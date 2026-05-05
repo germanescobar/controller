@@ -1281,8 +1281,16 @@ export function SessionView({
   const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
   const providerPickerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const currentSessionIdRef = useRef(sessionId);
-  const sendContextRef = useRef<{ sessionId: string | undefined; projectId: string } | null>(null);
+  const currentViewRef = useRef({
+    projectId,
+    worktreeId,
+    sessionId,
+  });
+  const sendContextRef = useRef<{
+    projectId: string;
+    worktreeId?: string;
+    sessionId?: string;
+  } | null>(null);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -1309,8 +1317,8 @@ export function SessionView({
 
   const attachToSession = (nextSessionId: string) => {
     setActiveStreamSessionId(nextSessionId);
-    sendContextRef.current = { sessionId: nextSessionId, projectId };
-    if (currentSessionIdRef.current !== nextSessionId) {
+    sendContextRef.current = { projectId, worktreeId, sessionId: nextSessionId };
+    if (currentViewRef.current.sessionId !== nextSessionId) {
       onSessionCreated(nextSessionId);
     }
   };
@@ -1438,11 +1446,20 @@ export function SessionView({
 
   // Track current session and manage stream visibility on session switch
   useEffect(() => {
-    const prevSessionId = currentSessionIdRef.current;
-    currentSessionIdRef.current = sessionId;
+    const prevSessionId = currentViewRef.current.sessionId;
+    currentViewRef.current = {
+      projectId,
+      worktreeId,
+      sessionId,
+    };
 
     if (eventSourceRef.current && sendContextRef.current) {
-      if (sessionId !== sendContextRef.current.sessionId) {
+      const viewingOriginStream =
+        projectId === sendContextRef.current.projectId &&
+        worktreeId === sendContextRef.current.worktreeId &&
+        sessionId === sendContextRef.current.sessionId;
+
+      if (!viewingOriginStream) {
         // Navigated away from the streaming session — hide streaming UI
         setStreaming(false);
         setPendingMessage(null);
@@ -1452,7 +1469,7 @@ export function SessionView({
         setStreaming(true);
       }
     }
-  }, [sessionId]);
+  }, [projectId, worktreeId, sessionId]);
 
   // Cleanup EventSource on unmount
   useEffect(() => {
@@ -1555,7 +1572,7 @@ export function SessionView({
     let runFailed = false;
 
     // Track which session this stream belongs to
-    sendContextRef.current = { sessionId, projectId };
+    sendContextRef.current = { projectId, worktreeId, sessionId };
 
     const es = startSession(projectId, sentMessage, {
       resumeSessionId: sessionId,
@@ -1571,10 +1588,24 @@ export function SessionView({
     eventSourceRef.current = es;
 
     // Check if the user is still viewing the session this stream belongs to
-    const isVisible = () =>
-      !sendContextRef.current?.sessionId ||
-      currentSessionIdRef.current === sendContextRef.current.sessionId ||
-      detectedSessionId === sendContextRef.current.sessionId;
+    const isVisible = () => {
+      const streamContext = sendContextRef.current;
+      if (!streamContext) return false;
+
+      const currentView = currentViewRef.current;
+      const currentMatchesStreamView =
+        currentView.projectId === streamContext.projectId &&
+        currentView.worktreeId === streamContext.worktreeId &&
+        currentView.sessionId === streamContext.sessionId;
+
+      if (currentMatchesStreamView) return true;
+      if (!streamContext.sessionId) return false;
+
+      return (
+        currentView.sessionId === streamContext.sessionId ||
+        detectedSessionId === streamContext.sessionId
+      );
+    };
 
     es.onmessage = (event) => {
       const data = JSON.parse(event.data) as SessionStreamEvent;
