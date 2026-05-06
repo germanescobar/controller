@@ -54,6 +54,20 @@ type StreamItem = (
   | { type: "error"; text: string }
 ) & { at: number };
 
+function isSessionIsolationDebugEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("debugSessionIsolation") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function debugSessionIsolation(event: string, data: Record<string, unknown>) {
+  if (!isSessionIsolationDebugEnabled()) return;
+  console.debug(`[session-isolation] ${event}`, data);
+}
+
 const REASONING_EFFORT_OPTIONS: Array<{
   value: ReasoningEffort;
   label: string;
@@ -1293,6 +1307,13 @@ export function SessionView({
   } | null>(null);
 
   useEffect(() => {
+    debugSessionIsolation("view.mounted", { projectId, worktreeId, sessionId });
+    return () => {
+      debugSessionIsolation("view.unmounted", { projectId, worktreeId, sessionId });
+    };
+  }, [projectId, worktreeId, sessionId]);
+
+  useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
 
@@ -1316,6 +1337,12 @@ export function SessionView({
   }, [message]);
 
   const attachToSession = (nextSessionId: string) => {
+    debugSessionIsolation("stream.attachedToSession", {
+      projectId,
+      worktreeId,
+      previousSessionId: sendContextRef.current?.sessionId,
+      nextSessionId,
+    });
     setActiveStreamSessionId(nextSessionId);
     sendContextRef.current = { projectId, worktreeId, sessionId: nextSessionId };
     if (currentViewRef.current.sessionId !== nextSessionId) {
@@ -1447,11 +1474,24 @@ export function SessionView({
   // Track current session and manage stream visibility on session switch
   useEffect(() => {
     const prevSessionId = currentViewRef.current.sessionId;
+    const prevProjectId = currentViewRef.current.projectId;
+    const prevWorktreeId = currentViewRef.current.worktreeId;
     currentViewRef.current = {
       projectId,
       worktreeId,
       sessionId,
     };
+
+    debugSessionIsolation("view.changed", {
+      prevProjectId,
+      prevWorktreeId,
+      prevSessionId,
+      projectId,
+      worktreeId,
+      sessionId,
+      streamContext: sendContextRef.current,
+      hasEventSource: !!eventSourceRef.current,
+    });
 
     if (eventSourceRef.current && sendContextRef.current) {
       const viewingOriginStream =
@@ -1460,11 +1500,22 @@ export function SessionView({
         sessionId === sendContextRef.current.sessionId;
 
       if (!viewingOriginStream) {
+        debugSessionIsolation("view.hidStreamingUi", {
+          projectId,
+          worktreeId,
+          sessionId,
+          streamContext: sendContextRef.current,
+        });
         // Navigated away from the streaming session — hide streaming UI
         setStreaming(false);
         setPendingMessage(null);
         setStreamItems([]);
       } else if (prevSessionId !== sessionId) {
+        debugSessionIsolation("view.restoredStreamingUi", {
+          projectId,
+          worktreeId,
+          sessionId,
+        });
         // Navigated back to the streaming session — restore indicator
         setStreaming(true);
       }
@@ -1573,6 +1624,13 @@ export function SessionView({
 
     // Track which session this stream belongs to
     sendContextRef.current = { projectId, worktreeId, sessionId };
+    debugSessionIsolation("stream.started", {
+      projectId,
+      worktreeId,
+      sessionId,
+      provider: selectedProvider,
+      mode: selectedMode,
+    });
 
     const es = startSession(projectId, sentMessage, {
       resumeSessionId: sessionId,
@@ -1598,6 +1656,19 @@ export function SessionView({
         currentView.worktreeId === streamContext.worktreeId &&
         currentView.sessionId === streamContext.sessionId;
 
+      const visible =
+        currentMatchesStreamView ||
+        (!!streamContext.sessionId &&
+          (currentView.sessionId === streamContext.sessionId ||
+            detectedSessionId === streamContext.sessionId));
+
+      debugSessionIsolation("stream.visibilityCheck", {
+        streamContext,
+        currentView,
+        detectedSessionId,
+        visible,
+      });
+
       if (currentMatchesStreamView) return true;
       if (!streamContext.sessionId) return false;
 
@@ -1609,6 +1680,12 @@ export function SessionView({
 
     es.onmessage = (event) => {
       const data = JSON.parse(event.data) as SessionStreamEvent;
+      debugSessionIsolation("stream.message", {
+        streamContext: sendContextRef.current,
+        currentView: currentViewRef.current,
+        detectedSessionId,
+        type: data.type,
+      });
       if (data.type === "started" || data.type === "stderr") {
         if (data.type === "stderr") {
           const text = data.text.trim();
@@ -1736,6 +1813,12 @@ export function SessionView({
           }
         }
       } else if (data.type === "done") {
+        debugSessionIsolation("stream.done", {
+          detectedSessionId,
+          streamContext: sendContextRef.current,
+          currentView: currentViewRef.current,
+          exitCode: data.exitCode,
+        });
         es.close();
         eventSourceRef.current = null;
         const wasVisible = isVisible();
@@ -1763,6 +1846,12 @@ export function SessionView({
         }
       } else if (data.type === "error") {
         const text = data.text.trim();
+        debugSessionIsolation("stream.error", {
+          text,
+          detectedSessionId,
+          streamContext: sendContextRef.current,
+          currentView: currentViewRef.current,
+        });
         es.close();
         eventSourceRef.current = null;
         const wasVisible = isVisible();
@@ -1777,6 +1866,12 @@ export function SessionView({
 
     es.onerror = () => {
       const wasVisible = isVisible();
+      debugSessionIsolation("stream.transportError", {
+        detectedSessionId,
+        streamContext: sendContextRef.current,
+        currentView: currentViewRef.current,
+        wasVisible,
+      });
       es.close();
       eventSourceRef.current = null;
       sendContextRef.current = null;

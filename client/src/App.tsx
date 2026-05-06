@@ -94,6 +94,10 @@ export function App() {
   };
 
   const activeView = view;
+  const sessionViewKey =
+    activeView.page === "session"
+      ? `${activeView.projectId}:${activeView.worktreeId ?? "main"}`
+      : "non-session";
 
   return (
     <div className="dark flex h-dvh w-full bg-background text-foreground">
@@ -198,6 +202,7 @@ export function App() {
 
         {activeView.page === "session" && (
           <SessionView
+            key={sessionViewKey}
             projectId={activeView.projectId}
             sessionId={activeView.sessionId}
             worktreeId={activeView.worktreeId}
