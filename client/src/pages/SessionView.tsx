@@ -2475,7 +2475,7 @@ export function SessionView({
                     </>)}
                     </div>
                     <div className="flex items-center gap-2">
-                      {streaming && selectedProvider === "codex" && (
+                      {streaming && (
                         <button
                           type="button"
                           onClick={handleStop}

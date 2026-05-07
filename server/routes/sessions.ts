@@ -14,6 +14,7 @@ import {
   getSessionRuntime,
   markSessionActive,
   markSessionInactive,
+  stopSessionRuntime,
 } from "../lib/session-runtime.js";
 
 // Strip ANSI escape codes (color, cursor, etc.)
@@ -222,7 +223,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   /** Write the user message + create/update session file once we know the sessionId. */
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
-    markSessionActive(sessionId);
+    markSessionActive(sessionId, { provider: providerId, child });
     // Write user message (only for non-Ada providers that don't persist their own events)
     if (shouldPersist && !userMessageWritten) {
       userMessageWritten = true;
@@ -454,7 +455,7 @@ async function streamCodexPlanSession(
 
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
-    markSessionActive(sessionId);
+    markSessionActive(sessionId, { provider: providerId });
     if (!userMessageWritten) {
       userMessageWritten = true;
       await appendEvent(worktreePath, sessionId, {
@@ -629,8 +630,25 @@ sessionsRouter.post(
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    const worktree = await resolveWorktree(
+      req.params.projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    const session = await getSession(worktree.path, req.params.sessionId);
+    const runtime = getSessionRuntime(req.params.sessionId);
+    const providerId = runtime.provider || session?.provider;
+
     try {
-      await codexAppServerManager.stopSession(req.params.sessionId);
+      if (providerId === "ada") {
+        await stopSessionRuntime(req.params.sessionId);
+      } else {
+        await codexAppServerManager.stopSession(req.params.sessionId);
+      }
       res.json({ ok: true });
     } catch (error) {
       res.status(400).json({
