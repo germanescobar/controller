@@ -85,6 +85,8 @@ export interface SpawnOptions {
   env: Record<string, string>;
   resumeSessionId?: string;
   model?: string;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  serviceTier?: "fast" | "flex";
   mode?: "default" | "plan";
 }
 
@@ -115,8 +117,14 @@ const adaProvider: AgentProvider = {
   id: "ada",
   name: "Ada",
 
-  spawn({ message, cwd, env, resumeSessionId, model }) {
+  spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, serviceTier }) {
     const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
+    if (reasoningEffort) {
+      cmdArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+    }
+    if (serviceTier) {
+      cmdArgs.push("-c", `service_tier="${serviceTier}"`);
+    }
 
     const args = ["chat", message];
     if (resumeSessionId) args.push("--resume", resumeSessionId);
@@ -146,9 +154,15 @@ const codexProvider: AgentProvider = {
   id: "codex",
   name: "Codex",
 
-  spawn({ message, cwd, env, resumeSessionId, model, mode }) {
+  spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
     // Flags must come before the prompt argument
     const flags = ["--json", "--full-auto", "--skip-git-repo-check", "--model", model || ""];
+    if (reasoningEffort) {
+      flags.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+    }
+    if (serviceTier) {
+      flags.push("-c", `service_tier="${serviceTier}"`);
+    }
     if (mode === "plan") {
       flags.push("--enable", "default_mode_request_user_input");
     }
@@ -469,11 +483,27 @@ function mapCodexAppServerEvent(
   }
 
   if (method === "turn/completed") {
+    const turn = params.turn as Record<string, unknown> | undefined;
+    const status = turn?.status as string | undefined;
+    if (status === "failed") {
+      const error = turn?.error as Record<string, unknown> | undefined;
+      const message =
+        (error?.message as string | undefined) ??
+        (error?.additionalDetails as string | undefined) ??
+        "Codex turn failed";
+      return {
+        type: "run.failed",
+        sessionId: (params.threadId as string | undefined) ?? state.threadId,
+        error: message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
     return {
       type: "run.completed",
       sessionId: (params.threadId as string | undefined) ?? state.threadId,
-      status: "completed",
-      stopReason: "completed",
+      status: status === "interrupted" ? "max_iterations" : "completed",
+      stopReason: status ?? "completed",
       timestamp: new Date().toISOString(),
     };
   }

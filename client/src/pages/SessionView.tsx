@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ import {
   type AgentProviderInfo,
   type Model,
   type PlanStep,
+  type ReasoningEffort,
+  type ServiceTier,
   type SessionStreamEvent,
   type UserInputQuestion,
 } from "../api.ts";
@@ -51,6 +53,32 @@ type StreamItem = (
   | { type: "thread_status"; status: string; activeFlags: string[] }
   | { type: "error"; text: string }
 ) & { at: number };
+
+function isSessionIsolationDebugEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("debugSessionIsolation") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function debugSessionIsolation(event: string, data: Record<string, unknown>) {
+  if (!isSessionIsolationDebugEnabled()) return;
+  console.debug(`[session-isolation] ${event}`, data);
+}
+
+const REASONING_EFFORT_OPTIONS: Array<{
+  value: ReasoningEffort;
+  label: string;
+}> = [
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "XHigh" },
+  { value: "none", label: "None" },
+];
 
 function normalizeToolResultContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -412,7 +440,7 @@ function getRunStatusText(
 
 function getLatestPendingUserInputRequest(
   events: AgentEvent[]
-): UserInputQuestion[] | null {
+): { eventId: string; questions: UserInputQuestion[] } | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i];
     if (event.type === "user_input_response") return null;
@@ -421,7 +449,7 @@ function getLatestPendingUserInputRequest(
         ((event.data.questions as UserInputQuestion[] | undefined) ?? []).filter(
           Boolean
         );
-      return questions.length > 0 ? questions : null;
+      return questions.length > 0 ? { eventId: event.id, questions } : null;
     }
   }
 
@@ -613,10 +641,12 @@ function EventBlock({
   event,
   copiedId,
   onCopy,
+  hiddenPendingUserInputEventId,
 }: {
   event: AgentEvent;
   copiedId: string | null;
   onCopy: (e: AgentEvent) => void;
+  hiddenPendingUserInputEventId?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const data = event.data;
@@ -675,6 +705,7 @@ function EventBlock({
   void expanded;
 
   if (event.type === "user_input_requested") {
+    if (hiddenPendingUserInputEventId === event.id) return null;
     const questions = ((data.questions as UserInputQuestion[] | undefined) ?? []).filter(Boolean);
     if (questions.length === 0) return null;
     return <UserInputRequestedBlock questions={questions} />;
@@ -1234,8 +1265,13 @@ export function SessionView({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedReasoningEffort, setSelectedReasoningEffort] =
+    useState<ReasoningEffort>("medium");
+  const [selectedServiceTier, setSelectedServiceTier] =
+    useState<ServiceTier>("flex");
   const [selectedMode, setSelectedMode] = useState<"default" | "plan">("default");
   const [showModelPicker, setShowModelPicker] = useState(false);
+  const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
   const [agentProviders, setAgentProviders] = useState<AgentProviderInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string>("ada");
@@ -1256,10 +1292,26 @@ export function SessionView({
   const terminalRef = useRef<TerminalHandle | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
   const providerPickerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const currentSessionIdRef = useRef(sessionId);
-  const sendContextRef = useRef<{ sessionId: string | undefined; projectId: string } | null>(null);
+  const currentViewRef = useRef({
+    projectId,
+    worktreeId,
+    sessionId,
+  });
+  const sendContextRef = useRef<{
+    projectId: string;
+    worktreeId?: string;
+    sessionId?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    debugSessionIsolation("view.mounted", { projectId, worktreeId, sessionId });
+    return () => {
+      debugSessionIsolation("view.unmounted", { projectId, worktreeId, sessionId });
+    };
+  }, [projectId, worktreeId, sessionId]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -1285,9 +1337,15 @@ export function SessionView({
   }, [message]);
 
   const attachToSession = (nextSessionId: string) => {
+    debugSessionIsolation("stream.attachedToSession", {
+      projectId,
+      worktreeId,
+      previousSessionId: sendContextRef.current?.sessionId,
+      nextSessionId,
+    });
     setActiveStreamSessionId(nextSessionId);
-    sendContextRef.current = { sessionId: nextSessionId, projectId };
-    if (currentSessionIdRef.current !== nextSessionId) {
+    sendContextRef.current = { projectId, worktreeId, sessionId: nextSessionId };
+    if (currentViewRef.current.sessionId !== nextSessionId) {
       onSessionCreated(nextSessionId);
     }
   };
@@ -1314,6 +1372,12 @@ export function SessionView({
       setSelectedMode("default");
     }
   }, [selectedMode, selectedProvider]);
+
+  useEffect(() => {
+    if (selectedProvider !== "codex") {
+      setShowReasoningEffortPicker(false);
+    }
+  }, [selectedProvider]);
 
   useEffect(() => {
     fetchAgentProviders()
@@ -1348,6 +1412,8 @@ export function SessionView({
             if (session.model) {
               setSelectedModel(session.model);
             }
+            setSelectedReasoningEffort(session.reasoningEffort || "medium");
+            setSelectedServiceTier(session.serviceTier || "flex");
           }
 
           if (eventsResult.status === "fulfilled") {
@@ -1367,6 +1433,8 @@ export function SessionView({
       setStreaming(false);
       setProviderResolved(true);
       setSelectedMode("default");
+      setSelectedReasoningEffort("medium");
+      setSelectedServiceTier("flex");
     }
     setActiveStreamSessionId(sessionId ?? null);
     setUserInputDraft({});
@@ -1405,21 +1473,54 @@ export function SessionView({
 
   // Track current session and manage stream visibility on session switch
   useEffect(() => {
-    const prevSessionId = currentSessionIdRef.current;
-    currentSessionIdRef.current = sessionId;
+    const prevSessionId = currentViewRef.current.sessionId;
+    const prevProjectId = currentViewRef.current.projectId;
+    const prevWorktreeId = currentViewRef.current.worktreeId;
+    currentViewRef.current = {
+      projectId,
+      worktreeId,
+      sessionId,
+    };
+
+    debugSessionIsolation("view.changed", {
+      prevProjectId,
+      prevWorktreeId,
+      prevSessionId,
+      projectId,
+      worktreeId,
+      sessionId,
+      streamContext: sendContextRef.current,
+      hasEventSource: !!eventSourceRef.current,
+    });
 
     if (eventSourceRef.current && sendContextRef.current) {
-      if (sessionId !== sendContextRef.current.sessionId) {
+      const viewingOriginStream =
+        projectId === sendContextRef.current.projectId &&
+        worktreeId === sendContextRef.current.worktreeId &&
+        sessionId === sendContextRef.current.sessionId;
+
+      if (!viewingOriginStream) {
+        debugSessionIsolation("view.hidStreamingUi", {
+          projectId,
+          worktreeId,
+          sessionId,
+          streamContext: sendContextRef.current,
+        });
         // Navigated away from the streaming session — hide streaming UI
         setStreaming(false);
         setPendingMessage(null);
         setStreamItems([]);
       } else if (prevSessionId !== sessionId) {
+        debugSessionIsolation("view.restoredStreamingUi", {
+          projectId,
+          worktreeId,
+          sessionId,
+        });
         // Navigated back to the streaming session — restore indicator
         setStreaming(true);
       }
     }
-  }, [sessionId]);
+  }, [projectId, worktreeId, sessionId]);
 
   // Cleanup EventSource on unmount
   useEffect(() => {
@@ -1493,6 +1594,12 @@ export function SessionView({
         setShowModelPicker(false);
       }
       if (
+        reasoningEffortPickerRef.current &&
+        !reasoningEffortPickerRef.current.contains(e.target as Node)
+      ) {
+        setShowReasoningEffortPicker(false);
+      }
+      if (
         providerPickerRef.current &&
         !providerPickerRef.current.contains(e.target as Node)
       ) {
@@ -1516,11 +1623,22 @@ export function SessionView({
     let runFailed = false;
 
     // Track which session this stream belongs to
-    sendContextRef.current = { sessionId, projectId };
+    sendContextRef.current = { projectId, worktreeId, sessionId };
+    debugSessionIsolation("stream.started", {
+      projectId,
+      worktreeId,
+      sessionId,
+      provider: selectedProvider,
+      mode: selectedMode,
+    });
 
     const es = startSession(projectId, sentMessage, {
       resumeSessionId: sessionId,
       model: selectedModel,
+      reasoningEffort:
+        selectedProvider === "codex" ? selectedReasoningEffort : undefined,
+      serviceTier:
+        selectedProvider === "codex" ? selectedServiceTier : undefined,
       provider: selectedProvider || undefined,
       mode: selectedProvider === "codex" ? selectedMode : "default",
       worktreeId,
@@ -1528,11 +1646,46 @@ export function SessionView({
     eventSourceRef.current = es;
 
     // Check if the user is still viewing the session this stream belongs to
-    const isVisible = () =>
-      currentSessionIdRef.current === sendContextRef.current?.sessionId;
+    const isVisible = () => {
+      const streamContext = sendContextRef.current;
+      if (!streamContext) return false;
+
+      const currentView = currentViewRef.current;
+      const currentMatchesStreamView =
+        currentView.projectId === streamContext.projectId &&
+        currentView.worktreeId === streamContext.worktreeId &&
+        currentView.sessionId === streamContext.sessionId;
+
+      const visible =
+        currentMatchesStreamView ||
+        (!!streamContext.sessionId &&
+          (currentView.sessionId === streamContext.sessionId ||
+            detectedSessionId === streamContext.sessionId));
+
+      debugSessionIsolation("stream.visibilityCheck", {
+        streamContext,
+        currentView,
+        detectedSessionId,
+        visible,
+      });
+
+      if (currentMatchesStreamView) return true;
+      if (!streamContext.sessionId) return false;
+
+      return (
+        currentView.sessionId === streamContext.sessionId ||
+        detectedSessionId === streamContext.sessionId
+      );
+    };
 
     es.onmessage = (event) => {
       const data = JSON.parse(event.data) as SessionStreamEvent;
+      debugSessionIsolation("stream.message", {
+        streamContext: sendContextRef.current,
+        currentView: currentViewRef.current,
+        detectedSessionId,
+        type: data.type,
+      });
       if (data.type === "started" || data.type === "stderr") {
         if (data.type === "stderr") {
           const text = data.text.trim();
@@ -1660,6 +1813,12 @@ export function SessionView({
           }
         }
       } else if (data.type === "done") {
+        debugSessionIsolation("stream.done", {
+          detectedSessionId,
+          streamContext: sendContextRef.current,
+          currentView: currentViewRef.current,
+          exitCode: data.exitCode,
+        });
         es.close();
         eventSourceRef.current = null;
         const wasVisible = isVisible();
@@ -1687,6 +1846,12 @@ export function SessionView({
         }
       } else if (data.type === "error") {
         const text = data.text.trim();
+        debugSessionIsolation("stream.error", {
+          text,
+          detectedSessionId,
+          streamContext: sendContextRef.current,
+          currentView: currentViewRef.current,
+        });
         es.close();
         eventSourceRef.current = null;
         const wasVisible = isVisible();
@@ -1701,6 +1866,12 @@ export function SessionView({
 
     es.onerror = () => {
       const wasVisible = isVisible();
+      debugSessionIsolation("stream.transportError", {
+        detectedSessionId,
+        streamContext: sendContextRef.current,
+        currentView: currentViewRef.current,
+        wasVisible,
+      });
       es.close();
       eventSourceRef.current = null;
       sendContextRef.current = null;
@@ -1789,6 +1960,9 @@ export function SessionView({
 
   const selectedModelName =
     models.find((m) => m.id === selectedModel)?.name ?? selectedModel;
+  const selectedReasoningEffortLabel =
+    REASONING_EFFORT_OPTIONS.find((option) => option.value === selectedReasoningEffort)?.label ??
+    selectedReasoningEffort;
   const latestStructuredInputRequestFromStream =
     [...streamItems]
       .reverse()
@@ -1800,12 +1974,12 @@ export function SessionView({
     latestStructuredInputRequestFromStream
       ? latestStructuredInputRequestFromStream
       : (() => {
-          const questions = getLatestPendingUserInputRequest(events);
-          return questions
+          const pendingRequest = getLatestPendingUserInputRequest(events);
+          return pendingRequest
             ? {
                 type: "user_input_requested" as const,
-                id: "persisted-user-input-request",
-                questions,
+                id: pendingRequest.eventId,
+                questions: pendingRequest.questions,
               }
             : null;
         })();
@@ -1944,6 +2118,9 @@ export function SessionView({
                       event={renderItem.event}
                       copiedId={copiedId}
                       onCopy={copyEventData}
+                      hiddenPendingUserInputEventId={
+                        streamItems.length === 0 ? latestStructuredInputRequest?.id : null
+                      }
                     />
                   );
                 })}
@@ -2178,72 +2355,127 @@ export function SessionView({
                             </button>
                           </div>
                           <span className="text-muted-foreground/40">|</span>
+                          <div className="relative" ref={reasoningEffortPickerRef}>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setShowReasoningEffortPicker(!showReasoningEffortPicker)
+                              }
+                              className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                            >
+                              {selectedReasoningEffortLabel}
+                              <ChevronDown className="h-3 w-3" />
+                            </button>
+                            {showReasoningEffortPicker && (
+                              <div className="absolute bottom-full left-0 mb-1 w-40 rounded-lg border border-border bg-popover p-1 shadow-lg">
+                                {REASONING_EFFORT_OPTIONS.map((option) => (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedReasoningEffort(option.value);
+                                      setShowReasoningEffortPicker(false);
+                                    }}
+                                    className={`flex w-full items-center rounded-md px-3 py-2 text-sm text-left transition-colors ${
+                                      selectedReasoningEffort === option.value
+                                        ? "bg-accent text-accent-foreground"
+                                        : "text-popover-foreground hover:bg-accent"
+                                    }`}
+                                  >
+                                    {option.label}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            aria-pressed={selectedServiceTier === "fast"}
+                            title={
+                              selectedServiceTier === "fast"
+                                ? "Fast mode active"
+                                : "Fast mode inactive"
+                            }
+                            onClick={() =>
+                              setSelectedServiceTier((tier) =>
+                                tier === "fast" ? "flex" : "fast"
+                              )
+                            }
+                            className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                              selectedServiceTier === "fast"
+                                ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/20"
+                                : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                            }`}
+                          >
+                            <Zap className="h-3.5 w-3.5" />
+                          </button>
+                          <span className="text-muted-foreground/40">|</span>
                         </>
                       )}
                       {/* Model picker */}
-                      <div className="relative" ref={modelPickerRef}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!showModelPicker && models.length === 0) loadModels(selectedProvider);
-                            setShowModelPicker(!showModelPicker);
-                          }}
-                          className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                        >
-                          {selectedModelName || "Select model"}
-                          <ChevronDown className="h-3 w-3" />
-                        </button>
-                        {showModelPicker && (
-                          <div className="absolute bottom-full left-0 mb-1 w-96 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
-                            {models.length === 0 ? (
-                              <div className="px-3 py-2 text-xs text-muted-foreground">
-                                No models found. Check ollama or add API keys in Settings.
-                              </div>
-                            ) : (
-                              Object.entries(
-                                models.reduce<Record<string, Model[]>>((acc, m) => {
-                                  const provider = m.provider || "ollama";
-                                  if (!acc[provider]) acc[provider] = [];
-                                  acc[provider].push(m);
-                                  return acc;
-                                }, {})
-                              ).map(([provider, providerModels]) => (
-                                <div key={provider}>
-                                  <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                                    {provider}
+                          <div className="relative" ref={modelPickerRef}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!showModelPicker && models.length === 0) loadModels(selectedProvider);
+                                setShowModelPicker(!showModelPicker);
+                              }}
+                              className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                            >
+                              {selectedModelName || "Select model"}
+                              <ChevronDown className="h-3 w-3" />
+                            </button>
+                            {showModelPicker && (
+                              <div className="absolute bottom-full left-0 mb-1 w-96 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
+                                {models.length === 0 ? (
+                                  <div className="px-3 py-2 text-xs text-muted-foreground">
+                                    No models found. Check ollama or add API keys in Settings.
                                   </div>
-                                  {providerModels.map((model) => (
-                                    <button
-                                      key={model.id}
-                                      type="button"
-                                      onClick={() => {
-                                        setSelectedModel(model.id);
-                                        setShowModelPicker(false);
-                                      }}
-                                      className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-left transition-colors ${
-                                        selectedModel === model.id
-                                          ? "bg-accent text-accent-foreground"
-                                          : "text-popover-foreground hover:bg-accent"
-                                      }`}
-                                    >
-                                      <span className="font-mono text-xs">{model.name}</span>
-                                      {model.size && (
-                                        <span className="ml-auto text-xs text-muted-foreground">
-                                          {model.size}
-                                        </span>
-                                      )}
-                                    </button>
-                                  ))}
-                                </div>
-                              ))
+                                ) : (
+                                  Object.entries(
+                                    models.reduce<Record<string, Model[]>>((acc, m) => {
+                                      const provider = m.provider || "ollama";
+                                      if (!acc[provider]) acc[provider] = [];
+                                      acc[provider].push(m);
+                                      return acc;
+                                    }, {})
+                                  ).map(([provider, providerModels]) => (
+                                    <div key={provider}>
+                                      <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                                        {provider}
+                                      </div>
+                                      {providerModels.map((model) => (
+                                        <button
+                                          key={model.id}
+                                          type="button"
+                                          onClick={() => {
+                                            setSelectedModel(model.id);
+                                            setShowModelPicker(false);
+                                          }}
+                                          className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-left transition-colors ${
+                                            selectedModel === model.id
+                                              ? "bg-accent text-accent-foreground"
+                                              : "text-popover-foreground hover:bg-accent"
+                                          }`}
+                                        >
+                                          <span className="font-mono text-xs">{model.name}</span>
+                                          {model.size && (
+                                            <span className="ml-auto text-xs text-muted-foreground">
+                                              {model.size}
+                                            </span>
+                                          )}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  ))
+                                )}
+                              </div>
                             )}
                           </div>
-                        )}
-                      </div>
                     </>)}
                     </div>
                     <div className="flex items-center gap-2">
-                      {streaming && selectedProvider === "codex" && (
+                      {streaming && (
                         <button
                           type="button"
                           onClick={handleStop}
@@ -2259,12 +2491,12 @@ export function SessionView({
                         disabled={
                           streaming && selectedProvider === "codex"
                             ? !message.trim()
-                            : streaming || !message.trim()
+                            : !message.trim() || streaming
                         }
-                        className="h-8 w-8 rounded-full bg-foreground text-background hover:bg-foreground/90"
+                        className="h-8 w-8 rounded-full"
                       >
-                        {streaming && selectedProvider !== "codex" ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+                        {streaming && selectedProvider === "codex" ? (
+                          <MessageSquare className="h-4 w-4" />
                         ) : (
                           <ArrowUp className="h-4 w-4" />
                         )}
@@ -2340,4 +2572,3 @@ export function SessionView({
     </>
   );
 }
-

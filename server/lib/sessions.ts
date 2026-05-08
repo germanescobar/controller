@@ -7,6 +7,8 @@ export interface SessionState {
   workingDirectory: string;
   worktreeId?: string;
   model: string;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  serviceTier?: "fast" | "flex";
   provider?: string;
   mode?: "default" | "plan";
   messages: unknown[];

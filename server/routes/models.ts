@@ -2,6 +2,7 @@ import { Router } from "express";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { getApiKey, PROVIDERS } from "../lib/api-keys.js";
+import { codexAppServerManager } from "../lib/codex-app-server.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,6 +102,7 @@ const PROVIDER_FETCHERS: Record<
 /** Well-known models available through Codex CLI (user authenticates separately). */
 function getCodexModels(): Model[] {
   return [
+    { id: "gpt-5.5", name: "GPT-5.5", provider: "codex", size: "latest" },
     { id: "gpt-5.4", name: "GPT-5.4", provider: "codex", size: "flagship" },
     { id: "gpt-5.4-mini", name: "GPT-5.4 Mini", provider: "codex", size: "fast" },
     { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "codex", size: "coding" },
@@ -109,11 +111,25 @@ function getCodexModels(): Model[] {
   ];
 }
 
+async function fetchCodexModels(): Promise<Model[]> {
+  try {
+    const models = await codexAppServerManager.listModels({});
+    return models.map((model) => ({
+      id: model.model || model.id,
+      name: model.displayName || model.model || model.id,
+      provider: "codex",
+      size: model.isDefault ? "default" : "",
+    }));
+  } catch {
+    return getCodexModels();
+  }
+}
+
 modelsRouter.get("/", async (req, res) => {
   const agent = (req.query.agent as string) || "ada";
 
   if (agent === "codex") {
-    res.json(getCodexModels());
+    res.json(await fetchCodexModels());
     return;
   }
 

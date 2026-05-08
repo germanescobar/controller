@@ -14,6 +14,8 @@ export interface Session {
   workingDirectory: string;
   worktreeId?: string;
   model: string;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  serviceTier?: "fast" | "flex";
   provider?: string;
   mode?: "default" | "plan";
   messages: unknown[];
@@ -312,6 +314,16 @@ export interface Model {
   size: string;
 }
 
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
+
+export type ServiceTier = "fast" | "flex";
+
 export interface ProviderStatus {
   id: string;
   name: string;
@@ -361,6 +373,8 @@ export function startSession(
   options?: {
     resumeSessionId?: string;
     model?: string;
+    reasoningEffort?: ReasoningEffort;
+    serviceTier?: ServiceTier;
     provider?: string;
     mode?: "default" | "plan";
     worktreeId?: string;
@@ -369,6 +383,8 @@ export function startSession(
   const params = new URLSearchParams({ message });
   if (options?.resumeSessionId) params.set("resumeSessionId", options.resumeSessionId);
   if (options?.model != null) params.set("model", options.model);
+  if (options?.reasoningEffort) params.set("reasoningEffort", options.reasoningEffort);
+  if (options?.serviceTier) params.set("serviceTier", options.serviceTier);
   if (options?.provider) params.set("provider", options.provider);
   if (options?.mode) params.set("mode", options.mode);
   if (options?.worktreeId) params.set("worktreeId", options.worktreeId);

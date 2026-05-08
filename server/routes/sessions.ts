@@ -14,6 +14,7 @@ import {
   getSessionRuntime,
   markSessionActive,
   markSessionInactive,
+  stopSessionRuntime,
 } from "../lib/session-runtime.js";
 
 // Strip ANSI escape codes (color, cursor, etc.)
@@ -146,6 +147,15 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   const message = req.query.message as string;
   const resumeSessionId = req.query.resumeSessionId as string | undefined;
   const model = req.query.model as string | undefined;
+  const reasoningEffort = req.query.reasoningEffort as
+    | "none"
+    | "minimal"
+    | "low"
+    | "medium"
+    | "high"
+    | "xhigh"
+    | undefined;
+  const serviceTier = req.query.serviceTier as "fast" | "flex" | undefined;
   const providerId = (req.query.provider as string) || "ada";
   const mode = (req.query.mode as "default" | "plan" | undefined) || "default";
 
@@ -167,6 +177,8 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       message,
       resumeSessionId,
       model,
+      reasoningEffort,
+      serviceTier,
       mode,
       providerId,
     });
@@ -187,6 +199,8 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     env: apiKeyEnv,
     resumeSessionId,
     model,
+    reasoningEffort,
+    serviceTier,
     mode,
   });
 
@@ -209,7 +223,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   /** Write the user message + create/update session file once we know the sessionId. */
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
-    markSessionActive(sessionId);
+    markSessionActive(sessionId, { provider: providerId, child });
     // Write user message (only for non-Ada providers that don't persist their own events)
     if (shouldPersist && !userMessageWritten) {
       userMessageWritten = true;
@@ -230,6 +244,8 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       workingDirectory: worktreePath,
       worktreeId,
       model: model ?? existing?.model ?? "",
+      reasoningEffort: reasoningEffort ?? existing?.reasoningEffort,
+      serviceTier: serviceTier ?? existing?.serviceTier,
       provider: providerId,
       mode,
       messages: existing?.messages ?? [],
@@ -401,11 +417,23 @@ async function streamCodexPlanSession(
     message: string;
     resumeSessionId?: string;
     model?: string;
+    reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+    serviceTier?: "fast" | "flex";
     mode: "default" | "plan";
     providerId: string;
   }
 ) {
-  const { worktreePath, worktreeId, message, resumeSessionId, model, mode, providerId } = options;
+  const {
+    worktreePath,
+    worktreeId,
+    message,
+    resumeSessionId,
+    model,
+    reasoningEffort,
+    serviceTier,
+    mode,
+    providerId,
+  } = options;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -427,7 +455,7 @@ async function streamCodexPlanSession(
 
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
-    markSessionActive(sessionId);
+    markSessionActive(sessionId, { provider: providerId });
     if (!userMessageWritten) {
       userMessageWritten = true;
       await appendEvent(worktreePath, sessionId, {
@@ -447,6 +475,8 @@ async function streamCodexPlanSession(
       workingDirectory: worktreePath,
       worktreeId,
       model: model ?? existing?.model ?? "",
+      reasoningEffort: reasoningEffort ?? existing?.reasoningEffort,
+      serviceTier: serviceTier ?? existing?.serviceTier,
       provider: providerId,
       mode,
       messages: existing?.messages ?? [],
@@ -520,6 +550,8 @@ async function streamCodexPlanSession(
         env: await getApiKeyEnvVars(),
         resumeSessionId,
         model,
+        reasoningEffort,
+        serviceTier,
         mode,
       },
       handleEvent
@@ -598,8 +630,25 @@ sessionsRouter.post(
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    const worktree = await resolveWorktree(
+      req.params.projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    const session = await getSession(worktree.path, req.params.sessionId);
+    const runtime = getSessionRuntime(req.params.sessionId);
+    const providerId = runtime.provider || session?.provider;
+
     try {
-      await codexAppServerManager.stopSession(req.params.sessionId);
+      if (providerId === "ada") {
+        await stopSessionRuntime(req.params.sessionId);
+      } else {
+        await codexAppServerManager.stopSession(req.params.sessionId);
+      }
       res.json({ ok: true });
     } catch (error) {
       res.status(400).json({
