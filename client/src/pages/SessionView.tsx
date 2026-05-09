@@ -2287,8 +2287,8 @@ export function SessionView({
                     className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                     style={{ maxHeight: "calc(1.25rem * 5)" }}
                   />
-                  <div className="mt-2 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                  <div className="mt-2 flex items-center gap-2 sm:justify-between">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 sm:gap-2">
                       {/* Agent provider picker — hidden while Codex is steering */}
                       {streaming && selectedProvider === "codex" ? null : (<>
                       <div className="relative" ref={providerPickerRef}>
@@ -2296,15 +2296,17 @@ export function SessionView({
                           type="button"
                           onClick={() => !sessionId && setShowProviderPicker(!showProviderPicker)}
                           disabled={!!sessionId}
-                          className={`flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors ${
+                          className={`flex min-w-0 max-w-full items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors ${
                             sessionId ? "opacity-50 cursor-not-allowed" : "hover:bg-accent hover:text-foreground"
                           }`}
                         >
-                          {agentProviders.find((p) => p.id === selectedProvider)?.name ?? selectedProvider}
+                          <span className="truncate">
+                            {agentProviders.find((p) => p.id === selectedProvider)?.name ?? selectedProvider}
+                          </span>
                           {!sessionId && <ChevronDown className="h-3 w-3" />}
                         </button>
                         {showProviderPicker && (
-                          <div className="absolute bottom-full left-0 mb-1 w-40 rounded-lg border border-border bg-popover p-1 shadow-lg">
+                          <div className="absolute bottom-full left-0 z-20 mb-1 w-40 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-1 shadow-lg">
                             {agentProviders.map((p) => (
                               <button
                                 key={p.id}
@@ -2325,7 +2327,7 @@ export function SessionView({
                           </div>
                         )}
                       </div>
-                      <span className="text-muted-foreground/40">|</span>
+                      <span className="hidden text-muted-foreground/40 sm:inline">|</span>
                       {selectedProvider === "codex" && (
                         <>
                           <div className="flex items-center rounded-md border border-border bg-background/60 p-0.5">
@@ -2354,20 +2356,20 @@ export function SessionView({
                               Plan
                             </button>
                           </div>
-                          <span className="text-muted-foreground/40">|</span>
+                          <span className="hidden text-muted-foreground/40 sm:inline">|</span>
                           <div className="relative" ref={reasoningEffortPickerRef}>
                             <button
                               type="button"
                               onClick={() =>
                                 setShowReasoningEffortPicker(!showReasoningEffortPicker)
                               }
-                              className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                              className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                             >
                               {selectedReasoningEffortLabel}
                               <ChevronDown className="h-3 w-3" />
                             </button>
                             {showReasoningEffortPicker && (
-                              <div className="absolute bottom-full left-0 mb-1 w-40 rounded-lg border border-border bg-popover p-1 shadow-lg">
+                              <div className="absolute bottom-full left-0 z-20 mb-1 w-40 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-1 shadow-lg">
                                 {REASONING_EFFORT_OPTIONS.map((option) => (
                                   <button
                                     key={option.value}
@@ -2409,24 +2411,24 @@ export function SessionView({
                           >
                             <Zap className="h-3.5 w-3.5" />
                           </button>
-                          <span className="text-muted-foreground/40">|</span>
+                          <span className="hidden text-muted-foreground/40 sm:inline">|</span>
                         </>
                       )}
                       {/* Model picker */}
-                          <div className="relative" ref={modelPickerRef}>
+                          <div className="relative min-w-0 shrink-0 sm:w-auto" ref={modelPickerRef}>
                             <button
                               type="button"
                               onClick={() => {
                                 if (!showModelPicker && models.length === 0) loadModels(selectedProvider);
                                 setShowModelPicker(!showModelPicker);
                               }}
-                              className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                              className="flex min-w-0 items-center justify-between gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                             >
-                              {selectedModelName || "Select model"}
-                              <ChevronDown className="h-3 w-3" />
+                              <span className="truncate">{selectedModelName || "Select model"}</span>
+                              <ChevronDown className="h-3 w-3 shrink-0" />
                             </button>
                             {showModelPicker && (
-                              <div className="absolute bottom-full left-0 mb-1 w-96 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
+                              <div className="absolute bottom-full left-0 z-20 mb-1 max-h-80 w-[min(calc(100vw-2rem),24rem)] overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
                                 {models.length === 0 ? (
                                   <div className="px-3 py-2 text-xs text-muted-foreground">
                                     No models found. Check ollama or add API keys in Settings.
@@ -2452,15 +2454,15 @@ export function SessionView({
                                             setSelectedModel(model.id);
                                             setShowModelPicker(false);
                                           }}
-                                          className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-left transition-colors ${
+                                          className={`flex w-full min-w-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
                                             selectedModel === model.id
                                               ? "bg-accent text-accent-foreground"
                                               : "text-popover-foreground hover:bg-accent"
                                           }`}
                                         >
-                                          <span className="font-mono text-xs">{model.name}</span>
+                                          <span className="min-w-0 truncate font-mono text-xs">{model.name}</span>
                                           {model.size && (
-                                            <span className="ml-auto text-xs text-muted-foreground">
+                                            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
                                               {model.size}
                                             </span>
                                           )}
@@ -2474,7 +2476,7 @@ export function SessionView({
                           </div>
                     </>)}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex shrink-0 items-center justify-end gap-2 self-end sm:self-auto">
                       {streaming && (
                         <button
                           type="button"
