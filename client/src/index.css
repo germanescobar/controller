@@ -134,19 +134,18 @@
 /* Terminal panel padding and touch scrolling */
 .terminal-panel .xterm {
   --terminal-bottom-padding: 24px;
-  background-color: #1c1c1e;
   box-sizing: border-box;
   height: 100%;
   padding-bottom: var(--terminal-bottom-padding);
 }
 
 .terminal-panel .xterm-screen {
-  background-color: #1c1c1e;
   padding: 8px 12px 0;
 }
 
-.terminal-panel .xterm-viewport {
-  bottom: var(--terminal-bottom-padding);
+.terminal-panel .xterm .xterm-viewport {
+  background-color: transparent !important;
+  bottom: var(--terminal-bottom-padding) !important;
   overscroll-behavior: contain;
 }
 
