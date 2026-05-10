@@ -2041,6 +2041,18 @@ export function SessionView({
 
         {/* Desktop: terminal toggle */}
         <div className="hidden md:flex items-center gap-2">
+          {(() => {
+            const { added: headerAdded, deleted: headerDeleted } = summarizeDiffFiles(
+              gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles
+            );
+            if (headerAdded === 0 && headerDeleted === 0) return null;
+            return (
+              <span className="font-mono text-xs">
+                <span className="text-green-400/90">+{headerAdded}</span>{" "}
+                <span className="text-red-400/90">-{headerDeleted}</span>
+              </span>
+            );
+          })()}
           <button
             onClick={() => setTerminalOpen(!terminalOpen)}
             className={`ml-2 rounded-md p-1.5 transition-colors ${
