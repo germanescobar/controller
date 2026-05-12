@@ -140,6 +140,10 @@ export class CodexAppServerManager {
     const done = new Promise<void>((resolve, reject) => {
       runtime.currentTurn = { resolve, reject };
     });
+    // Some start failures are delivered both as a run.failed event and as a
+    // rejected turn/start call. Attach a handler immediately so the local
+    // rejection never escapes before the route can observe the turn result.
+    done.catch(() => {});
 
     this.emitStarted(runtime, options.model ?? "");
 

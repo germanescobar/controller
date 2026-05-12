@@ -453,6 +453,17 @@ async function streamCodexPlanSession(
     }
   }
 
+  async function finishStream(exitCode: number) {
+    if (finished) return;
+    finished = true;
+    if (streamSessionId) {
+      markSessionInactive(streamSessionId);
+    }
+    await touchSession();
+    sseSend({ type: "done", exitCode });
+    if (clientConnected) res.end();
+  }
+
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
     markSessionActive(sessionId, { provider: providerId });
@@ -523,14 +534,10 @@ async function streamCodexPlanSession(
         sseSend({ type: "ada_event", event });
 
         if (event.type === "run.completed" || event.type === "run.failed") {
-          finished = true;
-          markSessionInactive(streamSessionId || event.sessionId);
-          await touchSession();
-          sseSend({
-            type: "done",
-            exitCode: event.type === "run.completed" ? 0 : 1,
-          });
-          if (clientConnected) res.end();
+          if (!streamSessionId) {
+            streamSessionId = event.sessionId;
+          }
+          await finishStream(event.type === "run.completed" ? 0 : 1);
         }
       })
       .catch(() => {});
@@ -543,7 +550,7 @@ async function streamCodexPlanSession(
   });
 
   try {
-    await codexAppServerManager.startPlanTurn(
+    const turn = await codexAppServerManager.startPlanTurn(
       {
         message,
         cwd: worktreePath,
@@ -556,18 +563,16 @@ async function streamCodexPlanSession(
       },
       handleEvent
     );
+    await turn.done;
     await eventProcessing;
   } catch (error) {
+    await eventProcessing;
     if (!finished) {
-      if (streamSessionId) {
-        markSessionInactive(streamSessionId);
-      }
       sseSend({
         type: "error",
         text: error instanceof Error ? error.message : String(error),
       });
-      sseSend({ type: "done", exitCode: 1 });
-      if (clientConnected) res.end();
+      await finishStream(1);
     }
   }
 }
