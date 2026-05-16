@@ -745,7 +745,7 @@ sessionsRouter.post(
       const providerId = session?.provider;
       if (providerId === "claude") {
         const events = await getEvents(worktree.path, req.params.sessionId);
-        const resumeMessage = buildClaudeUserInputResumeMessage(events, answers);
+        const resume = buildClaudeUserInputResume(events, answers);
         await appendEvent(worktree.path, req.params.sessionId, {
           id: randomUUID(),
           sessionId: req.params.sessionId,
@@ -759,7 +759,7 @@ sessionsRouter.post(
           await saveSession(worktree.path, session);
         }
 
-        res.json({ ok: true, resumeMessage });
+        res.json({ ok: true, ...resume });
         return;
       }
 
@@ -787,10 +787,10 @@ sessionsRouter.post(
   }
 );
 
-function buildClaudeUserInputResumeMessage(
+function buildClaudeUserInputResume(
   events: AgentEvent[],
   answers: Record<string, string | string[]>
-): string {
+): { resumeMessage: string; resumeMode?: "default" | "plan" } {
   const latestRequest = [...events]
     .reverse()
     .find((event) => event.type === "user_input_requested");
@@ -800,11 +800,19 @@ function buildClaudeUserInputResumeMessage(
     );
 
   if (answers.claude_exit_plan_mode === "Approve plan") {
-    return "I approve this plan. Please exit plan mode and proceed with the implementation.";
+    return {
+      resumeMessage:
+        "I approve this plan. You are no longer in plan mode. Proceed with the implementation now.",
+      resumeMode: "default",
+    };
   }
 
   if (answers.claude_exit_plan_mode === "Revise plan") {
-    return "Please stay in plan mode and revise the plan before implementation. Ask any follow-up questions you need.";
+    return {
+      resumeMessage:
+        "Please stay in plan mode and revise the plan before implementation. Ask any follow-up questions you need.",
+      resumeMode: "plan",
+    };
   }
 
   const lines = ["The user answered your AskUserQuestion tool request:"];
@@ -816,7 +824,7 @@ function buildClaudeUserInputResumeMessage(
     lines.push(`  Answer: ${answerText}`);
   }
   lines.push("Please continue using these answers.");
-  return lines.join("\n");
+  return { resumeMessage: lines.join("\n") };
 }
 
 interface AgentUserInputQuestionForRoute {

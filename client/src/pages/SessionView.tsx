@@ -1667,7 +1667,8 @@ export function SessionView({
 
   const startAgentStream = (
     sentMessage: string,
-    pendingVisibleMessage = sentMessage
+    pendingVisibleMessage = sentMessage,
+    modeOverride?: "default" | "plan"
   ) => {
     if (!sentMessage.trim() || streaming || !providerReady) return false;
 
@@ -1695,7 +1696,7 @@ export function SessionView({
       serviceTier:
         providerSupportsServiceTier ? selectedServiceTier : undefined,
       provider: selectedProvider || undefined,
-      mode: providerSupportsPlanMode ? selectedMode : "default",
+      mode: providerSupportsPlanMode ? modeOverride ?? selectedMode : "default",
       worktreeId,
     });
     eventSourceRef.current = es;
@@ -2011,7 +2012,11 @@ export function SessionView({
       const result = await submitSessionUserInput(projectId, targetSessionId, answers, worktreeId);
       setUserInputDraft({});
       if (result.resumeMessage) {
-        startAgentStream(result.resumeMessage, "Answered agent request");
+        startAgentStream(
+          result.resumeMessage,
+          "Answered agent request",
+          result.resumeMode
+        );
       }
     } catch (error) {
       setStreamItems((prev) => [
