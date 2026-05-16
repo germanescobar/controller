@@ -1,4 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 export interface AgentPlanStep {
   step: string;
@@ -93,6 +96,7 @@ export interface SpawnOptions {
 export interface AgentProvider {
   id: string;
   name: string;
+  command: string;
   spawn(opts: SpawnOptions): ChildProcess;
   parseEvent(line: string): AgentStreamEvent | null;
   createParser?(): (line: string) => AgentStreamEvent | null;
@@ -116,6 +120,7 @@ function normalizeToolResultContent(value: unknown): string {
 const adaProvider: AgentProvider = {
   id: "ada",
   name: "Ada",
+  command: "ada",
 
   spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, serviceTier }) {
     const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
@@ -153,6 +158,7 @@ const adaProvider: AgentProvider = {
 const codexProvider: AgentProvider = {
   id: "codex",
   name: "Codex",
+  command: "codex",
 
   spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
     // Flags must come before the prompt argument
@@ -198,6 +204,174 @@ const codexProvider: AgentProvider = {
     return mapCodexEvent(event, state);
   },
 };
+
+// ---------------------------------------------------------------------------
+// Claude provider
+// ---------------------------------------------------------------------------
+
+const CLAUDE_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+
+const claudeProvider: AgentProvider = {
+  id: "claude",
+  name: "Claude",
+  command: "claude",
+
+  spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, mode }) {
+    const args = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--permission-mode",
+      mode === "plan" ? "plan" : "bypassPermissions",
+    ];
+
+    if (model) {
+      args.push("--model", model);
+    }
+    if (reasoningEffort && CLAUDE_REASONING_EFFORTS.has(reasoningEffort)) {
+      args.push("--effort", reasoningEffort);
+    }
+    if (resumeSessionId) {
+      args.push("--resume", resumeSessionId);
+    }
+
+    args.push(message);
+
+    const fullCmd = `claude ${args.join(" ")}`;
+    console.log(`[claude] ${fullCmd.slice(0, 100)}...`);
+
+    return spawn("claude", args, {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  },
+
+  createParser() {
+    const state = { sessionId: "" };
+    return (line: string): AgentStreamEvent | null => {
+      const event = JSON.parse(line);
+      return mapClaudeEvent(event, state);
+    };
+  },
+
+  parseEvent(line: string): AgentStreamEvent | null {
+    const state = { sessionId: "" };
+    const event = JSON.parse(line);
+    return mapClaudeEvent(event, state);
+  },
+};
+
+function mapClaudeEvent(
+  event: Record<string, unknown>,
+  state: { sessionId: string }
+): AgentStreamEvent | null {
+  const sessionId = (event.session_id as string | undefined) ?? state.sessionId;
+  if (sessionId) {
+    state.sessionId = sessionId;
+  }
+
+  const type = event.type as string | undefined;
+  const subtype = event.subtype as string | undefined;
+
+  if (type === "system" && subtype === "init") {
+    return {
+      type: "run.started",
+      sessionId: state.sessionId,
+      model: (event.model as string | undefined) ?? "",
+      workingDirectory: (event.cwd as string | undefined) ?? "",
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  if (type === "assistant") {
+    const message = event.message as Record<string, unknown> | undefined;
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const part of content) {
+      const normalized = mapClaudeContentPart(part);
+      if (normalized) return normalized;
+    }
+  }
+
+  if (type === "user") {
+    const message = event.message as Record<string, unknown> | undefined;
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const part of content) {
+      const normalized = mapClaudeToolResultPart(part);
+      if (normalized) return normalized;
+    }
+  }
+
+  if (type === "result") {
+    const isError = event.is_error === true || (typeof subtype === "string" && subtype.startsWith("error"));
+    if (isError) {
+      return {
+        type: "run.failed",
+        sessionId: state.sessionId,
+        error:
+          (event.error as string | undefined) ??
+          (event.result as string | undefined) ??
+          subtype ??
+          "Claude run failed",
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    return {
+      type: "run.completed",
+      sessionId: state.sessionId,
+      status: "completed",
+      stopReason: subtype ?? "completed",
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  return null;
+}
+
+function mapClaudeContentPart(part: unknown): AgentStreamEvent | null {
+  if (!part || typeof part !== "object") return null;
+  const raw = part as Record<string, unknown>;
+  const type = raw.type as string | undefined;
+
+  if (type === "text") {
+    const text = raw.text as string | undefined;
+    return text ? { type: "assistant.text", text } : null;
+  }
+
+  if (type === "thinking") {
+    const text =
+      (raw.thinking as string | undefined) ??
+      (raw.text as string | undefined);
+    return text ? { type: "assistant.reasoning", text } : null;
+  }
+
+  if (type === "tool_use") {
+    return {
+      type: "tool.call",
+      id: (raw.id as string | undefined) ?? "",
+      name: (raw.name as string | undefined) ?? "tool_use",
+      input: (raw.input as Record<string, unknown> | undefined) ?? {},
+    };
+  }
+
+  return null;
+}
+
+function mapClaudeToolResultPart(part: unknown): AgentStreamEvent | null {
+  if (!part || typeof part !== "object") return null;
+  const raw = part as Record<string, unknown>;
+  if (raw.type !== "tool_result") return null;
+
+  return {
+    type: "tool.result",
+    id: (raw.tool_use_id as string | undefined) ?? "",
+    name: "tool_result",
+    content: normalizeToolResultContent(raw.content),
+    isError: raw.is_error === true,
+  };
+}
 
 /**
  * Map a Codex JSONL event to our normalized AgentStreamEvent format.
@@ -585,6 +759,7 @@ function getThreadActiveFlags(status: unknown): string[] | undefined {
 const providers: Record<string, AgentProvider> = {
   ada: adaProvider,
   codex: codexProvider,
+  claude: claudeProvider,
 };
 
 export function getAgentProvider(id: string): AgentProvider | undefined {
@@ -593,4 +768,26 @@ export function getAgentProvider(id: string): AgentProvider | undefined {
 
 export function getAgentProviders(): AgentProvider[] {
   return Object.values(providers);
+}
+
+async function isCommandAvailable(command: string): Promise<boolean> {
+  try {
+    await execFileAsync("sh", ["-lc", `command -v ${command}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function getAvailableAgentProviders(): Promise<AgentProvider[]> {
+  const availability = await Promise.all(
+    Object.values(providers).map(async (provider) => ({
+      provider,
+      available: await isCommandAvailable(provider.command),
+    }))
+  );
+
+  return availability
+    .filter(({ available }) => available)
+    .map(({ provider }) => provider);
 }

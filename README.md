@@ -1,10 +1,10 @@
 # Coding Orchestrator
 
-A web-based UI for managing and interacting with AI coding agents. It provides a chat-like interface to send prompts to coding agents (such as Ada and Codex), stream their responses in real time, and organize work into projects and sessions.
+A web-based UI for managing and interacting with AI coding agents. It provides a chat-like interface to send prompts to coding agents (such as Ada, Codex, and Claude), stream their responses in real time, and organize work into projects and sessions.
 
 ## Features
 
-- **Multi-provider support** — plug in different AI coding agents (Ada, Codex) and switch between them per session.
+- **Multi-provider support** — plug in different AI coding agents (Ada, Codex, Claude) and switch between them per session.
 - **Project management** — register local project directories and manage them from a sidebar.
 - **Session management** — create, resume, and archive coding sessions within each project. Sessions persist their event history to disk.
 - **Real-time streaming** — agent output (text, reasoning, tool calls, tool results) is streamed to the browser via SSE.
@@ -18,7 +18,7 @@ A web-based UI for managing and interacting with AI coding agents. It provides a
 client/          React + Vite frontend (Tailwind CSS, shadcn/ui)
 server/          Express API backend
   lib/
-    agents.ts    Agent provider abstraction & Codex/Ada adapters
+    agents.ts    Agent provider abstraction & Ada/Codex/Claude adapters
     sessions.ts  Session & event persistence (JSON/JSONL files)
     projects.ts  Project registry
     api-keys.ts  API key storage
@@ -39,6 +39,7 @@ The server spawns agent CLIs as child processes, parses their JSON output stream
 - At least one supported coding agent CLI installed and on your `PATH`:
   - **Ada** (`ada`)
   - **Codex** (`codex`)
+  - **Claude** (`claude`)
 
 ### Install & Run
 

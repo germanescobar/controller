@@ -125,11 +125,24 @@ async function fetchCodexModels(): Promise<Model[]> {
   }
 }
 
+/** Well-known Claude Code aliases (user authenticates separately through Claude CLI). */
+function getClaudeModels(): Model[] {
+  return [
+    { id: "sonnet", name: "Claude Sonnet", provider: "claude", size: "default" },
+    { id: "opus", name: "Claude Opus", provider: "claude", size: "" },
+  ];
+}
+
 modelsRouter.get("/", async (req, res) => {
   const agent = (req.query.agent as string) || "ada";
 
   if (agent === "codex") {
     res.json(await fetchCodexModels());
+    return;
+  }
+
+  if (agent === "claude") {
+    res.json(getClaudeModels());
     return;
   }
 

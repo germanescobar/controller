@@ -80,6 +80,29 @@ const REASONING_EFFORT_OPTIONS: Array<{
   { value: "none", label: "None" },
 ];
 
+const CLAUDE_REASONING_EFFORTS = new Set<ReasoningEffort>([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
+
+function supportsPlanMode(provider: string): boolean {
+  return provider === "codex" || provider === "claude";
+}
+
+function supportsReasoningEffort(provider: string): boolean {
+  return provider === "codex" || provider === "claude";
+}
+
+function supportsServiceTier(provider: string): boolean {
+  return provider === "codex";
+}
+
+function supportsLiveSteering(provider: string): boolean {
+  return provider === "codex";
+}
+
 function normalizeToolResultContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (content == null) return "";
@@ -1096,7 +1119,7 @@ function UserInputRequestedBlock({
         <Badge variant="secondary" className="text-[10px]">
           <span className="text-amber-400">waiting</span>
         </Badge>
-        <span className="text-sm text-foreground">Codex requested user input</span>
+        <span className="text-sm text-foreground">Agent requested user input</span>
       </div>
       <div className="mt-3 space-y-3">
         {questions.map((question) => (
@@ -1274,6 +1297,7 @@ export function SessionView({
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
   const [agentProviders, setAgentProviders] = useState<AgentProviderInfo[]>([]);
+  const [providersLoaded, setProvidersLoaded] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<string>("ada");
   const [providerResolved, setProviderResolved] = useState(!sessionId);
   const [showProviderPicker, setShowProviderPicker] = useState(false);
@@ -1305,6 +1329,20 @@ export function SessionView({
     worktreeId?: string;
     sessionId?: string;
   } | null>(null);
+  const selectedProviderIsAvailable = agentProviders.some(
+    (provider) => provider.id === selectedProvider
+  );
+  const providerReady = !!sessionId || (providersLoaded && selectedProviderIsAvailable);
+  const providerSupportsPlanMode = supportsPlanMode(selectedProvider);
+  const providerSupportsReasoningEffort = supportsReasoningEffort(selectedProvider);
+  const providerSupportsServiceTier = supportsServiceTier(selectedProvider);
+  const providerSupportsLiveSteering = supportsLiveSteering(selectedProvider);
+  const reasoningEffortOptions =
+    selectedProvider === "claude"
+      ? REASONING_EFFORT_OPTIONS.filter((option) =>
+          CLAUDE_REASONING_EFFORTS.has(option.value)
+        )
+      : REASONING_EFFORT_OPTIONS;
 
   useEffect(() => {
     debugSessionIsolation("view.mounted", { projectId, worktreeId, sessionId });
@@ -1364,26 +1402,43 @@ export function SessionView({
   };
 
   useEffect(() => {
-    if (providerResolved) loadModels(selectedProvider);
-  }, [selectedProvider, providerResolved]);
+    if (providerResolved && providerReady) loadModels(selectedProvider);
+  }, [selectedProvider, providerResolved, providerReady]);
 
   useEffect(() => {
-    if (selectedProvider !== "codex" && selectedMode !== "default") {
+    if (!providerSupportsPlanMode && selectedMode !== "default") {
       setSelectedMode("default");
     }
-  }, [selectedMode, selectedProvider]);
+  }, [providerSupportsPlanMode, selectedMode]);
 
   useEffect(() => {
-    if (selectedProvider !== "codex") {
+    if (!providerSupportsReasoningEffort) {
       setShowReasoningEffortPicker(false);
     }
-  }, [selectedProvider]);
+  }, [providerSupportsReasoningEffort]);
+
+  useEffect(() => {
+    if (
+      selectedProvider === "claude" &&
+      !CLAUDE_REASONING_EFFORTS.has(selectedReasoningEffort)
+    ) {
+      setSelectedReasoningEffort("medium");
+    }
+  }, [selectedProvider, selectedReasoningEffort]);
 
   useEffect(() => {
     fetchAgentProviders()
-      .then((p) => setAgentProviders(p))
+      .then((p) => {
+        setAgentProviders(p);
+        if (!sessionId) {
+          setSelectedProvider((prev) =>
+            p.some((provider) => provider.id === prev) ? prev : p[0]?.id ?? prev
+          );
+        }
+      })
+      .finally(() => setProvidersLoaded(true))
       .catch(() => {});
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!worktreeId) {
@@ -1612,7 +1667,7 @@ export function SessionView({
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!message.trim() || streaming) return;
+    if (!message.trim() || streaming || !providerReady) return;
 
     const sentMessage = message;
     setMessage("");
@@ -1636,11 +1691,11 @@ export function SessionView({
       resumeSessionId: sessionId,
       model: selectedModel,
       reasoningEffort:
-        selectedProvider === "codex" ? selectedReasoningEffort : undefined,
+        providerSupportsReasoningEffort ? selectedReasoningEffort : undefined,
       serviceTier:
-        selectedProvider === "codex" ? selectedServiceTier : undefined,
+        providerSupportsServiceTier ? selectedServiceTier : undefined,
       provider: selectedProvider || undefined,
-      mode: selectedProvider === "codex" ? selectedMode : "default",
+      mode: providerSupportsPlanMode ? selectedMode : "default",
       worktreeId,
     });
     eventSourceRef.current = es;
@@ -1916,7 +1971,7 @@ export function SessionView({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (streaming && selectedProvider === "codex") {
+      if (streaming && providerSupportsLiveSteering) {
         handleSteer(e as unknown as React.FormEvent);
       } else {
         handleSend(e);
@@ -2280,7 +2335,7 @@ export function SessionView({
           {/* Input */}
           <div className="shrink-0 border-t border-border bg-background px-3 pb-3 pt-2 md:px-4 md:pb-4 md:pt-3">
             <div className="mx-auto max-w-3xl">
-              <form onSubmit={streaming && selectedProvider === "codex" ? handleSteer : handleSend}>
+              <form onSubmit={streaming && providerSupportsLiveSteering ? handleSteer : handleSend}>
                 <div className="rounded-xl border border-border bg-input p-3">
                   <textarea
                     ref={textareaRef}
@@ -2288,21 +2343,21 @@ export function SessionView({
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder={
-                      streaming && selectedProvider === "codex"
+                      streaming && providerSupportsLiveSteering
                         ? "Steer the agent..."
                         : sessionId
                         ? "Ask for follow-up changes"
                         : "Describe what you want to build..."
                     }
                     rows={1}
-                    disabled={streaming && selectedProvider !== "codex"}
+                    disabled={streaming && !providerSupportsLiveSteering}
                     className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                     style={{ maxHeight: "calc(1.25rem * 5)" }}
                   />
                   <div className="mt-2 flex items-center gap-2 sm:justify-between">
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 sm:gap-2">
-                      {/* Agent provider picker — hidden while Codex is steering */}
-                      {streaming && selectedProvider === "codex" ? null : (<>
+                      {/* Agent provider picker — hidden while the active provider supports steering */}
+                      {streaming && providerSupportsLiveSteering ? null : (<>
                       <div className="relative" ref={providerPickerRef}>
                         <button
                           type="button"
@@ -2340,7 +2395,7 @@ export function SessionView({
                         )}
                       </div>
                       <span className="hidden text-muted-foreground/40 sm:inline">|</span>
-                      {selectedProvider === "codex" && (
+                      {providerSupportsPlanMode && (
                         <>
                           <div className="flex items-center rounded-md border border-border bg-background/60 p-0.5">
                             <button
@@ -2369,60 +2424,66 @@ export function SessionView({
                             </button>
                           </div>
                           <span className="hidden text-muted-foreground/40 sm:inline">|</span>
-                          <div className="relative" ref={reasoningEffortPickerRef}>
+                          {providerSupportsReasoningEffort && (
+                            <>
+                              <div className="relative" ref={reasoningEffortPickerRef}>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setShowReasoningEffortPicker(!showReasoningEffortPicker)
+                                  }
+                                  className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                                >
+                                  {selectedReasoningEffortLabel}
+                                  <ChevronDown className="h-3 w-3" />
+                                </button>
+                                {showReasoningEffortPicker && (
+                                  <div className="absolute bottom-full left-0 z-20 mb-1 w-40 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-1 shadow-lg">
+                                    {reasoningEffortOptions.map((option) => (
+                                      <button
+                                        key={option.value}
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedReasoningEffort(option.value);
+                                          setShowReasoningEffortPicker(false);
+                                        }}
+                                        className={`flex w-full items-center rounded-md px-3 py-2 text-sm text-left transition-colors ${
+                                          selectedReasoningEffort === option.value
+                                            ? "bg-accent text-accent-foreground"
+                                            : "text-popover-foreground hover:bg-accent"
+                                        }`}
+                                      >
+                                        {option.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </>
+                          )}
+                          {providerSupportsServiceTier && (
                             <button
                               type="button"
-                              onClick={() =>
-                                setShowReasoningEffortPicker(!showReasoningEffortPicker)
+                              aria-pressed={selectedServiceTier === "fast"}
+                              title={
+                                selectedServiceTier === "fast"
+                                  ? "Fast mode active"
+                                  : "Fast mode inactive"
                               }
-                              className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                              onClick={() =>
+                                setSelectedServiceTier((tier) =>
+                                  tier === "fast" ? "flex" : "fast"
+                                )
+                              }
+                              className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                                selectedServiceTier === "fast"
+                                  ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/20"
+                                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                              }`}
                             >
-                              {selectedReasoningEffortLabel}
-                              <ChevronDown className="h-3 w-3" />
+                              <Zap className="h-3.5 w-3.5" />
                             </button>
-                            {showReasoningEffortPicker && (
-                              <div className="absolute bottom-full left-0 z-20 mb-1 w-40 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-1 shadow-lg">
-                                {REASONING_EFFORT_OPTIONS.map((option) => (
-                                  <button
-                                    key={option.value}
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedReasoningEffort(option.value);
-                                      setShowReasoningEffortPicker(false);
-                                    }}
-                                    className={`flex w-full items-center rounded-md px-3 py-2 text-sm text-left transition-colors ${
-                                      selectedReasoningEffort === option.value
-                                        ? "bg-accent text-accent-foreground"
-                                        : "text-popover-foreground hover:bg-accent"
-                                    }`}
-                                  >
-                                    {option.label}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                          <button
-                            type="button"
-                            aria-pressed={selectedServiceTier === "fast"}
-                            title={
-                              selectedServiceTier === "fast"
-                                ? "Fast mode active"
-                                : "Fast mode inactive"
-                            }
-                            onClick={() =>
-                              setSelectedServiceTier((tier) =>
-                                tier === "fast" ? "flex" : "fast"
-                              )
-                            }
-                            className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
-                              selectedServiceTier === "fast"
-                                ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/20"
-                                : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                            }`}
-                          >
-                            <Zap className="h-3.5 w-3.5" />
-                          </button>
+                          )}
                           <span className="hidden text-muted-foreground/40 sm:inline">|</span>
                         </>
                       )}
@@ -2503,13 +2564,13 @@ export function SessionView({
                         type="submit"
                         size="icon"
                         disabled={
-                          streaming && selectedProvider === "codex"
-                            ? !message.trim()
-                            : !message.trim() || streaming
+                          streaming && providerSupportsLiveSteering
+                            ? !message.trim() || !providerReady
+                            : !message.trim() || streaming || !providerReady
                         }
                         className="h-8 w-8 rounded-full"
                       >
-                        {streaming && selectedProvider === "codex" ? (
+                        {streaming && providerSupportsLiveSteering ? (
                           <MessageSquare className="h-4 w-4" />
                         ) : (
                           <ArrowUp className="h-4 w-4" />

@@ -212,8 +212,8 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   let streamSessionId = resumeSessionId ?? "";
   let userMessageWritten = false;
 
-  // Close stdin so Codex doesn't wait for additional input
-  if (providerId === "codex") {
+  // Close stdin for CLIs that otherwise wait briefly for piped input.
+  if (providerId === "codex" || providerId === "claude") {
     child.stdin?.end();
   }
 
@@ -649,10 +649,10 @@ sessionsRouter.post(
     const providerId = runtime.provider || session?.provider;
 
     try {
-      if (providerId === "ada") {
-        await stopSessionRuntime(req.params.sessionId);
-      } else {
+      if (providerId === "codex") {
         await codexAppServerManager.stopSession(req.params.sessionId);
+      } else {
+        await stopSessionRuntime(req.params.sessionId);
       }
       res.json({ ok: true });
     } catch (error) {
