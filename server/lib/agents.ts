@@ -251,7 +251,7 @@ const claudeProvider: AgentProvider = {
   },
 
   createParser() {
-    const state = { sessionId: "" };
+    const state = { sessionId: "", pausedForUserInput: false };
     return (line: string): AgentStreamParseResult => {
       const event = JSON.parse(line);
       return mapClaudeEvent(event, state);
@@ -259,7 +259,7 @@ const claudeProvider: AgentProvider = {
   },
 
   parseEvent(line: string): AgentStreamParseResult {
-    const state = { sessionId: "" };
+    const state = { sessionId: "", pausedForUserInput: false };
     const event = JSON.parse(line);
     return mapClaudeEvent(event, state);
   },
@@ -267,11 +267,15 @@ const claudeProvider: AgentProvider = {
 
 function mapClaudeEvent(
   event: Record<string, unknown>,
-  state: { sessionId: string }
+  state: { sessionId: string; pausedForUserInput: boolean }
 ): AgentStreamEvent | AgentStreamEvent[] | null {
   const sessionId = (event.session_id as string | undefined) ?? state.sessionId;
   if (sessionId) {
     state.sessionId = sessionId;
+  }
+
+  if (state.pausedForUserInput) {
+    return null;
   }
 
   const type = event.type as string | undefined;
@@ -293,6 +297,9 @@ function mapClaudeEvent(
     const events: AgentStreamEvent[] = [];
     for (const part of content) {
       events.push(...mapClaudeContentPartToEvents(part));
+    }
+    if (events.some((normalized) => normalized.type === "user.input_requested")) {
+      state.pausedForUserInput = true;
     }
     if (events.length === 1) return events[0];
     if (events.length > 1) return events;
@@ -341,7 +348,11 @@ function mapClaudeContentPart(part: unknown): AgentStreamEvent | null {
 
   if (type === "text") {
     const text = raw.text as string | undefined;
-    if (text && /^Plan is saved at .*retry exiting plan mode\.$/s.test(text.trim())) {
+    if (
+      text &&
+      (/^Plan is saved at .*retry exiting plan mode\.$/s.test(text.trim()) ||
+        /^The user dismissed the questions\./.test(text.trim()))
+    ) {
       return null;
     }
     return text ? { type: "assistant.text", text } : null;
