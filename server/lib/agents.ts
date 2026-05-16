@@ -98,9 +98,11 @@ export interface AgentProvider {
   name: string;
   command: string;
   spawn(opts: SpawnOptions): ChildProcess;
-  parseEvent(line: string): AgentStreamEvent | null;
-  createParser?(): (line: string) => AgentStreamEvent | null;
+  parseEvent(line: string): AgentStreamEvent | AgentStreamEvent[] | null;
+  createParser?(): (line: string) => AgentStreamEvent | AgentStreamEvent[] | null;
 }
+
+export type AgentStreamParseResult = AgentStreamEvent | AgentStreamEvent[] | null;
 
 function normalizeToolResultContent(value: unknown): string {
   if (typeof value === "string") return value;
@@ -250,13 +252,13 @@ const claudeProvider: AgentProvider = {
 
   createParser() {
     const state = { sessionId: "" };
-    return (line: string): AgentStreamEvent | null => {
+    return (line: string): AgentStreamParseResult => {
       const event = JSON.parse(line);
       return mapClaudeEvent(event, state);
     };
   },
 
-  parseEvent(line: string): AgentStreamEvent | null {
+  parseEvent(line: string): AgentStreamParseResult {
     const state = { sessionId: "" };
     const event = JSON.parse(line);
     return mapClaudeEvent(event, state);
@@ -266,7 +268,7 @@ const claudeProvider: AgentProvider = {
 function mapClaudeEvent(
   event: Record<string, unknown>,
   state: { sessionId: string }
-): AgentStreamEvent | null {
+): AgentStreamEvent | AgentStreamEvent[] | null {
   const sessionId = (event.session_id as string | undefined) ?? state.sessionId;
   if (sessionId) {
     state.sessionId = sessionId;
@@ -288,10 +290,12 @@ function mapClaudeEvent(
   if (type === "assistant") {
     const message = event.message as Record<string, unknown> | undefined;
     const content = Array.isArray(message?.content) ? message.content : [];
+    const events: AgentStreamEvent[] = [];
     for (const part of content) {
-      const normalized = mapClaudeContentPart(part);
-      if (normalized) return normalized;
+      events.push(...mapClaudeContentPartToEvents(part));
     }
+    if (events.length === 1) return events[0];
+    if (events.length > 1) return events;
   }
 
   if (type === "user") {
@@ -337,6 +341,9 @@ function mapClaudeContentPart(part: unknown): AgentStreamEvent | null {
 
   if (type === "text") {
     const text = raw.text as string | undefined;
+    if (text && /^Plan is saved at .*retry exiting plan mode\.$/s.test(text.trim())) {
+      return null;
+    }
     return text ? { type: "assistant.text", text } : null;
   }
 
@@ -348,28 +355,124 @@ function mapClaudeContentPart(part: unknown): AgentStreamEvent | null {
   }
 
   if (type === "tool_use") {
+    const name = (raw.name as string | undefined) ?? "tool_use";
+    const input = (raw.input as Record<string, unknown> | undefined) ?? {};
+
+    if (name === "AskUserQuestion") {
+      const questions = Array.isArray(input.questions)
+        ? input.questions
+            .map((question, index) => normalizeClaudeUserInputQuestion(question, index))
+            .filter((question): question is AgentUserInputQuestion => question !== null)
+        : [];
+      if (questions.length > 0) {
+        return {
+          type: "user.input_requested",
+          id: (raw.id as string | undefined) ?? "",
+          questions,
+        };
+      }
+    }
+
     return {
       type: "tool.call",
       id: (raw.id as string | undefined) ?? "",
-      name: (raw.name as string | undefined) ?? "tool_use",
-      input: (raw.input as Record<string, unknown> | undefined) ?? {},
+      name,
+      input,
     };
   }
 
   return null;
 }
 
+function mapClaudeContentPartToEvents(part: unknown): AgentStreamEvent[] {
+  if (!part || typeof part !== "object") return [];
+  const raw = part as Record<string, unknown>;
+  if (raw.type === "tool_use" && raw.name === "ExitPlanMode") {
+    const input = (raw.input as Record<string, unknown> | undefined) ?? {};
+    const plan = typeof input.plan === "string" ? input.plan.trim() : "";
+    const events: AgentStreamEvent[] = [];
+    if (plan) {
+      events.push({ type: "assistant.text", text: plan });
+    }
+    events.push({
+      type: "user.input_requested",
+      id: (raw.id as string | undefined) ?? "",
+      questions: [
+        {
+          id: "claude_exit_plan_mode",
+          header: "Plan approval",
+          question: "Claude is ready to exit plan mode.",
+          options: [
+            {
+              label: "Approve plan",
+              description: "Resume Claude and ask it to proceed with this plan.",
+            },
+            {
+              label: "Revise plan",
+              description: "Resume Claude and ask it to keep planning before implementation.",
+            },
+          ],
+        },
+      ],
+    });
+    return events;
+  }
+
+  const event = mapClaudeContentPart(part);
+  return event ? [event] : [];
+}
+
 function mapClaudeToolResultPart(part: unknown): AgentStreamEvent | null {
   if (!part || typeof part !== "object") return null;
   const raw = part as Record<string, unknown>;
   if (raw.type !== "tool_result") return null;
+  const content = normalizeToolResultContent(raw.content);
+  if (
+    raw.is_error === true &&
+    (content.trim() === "Answer questions?" || content.trim() === "Exit plan mode?")
+  ) {
+    return null;
+  }
 
   return {
     type: "tool.result",
     id: (raw.tool_use_id as string | undefined) ?? "",
     name: "tool_result",
-    content: normalizeToolResultContent(raw.content),
+    content,
     isError: raw.is_error === true,
+  };
+}
+
+function normalizeClaudeUserInputQuestion(
+  value: unknown,
+  index: number
+): AgentUserInputQuestion | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const question = raw.question as string | undefined;
+  const header = (raw.header as string | undefined) ?? `Question ${index + 1}`;
+  const options = Array.isArray(raw.options)
+    ? raw.options
+        .map((option) => normalizeClaudeUserInputOption(option))
+        .filter((option): option is AgentUserInputOption => option !== null)
+    : [];
+  if (!question || options.length === 0) return null;
+  return {
+    id: `question-${index}`,
+    header,
+    question,
+    options,
+  };
+}
+
+function normalizeClaudeUserInputOption(value: unknown): AgentUserInputOption | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const label = raw.label as string | undefined;
+  if (!label) return null;
+  return {
+    label,
+    description: (raw.description as string | undefined) ?? "",
   };
 }
 

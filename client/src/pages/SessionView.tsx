@@ -1665,13 +1665,13 @@ export function SessionView({
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const handleSend = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!message.trim() || streaming || !providerReady) return;
+  const startAgentStream = (
+    sentMessage: string,
+    pendingVisibleMessage = sentMessage
+  ) => {
+    if (!sentMessage.trim() || streaming || !providerReady) return false;
 
-    const sentMessage = message;
-    setMessage("");
-    setPendingMessage(sentMessage);
+    setPendingMessage(pendingVisibleMessage);
     setStreaming(true);
     setStreamItems([]);
     let detectedSessionId = sessionId;
@@ -1935,6 +1935,17 @@ export function SessionView({
         setPendingMessage(null);
       }
     };
+
+    return true;
+  };
+
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!message.trim()) return;
+    const sentMessage = message;
+    if (startAgentStream(sentMessage)) {
+      setMessage("");
+    }
   };
 
   const handleStop = async () => {
@@ -1997,8 +2008,11 @@ export function SessionView({
 
     setSubmittingUserInput(true);
     try {
-      await submitSessionUserInput(projectId, targetSessionId, answers, worktreeId);
+      const result = await submitSessionUserInput(projectId, targetSessionId, answers, worktreeId);
       setUserInputDraft({});
+      if (result.resumeMessage) {
+        startAgentStream(result.resumeMessage, "Answered agent request");
+      }
     } catch (error) {
       setStreamItems((prev) => [
         ...prev,

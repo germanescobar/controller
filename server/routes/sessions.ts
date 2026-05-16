@@ -203,6 +203,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     serviceTier,
     mode,
   });
+  const parseProviderEvent = provider.createParser?.() ?? provider.parseEvent.bind(provider);
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
@@ -319,8 +320,9 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
       if (line.length > 0) {
         try {
-          const event = provider.parseEvent(line);
-          if (event) {
+          const parsed = parseProviderEvent(line);
+          const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+          for (const event of events) {
             eventProcessing = eventProcessing
               .then(async () => {
                 // Always persist session metadata on run.started so
@@ -359,8 +361,9 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     const lastLine = stdoutBuffer.trim();
     if (lastLine.length > 0) {
       try {
-        const event = provider.parseEvent(lastLine);
-        if (event) {
+        const parsed = parseProviderEvent(lastLine);
+        const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+        for (const event of events) {
           if (shouldPersist && event.type !== "run.completed" && event.type !== "run.failed") {
             persistAgentEvent(event);
           }
@@ -728,6 +731,28 @@ sessionsRouter.post(
     }
 
     try {
+      const session = await getSession(worktree.path, req.params.sessionId);
+      const providerId = session?.provider;
+      if (providerId === "claude") {
+        const events = await getEvents(worktree.path, req.params.sessionId);
+        const resumeMessage = buildClaudeUserInputResumeMessage(events, answers);
+        await appendEvent(worktree.path, req.params.sessionId, {
+          id: randomUUID(),
+          sessionId: req.params.sessionId,
+          timestamp: new Date().toISOString(),
+          type: "user_input_response",
+          data: { answers },
+        });
+
+        if (session) {
+          session.lastActiveAt = new Date().toISOString();
+          await saveSession(worktree.path, session);
+        }
+
+        res.json({ ok: true, resumeMessage });
+        return;
+      }
+
       await codexAppServerManager.submitUserInput(req.params.sessionId, answers);
       await appendEvent(worktree.path, req.params.sessionId, {
         id: randomUUID(),
@@ -751,6 +776,44 @@ sessionsRouter.post(
     }
   }
 );
+
+function buildClaudeUserInputResumeMessage(
+  events: AgentEvent[],
+  answers: Record<string, string | string[]>
+): string {
+  const latestRequest = [...events]
+    .reverse()
+    .find((event) => event.type === "user_input_requested");
+  const questions =
+    ((latestRequest?.data.questions as AgentUserInputQuestionForRoute[] | undefined) ?? []).filter(
+      Boolean
+    );
+
+  if (answers.claude_exit_plan_mode === "Approve plan") {
+    return "I approve this plan. Please exit plan mode and proceed with the implementation.";
+  }
+
+  if (answers.claude_exit_plan_mode === "Revise plan") {
+    return "Please stay in plan mode and revise the plan before implementation. Ask any follow-up questions you need.";
+  }
+
+  const lines = ["The user answered your AskUserQuestion tool request:"];
+  for (const question of questions) {
+    const answer = answers[question.id];
+    if (answer == null) continue;
+    const answerText = Array.isArray(answer) ? answer.join(", ") : answer;
+    lines.push(`- ${question.header}: ${question.question}`);
+    lines.push(`  Answer: ${answerText}`);
+  }
+  lines.push("Please continue using these answers.");
+  return lines.join("\n");
+}
+
+interface AgentUserInputQuestionForRoute {
+  id: string;
+  header: string;
+  question: string;
+}
 
 // Archive a session
 sessionsRouter.post(

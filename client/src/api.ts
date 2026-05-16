@@ -282,7 +282,7 @@ export async function submitSessionUserInput(
   sessionId: string,
   answers: Record<string, string | string[]>,
   worktreeId?: string
-): Promise<void> {
+): Promise<{ resumeMessage?: string }> {
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/user-input${withWorktree(worktreeId)}`,
     {
@@ -305,6 +305,8 @@ export async function submitSessionUserInput(
 
     throw new Error(message);
   }
+
+  return (await res.json()) as { resumeMessage?: string };
 }
 
 export interface Model {
