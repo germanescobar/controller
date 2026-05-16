@@ -212,6 +212,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   const shouldPersist = providerId !== "ada";
   let streamSessionId = resumeSessionId ?? "";
   let userMessageWritten = false;
+  let pausedForClaudeUserInput = false;
 
   // Close stdin for CLIs that otherwise wait briefly for piped input.
   if (providerId === "codex" || providerId === "claude") {
@@ -323,6 +324,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
           const parsed = parseProviderEvent(line);
           const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
           for (const event of events) {
+            if (pausedForClaudeUserInput) break;
             eventProcessing = eventProcessing
               .then(async () => {
                 // Always persist session metadata on run.started so
@@ -340,6 +342,10 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
                 sseSend({ type: "ada_event", event });
               })
               .catch(() => {});
+            if (providerId === "claude" && event.type === "user.input_requested") {
+              pausedForClaudeUserInput = true;
+              child.kill("SIGTERM");
+            }
           }
         } catch {
           sseSend({
@@ -358,16 +364,20 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     eventProcessing
       .catch(() => {})
       .then(() => {
-    const lastLine = stdoutBuffer.trim();
+    const lastLine = pausedForClaudeUserInput ? "" : stdoutBuffer.trim();
     if (lastLine.length > 0) {
       try {
         const parsed = parseProviderEvent(lastLine);
         const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
         for (const event of events) {
+          if (pausedForClaudeUserInput) break;
           if (shouldPersist && event.type !== "run.completed" && event.type !== "run.failed") {
             persistAgentEvent(event);
           }
           sseSend({ type: "ada_event", event });
+          if (providerId === "claude" && event.type === "user.input_requested") {
+            pausedForClaudeUserInput = true;
+          }
         }
       } catch {
         sseSend({
@@ -389,7 +399,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       }).catch(() => {});
     }
 
-    sseSend({ type: "done", exitCode: code });
+    sseSend({ type: "done", exitCode: pausedForClaudeUserInput ? 0 : code });
     if (clientConnected) res.end();
       });
   });
