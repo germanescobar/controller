@@ -2061,6 +2061,7 @@ export function SessionView({
     events,
     pendingMessage
   );
+  const waitingForStructuredInput = Boolean(latestStructuredInputRequest);
 
   return (
     <>
@@ -2339,7 +2340,7 @@ export function SessionView({
                 </div>
               )}
 
-              {streaming && (
+              {streaming && !waitingForStructuredInput && (
                 <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   <span>Working...</span>
