@@ -1998,6 +1998,7 @@ export function SessionView({
   };
 
   const handleStructuredUserInputSubmit = async (
+    requestId: string,
     questions: UserInputQuestion[]
   ) => {
     const targetSessionId = activeStreamSessionId ?? sessionId;
@@ -2011,6 +2012,14 @@ export function SessionView({
     try {
       const result = await submitSessionUserInput(projectId, targetSessionId, answers, worktreeId);
       setUserInputDraft({});
+      setStreamItems((prev) =>
+        prev.filter(
+          (item) => item.type !== "user_input_requested" || item.id !== requestId
+        )
+      );
+      fetchEvents(projectId, targetSessionId, worktreeId)
+        .then(setEvents)
+        .catch(() => {});
       if (result.resumeMessage) {
         startAgentStream(
           result.resumeMessage,
@@ -2297,7 +2306,7 @@ export function SessionView({
                           }
                           onSubmit={
                             latestStructuredInputRequest?.id === item.id
-                              ? () => handleStructuredUserInputSubmit(item.questions)
+                              ? () => handleStructuredUserInputSubmit(item.id, item.questions)
                               : undefined
                           }
                           submitting={submittingUserInput}
@@ -2332,6 +2341,7 @@ export function SessionView({
                     }
                     onSubmit={() =>
                       handleStructuredUserInputSubmit(
+                        latestStructuredInputRequest.id,
                         latestStructuredInputRequest.questions
                       )
                     }
