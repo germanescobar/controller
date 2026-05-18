@@ -67,20 +67,27 @@ sessionsRouter.get("/:projectId/git/diff", async (req, res) => {
       "git ls-files --others --exclude-standard",
       execOpts
     );
-    const untracked = listOut.split("\n").filter(Boolean).slice(0, 50);
+    const untracked = listOut.split("\n").filter(Boolean).sort().slice(0, 50);
     const { readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    await Promise.all(
+    const chunks = await Promise.all(
       untracked.map(async (file) => {
         try {
           const content = await readFile(join(worktree.path, file), "utf-8");
           const lines = content.split("\n");
           if (lines[lines.length - 1] === "") lines.pop();
-          diff += `diff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n`;
-          diff += lines.map((l) => `+${l}`).join("\n") + "\n";
-        } catch { /* skip binary / unreadable */ }
+          return (
+            `diff --git a/${file} b/${file}\nnew file mode 100644\n--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n` +
+            lines.map((l) => `+${l}`).join("\n") +
+            "\n"
+          );
+        } catch {
+          // skip binary / unreadable
+          return "";
+        }
       })
     );
+    diff += chunks.join("");
   } catch { /* ignore */ }
 
   res.json({ diff });

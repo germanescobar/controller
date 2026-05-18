@@ -1293,8 +1293,8 @@ function ChangesPanel({
         <div className="flex-1 overflow-y-auto py-2 px-3 space-y-2">
           {activeFiles.length === 0 ? (
             <p className="px-1 pt-1 text-xs text-muted-foreground/50">No changes</p>
-          ) : activeFiles.map((file, i) => (
-            <DiffBlock key={i} files={[file]} />
+          ) : activeFiles.map((file) => (
+            <DiffBlock key={file.path} files={[file]} />
           ))}
         </div>
       </div>
