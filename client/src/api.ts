@@ -309,6 +309,34 @@ export async function submitSessionUserInput(
   return (await res.json()) as { resumeMessage?: string; resumeMode?: "default" | "plan" };
 }
 
+export async function dismissSessionUserInput(
+  projectId: string,
+  sessionId: string,
+  worktreeId?: string
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/user-input/dismiss${withWorktree(worktreeId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+
+  if (!res.ok) {
+    let message = "Failed to dismiss user input";
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) {
+        message = body.error;
+      }
+    } catch {
+      // Ignore JSON parsing errors and use the default message.
+    }
+
+    throw new Error(message);
+  }
+}
+
 export interface Model {
   id: string;
   name: string;

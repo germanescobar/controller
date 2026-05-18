@@ -16,6 +16,7 @@ import {
   fetchSession,
   fetchSessionRuntime,
   fetchWorktrees,
+  dismissSessionUserInput,
   startSession,
   stopSession,
   steerSession,
@@ -1226,65 +1227,135 @@ function UserInputRequestedBlock({
   answers,
   questions,
   onAnswerSelect,
+  onDismiss,
   onSubmit,
   submitting = false,
 }: {
   answers?: Record<string, string>;
   questions: UserInputQuestion[];
   onAnswerSelect?: (questionId: string, answer: string) => void;
+  onDismiss?: () => void;
   onSubmit?: () => void;
   submitting?: boolean;
 }) {
-  const allAnswered = questions.every((question) => Boolean(answers?.[question.id]));
+  const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
+  const activeQuestion = questions[activeQuestionIndex] ?? questions[0];
+  const activeAnswer = activeQuestion ? answers?.[activeQuestion.id] ?? "" : "";
+  const optionLabels = activeQuestion?.options.map((option) => option.label) ?? [];
+  const customAnswer = activeAnswer && !optionLabels.includes(activeAnswer) ? activeAnswer : "";
+  const allAnswered = questions.every((question) => Boolean(answers?.[question.id]?.trim()));
+  const activeAnswered = Boolean(activeAnswer.trim());
+  const isLastQuestion = activeQuestionIndex >= questions.length - 1;
+  const isPlanApproval =
+    activeQuestion.id === "claude_exit_plan_mode" ||
+    activeQuestion.header.toLowerCase().includes("plan");
+  const showCustomAnswer = Boolean(onAnswerSelect || customAnswer);
+
+  useEffect(() => {
+    setActiveQuestionIndex((index) => Math.min(index, Math.max(questions.length - 1, 0)));
+  }, [questions.length]);
+
+  if (!activeQuestion) return null;
+
+  const handleContinue = () => {
+    if (!isLastQuestion) {
+      setActiveQuestionIndex((index) => index + 1);
+      return;
+    }
+    onSubmit?.();
+  };
 
   return (
     <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-      <div className="flex items-center gap-2">
-        <Badge variant="secondary" className="text-[10px]">
-          <span className="text-amber-400">waiting</span>
-        </Badge>
-        <span className="text-sm text-foreground">Agent requested user input</span>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Badge variant="secondary" className="text-[10px]">
+            <span className="text-amber-400">waiting</span>
+          </Badge>
+          <span className="text-sm text-foreground">Agent requested user input</span>
+        </div>
+        {questions.length > 1 ? (
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {activeQuestionIndex + 1} / {questions.length}
+          </span>
+        ) : null}
       </div>
-      <div className="mt-3 space-y-3">
-        {questions.map((question) => (
-          <div key={question.id} className="rounded-md border border-border/70 p-3">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              {question.header}
-            </div>
-            <div className="mt-1 text-sm text-foreground">{question.question}</div>
-            <div className="mt-2 space-y-2">
-              {question.options.map((option) => (
-                <button
-                  key={`${question.id}-${option.label}`}
-                  type="button"
-                  onClick={() => onAnswerSelect?.(question.id, option.label)}
-                  disabled={!onAnswerSelect || submitting}
-                  className={`w-full rounded-md px-3 py-2 text-left transition-colors ${
-                    answers?.[question.id] === option.label
-                      ? "bg-accent text-accent-foreground"
-                      : "bg-background/70"
-                  } ${onAnswerSelect ? "hover:bg-accent/70" : "cursor-default"}`}
-                >
-                  <div className="text-sm text-foreground">{option.label}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {option.description}
-                  </div>
-                </button>
-              ))}
-            </div>
+      <div className="mt-3 rounded-md border border-border/70 p-3">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          {activeQuestion.header}
+        </div>
+        <div className="mt-1 text-sm text-foreground">{activeQuestion.question}</div>
+        {activeQuestion.options.length > 0 ? (
+          <div className="mt-3 space-y-2">
+            {activeQuestion.options.map((option) => (
+              <button
+                key={`${activeQuestion.id}-${option.label}`}
+                type="button"
+                onClick={() => onAnswerSelect?.(activeQuestion.id, option.label)}
+                disabled={!onAnswerSelect || submitting}
+                className={`w-full rounded-md px-3 py-2 text-left transition-colors ${
+                  activeAnswer === option.label
+                    ? "bg-accent text-accent-foreground"
+                    : "bg-background/70"
+                } ${onAnswerSelect ? "hover:bg-accent/70" : "cursor-default"}`}
+              >
+                <div className="text-sm text-foreground">{option.label}</div>
+                <div className="text-xs text-muted-foreground">{option.description}</div>
+              </button>
+            ))}
           </div>
-        ))}
+        ) : null}
+        {showCustomAnswer ? (
+          <textarea
+            value={customAnswer}
+            onChange={(event) => onAnswerSelect?.(activeQuestion.id, event.target.value)}
+            disabled={!onAnswerSelect || submitting}
+            rows={3}
+            placeholder={
+              isPlanApproval
+                ? "Tell the agent what to do instead..."
+                : "Or type your own answer..."
+            }
+            className="mt-3 min-h-20 w-full resize-y rounded-md border border-border bg-background/80 px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-amber-500/60 disabled:cursor-default disabled:opacity-70"
+          />
+        ) : null}
       </div>
-      {onSubmit ? (
-        <div className="mt-4 flex justify-end">
-          <Button
-            type="button"
-            size="sm"
-            onClick={onSubmit}
-            disabled={!allAnswered || submitting}
-          >
-            {submitting ? "Submitting..." : "Continue"}
-          </Button>
+      {onSubmit || onDismiss ? (
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            {onDismiss ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={onDismiss}
+                disabled={submitting}
+              >
+                Dismiss
+              </Button>
+            ) : null}
+            {onSubmit ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setActiveQuestionIndex((index) => Math.max(index - 1, 0))}
+                disabled={activeQuestionIndex === 0 || submitting}
+              >
+                Back
+              </Button>
+            ) : null}
+          </div>
+          {onSubmit ? (
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleContinue}
+              disabled={submitting || !activeAnswered || (isLastQuestion && !allAnswered)}
+            >
+              {submitting ? "Submitting..." : isLastQuestion ? "Continue" : "Next"}
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -2292,6 +2363,36 @@ export function SessionView({
     }
   };
 
+  const handleStructuredUserInputDismiss = async (requestId: string) => {
+    const targetSessionId = activeStreamSessionId ?? sessionId;
+    if (!targetSessionId) return;
+
+    setSubmittingUserInput(true);
+    try {
+      await dismissSessionUserInput(projectId, targetSessionId, worktreeId);
+      setUserInputDraft({});
+      setStreamItems((prev) =>
+        prev.filter(
+          (item) => item.type !== "user_input_requested" || item.id !== requestId
+        )
+      );
+      fetchEvents(projectId, targetSessionId, worktreeId)
+        .then(setEvents)
+        .catch(() => {});
+    } catch (error) {
+      setStreamItems((prev) => [
+        ...prev,
+        {
+          type: "error",
+          text: error instanceof Error ? error.message : "Failed to dismiss user input",
+          at: Date.now(),
+        },
+      ]);
+    } finally {
+      setSubmittingUserInput(false);
+    }
+  };
+
   const selectedModelName =
     models.find((m) => m.id === selectedModel)?.name ?? selectedModel;
   const selectedReasoningEffortLabel =
@@ -2560,6 +2661,11 @@ export function SessionView({
                               ? () => handleStructuredUserInputSubmit(item.id, item.questions)
                               : undefined
                           }
+                          onDismiss={
+                            latestStructuredInputRequest?.id === item.id
+                              ? () => handleStructuredUserInputDismiss(item.id)
+                              : undefined
+                          }
                           submitting={submittingUserInput}
                         />
                       );
@@ -2595,6 +2701,9 @@ export function SessionView({
                         latestStructuredInputRequest.id,
                         latestStructuredInputRequest.questions
                       )
+                    }
+                    onDismiss={() =>
+                      handleStructuredUserInputDismiss(latestStructuredInputRequest.id)
                     }
                     submitting={submittingUserInput}
                   />
