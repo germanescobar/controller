@@ -1352,6 +1352,7 @@ export function SessionView({
   const providerPickerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const streamingRef = useRef(streaming);
+  const pendingAttachedSessionIdRef = useRef<string | null>(null);
   const currentViewRef = useRef({
     projectId,
     worktreeId,
@@ -1362,6 +1363,15 @@ export function SessionView({
     worktreeId?: string;
     sessionId?: string;
   } | null>(null);
+  const viewMatchesStreamContext = (context: typeof sendContextRef.current) => {
+    if (!context) return false;
+    const currentView = currentViewRef.current;
+    return (
+      currentView.projectId === context.projectId &&
+      currentView.worktreeId === context.worktreeId &&
+      currentView.sessionId === context.sessionId
+    );
+  };
   const selectedProviderIsAvailable = agentProviders.some(
     (provider) => provider.id === selectedProvider
   );
@@ -1427,6 +1437,7 @@ export function SessionView({
     setActiveStreamSessionId(nextSessionId);
     sendContextRef.current = { projectId, worktreeId, sessionId: nextSessionId };
     if (currentViewRef.current.sessionId !== nextSessionId) {
+      pendingAttachedSessionIdRef.current = nextSessionId;
       onSessionCreated(nextSessionId);
     }
   };
@@ -1507,6 +1518,7 @@ export function SessionView({
 
   // When loading an existing session, restore the provider and model that were used
   useEffect(() => {
+    let cancelled = false;
     if (sessionId) {
       setProviderResolved(false);
       Promise.allSettled([
@@ -1515,6 +1527,7 @@ export function SessionView({
         fetchSessionRuntime(projectId, sessionId, worktreeId),
       ])
         .then(([sessionResult, eventsResult, runtimeResult]) => {
+          if (cancelled) return;
           if (sessionResult.status === "fulfilled") {
             const session = sessionResult.value;
             setSelectedProvider(session.provider || "ada");
@@ -1536,7 +1549,9 @@ export function SessionView({
             setStreaming(false);
           }
         })
-        .finally(() => setProviderResolved(true));
+        .finally(() => {
+          if (!cancelled) setProviderResolved(true);
+        });
     } else {
       setEvents([]);
       setStreamItems([]);
@@ -1548,11 +1563,15 @@ export function SessionView({
     }
     setActiveStreamSessionId(sessionId ?? null);
     setUserInputDraft({});
+    return () => {
+      cancelled = true;
+    };
   }, [projectId, sessionId, worktreeId]);
 
   useEffect(() => {
-    if (!sessionId || eventSourceRef.current) return;
+    if (!sessionId) return;
     if (!streaming) return;
+    if (eventSourceRef.current && viewMatchesStreamContext(sendContextRef.current)) return;
 
     let cancelled = false;
     const interval = window.setInterval(async () => {
@@ -1579,7 +1598,7 @@ export function SessionView({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [projectId, sessionId, streaming]);
+  }, [projectId, sessionId, worktreeId, streaming]);
 
   // Track current session and manage stream visibility on session switch
   useEffect(() => {
@@ -1591,6 +1610,12 @@ export function SessionView({
       worktreeId,
       sessionId,
     };
+    if (
+      pendingAttachedSessionIdRef.current &&
+      pendingAttachedSessionIdRef.current === sessionId
+    ) {
+      pendingAttachedSessionIdRef.current = null;
+    }
 
     debugSessionIsolation("view.changed", {
       prevProjectId,
@@ -1604,10 +1629,7 @@ export function SessionView({
     });
 
     if (eventSourceRef.current && sendContextRef.current) {
-      const viewingOriginStream =
-        projectId === sendContextRef.current.projectId &&
-        worktreeId === sendContextRef.current.worktreeId &&
-        sessionId === sendContextRef.current.sessionId;
+      const viewingOriginStream = viewMatchesStreamContext(sendContextRef.current);
 
       if (!viewingOriginStream) {
         debugSessionIsolation("view.hidStreamingUi", {
@@ -1778,9 +1800,13 @@ export function SessionView({
 
       const visible =
         currentMatchesStreamView ||
-        (!!streamContext.sessionId &&
-          (currentView.sessionId === streamContext.sessionId ||
-            detectedSessionId === streamContext.sessionId));
+        (
+          currentView.projectId === streamContext.projectId &&
+          currentView.worktreeId === streamContext.worktreeId &&
+          currentView.sessionId == null &&
+          pendingAttachedSessionIdRef.current === streamContext.sessionId &&
+          streamContext.sessionId === detectedSessionId
+        );
 
       debugSessionIsolation("stream.visibilityCheck", {
         streamContext,
@@ -1790,11 +1816,13 @@ export function SessionView({
       });
 
       if (currentMatchesStreamView) return true;
-      if (!streamContext.sessionId) return false;
 
       return (
-        currentView.sessionId === streamContext.sessionId ||
-        detectedSessionId === streamContext.sessionId
+        currentView.projectId === streamContext.projectId &&
+        currentView.worktreeId === streamContext.worktreeId &&
+        currentView.sessionId == null &&
+        pendingAttachedSessionIdRef.current === streamContext.sessionId &&
+        streamContext.sessionId === detectedSessionId
       );
     };
 
