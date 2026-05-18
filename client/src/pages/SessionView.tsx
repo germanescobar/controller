@@ -527,6 +527,13 @@ type StreamRenderItem =
   | { kind: "working_group"; key: string; items: StreamItem[]; startIndex: number }
   | { kind: "item"; key: string; item: StreamItem; index: number };
 
+interface QueuedStreamStart {
+  message: string;
+  pendingVisibleMessage: string;
+  modeOverride?: "default" | "plan";
+  resumeSessionId?: string;
+}
+
 const WORKING_EVENT_TYPES = new Set([
   "tool_call",
   "tool_result",
@@ -1306,6 +1313,7 @@ export function SessionView({
   const [message, setMessage] = useState("");
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1343,6 +1351,7 @@ export function SessionView({
   const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
   const providerPickerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const streamingRef = useRef(streaming);
   const currentViewRef = useRef({
     projectId,
     worktreeId,
@@ -1373,6 +1382,10 @@ export function SessionView({
           CLAUDE_REASONING_EFFORTS.has(option.value)
         )
       : REASONING_EFFORT_OPTIONS;
+
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
 
   useEffect(() => {
     debugSessionIsolation("view.mounted", { projectId, worktreeId, sessionId });
@@ -1710,9 +1723,10 @@ export function SessionView({
   const startAgentStream = (
     sentMessage: string,
     pendingVisibleMessage = sentMessage,
-    modeOverride?: "default" | "plan"
+    modeOverride?: "default" | "plan",
+    resumeSessionIdOverride?: string
   ) => {
-    if (!sentMessage.trim() || streaming) return false;
+    if (!sentMessage.trim() || streamingRef.current) return false;
     if (!providerReady) {
       setProviderLoadError(
         providerLoadError ?? "Could not start because agent providers are not ready. Retry provider discovery."
@@ -1720,14 +1734,16 @@ export function SessionView({
       return false;
     }
 
+    const streamSessionId = resumeSessionIdOverride ?? sessionId;
+    streamingRef.current = true;
     setPendingMessage(pendingVisibleMessage);
     setStreaming(true);
     setStreamItems([]);
-    let detectedSessionId = sessionId;
+    let detectedSessionId = streamSessionId;
     let runFailed = false;
 
     // Track which session this stream belongs to
-    sendContextRef.current = { projectId, worktreeId, sessionId };
+    sendContextRef.current = { projectId, worktreeId, sessionId: streamSessionId };
     debugSessionIsolation("stream.started", {
       projectId,
       worktreeId,
@@ -1737,7 +1753,7 @@ export function SessionView({
     });
 
     const es = startSession(projectId, sentMessage, {
-      resumeSessionId: sessionId,
+      resumeSessionId: streamSessionId,
       model: selectedModel,
       reasoningEffort:
         providerSupportsReasoningEffort ? selectedReasoningEffort : undefined,
@@ -1929,6 +1945,7 @@ export function SessionView({
         sendContextRef.current = null;
 
         if (wasVisible) {
+          streamingRef.current = false;
           setStreaming(false);
           setPendingMessage(null);
           setActiveStreamSessionId(detectedSessionId || null);
@@ -1962,6 +1979,7 @@ export function SessionView({
         sendContextRef.current = null;
         if (wasVisible) {
           setStreamItems((prev) => [...prev, { type: "error", text, at: Date.now() }]);
+          streamingRef.current = false;
           setStreaming(false);
           setPendingMessage(null);
         }
@@ -1980,6 +1998,7 @@ export function SessionView({
       eventSourceRef.current = null;
       sendContextRef.current = null;
       if (wasVisible) {
+        streamingRef.current = false;
         setStreaming(false);
         setPendingMessage(null);
       }
@@ -1987,6 +2006,28 @@ export function SessionView({
 
     return true;
   };
+
+  useEffect(() => {
+    if (!queuedStreamStart || streaming || !providerReady) return;
+    const queued = queuedStreamStart;
+    setQueuedStreamStart(null);
+    const started = startAgentStream(
+      queued.message,
+      queued.pendingVisibleMessage,
+      queued.modeOverride,
+      queued.resumeSessionId
+    );
+    if (!started) {
+      setStreamItems((prev) => [
+        ...prev,
+        {
+          type: "error",
+          text: "Could not resume the agent. Please retry your answer.",
+          at: Date.now(),
+        },
+      ]);
+    }
+  }, [queuedStreamStart, streaming, providerReady]);
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -2069,11 +2110,31 @@ export function SessionView({
         .then(setEvents)
         .catch(() => {});
       if (result.resumeMessage) {
-        startAgentStream(
-          result.resumeMessage,
-          "Answered agent request",
-          result.resumeMode
-        );
+        const resumeStart: QueuedStreamStart = {
+          message: result.resumeMessage,
+          pendingVisibleMessage: "Answered agent request",
+          modeOverride: result.resumeMode,
+          resumeSessionId: targetSessionId,
+        };
+        if (streamingRef.current || eventSourceRef.current) {
+          setQueuedStreamStart(resumeStart);
+        } else if (
+          !startAgentStream(
+            resumeStart.message,
+            resumeStart.pendingVisibleMessage,
+            resumeStart.modeOverride,
+            resumeStart.resumeSessionId
+          )
+        ) {
+          setStreamItems((prev) => [
+            ...prev,
+            {
+              type: "error",
+              text: "Could not resume the agent. Please retry your answer.",
+              at: Date.now(),
+            },
+          ]);
+        }
       }
     } catch (error) {
       setStreamItems((prev) => [
