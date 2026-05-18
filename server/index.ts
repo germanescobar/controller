@@ -7,7 +7,7 @@ import { sessionsRouter } from "./routes/sessions.js";
 import { worktreesRouter } from "./routes/worktrees.js";
 import { modelsRouter } from "./routes/models.js";
 import { apiKeysRouter } from "./routes/api-keys.js";
-import { getAgentProviders } from "./lib/agents.js";
+import { getAvailableAgentProviders } from "./lib/agents.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
@@ -23,8 +23,8 @@ app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
 
 // Agent providers
-app.get("/api/agent-providers", (_req, res) => {
-  const providers = getAgentProviders().map((p) => ({ id: p.id, name: p.name }));
+app.get("/api/agent-providers", async (_req, res) => {
+  const providers = (await getAvailableAgentProviders()).map((p) => ({ id: p.id, name: p.name }));
   res.json(providers);
 });
 

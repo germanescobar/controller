@@ -1,5 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { getAgentProvider, type AgentStreamEvent, type AgentUserInputQuestion } from "./agents.js";
+import {
+  getAgentProvider,
+  type AgentStreamEvent,
+  type AgentStreamParseResult,
+  type AgentUserInputQuestion,
+} from "./agents.js";
 
 type JsonRpcId = string | number;
 
@@ -32,7 +37,7 @@ interface SessionRuntime {
   currentTurnId?: string;
   listeners: Set<(event: AgentStreamEvent) => void>;
   pendingUserInput?: PendingUserInputRequest;
-  parseEvent: (line: string) => AgentStreamEvent | null;
+  parseEvent: (line: string) => AgentStreamParseResult;
   currentTurn?: {
     resolve: () => void;
     reject: (error: Error) => void;
@@ -93,6 +98,10 @@ interface CollaborationModePayload {
     reasoning_effort: StartPlanTurnOptions["reasoningEffort"] | null;
     developer_instructions: string | null;
   };
+}
+
+function firstParsedEvent(result: AgentStreamParseResult): AgentStreamEvent | null {
+  return Array.isArray(result) ? result[0] ?? null : result;
 }
 
 export class CodexAppServerManager {
@@ -271,8 +280,7 @@ export class CodexAppServerManager {
       settings: {
         model: options.model ?? "",
         reasoning_effort: options.reasoningEffort ?? null,
-        developer_instructions:
-          "<collaboration_mode># Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.</collaboration_mode>",
+        developer_instructions: null,
       },
     };
   }
@@ -441,7 +449,7 @@ export class CodexAppServerManager {
 
       if (message.id !== undefined) {
         if (message.method === "item/tool/requestUserInput" && runtime) {
-          const mappedEvent = runtime.parseEvent(JSON.stringify(message));
+          const mappedEvent = firstParsedEvent(runtime.parseEvent(JSON.stringify(message)));
           if (mappedEvent?.type === "user.input_requested") {
             runtime.pendingUserInput = {
               requestId: message.id,
@@ -458,7 +466,7 @@ export class CodexAppServerManager {
       }
 
       if (!runtime) return;
-      const mappedEvent = runtime.parseEvent(JSON.stringify(message));
+      const mappedEvent = firstParsedEvent(runtime.parseEvent(JSON.stringify(message)));
       if (!mappedEvent) return;
       if (mappedEvent.type === "run.started" && runtime.startedEmitted) return;
       if (mappedEvent.type === "run.started") {

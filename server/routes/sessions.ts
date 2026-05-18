@@ -203,6 +203,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     serviceTier,
     mode,
   });
+  const parseProviderEvent = provider.createParser?.() ?? provider.parseEvent.bind(provider);
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
@@ -211,9 +212,10 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   const shouldPersist = providerId !== "ada";
   let streamSessionId = resumeSessionId ?? "";
   let userMessageWritten = false;
+  let pausedForClaudeUserInput = false;
 
-  // Close stdin so Codex doesn't wait for additional input
-  if (providerId === "codex") {
+  // Close stdin for CLIs that otherwise wait briefly for piped input.
+  if (providerId === "codex" || providerId === "claude") {
     child.stdin?.end();
   }
 
@@ -319,8 +321,10 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
       if (line.length > 0) {
         try {
-          const event = provider.parseEvent(line);
-          if (event) {
+          const parsed = parseProviderEvent(line);
+          const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+          for (const event of events) {
+            if (pausedForClaudeUserInput) break;
             eventProcessing = eventProcessing
               .then(async () => {
                 // Always persist session metadata on run.started so
@@ -338,6 +342,10 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
                 sseSend({ type: "ada_event", event });
               })
               .catch(() => {});
+            if (providerId === "claude" && event.type === "user.input_requested") {
+              pausedForClaudeUserInput = true;
+              child.kill("SIGTERM");
+            }
           }
         } catch {
           sseSend({
@@ -356,15 +364,20 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     eventProcessing
       .catch(() => {})
       .then(() => {
-    const lastLine = stdoutBuffer.trim();
+    const lastLine = pausedForClaudeUserInput ? "" : stdoutBuffer.trim();
     if (lastLine.length > 0) {
       try {
-        const event = provider.parseEvent(lastLine);
-        if (event) {
+        const parsed = parseProviderEvent(lastLine);
+        const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+        for (const event of events) {
+          if (pausedForClaudeUserInput) break;
           if (shouldPersist && event.type !== "run.completed" && event.type !== "run.failed") {
             persistAgentEvent(event);
           }
           sseSend({ type: "ada_event", event });
+          if (providerId === "claude" && event.type === "user.input_requested") {
+            pausedForClaudeUserInput = true;
+          }
         }
       } catch {
         sseSend({
@@ -386,7 +399,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       }).catch(() => {});
     }
 
-    sseSend({ type: "done", exitCode: code });
+    sseSend({ type: "done", exitCode: pausedForClaudeUserInput ? 0 : code });
     if (clientConnected) res.end();
       });
   });
@@ -649,10 +662,10 @@ sessionsRouter.post(
     const providerId = runtime.provider || session?.provider;
 
     try {
-      if (providerId === "ada") {
-        await stopSessionRuntime(req.params.sessionId);
-      } else {
+      if (providerId === "codex") {
         await codexAppServerManager.stopSession(req.params.sessionId);
+      } else {
+        await stopSessionRuntime(req.params.sessionId);
       }
       res.json({ ok: true });
     } catch (error) {
@@ -728,6 +741,28 @@ sessionsRouter.post(
     }
 
     try {
+      const session = await getSession(worktree.path, req.params.sessionId);
+      const providerId = session?.provider;
+      if (providerId === "claude") {
+        const events = await getEvents(worktree.path, req.params.sessionId);
+        const resume = buildClaudeUserInputResume(events, answers);
+        await appendEvent(worktree.path, req.params.sessionId, {
+          id: randomUUID(),
+          sessionId: req.params.sessionId,
+          timestamp: new Date().toISOString(),
+          type: "user_input_response",
+          data: { answers },
+        });
+
+        if (session) {
+          session.lastActiveAt = new Date().toISOString();
+          await saveSession(worktree.path, session);
+        }
+
+        res.json({ ok: true, ...resume });
+        return;
+      }
+
       await codexAppServerManager.submitUserInput(req.params.sessionId, answers);
       await appendEvent(worktree.path, req.params.sessionId, {
         id: randomUUID(),
@@ -751,6 +786,52 @@ sessionsRouter.post(
     }
   }
 );
+
+function buildClaudeUserInputResume(
+  events: AgentEvent[],
+  answers: Record<string, string | string[]>
+): { resumeMessage: string; resumeMode?: "default" | "plan" } {
+  const latestRequest = [...events]
+    .reverse()
+    .find((event) => event.type === "user_input_requested");
+  const questions =
+    ((latestRequest?.data.questions as AgentUserInputQuestionForRoute[] | undefined) ?? []).filter(
+      Boolean
+    );
+
+  if (answers.claude_exit_plan_mode === "Approve plan") {
+    return {
+      resumeMessage:
+        "I approve this plan. You are no longer in plan mode. Proceed with the implementation now.",
+      resumeMode: "default",
+    };
+  }
+
+  if (answers.claude_exit_plan_mode === "Revise plan") {
+    return {
+      resumeMessage:
+        "Please stay in plan mode and revise the plan before implementation. Ask any follow-up questions you need.",
+      resumeMode: "plan",
+    };
+  }
+
+  const lines = ["The user answered your AskUserQuestion tool request:"];
+  for (const question of questions) {
+    const answer = answers[question.id];
+    if (answer == null) continue;
+    const answerText = Array.isArray(answer) ? answer.join(", ") : answer;
+    lines.push(`- ${question.header}: ${question.question}`);
+    lines.push(`  Answer: ${answerText}`);
+  }
+  lines.push("Please continue using these answers.");
+  return { resumeMessage: lines.join("\n") };
+}
+
+interface AgentUserInputQuestionForRoute {
+  id: string;
+  header: string;
+  question: string;
+}
 
 // Archive a session
 sessionsRouter.post(
