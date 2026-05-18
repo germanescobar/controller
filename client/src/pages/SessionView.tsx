@@ -1372,6 +1372,17 @@ export function SessionView({
       currentView.sessionId === context.sessionId
     );
   };
+  const targetMatchesStreamContext = (
+    context: typeof sendContextRef.current,
+    target: { projectId: string; worktreeId?: string; sessionId?: string }
+  ) => {
+    if (!context) return false;
+    return (
+      target.projectId === context.projectId &&
+      target.worktreeId === context.worktreeId &&
+      target.sessionId === context.sessionId
+    );
+  };
   const selectedProviderIsAvailable = agentProviders.some(
     (provider) => provider.id === selectedProvider
   );
@@ -1571,7 +1582,16 @@ export function SessionView({
   useEffect(() => {
     if (!sessionId) return;
     if (!streaming) return;
-    if (eventSourceRef.current && viewMatchesStreamContext(sendContextRef.current)) return;
+    if (
+      eventSourceRef.current &&
+      targetMatchesStreamContext(sendContextRef.current, {
+        projectId,
+        worktreeId,
+        sessionId,
+      })
+    ) {
+      return;
+    }
 
     let cancelled = false;
     const interval = window.setInterval(async () => {
