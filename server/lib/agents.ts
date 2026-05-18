@@ -412,15 +412,11 @@ function mapClaudeContentPartToEvents(part: unknown): AgentStreamEvent[] {
         {
           id: "claude_exit_plan_mode",
           header: "Plan approval",
-          question: "Claude is ready to exit plan mode.",
+          question: "Implement this plan, or tell Claude what to do next.",
           options: [
             {
-              label: "Approve plan",
+              label: "Implement this plan",
               description: "Resume Claude and ask it to proceed with this plan.",
-            },
-            {
-              label: "Revise plan",
-              description: "Resume Claude and ask it to keep planning before implementation.",
             },
           ],
         },
@@ -467,7 +463,7 @@ function normalizeClaudeUserInputQuestion(
         .map((option) => normalizeClaudeUserInputOption(option))
         .filter((option): option is AgentUserInputOption => option !== null)
     : [];
-  if (!question || options.length === 0) return null;
+  if (!question) return null;
   return {
     id: `question-${index}`,
     header,
@@ -832,7 +828,7 @@ function normalizeUserInputQuestion(
         .map((option) => normalizeUserInputOption(option))
         .filter((option): option is AgentUserInputOption => option !== null)
     : [];
-  if (!id || !header || !question || options.length === 0) return null;
+  if (!id || !header || !question) return null;
   return { id, header, question, options };
 }
 

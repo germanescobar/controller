@@ -851,6 +851,47 @@ sessionsRouter.post(
 );
 
 sessionsRouter.post(
+  "/:projectId/sessions/:sessionId/user-input/dismiss",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const worktree = await resolveWorktree(
+      req.params.projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    try {
+      await appendEvent(worktree.path, req.params.sessionId, {
+        id: randomUUID(),
+        sessionId: req.params.sessionId,
+        timestamp: new Date().toISOString(),
+        type: "user_input_response",
+        data: { dismissed: true },
+      });
+
+      const existing = await getSession(worktree.path, req.params.sessionId);
+      if (existing) {
+        existing.lastActiveAt = new Date().toISOString();
+        await saveSession(worktree.path, existing);
+      }
+
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+);
+
+sessionsRouter.post(
   "/:projectId/sessions/:sessionId/user-input",
   async (req, res) => {
     const project = await getProject(req.params.projectId);
@@ -932,7 +973,10 @@ function buildClaudeUserInputResume(
       Boolean
     );
 
-  if (answers.claude_exit_plan_mode === "Approve plan") {
+  if (
+    answers.claude_exit_plan_mode === "Approve plan" ||
+    answers.claude_exit_plan_mode === "Implement this plan"
+  ) {
     return {
       resumeMessage:
         "I approve this plan. You are no longer in plan mode. Proceed with the implementation now.",
