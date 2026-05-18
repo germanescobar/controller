@@ -114,6 +114,28 @@ function normalizeToolResultContent(content: unknown): string {
   }
 }
 
+function normalizeMarkdownText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizeMarkdownText(item))
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof value === "object") {
+    const raw = value as Record<string, unknown>;
+    if (typeof raw.text === "string") return raw.text;
+    if (typeof raw.content === "string") return raw.content;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
 function truncateInlineText(value: string, maxLength: number): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLength) return normalized;
@@ -679,7 +701,7 @@ function EventBlock({
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] rounded-2xl bg-secondary px-4 py-3 text-sm">
-          {data.text as string}
+          {normalizeMarkdownText(data.text)}
         </div>
       </div>
     );
@@ -687,16 +709,18 @@ function EventBlock({
 
   // assistant_response: render markdown
   if (event.type === "assistant_response") {
-    const content = data.content as Array<{ type: string; text?: string }> | undefined;
+    const content = Array.isArray(data.content)
+      ? (data.content as Array<{ type?: unknown; text?: unknown; content?: unknown }>)
+      : [];
     const reasoningText = content
       ?.filter((b) => b.type === "reasoning")
-      .map((b) => b.text)
-      .filter((text): text is string => Boolean(text))
+      .map((b) => normalizeMarkdownText(b.text ?? b.content))
+      .filter(Boolean)
       .join("\n");
     const text = content
       ?.filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .filter((text): text is string => Boolean(text))
+      .map((b) => normalizeMarkdownText(b.text ?? b.content))
+      .filter(Boolean)
       .join("\n");
     if (!reasoningText && !text) return null;
     return (
@@ -781,22 +805,24 @@ function AssistantBlock({
   text,
   children,
 }: {
-  text: string;
+  text: unknown;
   children?: React.ReactNode;
 }) {
+  const normalizedText = normalizeMarkdownText(text);
   return (
     <div className="space-y-2">
       <div className="prose prose-invert prose-sm max-w-none overflow-x-auto break-words">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizedText}</ReactMarkdown>
       </div>
       {children}
     </div>
   );
 }
 
-function ReasoningBlock({ text }: { text: string }) {
+function ReasoningBlock({ text }: { text: unknown }) {
   const [expanded, setExpanded] = useState(false);
-  const preview = text.replace(/\s+/g, " ").trim();
+  const normalizedText = normalizeMarkdownText(text);
+  const preview = normalizedText.replace(/\s+/g, " ").trim();
 
   return (
     <div>
@@ -822,7 +848,7 @@ function ReasoningBlock({ text }: { text: string }) {
       {expanded && (
         <div className="px-4 py-2 bg-background/30">
           <div className="prose prose-invert prose-sm max-w-none overflow-x-auto break-words text-muted-foreground/80 text-[13px]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizedText}</ReactMarkdown>
           </div>
         </div>
       )}
@@ -987,10 +1013,7 @@ function WorkingChildEvent({ event }: { event: AgentEvent }) {
     event.type === "assistant_reasoning" ||
     event.type === "assistant.reasoning"
   ) {
-    const text =
-      (data.text as string | undefined) ??
-      (data.content as string | undefined) ??
-      "";
+    const text = normalizeMarkdownText(data.text ?? data.content);
     if (!text) return null;
     return <ReasoningBlock text={text} />;
   }

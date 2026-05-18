@@ -280,8 +280,7 @@ export class CodexAppServerManager {
       settings: {
         model: options.model ?? "",
         reasoning_effort: options.reasoningEffort ?? null,
-        developer_instructions:
-          "<collaboration_mode># Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.</collaboration_mode>",
+        developer_instructions: null,
       },
     };
   }
