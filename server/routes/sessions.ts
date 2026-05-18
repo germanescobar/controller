@@ -1,6 +1,9 @@
 import { Router, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import { exec } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { getProject } from "../lib/projects.js";
 import { resolveWorktree } from "../lib/worktrees.js";
@@ -21,6 +24,118 @@ import {
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
+}
+
+interface RunDiffSummary {
+  diff: string;
+  filesChanged: number;
+  added: number;
+  deleted: number;
+}
+
+async function createWorktreeSnapshot(worktreePath: string): Promise<string | null> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "coding-agent-index-"));
+  const indexPath = path.join(tempDir, "index");
+  const execOpts = {
+    cwd: worktreePath,
+    maxBuffer: 10 * 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_INDEX_FILE: indexPath,
+    },
+  };
+
+  try {
+    try {
+      await execAsync("git rev-parse --is-inside-work-tree", execOpts);
+    } catch {
+      return null;
+    }
+
+    try {
+      await execAsync("git read-tree HEAD", execOpts);
+    } catch {
+      await execAsync("git read-tree --empty", execOpts);
+    }
+
+    await execAsync(
+      "git ls-files -z --cached --others --modified --deleted --exclude-standard ':!.coding-agent' ':!.coding-agent/**' | git update-index --add --remove -z --stdin",
+      execOpts
+    );
+    const { stdout } = await execAsync("git write-tree", execOpts);
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function getRunDiff(
+  worktreePath: string,
+  beforeTree: string | null
+): Promise<RunDiffSummary | null> {
+  if (!beforeTree) return null;
+  const afterTree = await createWorktreeSnapshot(worktreePath);
+  if (!afterTree || afterTree === beforeTree) return null;
+
+  try {
+    const { stdout: diff } = await execAsync(
+      `git diff --find-renames ${beforeTree} ${afterTree} -- . ":(exclude).coding-agent"`,
+      {
+        cwd: worktreePath,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      }
+    );
+    if (!diff.trim()) return null;
+    return summarizeRunDiff(diff);
+  } catch {
+    return null;
+  }
+}
+
+function summarizeRunDiff(diff: string): RunDiffSummary {
+  const files = diff
+    .split(/(?=^diff --git )/m)
+    .filter((section) => section.trim().startsWith("diff --git "));
+  let added = 0;
+  let deleted = 0;
+
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) added += 1;
+    else if (line.startsWith("-")) deleted += 1;
+  }
+
+  return {
+    diff,
+    filesChanged: files.length,
+    added,
+    deleted,
+  };
+}
+
+async function persistRunDiffEvent(
+  worktreePath: string,
+  sessionId: string,
+  beforeTree: string | null
+): Promise<void> {
+  try {
+    const summary = await getRunDiff(worktreePath, beforeTree);
+    if (!summary || summary.filesChanged === 0) return;
+
+    await appendEvent(worktreePath, sessionId, {
+      id: randomUUID(),
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: "run_diff",
+      data: { ...summary },
+    });
+  } catch {
+    // Diff cards are a convenience; never fail run completion because of them.
+  }
 }
 
 export const sessionsRouter = Router();
@@ -177,10 +292,13 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     return;
   }
 
+  const runStartTree = await createWorktreeSnapshot(worktree.path);
+
   if (providerId === "codex") {
     await streamCodexPlanSession(req, res, {
       worktreePath: worktree.path,
       worktreeId: worktree.id,
+      runStartTree,
       message,
       resumeSessionId,
       model,
@@ -370,7 +488,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   child.on("close", (code) => {
     eventProcessing
       .catch(() => {})
-      .then(() => {
+      .then(async () => {
     const lastLine = pausedForClaudeUserInput ? "" : stdoutBuffer.trim();
     if (lastLine.length > 0) {
       try {
@@ -397,6 +515,9 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
     // Update runtime state and lastActiveAt once the stream closes.
     if (streamSessionId) {
+      if (!pausedForClaudeUserInput && code === 0) {
+        await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+      }
       markSessionInactive(streamSessionId);
       getSession(worktreePath, streamSessionId).then((existing) => {
         if (existing) {
@@ -434,6 +555,7 @@ async function streamCodexPlanSession(
   options: {
     worktreePath: string;
     worktreeId: string;
+    runStartTree: string | null;
     message: string;
     resumeSessionId?: string;
     model?: string;
@@ -446,6 +568,7 @@ async function streamCodexPlanSession(
   const {
     worktreePath,
     worktreeId,
+    runStartTree,
     message,
     resumeSessionId,
     model,
@@ -477,6 +600,9 @@ async function streamCodexPlanSession(
     if (finished) return;
     finished = true;
     if (streamSessionId) {
+      if (exitCode === 0) {
+        await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+      }
       markSessionInactive(streamSessionId);
     }
     await touchSession();
@@ -557,7 +683,6 @@ async function streamCodexPlanSession(
           if (!streamSessionId) {
             streamSessionId = event.sessionId;
           }
-          await finishStream(event.type === "run.completed" ? 0 : 1);
         }
       })
       .catch(() => {});
@@ -585,6 +710,7 @@ async function streamCodexPlanSession(
     );
     await turn.done;
     await eventProcessing;
+    await finishStream(0);
   } catch (error) {
     await eventProcessing;
     if (!finished) {

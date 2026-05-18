@@ -421,7 +421,6 @@ function DiffView({ files }: { files: DiffFile[] }) {
   return (
     <div className="border-t border-border/30 divide-y divide-border/20">
       {files.map((file, i) => {
-        if (file.op === "delete" || file.lines.length === 0) return null;
         const processed = processLinesWithNumbers(file.lines);
         return (
           <div key={i}>
@@ -430,42 +429,133 @@ function DiffView({ files }: { files: DiffFile[] }) {
                 {relativizePath(file.path, projectRoot)}
               </div>
             )}
-            <div className="overflow-x-auto">
-              {processed.map((line, j) => {
-                if (line.kind === "hunk") {
+            {file.lines.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground/60">
+                Binary or metadata-only change
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                {processed.map((line, j) => {
+                  if (line.kind === "hunk") {
+                    return (
+                      <div key={j} className="flex bg-blue-950/20 border-y border-blue-900/20 first:border-t-0">
+                        <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
+                        <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
+                        <span className="px-3 py-0.5 font-mono text-[10px] text-blue-400/50 whitespace-pre">
+                          {line.text}
+                        </span>
+                      </div>
+                    );
+                  }
+                  const isAdd = line.kind === "add";
+                  const isDel = line.kind === "del";
                   return (
-                    <div key={j} className="flex bg-blue-950/20 border-y border-blue-900/20 first:border-t-0">
-                      <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
-                      <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
-                      <span className="px-3 py-0.5 font-mono text-[10px] text-blue-400/50 whitespace-pre">
+                    <div key={j} className={`flex min-w-0 ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""}`}>
+                      <span className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/25 border-r border-border/20 bg-background/10">
+                        {line.oldLine ?? ""}
+                      </span>
+                      <span className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/25 border-r border-border/20 bg-background/10">
+                        {line.newLine ?? ""}
+                      </span>
+                      <span className={`pl-2 pr-1 py-0.5 shrink-0 select-none font-mono text-[11px] ${isAdd ? "text-green-400/70" : isDel ? "text-red-400/70" : "text-muted-foreground/30"}`}>
+                        {isAdd ? "+" : isDel ? "−" : " "}
+                      </span>
+                      <span className={`py-0.5 pr-3 whitespace-pre font-mono text-[11px] flex-1 min-w-0 ${isAdd ? "text-green-300/90" : isDel ? "text-red-300/90" : "text-muted-foreground/70"}`}>
                         {line.text}
                       </span>
                     </div>
                   );
-                }
-                const isAdd = line.kind === "add";
-                const isDel = line.kind === "del";
-                return (
-                  <div key={j} className={`flex min-w-0 ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""}`}>
-                    <span className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/25 border-r border-border/20 bg-background/10">
-                      {line.oldLine ?? ""}
-                    </span>
-                    <span className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/25 border-r border-border/20 bg-background/10">
-                      {line.newLine ?? ""}
-                    </span>
-                    <span className={`pl-2 pr-1 py-0.5 shrink-0 select-none font-mono text-[11px] ${isAdd ? "text-green-400/70" : isDel ? "text-red-400/70" : "text-muted-foreground/30"}`}>
-                      {isAdd ? "+" : isDel ? "−" : " "}
-                    </span>
-                    <span className={`py-0.5 pr-3 whitespace-pre font-mono text-[11px] flex-1 min-w-0 ${isAdd ? "text-green-300/90" : isDel ? "text-red-300/90" : "text-muted-foreground/70"}`}>
-                      {line.text}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
+                })}
+              </div>
+            )}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function RunDiffCard({ data }: { data: Record<string, unknown> }) {
+  const [showAllFiles, setShowAllFiles] = useState(false);
+  const projectRoot = useContext(ProjectRootContext);
+  const diff = typeof data.diff === "string" ? data.diff : "";
+  const files = parseFullGitDiff(diff);
+  if (files.length === 0) return null;
+
+  const summary = summarizeDiffFiles(files);
+  const added = typeof data.added === "number" ? data.added : summary.added;
+  const deleted = typeof data.deleted === "number" ? data.deleted : summary.deleted;
+  const filesChanged =
+    typeof data.filesChanged === "number" ? data.filesChanged : files.length;
+  const visibleFiles = showAllFiles ? files : files.slice(0, 3);
+  const hiddenCount = Math.max(0, files.length - visibleFiles.length);
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border/60 bg-card">
+      <div className="flex items-center gap-2.5 border-b border-border/60 px-3 py-2.5">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-background">
+          <Diff className="h-3.5 w-3.5 text-muted-foreground" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-medium">
+            Edited {filesChanged} file{filesChanged === 1 ? "" : "s"}
+          </div>
+          <div className="mt-0.5 font-mono text-[11px]">
+            <span className="text-green-400/90">+{added}</span>{" "}
+            <span className="text-red-400/90">-{deleted}</span>
+          </div>
+        </div>
+      </div>
+      <div className="divide-y divide-border/50">
+        {visibleFiles.map((file) => (
+          <RunDiffFileRow
+            key={file.path}
+            file={file}
+            label={relativizePath(file.path, projectRoot)}
+          />
+        ))}
+        {hiddenCount > 0 && (
+          <button
+            onClick={() => setShowAllFiles(true)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/40"
+          >
+            <span>Show {hiddenCount} more file{hiddenCount === 1 ? "" : "s"}</span>
+            <ChevronDown className="h-3 w-3 text-muted-foreground" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const fileSummary = summarizeDiffFiles([file]);
+
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded((open) => !open)}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/40"
+      >
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+        )}
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground/90">
+          {label}
+        </span>
+        <span className="shrink-0 font-mono text-xs">
+          <span className="text-green-400/90">+{fileSummary.added}</span>{" "}
+          <span className="text-red-400/90">-{fileSummary.deleted}</span>
+        </span>
+      </button>
+      {expanded && (
+        <div className="max-h-96 overflow-y-auto border-t border-border/30">
+          <DiffView files={[file]} />
+        </div>
+      )}
     </div>
   );
 }
@@ -749,6 +839,10 @@ function EventBlock({
         ) : null}
       </div>
     );
+  }
+
+  if (event.type === "run_diff") {
+    return <RunDiffCard data={data} />;
   }
 
   // Working-group events are rendered inside WorkingBlock at the parent level.
