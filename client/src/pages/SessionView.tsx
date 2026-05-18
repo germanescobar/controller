@@ -1321,6 +1321,7 @@ export function SessionView({
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
   const [agentProviders, setAgentProviders] = useState<AgentProviderInfo[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
+  const [providerLoadError, setProviderLoadError] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("ada");
   const [providerResolved, setProviderResolved] = useState(!sessionId);
   const [showProviderPicker, setShowProviderPicker] = useState(false);
@@ -1360,6 +1361,12 @@ export function SessionView({
   const providerSupportsReasoningEffort = supportsReasoningEffort(selectedProvider);
   const providerSupportsServiceTier = supportsServiceTier(selectedProvider);
   const providerSupportsLiveSteering = supportsLiveSteering(selectedProvider);
+  const providerStatusMessage =
+    !sessionId && providerLoadError
+      ? providerLoadError
+      : !sessionId && providersLoaded && !selectedProviderIsAvailable
+      ? "Selected agent provider is unavailable. Retry provider discovery."
+      : null;
   const reasoningEffortOptions =
     selectedProvider === "claude"
       ? REASONING_EFFORT_OPTIONS.filter((option) =>
@@ -1424,6 +1431,28 @@ export function SessionView({
       .catch(() => {});
   };
 
+  const loadAgentProviders = () => {
+    setProvidersLoaded(false);
+    setProviderLoadError(null);
+    fetchAgentProviders()
+      .then((p) => {
+        setAgentProviders(p);
+        if (p.length === 0) {
+          setProviderLoadError("No agent providers were found. Check your CLI installs and retry.");
+        }
+        if (!sessionId) {
+          setSelectedProvider((prev) =>
+            p.some((provider) => provider.id === prev) ? prev : p[0]?.id ?? prev
+          );
+        }
+      })
+      .catch(() => {
+        setAgentProviders([]);
+        setProviderLoadError("Could not load agent providers. Retry before starting a session.");
+      })
+      .finally(() => setProvidersLoaded(true));
+  };
+
   useEffect(() => {
     if (providerResolved && providerReady) loadModels(selectedProvider);
   }, [selectedProvider, providerResolved, providerReady]);
@@ -1450,17 +1479,7 @@ export function SessionView({
   }, [selectedProvider, selectedReasoningEffort]);
 
   useEffect(() => {
-    fetchAgentProviders()
-      .then((p) => {
-        setAgentProviders(p);
-        if (!sessionId) {
-          setSelectedProvider((prev) =>
-            p.some((provider) => provider.id === prev) ? prev : p[0]?.id ?? prev
-          );
-        }
-      })
-      .finally(() => setProvidersLoaded(true))
-      .catch(() => {});
+    loadAgentProviders();
   }, [sessionId]);
 
   useEffect(() => {
@@ -1693,7 +1712,13 @@ export function SessionView({
     pendingVisibleMessage = sentMessage,
     modeOverride?: "default" | "plan"
   ) => {
-    if (!sentMessage.trim() || streaming || !providerReady) return false;
+    if (!sentMessage.trim() || streaming) return false;
+    if (!providerReady) {
+      setProviderLoadError(
+        providerLoadError ?? "Could not start because agent providers are not ready. Retry provider discovery."
+      );
+      return false;
+    }
 
     setPendingMessage(pendingVisibleMessage);
     setStreaming(true);
@@ -2407,6 +2432,19 @@ export function SessionView({
                     className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                     style={{ maxHeight: "calc(1.25rem * 5)" }}
                   />
+                  {providerStatusMessage && (
+                    <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      <span className="min-w-0">{providerStatusMessage}</span>
+                      <button
+                        type="button"
+                        onClick={loadAgentProviders}
+                        disabled={!providersLoaded}
+                        className="shrink-0 rounded px-2 py-1 font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
                   <div className="mt-2 flex items-center gap-2 sm:justify-between">
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 sm:gap-2">
                       {/* Agent provider picker — hidden while the active provider supports steering */}
