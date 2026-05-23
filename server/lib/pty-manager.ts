@@ -102,6 +102,15 @@ class PtyManager {
       this.sessions.delete(sessionId);
     }
   }
+
+  /** Kill and remove every PTY whose session id starts with a prefix. */
+  killByPrefix(prefix: string): void {
+    for (const sessionId of Array.from(this.sessions.keys())) {
+      if (sessionId.startsWith(prefix)) {
+        this.kill(sessionId);
+      }
+    }
+  }
 }
 
 export const ptyManager = new PtyManager();

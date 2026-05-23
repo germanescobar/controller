@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
@@ -562,6 +562,69 @@ function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
 }
 
 const COMPOSER_MAX_LINES = 5;
+const DEFAULT_TERMINAL_ID = "default";
+
+interface TerminalTab {
+  id: string;
+  label: string;
+}
+
+const DEFAULT_TERMINAL_TAB: TerminalTab = {
+  id: DEFAULT_TERMINAL_ID,
+  label: "Terminal 1",
+};
+
+function buildTerminalStorageKey(projectId: string, worktreeId?: string): string {
+  return `terminalTabs:${projectId}:${worktreeId ?? "main"}`;
+}
+
+function normalizeTerminalTabs(value: unknown): TerminalTab[] {
+  if (!Array.isArray(value)) return [DEFAULT_TERMINAL_TAB];
+  const seen = new Set<string>();
+  const tabs = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const raw = item as Record<string, unknown>;
+      const id = typeof raw.id === "string" ? raw.id.trim() : "";
+      const label = typeof raw.label === "string" ? raw.label.trim() : "";
+      if (!id || !label || seen.has(id) || !/^[a-zA-Z0-9._-]+$/.test(id)) return null;
+      seen.add(id);
+      return { id, label };
+    })
+    .filter((tab): tab is TerminalTab => Boolean(tab));
+
+  return tabs.length > 0 ? tabs : [DEFAULT_TERMINAL_TAB];
+}
+
+function loadStoredTerminals(projectId: string, worktreeId?: string): {
+  tabs: TerminalTab[];
+  activeId: string;
+} {
+  if (typeof window === "undefined") {
+    return { tabs: [DEFAULT_TERMINAL_TAB], activeId: DEFAULT_TERMINAL_ID };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(buildTerminalStorageKey(projectId, worktreeId));
+    if (!raw) return { tabs: [DEFAULT_TERMINAL_TAB], activeId: DEFAULT_TERMINAL_ID };
+    const parsed = JSON.parse(raw) as { tabs?: unknown; activeId?: unknown };
+    const tabs = normalizeTerminalTabs(parsed.tabs);
+    const activeId =
+      typeof parsed.activeId === "string" && tabs.some((tab) => tab.id === parsed.activeId)
+        ? parsed.activeId
+        : tabs[0].id;
+    return { tabs, activeId };
+  } catch {
+    return { tabs: [DEFAULT_TERMINAL_TAB], activeId: DEFAULT_TERMINAL_ID };
+  }
+}
+
+function makeTerminalId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `terminal-${crypto.randomUUID()}`;
+  }
+  return `terminal-${Date.now()}`;
+}
 
 function getRunStatusText(
   stopReason: "completed" | "max_iterations" | string,
@@ -1498,6 +1561,12 @@ export function SessionView({
   const [selectedProvider, setSelectedProvider] = useState<string>("ada");
   const [providerResolved, setProviderResolved] = useState(!sessionId);
   const [showProviderPicker, setShowProviderPicker] = useState(false);
+  const initialTerminalState = loadStoredTerminals(projectId, worktreeId);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(initialTerminalState.tabs);
+  const [activeTerminalId, setActiveTerminalId] = useState<string>(initialTerminalState.activeId);
+  const [loadedTerminalStorageKey, setLoadedTerminalStorageKey] = useState(() =>
+    buildTerminalStorageKey(projectId, worktreeId)
+  );
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"agent" | "terminal" | "changes">("agent");
   const [rightTab, setRightTab] = useState<"terminal" | "changes">("terminal");
@@ -1511,6 +1580,7 @@ export function SessionView({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const terminalRef = useRef<TerminalHandle | null>(null);
+  const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
@@ -1568,6 +1638,68 @@ export function SessionView({
           CLAUDE_REASONING_EFFORTS.has(option.value)
         )
       : REASONING_EFFORT_OPTIONS;
+  const terminalStorageKey = buildTerminalStorageKey(projectId, worktreeId);
+
+  useEffect(() => {
+    const stored = loadStoredTerminals(projectId, worktreeId);
+    setTerminalTabs(stored.tabs);
+    setActiveTerminalId(stored.activeId);
+    setLoadedTerminalStorageKey(buildTerminalStorageKey(projectId, worktreeId));
+    terminalRef.current = terminalRefs.current[stored.activeId] ?? null;
+  }, [projectId, worktreeId]);
+
+  useEffect(() => {
+    terminalRef.current = terminalRefs.current[activeTerminalId] ?? null;
+  }, [activeTerminalId, terminalTabs]);
+
+  useEffect(() => {
+    if (loadedTerminalStorageKey !== terminalStorageKey) return;
+    try {
+      window.localStorage.setItem(
+        terminalStorageKey,
+        JSON.stringify({ tabs: terminalTabs, activeId: activeTerminalId })
+      );
+    } catch {}
+  }, [loadedTerminalStorageKey, terminalStorageKey, terminalTabs, activeTerminalId]);
+
+  const handleTerminalRef = (terminalId: string, handle: TerminalHandle | null) => {
+    terminalRefs.current[terminalId] = handle;
+    if (terminalId === activeTerminalId) {
+      terminalRef.current = handle;
+    }
+  };
+
+  const handleAddTerminal = () => {
+    const usedLabels = new Set(terminalTabs.map((tab) => tab.label));
+    let nextNumber = terminalTabs.length + 1;
+    while (usedLabels.has(`Terminal ${nextNumber}`)) nextNumber += 1;
+
+    const nextTab = {
+      id: makeTerminalId(),
+      label: `Terminal ${nextNumber}`,
+    };
+    setTerminalTabs((prev) => [...prev, nextTab]);
+    setActiveTerminalId(nextTab.id);
+    setRightTab("terminal");
+    if (mobilePanel === "changes") setMobilePanel("terminal");
+  };
+
+  const handleCloseTerminal = (terminalId: string) => {
+    if (terminalTabs.length <= 1) return;
+    terminalRefs.current[terminalId]?.close();
+    setTerminalTabs((prev) => {
+      if (prev.length <= 1) return prev;
+      const closingIndex = prev.findIndex((tab) => tab.id === terminalId);
+      if (closingIndex === -1) return prev;
+      const next = prev.filter((tab) => tab.id !== terminalId);
+      if (activeTerminalId === terminalId) {
+        const nextActive = next[Math.min(closingIndex, next.length - 1)] ?? next[0];
+        setActiveTerminalId(nextActive.id);
+      }
+      return next;
+    });
+    terminalRefs.current[terminalId] = null;
+  };
 
   useEffect(() => {
     streamingRef.current = streaming;
@@ -1717,6 +1849,8 @@ export function SessionView({
 
           if (eventsResult.status === "fulfilled") {
             setEvents(eventsResult.value);
+          } else {
+            setEvents([]);
           }
 
           if (runtimeResult.status === "fulfilled") {
@@ -3027,10 +3161,77 @@ export function SessionView({
                 </button>
               )}
             </div>
+            {rightTab === "terminal" && (
+              <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-[#1c1c1e] px-2">
+                {terminalTabs.map((tab) => {
+                  const active = tab.id === activeTerminalId;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTerminalId(tab.id)}
+                      className={`group flex h-7 max-w-40 shrink-0 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors ${
+                        active
+                          ? "bg-accent/30 text-foreground"
+                          : "text-muted-foreground hover:bg-accent/20 hover:text-foreground"
+                      }`}
+                      title={tab.label}
+                    >
+                      <span className="min-w-0 truncate">{tab.label}</span>
+                      {terminalTabs.length > 1 && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Close ${tab.label}`}
+                          title={`Close ${tab.label}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleCloseTerminal(tab.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              handleCloseTerminal(tab.id);
+                            }
+                          }}
+                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/70 opacity-70 transition-colors hover:bg-background/40 hover:text-foreground group-hover:opacity-100"
+                        >
+                          <X className="h-3 w-3" />
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={handleAddTerminal}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/20 hover:text-foreground"
+                  title="New terminal"
+                  aria-label="New terminal"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
             {/* Content area — terminal always mounted and sized, changes panel overlaid */}
             <div className="relative flex-1 min-h-0">
               <div className={`absolute inset-0 ${rightTab !== "terminal" ? "invisible pointer-events-none" : ""}`}>
-                <Terminal ref={terminalRef} projectId={projectId} worktreeId={worktreeId} />
+                {terminalTabs.map((tab) => (
+                  <div
+                    key={tab.id}
+                    className={`absolute inset-0 ${
+                      tab.id !== activeTerminalId ? "invisible pointer-events-none" : ""
+                    }`}
+                  >
+                    <Terminal
+                      ref={(handle) => handleTerminalRef(tab.id, handle)}
+                      projectId={projectId}
+                      worktreeId={worktreeId}
+                      terminalId={tab.id}
+                    />
+                  </div>
+                ))}
               </div>
               {rightTab === "changes" && (gitDiffFiles.length > 0 || branchDiffFiles.length > 0) && (
                 <div className="absolute inset-0 overflow-auto bg-background">

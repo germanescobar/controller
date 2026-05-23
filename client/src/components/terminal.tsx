@@ -18,11 +18,13 @@ export type TerminalSpecialKey =
 export interface TerminalHandle {
   sendSpecialKey: (key: TerminalSpecialKey) => void;
   focus: () => void;
+  close: () => void;
 }
 
 interface TerminalProps {
   projectId: string;
   worktreeId?: string;
+  terminalId: string;
 }
 
 function encodeSpecialKey(term: XTerm, key: TerminalSpecialKey): string {
@@ -51,7 +53,7 @@ function encodeSpecialKey(term: XTerm, key: TerminalSpecialKey): string {
 }
 
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
-  function Terminal({ projectId, worktreeId }, ref) {
+  function Terminal({ projectId, worktreeId, terminalId }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const termRef = useRef<XTerm | null>(null);
     const fitRef = useRef<FitAddon | null>(null);
@@ -67,6 +69,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       },
       focus() {
         termRef.current?.focus();
+      },
+      close() {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "close" }));
       },
     }));
 
@@ -115,7 +122,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       };
     }, []);
 
-    // Handle WebSocket connection (per worktree, not per session)
+    // Handle WebSocket connection (per worktree terminal)
     useEffect(() => {
       const term = termRef.current;
       if (!term || !projectId) return;
@@ -135,7 +142,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       wsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "attach", projectId, worktreeId }));
+        ws.send(JSON.stringify({ type: "attach", projectId, worktreeId, terminalId }));
 
         const fitAddon = fitRef.current;
         if (fitAddon) {
@@ -189,7 +196,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         ws.close();
         wsRef.current = null;
       };
-    }, [projectId, worktreeId]);
+    }, [projectId, worktreeId, terminalId]);
 
     return (
       <div

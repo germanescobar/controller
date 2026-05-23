@@ -32,6 +32,14 @@ const server = http.createServer(app);
 
 // WebSocket server for terminal connections
 const wss = new WebSocketServer({ server, path: "/ws/terminal" });
+const DEFAULT_TERMINAL_ID = "default";
+
+function normalizeTerminalId(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_TERMINAL_ID;
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_TERMINAL_ID;
+  return /^[a-zA-Z0-9._-]+$/.test(trimmed) ? trimmed : DEFAULT_TERMINAL_ID;
+}
 
 wss.on("connection", (ws: WebSocket) => {
   let ptyKey: string | null = null;
@@ -46,8 +54,12 @@ wss.on("connection", (ws: WebSocket) => {
     }
 
     if (msg.type === "attach") {
+      unsubscribe?.();
+      unsubscribe = null;
+
       const projectId = msg.projectId as string;
       const worktreeIdParam = msg.worktreeId as string | undefined;
+      const terminalId = normalizeTerminalId(msg.terminalId);
       if (!projectId) return;
 
       const project = await getProject(projectId);
@@ -62,7 +74,7 @@ wss.on("connection", (ws: WebSocket) => {
         return;
       }
 
-      ptyKey = `${projectId}:${worktree.id}`;
+      ptyKey = `${projectId}:${worktree.id}:${terminalId}`;
       const result = ptyManager.getOrCreate(ptyKey, worktree.path);
 
       if (result.error) {
@@ -87,6 +99,13 @@ wss.on("connection", (ws: WebSocket) => {
       ptyManager.write(ptyKey, msg.data as string);
     } else if (msg.type === "resize" && ptyKey) {
       ptyManager.resize(ptyKey, msg.cols as number, msg.rows as number);
+    } else if (msg.type === "close" && ptyKey) {
+      unsubscribe?.();
+      unsubscribe = null;
+      ptyManager.kill(ptyKey);
+      ws.send(JSON.stringify({ type: "closed" }));
+      ptyKey = null;
+      ws.close(1000);
     }
   });
 

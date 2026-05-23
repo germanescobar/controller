@@ -18,6 +18,7 @@ import {
 import { projectWorktreesDir, worktreePath } from "../lib/paths.js";
 import { getSessions } from "../lib/sessions.js";
 import { getSessionRuntime } from "../lib/session-runtime.js";
+import { ptyManager } from "../lib/pty-manager.js";
 
 export const worktreesRouter = Router();
 
@@ -300,6 +301,8 @@ worktreesRouter.delete(
       });
       return;
     }
+
+    ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
 
     // Remove via git first; fall back to fs.rm if directory still exists.
     await runGitExitCode(project.path, [
