@@ -188,6 +188,12 @@ function withWorktree(worktreeId?: string, extra?: URLSearchParams): string {
   return qs ? `?${qs}` : "";
 }
 
+async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<void> {
+  if (res.ok) return;
+  const body = await res.json().catch(() => ({})) as { error?: string };
+  throw new Error(body.error ?? fallbackMessage);
+}
+
 export async function fetchSessions(
   projectId: string,
   worktreeId?: string
@@ -206,6 +212,7 @@ export async function fetchSession(
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions/${sessionId}${withWorktree(worktreeId)}`
   );
+  await throwIfNotOk(res, "Failed to fetch session");
   return res.json();
 }
 
@@ -217,6 +224,7 @@ export async function fetchSessionRuntime(
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/runtime${withWorktree(worktreeId)}`
   );
+  await throwIfNotOk(res, "Failed to fetch session runtime");
   return res.json();
 }
 
@@ -239,7 +247,12 @@ export async function fetchEvents(
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/events${withWorktree(worktreeId)}`
   );
-  return res.json();
+  await throwIfNotOk(res, "Failed to fetch events");
+  const body = await res.json();
+  if (!Array.isArray(body)) {
+    throw new Error("Failed to fetch events");
+  }
+  return body;
 }
 
 export async function stopSession(

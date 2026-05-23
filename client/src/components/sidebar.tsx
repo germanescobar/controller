@@ -140,7 +140,8 @@ export function Sidebar({
               .filter((s) => !archivedIds.has(s.id))
               .map(async (session) => ({
                 sessionId: session.id,
-                runtime: await fetchSessionRuntime(project.id, session.id, worktree.id),
+                runtime: await fetchSessionRuntime(project.id, session.id, worktree.id)
+                  .catch(() => ({ active: false })),
               }))
           )
         )

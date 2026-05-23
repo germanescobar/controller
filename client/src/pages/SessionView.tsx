@@ -1849,6 +1849,8 @@ export function SessionView({
 
           if (eventsResult.status === "fulfilled") {
             setEvents(eventsResult.value);
+          } else {
+            setEvents([]);
           }
 
           if (runtimeResult.status === "fulfilled") {
