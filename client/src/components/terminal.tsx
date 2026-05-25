@@ -58,6 +58,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const termRef = useRef<XTerm | null>(null);
     const fitRef = useRef<FitAddon | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
+    const hasAttachedRef = useRef(false);
 
     useImperativeHandle(ref, () => ({
       sendSpecialKey(key: TerminalSpecialKey) {
@@ -147,7 +148,16 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         wsRef.current = ws;
 
         ws.onopen = () => {
-          ws.send(JSON.stringify({ type: "attach", projectId, worktreeId, terminalId }));
+          ws.send(
+            JSON.stringify({
+              type: "attach",
+              projectId,
+              worktreeId,
+              terminalId,
+              replayBuffer: !hasAttachedRef.current,
+            })
+          );
+          hasAttachedRef.current = true;
 
           const fitAddon = fitRef.current;
           if (fitAddon) {
