@@ -60,6 +60,7 @@ wss.on("connection", (ws: WebSocket) => {
       const projectId = msg.projectId as string;
       const worktreeIdParam = msg.worktreeId as string | undefined;
       const terminalId = normalizeTerminalId(msg.terminalId);
+      const replayBuffer = msg.replayBuffer !== false;
       if (!projectId) return;
 
       const project = await getProject(projectId);
@@ -83,7 +84,7 @@ wss.on("connection", (ws: WebSocket) => {
       }
 
       // Send buffered output so the terminal restores its state
-      if (result.buffer) {
+      if (replayBuffer && result.buffer) {
         ws.send(JSON.stringify({ type: "output", data: result.buffer }));
       }
 

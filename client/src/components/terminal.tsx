@@ -58,6 +58,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const termRef = useRef<XTerm | null>(null);
     const fitRef = useRef<FitAddon | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
+    const hasAttachedRef = useRef(false);
 
     useImperativeHandle(ref, () => ({
       sendSpecialKey(key: TerminalSpecialKey) {
@@ -138,62 +139,90 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const host = window.location.hostname;
       const port = import.meta.env.DEV ? "3100" : window.location.port;
       const wsUrl = `${protocol}//${host}:${port}/ws/terminal`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+      let reconnectTimer: number | null = null;
+      let disposed = false;
 
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "attach", projectId, worktreeId, terminalId }));
+      const connect = () => {
+        if (disposed) return;
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
 
-        const fitAddon = fitRef.current;
-        if (fitAddon) {
-          fitAddon.fit();
+        ws.onopen = () => {
           ws.send(
             JSON.stringify({
-              type: "resize",
-              cols: term.cols,
-              rows: term.rows,
+              type: "attach",
+              projectId,
+              worktreeId,
+              terminalId,
+              replayBuffer: !hasAttachedRef.current,
             })
           );
-        }
+          hasAttachedRef.current = true;
+
+          const fitAddon = fitRef.current;
+          if (fitAddon) {
+            fitAddon.fit();
+            ws.send(
+              JSON.stringify({
+                type: "resize",
+                cols: term.cols,
+                rows: term.rows,
+              })
+            );
+          }
+        };
+
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "output") {
+            term.write(msg.data);
+          } else if (msg.type === "error") {
+            term.writeln(`\x1b[31mError: ${msg.message}\x1b[0m`);
+          }
+        };
+
+        ws.onerror = () => {
+          if (!disposed) {
+            term.writeln("\x1b[31mWebSocket connection failed.\x1b[0m");
+          }
+        };
+
+        ws.onclose = (event) => {
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
+          if (disposed || event.code === 1000) return;
+          term.writeln(`\x1b[31mConnection lost (code ${event.code}). Reconnecting...\x1b[0m`);
+          reconnectTimer = window.setTimeout(connect, 1000);
+        };
       };
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "output") {
-          term.write(msg.data);
-        } else if (msg.type === "error") {
-          term.writeln(`\x1b[31mError: ${msg.message}\x1b[0m`);
-        }
-      };
-
-      ws.onerror = () => {
-        term.writeln("\x1b[31mWebSocket connection failed.\x1b[0m");
-      };
-
-      ws.onclose = (event) => {
-        if (event.code !== 1000) {
-          term.writeln(`\x1b[31mConnection lost (code ${event.code}).\x1b[0m`);
-        }
-      };
+      connect();
 
       const inputDisposable = term.onData((data: string) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "input", data }));
         }
       });
 
       const resizeDisposable = term.onResize(
         ({ cols, rows }: { cols: number; rows: number }) => {
-          if (ws.readyState === WebSocket.OPEN) {
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "resize", cols, rows }));
           }
         }
       );
 
       return () => {
+        disposed = true;
+        if (reconnectTimer !== null) {
+          window.clearTimeout(reconnectTimer);
+        }
         inputDisposable.dispose();
         resizeDisposable.dispose();
-        ws.close();
+        wsRef.current?.close();
         wsRef.current = null;
       };
     }, [projectId, worktreeId, terminalId]);
