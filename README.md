@@ -31,11 +31,14 @@ server/          Express API backend
 
 The server spawns agent CLIs as child processes, parses their JSON output streams, normalizes events into a common format (`AgentStreamEvent`), and forwards them to the client over SSE. Session state and events are stored as JSON/JSONL files inside each project's `.coding-agent/` directory.
 
+Embedded terminal tabs are backed by deterministic `tmux` sessions. The Express server attaches browser WebSocket connections to those sessions, so commands started in a terminal can survive browser refreshes and backend hot reloads. Closing a terminal tab intentionally kills its associated `tmux` session.
+
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js 20+
+- `tmux` for persistent embedded terminals that survive backend restarts
 - At least one supported coding agent CLI installed and on your `PATH`:
   - **Ada** (`ada`)
   - **Codex** (`codex`)

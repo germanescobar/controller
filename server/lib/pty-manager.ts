@@ -1,5 +1,6 @@
 import * as pty from "node-pty";
-import os from "node:os";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 
 interface PtySession {
   pty: pty.IPty;
@@ -8,6 +9,59 @@ interface PtySession {
 }
 
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB per session buffer
+const TMUX_SESSION_PREFIX = "coding-orchestrator-";
+
+function sanitizeTmuxName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function tmuxSessionName(sessionId: string): string {
+  const safeId = sanitizeTmuxName(sessionId).slice(0, 160);
+  const hash = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
+  return `${TMUX_SESSION_PREFIX}${safeId}-${hash}`;
+}
+
+function tmuxPrefix(prefix: string): string {
+  return `${TMUX_SESSION_PREFIX}${sanitizeTmuxName(prefix)}`;
+}
+
+function listTmuxSessions(): string[] {
+  try {
+    const output = execFileSync("tmux", ["list-sessions", "-F", "#{session_name}"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return output.split("\n").map((line) => line.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function killTmuxSession(sessionName: string): void {
+  try {
+    execFileSync("tmux", ["kill-session", "-t", `=${sessionName}`], {
+      stdio: "ignore",
+    });
+  } catch {
+    // The tmux session may already be gone.
+  }
+}
+
+function ensureTmuxSession(sessionName: string, cwd: string): void {
+  try {
+    execFileSync("tmux", ["has-session", "-t", `=${sessionName}`], {
+      stdio: "ignore",
+    });
+  } catch {
+    execFileSync("tmux", ["new-session", "-d", "-s", sessionName, "-c", cwd], {
+      stdio: "ignore",
+    });
+  }
+
+  execFileSync("tmux", ["set-option", "-t", sessionName, "status", "off"], {
+    stdio: "ignore",
+  });
+}
 
 class PtyManager {
   private sessions = new Map<string, PtySession>();
@@ -19,8 +73,6 @@ class PtyManager {
       return { isNew: false, buffer: existing.buffer };
     }
 
-    const shell = process.env.SHELL || (os.platform() === "win32" ? "powershell.exe" : "/bin/zsh");
-
     // Build a clean env — filter out keys that can interfere with node-pty
     const env: Record<string, string> = {};
     for (const [key, val] of Object.entries(process.env)) {
@@ -29,8 +81,10 @@ class PtyManager {
     }
 
     let ptyProcess: pty.IPty;
+    const sessionName = tmuxSessionName(sessionId);
     try {
-      ptyProcess = pty.spawn(shell, [], {
+      ensureTmuxSession(sessionName, cwd);
+      ptyProcess = pty.spawn("tmux", ["attach-session", "-t", `=${sessionName}`], {
         name: "xterm-256color",
         cols: 80,
         rows: 24,
@@ -40,7 +94,7 @@ class PtyManager {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`Failed to spawn PTY for session ${sessionId}: ${msg}`);
-      return { isNew: true, buffer: "", error: msg };
+      return { isNew: true, buffer: "", error: `tmux is required for persistent terminals: ${msg}` };
     }
 
     const session: PtySession = {
@@ -101,6 +155,7 @@ class PtyManager {
       session.pty.kill();
       this.sessions.delete(sessionId);
     }
+    killTmuxSession(tmuxSessionName(sessionId));
   }
 
   /** Kill and remove every PTY whose session id starts with a prefix. */
@@ -108,6 +163,12 @@ class PtyManager {
     for (const sessionId of Array.from(this.sessions.keys())) {
       if (sessionId.startsWith(prefix)) {
         this.kill(sessionId);
+      }
+    }
+    const targetPrefix = tmuxPrefix(prefix);
+    for (const sessionName of listTmuxSessions()) {
+      if (sessionName.startsWith(targetPrefix)) {
+        killTmuxSession(sessionName);
       }
     }
   }
