@@ -6,10 +6,22 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { getProject } from "../lib/projects.js";
-import { resolveWorktree } from "../lib/worktrees.js";
+import { getProjectWorktrees, resolveWorktree } from "../lib/worktrees.js";
 
 const execAsync = promisify(exec);
-import { getSessions, getSession, getEvents, archiveSession, saveSession, appendEvent, type AgentEvent } from "../lib/sessions.js";
+import {
+  getSessions,
+  getSession,
+  getEvents,
+  archiveSession,
+  saveSession,
+  appendEvent,
+  saveAttachment,
+  getAttachment,
+  getAttachments,
+  type AgentEvent,
+  type AttachmentMetadata,
+} from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
 import { getAgentProvider, type AgentStreamEvent } from "../lib/agents.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
@@ -24,6 +36,72 @@ import {
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
+}
+
+function isBenignProviderStderrLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (trimmed.includes("Reading additional input from stdin")) return true;
+  if (trimmed.includes("Reading prompt from stdin")) return true;
+  if (/^OpenAI Codex v/i.test(trimmed)) return true;
+  if (/^-{4,}$/.test(trimmed)) return true;
+  if (/^(workdir|model|provider|approval|sandbox|reasoning effort|reasoning summaries|session id):/i.test(trimmed)) {
+    return true;
+  }
+  if (/^hook: /i.test(trimmed)) return true;
+  if (/^tokens used$/i.test(trimmed)) return true;
+  if (/^\d{4}-\d{2}-\d{2}T.*\b(WARN|ERROR)\b.*failed to record rollout items/i.test(trimmed)) {
+    return true;
+  }
+  if (/^\d{4}-\d{2}-\d{2}T.*\bWARN\b.*Failed to terminate MCP process group/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
+const MAX_ATTACHMENT_COUNT = 5;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024;
+const SUPPORTED_ATTACHMENT_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "application/json",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/zip",
+]);
+
+interface AttachmentUpload {
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  data?: string;
+}
+
+function sanitizeFileName(name: string): string {
+  const base = path.basename(name).replace(/[^a-zA-Z0-9._-]+/g, "-");
+  return base.replace(/^-+|-+$/g, "") || "attachment";
+}
+
+function attachmentPublicMetadata(
+  projectId: string,
+  worktreeId: string,
+  attachment: AttachmentMetadata
+) {
+  return {
+    id: attachment.id,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    path: attachment.path,
+    isImage: attachment.isImage,
+    createdAt: attachment.createdAt,
+    url: `/api/projects/${projectId}/attachments/${attachment.id}?worktreeId=${encodeURIComponent(worktreeId)}&v=${encodeURIComponent(attachment.createdAt)}`,
+  };
 }
 
 interface RunDiffSummary {
@@ -139,6 +217,128 @@ async function persistRunDiffEvent(
 }
 
 export const sessionsRouter = Router();
+
+sessionsRouter.post("/:projectId/attachments", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(
+    req.params.projectId,
+    req.query.worktreeId as string | undefined
+  );
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+
+  const uploads = req.body.attachments as AttachmentUpload[] | undefined;
+  if (!Array.isArray(uploads) || uploads.length === 0) {
+    res.status(400).json({ error: "At least one attachment is required" });
+    return;
+  }
+  if (uploads.length > MAX_ATTACHMENT_COUNT) {
+    res.status(400).json({ error: `Attach up to ${MAX_ATTACHMENT_COUNT} files` });
+    return;
+  }
+
+  let totalSize = 0;
+  const saved: AttachmentMetadata[] = [];
+  try {
+    for (const upload of uploads) {
+      const name = sanitizeFileName(upload.name ?? "");
+      const mimeType = upload.mimeType || "application/octet-stream";
+      if (!SUPPORTED_ATTACHMENT_TYPES.has(mimeType)) {
+        res.status(400).json({ error: `${name} is not a supported file type` });
+        return;
+      }
+      if (!upload.data || typeof upload.data !== "string") {
+        res.status(400).json({ error: `${name} could not be read` });
+        return;
+      }
+      const data = Buffer.from(upload.data, "base64");
+      const size = data.byteLength;
+      if (size <= 0) {
+        res.status(400).json({ error: `${name} is empty` });
+        return;
+      }
+      if (size > MAX_ATTACHMENT_SIZE) {
+        res.status(400).json({ error: `${name} is larger than 10 MB` });
+        return;
+      }
+      totalSize += size;
+      if (totalSize > MAX_ATTACHMENT_TOTAL_SIZE) {
+        res.status(400).json({ error: "Attachments are larger than 25 MB total" });
+        return;
+      }
+      if (typeof upload.size === "number" && upload.size !== size) {
+        res.status(400).json({ error: `${name} changed while uploading` });
+        return;
+      }
+
+      const attachment = await saveAttachment(
+        worktree.path,
+        {
+          id: randomUUID(),
+          name,
+          mimeType,
+          size,
+          path: "",
+          isImage: mimeType.startsWith("image/"),
+          createdAt: new Date().toISOString(),
+        },
+        data
+      );
+      saved.push(attachment);
+    }
+
+    res.json({
+      attachments: saved.map((attachment) =>
+        attachmentPublicMetadata(req.params.projectId, worktree.id, attachment)
+      ),
+    });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+sessionsRouter.get("/:projectId/attachments/:attachmentId", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const worktree = await resolveWorktree(
+    req.params.projectId,
+    req.query.worktreeId as string | undefined
+  );
+  let attachment = worktree
+    ? await getAttachment(worktree.path, req.params.attachmentId)
+    : null;
+  if (!attachment) {
+    const worktrees = await getProjectWorktrees(req.params.projectId);
+    for (const candidate of worktrees) {
+      attachment = await getAttachment(candidate.path, req.params.attachmentId);
+      if (attachment) break;
+    }
+  }
+  if (!attachment || !attachment.isImage) {
+    res.status(404).json({ error: "Attachment not found" });
+    return;
+  }
+  try {
+    const data = await fs.readFile(attachment.path);
+    res.set("Cache-Control", "no-store");
+    res.type(attachment.mimeType);
+    res.send(data);
+  } catch {
+    res.status(404).json({ error: "Attachment file not found" });
+  }
+});
 
 // Git diff for a worktree
 sessionsRouter.get("/:projectId/git/diff", async (req, res) => {
@@ -277,9 +477,13 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     | "high"
     | "xhigh"
     | undefined;
-  const serviceTier = req.query.serviceTier as "fast" | "flex" | undefined;
+  const serviceTier = req.query.serviceTier === "fast" ? "fast" : undefined;
   const providerId = (req.query.provider as string) || "ada";
   const mode = (req.query.mode as "default" | "plan" | undefined) || "default";
+  const attachmentIds = (req.query.attachmentIds as string | undefined)
+    ?.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean) ?? [];
 
   const provider = getAgentProvider(providerId);
   if (!provider) {
@@ -291,13 +495,24 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     res.status(400).json({ error: "message query param is required" });
     return;
   }
+  if (attachmentIds.length > 0 && providerId !== "codex" && providerId !== "claude") {
+    res.status(400).json({ error: `${provider.name} does not support attachments` });
+    return;
+  }
+
+  const attachments = await getAttachments(worktree.path, attachmentIds);
+  if (attachments.length !== attachmentIds.length) {
+    res.status(400).json({ error: "One or more attachments could not be found" });
+    return;
+  }
 
   const runStartTree = await createWorktreeSnapshot(worktree.path);
 
-  if (providerId === "codex") {
+  if (providerId === "codex" && attachments.length === 0) {
     await streamCodexPlanSession(req, res, {
       worktreePath: worktree.path,
       worktreeId: worktree.id,
+      projectId: req.params.projectId,
       runStartTree,
       message,
       resumeSessionId,
@@ -306,6 +521,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       serviceTier,
       mode,
       providerId,
+      attachments,
     });
     return;
   }
@@ -322,6 +538,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     message,
     cwd: worktree.path,
     env: apiKeyEnv,
+    attachments,
     resumeSessionId,
     model,
     reasoningEffort,
@@ -359,7 +576,12 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
         sessionId,
         timestamp: new Date().toISOString(),
         type: "user_message",
-        data: { text: message },
+        data: {
+          text: message,
+          attachments: attachments.map((attachment) =>
+            attachmentPublicMetadata(req.params.projectId, worktreeId, attachment)
+          ),
+        },
       });
     }
     // Merge with existing session file (preserve title/createdAt from earlier messages)
@@ -417,10 +639,9 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     const raw = data.toString();
     const text = stripAnsi(raw).trim();
 
-    // Filter out Codex's informational stdin message (but keep other content in the same chunk)
     const filtered = text
       .split("\n")
-      .filter((line) => !line.includes("Reading additional input from stdin"))
+      .filter((line) => !isBenignProviderStderrLine(line))
       .join("\n")
       .trim();
     if (!filtered) return;
@@ -555,6 +776,7 @@ async function streamCodexPlanSession(
   options: {
     worktreePath: string;
     worktreeId: string;
+    projectId: string;
     runStartTree: string | null;
     message: string;
     resumeSessionId?: string;
@@ -563,11 +785,13 @@ async function streamCodexPlanSession(
     serviceTier?: "fast" | "flex";
     mode: "default" | "plan";
     providerId: string;
+    attachments: AttachmentMetadata[];
   }
 ) {
   const {
     worktreePath,
     worktreeId,
+    projectId,
     runStartTree,
     message,
     resumeSessionId,
@@ -576,6 +800,7 @@ async function streamCodexPlanSession(
     serviceTier,
     mode,
     providerId,
+    attachments,
   } = options;
 
   res.writeHead(200, {
@@ -620,7 +845,12 @@ async function streamCodexPlanSession(
         sessionId,
         timestamp: new Date().toISOString(),
         type: "user_message",
-        data: { text: message },
+        data: {
+          text: message,
+          attachments: attachments.map((attachment) =>
+            attachmentPublicMetadata(projectId, worktreeId, attachment)
+          ),
+        },
       });
     }
 
@@ -705,6 +935,7 @@ async function streamCodexPlanSession(
         reasoningEffort,
         serviceTier,
         mode,
+        attachments,
       },
       handleEvent
     );

@@ -57,6 +57,24 @@ export interface AgentEvent {
   data: Record<string, unknown>;
 }
 
+export interface SessionAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  isImage: boolean;
+  createdAt?: string;
+  url?: string;
+}
+
+export interface PendingAttachmentUpload {
+  name: string;
+  mimeType: string;
+  size: number;
+  data: string;
+}
+
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
 
 export interface PlanStep {
@@ -421,6 +439,7 @@ export function startSession(
     provider?: string;
     mode?: "default" | "plan";
     worktreeId?: string;
+    attachmentIds?: string[];
   }
 ): EventSource {
   const params = new URLSearchParams({ message });
@@ -431,9 +450,30 @@ export function startSession(
   if (options?.provider) params.set("provider", options.provider);
   if (options?.mode) params.set("mode", options.mode);
   if (options?.worktreeId) params.set("worktreeId", options.worktreeId);
+  if (options?.attachmentIds?.length) {
+    params.set("attachmentIds", options.attachmentIds.join(","));
+  }
   return new EventSource(
     `${BASE}/projects/${projectId}/sessions/stream?${params}`
   );
+}
+
+export async function uploadSessionAttachments(
+  projectId: string,
+  attachments: PendingAttachmentUpload[],
+  worktreeId?: string
+): Promise<SessionAttachment[]> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/attachments${withWorktree(worktreeId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attachments }),
+    }
+  );
+  await throwIfNotOk(res, "Failed to upload attachments");
+  const body = (await res.json()) as { attachments?: SessionAttachment[] };
+  return body.attachments ?? [];
 }
 
 export async function fetchBranches(

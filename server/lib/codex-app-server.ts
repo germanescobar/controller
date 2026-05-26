@@ -3,6 +3,7 @@ import {
   getAgentProvider,
   type AgentStreamEvent,
   type AgentStreamParseResult,
+  type AgentAttachment,
   type AgentUserInputQuestion,
 } from "./agents.js";
 
@@ -74,6 +75,7 @@ export interface StartPlanTurnOptions {
   message: string;
   cwd: string;
   env: Record<string, string>;
+  attachments?: AgentAttachment[];
   model?: string;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   serviceTier?: "fast" | "flex";
@@ -160,7 +162,7 @@ export class CodexAppServerManager {
       const serviceTier = options.serviceTier === "fast" ? "fast" : null;
       const turnResult = await this.call("turn/start", {
         threadId: runtime.threadId,
-        input: [{ type: "text", text: options.message, text_elements: [] }],
+        input: buildCodexInput(options.message, options.attachments ?? []),
         cwd: options.cwd,
         approvalPolicy: "never",
         sandboxPolicy: { type: "dangerFullAccess" },
@@ -560,6 +562,35 @@ export class CodexAppServerManager {
 
     this.sessions.clear();
   }
+}
+
+function buildCodexInput(message: string, attachments: AgentAttachment[]): Record<string, unknown>[] {
+  if (attachments.length === 0) {
+    return [{ type: "text", text: message, text_elements: [] }];
+  }
+
+  const attachmentLines = attachments.map((attachment, index) => {
+    const note = attachment.isImage
+      ? "also included as an image attachment when supported"
+      : "available as a local file";
+    return `${index + 1}. ${attachment.name} (${attachment.mimeType || "application/octet-stream"}, ${attachment.size} bytes): ${attachment.path} - ${note}`;
+  });
+
+  const input: Record<string, unknown>[] = [
+    {
+      type: "text",
+      text: `${message}\n\nAttached files:\n${attachmentLines.join("\n")}`,
+      text_elements: [],
+    },
+  ];
+
+  for (const attachment of attachments) {
+    if (attachment.isImage) {
+      input.push({ type: "image", path: attachment.path });
+    }
+  }
+
+  return input;
 }
 
 function getThreadFromResponse(value: unknown): { id?: string } | null {
