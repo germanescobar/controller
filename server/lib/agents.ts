@@ -86,11 +86,21 @@ export interface SpawnOptions {
   message: string;
   cwd: string;
   env: Record<string, string>;
+  attachments?: AgentAttachment[];
   resumeSessionId?: string;
   model?: string;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   serviceTier?: "fast" | "flex";
   mode?: "default" | "plan";
+}
+
+export interface AgentAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  isImage: boolean;
 }
 
 export interface AgentProvider {
@@ -115,6 +125,26 @@ function normalizeToolResultContent(value: unknown): string {
   }
 }
 
+function normalizeErrorMessage(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value.trim()) return value;
+  if (value && typeof value === "object") {
+    const raw = value as Record<string, unknown>;
+    if (typeof raw.message === "string" && raw.message.trim()) return raw.message;
+    if (typeof raw.error === "string" && raw.error.trim()) return raw.error;
+    if (typeof raw.additionalDetails === "string" && raw.additionalDetails.trim()) {
+      return raw.additionalDetails;
+    }
+  }
+  if (value != null) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return fallback;
+}
+
 // ---------------------------------------------------------------------------
 // Ada provider
 // ---------------------------------------------------------------------------
@@ -129,7 +159,7 @@ const adaProvider: AgentProvider = {
     if (reasoningEffort) {
       cmdArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
     }
-    if (serviceTier) {
+    if (serviceTier === "fast") {
       cmdArgs.push("-c", `service_tier="${serviceTier}"`);
     }
 
@@ -162,24 +192,29 @@ const codexProvider: AgentProvider = {
   name: "Codex",
   command: "codex",
 
-  spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
+  spawn({ message, cwd, env, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
     // Flags must come before the prompt argument
     const flags = ["--json", "--full-auto", "--skip-git-repo-check", "--model", model || ""];
     if (reasoningEffort) {
       flags.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
     }
-    if (serviceTier) {
+    if (serviceTier === "fast") {
       flags.push("-c", `service_tier="${serviceTier}"`);
     }
     if (mode === "plan") {
       flags.push("--enable", "default_mode_request_user_input");
     }
 
+    const imageArgs = attachments
+      .filter((attachment) => attachment.isImage)
+      .flatMap((attachment) => ["--image", attachment.path]);
+    const prompt = withAttachmentContext(message, attachments, "codex");
+
     let args: string[];
     if (resumeSessionId) {
-      args = ["exec", ...flags, "resume", resumeSessionId, message];
+      args = ["exec", ...flags, "resume", ...imageArgs, "--", resumeSessionId, prompt];
     } else {
-      args = ["exec", ...flags, message];
+      args = ["exec", ...flags, ...imageArgs, "--", prompt];
     }
 
     const fullCmd = `codex ${args.join(" ")}`;
@@ -218,7 +253,7 @@ const claudeProvider: AgentProvider = {
   name: "Claude",
   command: "claude",
 
-  spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, mode }) {
+  spawn({ message, cwd, env, attachments = [], resumeSessionId, model, reasoningEffort, mode }) {
     const args = [
       "-p",
       "--output-format",
@@ -238,7 +273,7 @@ const claudeProvider: AgentProvider = {
       args.push("--resume", resumeSessionId);
     }
 
-    args.push(message);
+    args.push(withAttachmentContext(message, attachments, "claude"));
 
     const fullCmd = `claude ${args.join(" ")}`;
     console.log(`[claude] ${fullCmd.slice(0, 100)}...`);
@@ -264,6 +299,22 @@ const claudeProvider: AgentProvider = {
     return mapClaudeEvent(event, state);
   },
 };
+
+function withAttachmentContext(
+  message: string,
+  attachments: AgentAttachment[],
+  provider: "codex" | "claude"
+): string {
+  if (attachments.length === 0) return message;
+  const lines = attachments.map((attachment, index) => {
+    const note =
+      provider === "codex" && attachment.isImage
+        ? "also attached through --image"
+        : "available as a local file";
+    return `${index + 1}. ${attachment.name} (${attachment.mimeType || "application/octet-stream"}, ${attachment.size} bytes): ${attachment.path} - ${note}`;
+  });
+  return `${message}\n\nAttached files:\n${lines.join("\n")}`;
+}
 
 function mapClaudeEvent(
   event: Record<string, unknown>,
@@ -320,11 +371,10 @@ function mapClaudeEvent(
       return {
         type: "run.failed",
         sessionId: state.sessionId,
-        error:
-          (event.error as string | undefined) ??
-          (event.result as string | undefined) ??
-          subtype ??
-          "Claude run failed",
+        error: normalizeErrorMessage(
+          event.error ?? event.result ?? subtype,
+          "Claude run failed"
+        ),
         timestamp: new Date().toISOString(),
       };
     }
@@ -581,14 +631,10 @@ function mapCodexEvent(event: Record<string, unknown>, state: { threadId: string
   }
 
   if (type === "turn.failed" || type === "error") {
-    const error =
-      (event.error as string) ??
-      (event.message as string) ??
-      "Unknown error";
     return {
       type: "run.failed",
       sessionId: state.threadId,
-      error,
+      error: normalizeErrorMessage(event.error ?? event.message, "Unknown error"),
       timestamp: new Date().toISOString(),
     };
   }

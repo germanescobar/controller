@@ -57,6 +57,24 @@ export interface AgentEvent {
   data: Record<string, unknown>;
 }
 
+export interface SessionAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  isImage: boolean;
+  createdAt?: string;
+  url?: string;
+}
+
+export interface PendingAttachmentUpload {
+  name: string;
+  mimeType: string;
+  size: number;
+  data: string;
+}
+
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
 
 export interface PlanStep {
@@ -190,8 +208,18 @@ function withWorktree(worktreeId?: string, extra?: URLSearchParams): string {
 
 async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<void> {
   if (res.ok) return;
-  const body = await res.json().catch(() => ({})) as { error?: string };
-  throw new Error(body.error ?? fallbackMessage);
+  const body = await res.json().catch(() => ({})) as { error?: unknown; message?: unknown };
+  const rawMessage = body.error ?? body.message;
+  if (typeof rawMessage === "string" && rawMessage.trim()) {
+    throw new Error(rawMessage);
+  }
+  if (rawMessage && typeof rawMessage === "object") {
+    const nested = rawMessage as Record<string, unknown>;
+    if (typeof nested.message === "string" && nested.message.trim()) {
+      throw new Error(nested.message);
+    }
+  }
+  throw new Error(fallbackMessage);
 }
 
 export async function fetchSessions(
@@ -421,6 +449,7 @@ export function startSession(
     provider?: string;
     mode?: "default" | "plan";
     worktreeId?: string;
+    attachmentIds?: string[];
   }
 ): EventSource {
   const params = new URLSearchParams({ message });
@@ -431,9 +460,30 @@ export function startSession(
   if (options?.provider) params.set("provider", options.provider);
   if (options?.mode) params.set("mode", options.mode);
   if (options?.worktreeId) params.set("worktreeId", options.worktreeId);
+  if (options?.attachmentIds?.length) {
+    params.set("attachmentIds", options.attachmentIds.join(","));
+  }
   return new EventSource(
     `${BASE}/projects/${projectId}/sessions/stream?${params}`
   );
+}
+
+export async function uploadSessionAttachments(
+  projectId: string,
+  attachments: PendingAttachmentUpload[],
+  worktreeId?: string
+): Promise<SessionAttachment[]> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/attachments${withWorktree(worktreeId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attachments }),
+    }
+  );
+  await throwIfNotOk(res, "Failed to upload attachments");
+  const body = (await res.json()) as { attachments?: SessionAttachment[] };
+  return body.attachments ?? [];
 }
 
 export async function fetchBranches(

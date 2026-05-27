@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import {
   steerSession,
   submitSessionUserInput,
   type Project,
+  uploadSessionAttachments,
   type Worktree,
   type AgentEvent,
   type AgentProviderInfo,
@@ -30,6 +31,7 @@ import {
   type ReasoningEffort,
   type ServiceTier,
   type SessionStreamEvent,
+  type SessionAttachment,
   type UserInputQuestion,
 } from "../api.ts";
 
@@ -44,7 +46,7 @@ interface SessionViewProps {
 
 type StreamItem = (
   | { type: "assistant"; text: string }
-  | { type: "user_message"; text: string }
+  | { type: "user_message"; text: string; attachments?: SessionAttachment[] }
   | { type: "reasoning"; text: string }
   | { type: "tool_call"; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; name?: string; content: string; isError: boolean }
@@ -52,7 +54,7 @@ type StreamItem = (
   | { type: "plan_delta"; id: string; delta: string }
   | { type: "user_input_requested"; id: string; questions: UserInputQuestion[] }
   | { type: "thread_status"; status: string; activeFlags: string[] }
-  | { type: "error"; text: string }
+  | { type: "error"; text: unknown }
 ) & { at: number };
 
 function isSessionIsolationDebugEnabled(): boolean {
@@ -102,6 +104,83 @@ function supportsServiceTier(provider: string): boolean {
 
 function supportsLiveSteering(provider: string): boolean {
   return provider === "codex";
+}
+
+function supportsAttachments(provider: string): boolean {
+  return provider === "codex" || provider === "claude";
+}
+
+const MAX_ATTACHMENT_COUNT = 5;
+const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_SIZE = 35 * 1024 * 1024;
+const SUPPORTED_ATTACHMENT_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/heic",
+  "image/heif",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "application/json",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/zip",
+]);
+const PREVIEWABLE_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+interface ComposerAttachment {
+  id: string;
+  file: File;
+  previewUrl?: string;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileDisplayName(file: File): string {
+  const name = typeof file.name === "string" ? file.name.trim() : "";
+  return name || "attachment";
+}
+
+function getFileMimeType(file: File): string {
+  return typeof file.type === "string" && file.type.trim()
+    ? file.type.trim()
+    : "application/octet-stream";
+}
+
+function makeClientId(prefix: string): string {
+  const cryptoApi = typeof globalThis.crypto === "object" ? globalThis.crypto : undefined;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return `${prefix}-${cryptoApi.randomUUID()}`;
+  }
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    const values = new Uint32Array(2);
+    cryptoApi.getRandomValues(values);
+    return `${prefix}-${Date.now().toString(36)}-${values[0].toString(36)}-${values[1].toString(36)}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      resolve(result.includes(",") ? result.split(",")[1] : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function normalizeToolResultContent(content: unknown): string {
@@ -620,10 +699,7 @@ function loadStoredTerminals(projectId: string, worktreeId?: string): {
 }
 
 function makeTerminalId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `terminal-${crypto.randomUUID()}`;
-  }
-  return `terminal-${Date.now()}`;
+  return makeClientId("terminal");
 }
 
 function getRunStatusText(
@@ -859,10 +935,14 @@ function EventBlock({
 
   // user_message: show as chat bubble
   if (event.type === "user_message" && data.text) {
+    const attachments = (data.attachments as SessionAttachment[] | undefined) ?? [];
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl bg-secondary px-4 py-3 text-sm">
-          {normalizeMarkdownText(data.text)}
+        <div className="max-w-[85%]">
+          <AttachmentStrip attachments={attachments} />
+          <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
+            {normalizeMarkdownText(data.text)}
+          </div>
         </div>
       </div>
     );
@@ -1453,15 +1533,58 @@ function ThreadStatusBlock({
   );
 }
 
-function ErrorBlock({ text }: { text: string }) {
+function ErrorBlock({ text }: { text: unknown }) {
+  const normalizedText = normalizeMarkdownText(text);
   return (
     <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3">
       <div className="flex items-center gap-2">
         <Badge variant="destructive" className="shrink-0 text-[10px]">
           error
         </Badge>
-        <span className="text-xs text-destructive-foreground">{text}</span>
+        <span className="text-xs text-destructive-foreground">{normalizedText}</span>
       </div>
+    </div>
+  );
+}
+
+function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] }) {
+  if (!attachments || attachments.length === 0) return null;
+  return (
+    <div className="mb-2 flex flex-wrap justify-end gap-2">
+      {attachments.map((attachment, index) => {
+        const id = normalizeMarkdownText(attachment.id) || `attachment-${index}`;
+        const name = normalizeMarkdownText(attachment.name) || "attachment";
+        const mimeType = normalizeMarkdownText(attachment.mimeType);
+        const path = normalizeMarkdownText(attachment.path);
+        const url = normalizeMarkdownText(attachment.url);
+        const size = typeof attachment.size === "number" ? attachment.size : Number.NaN;
+        const canPreview = PREVIEWABLE_IMAGE_TYPES.has(mimeType);
+        return (
+        <div
+          key={id}
+          className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
+          title={path}
+        >
+          {attachment.isImage && url && canPreview ? (
+            <img
+              src={url}
+              alt=""
+              className="h-8 w-8 shrink-0 rounded object-cover"
+            />
+          ) : (
+            <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <div className="min-w-0">
+            <div className="truncate text-foreground">{name}</div>
+            {Number.isFinite(size) ? (
+              <div className="text-[10px] text-muted-foreground">
+                {formatBytes(size)}
+              </div>
+            ) : null}
+          </div>
+        </div>
+        );
+      })}
     </div>
   );
 }
@@ -1540,6 +1663,9 @@ export function SessionView({
 }: SessionViewProps) {
   const [message, setMessage] = useState("");
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<SessionAttachment[]>([]);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
@@ -1582,6 +1708,7 @@ export function SessionView({
   const terminalRef = useRef<TerminalHandle | null>(null);
   const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
   const providerPickerRef = useRef<HTMLDivElement>(null);
@@ -1626,6 +1753,8 @@ export function SessionView({
   const providerSupportsReasoningEffort = supportsReasoningEffort(selectedProvider);
   const providerSupportsServiceTier = supportsServiceTier(selectedProvider);
   const providerSupportsLiveSteering = supportsLiveSteering(selectedProvider);
+  const providerSupportsAttachments = supportsAttachments(selectedProvider);
+  const shouldPollChanges = terminalOpen || rightTab === "changes" || mobilePanel === "changes";
   const providerStatusMessage =
     !sessionId && providerLoadError
       ? providerLoadError
@@ -1827,6 +1956,17 @@ export function SessionView({
   // When loading an existing session, restore the provider and model that were used
   useEffect(() => {
     let cancelled = false;
+    const viewingActiveStream = targetMatchesStreamContext(sendContextRef.current, {
+      projectId,
+      worktreeId,
+      sessionId,
+    });
+    if (!viewingActiveStream) {
+      setStreamItems([]);
+      setPendingMessage(null);
+      setPendingAttachments([]);
+    }
+
     if (sessionId) {
       setProviderResolved(false);
       Promise.allSettled([
@@ -1904,6 +2044,7 @@ export function SessionView({
         if (!runtime.active) {
           setStreaming(false);
           setPendingMessage(null);
+          setPendingAttachments([]);
           setStreamItems([]);
         }
       } catch {
@@ -1960,6 +2101,7 @@ export function SessionView({
         // Navigated away from the streaming session — hide streaming UI
         setStreaming(false);
         setPendingMessage(null);
+        setPendingAttachments([]);
         setStreamItems([]);
       } else if (prevSessionId !== sessionId) {
         debugSessionIsolation("view.restoredStreamingUi", {
@@ -2011,9 +2153,12 @@ export function SessionView({
         .catch(() => { if (!cancelled) setGitDiffLoaded(true); });
     };
     load();
+    if (!shouldPollChanges) {
+      return () => { cancelled = true; };
+    }
     const interval = setInterval(load, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [projectId, worktreeId]);
+  }, [projectId, worktreeId, shouldPollChanges]);
 
   // Poll branch diff for the Changes tab (PR view)
   useEffect(() => {
@@ -2024,9 +2169,12 @@ export function SessionView({
         .catch(() => {});
     };
     load();
+    if (!shouldPollChanges) {
+      return () => { cancelled = true; };
+    }
     const interval = setInterval(load, 5000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [projectId, worktreeId]);
+  }, [projectId, worktreeId, shouldPollChanges]);
 
   // Auto-switch away from Changes tab when there are no changes
   useEffect(() => {
@@ -2035,6 +2183,67 @@ export function SessionView({
       if (mobilePanel === "changes") setMobilePanel("terminal");
     }
   }, [gitDiffLoaded, gitDiffFiles.length, branchDiffFiles.length, rightTab, mobilePanel]);
+
+  const addComposerFiles = (files: FileList | File[]) => {
+    const nextFiles = Array.from(files);
+    if (nextFiles.length === 0) return;
+    setAttachmentError(null);
+
+    setComposerAttachments((prev) => {
+      const next = [...prev];
+      let totalSize = next.reduce((sum, item) => sum + item.file.size, 0);
+      for (const file of nextFiles) {
+        const fileName = getFileDisplayName(file);
+        const mimeType = getFileMimeType(file);
+        if (next.length >= MAX_ATTACHMENT_COUNT) {
+          setAttachmentError(`Attach up to ${MAX_ATTACHMENT_COUNT} files`);
+          break;
+        }
+        if (!SUPPORTED_ATTACHMENT_TYPES.has(mimeType)) {
+          setAttachmentError(`${fileName} is not a supported file type`);
+          continue;
+        }
+        if (file.size > MAX_ATTACHMENT_SIZE) {
+          setAttachmentError(`${fileName} is larger than 15 MB`);
+          continue;
+        }
+        if (totalSize + file.size > MAX_ATTACHMENT_TOTAL_SIZE) {
+          setAttachmentError("Attachments are larger than 35 MB total");
+          break;
+        }
+        totalSize += file.size;
+        next.push({
+          id: `${fileName}-${file.size}-${file.lastModified}-${makeClientId("attachment")}`,
+          file,
+          previewUrl: PREVIEWABLE_IMAGE_TYPES.has(mimeType)
+            ? URL.createObjectURL(file)
+            : undefined,
+        });
+      }
+      return next;
+    });
+  };
+
+  const removeComposerAttachment = (id: string) => {
+    setComposerAttachments((prev) => {
+      const target = prev.find((attachment) => attachment.id === id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((attachment) => attachment.id !== id);
+    });
+  };
+
+  const uploadComposerAttachments = async () => {
+    if (composerAttachments.length === 0) return [];
+    const uploads = await Promise.all(
+      composerAttachments.map(async ({ file }) => ({
+        name: getFileDisplayName(file),
+        mimeType: getFileMimeType(file),
+        size: file.size,
+        data: await fileToBase64(file),
+      }))
+    );
+    return uploadSessionAttachments(projectId, uploads, worktreeId);
+  };
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -2061,11 +2270,13 @@ export function SessionView({
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const startAgentStream = (
+  const startAgentStream = async (
     sentMessage: string,
     pendingVisibleMessage = sentMessage,
     modeOverride?: "default" | "plan",
-    resumeSessionIdOverride?: string
+    resumeSessionIdOverride?: string,
+    attachmentIds?: string[],
+    visibleAttachments?: SessionAttachment[]
   ) => {
     if (!sentMessage.trim() || streamingRef.current) return false;
     if (!providerReady) {
@@ -2078,6 +2289,7 @@ export function SessionView({
     const streamSessionId = resumeSessionIdOverride ?? sessionId;
     streamingRef.current = true;
     setPendingMessage(pendingVisibleMessage);
+    setPendingAttachments(visibleAttachments ?? []);
     setStreaming(true);
     setStreamItems([]);
     let detectedSessionId = streamSessionId;
@@ -2099,10 +2311,13 @@ export function SessionView({
       reasoningEffort:
         providerSupportsReasoningEffort ? selectedReasoningEffort : undefined,
       serviceTier:
-        providerSupportsServiceTier ? selectedServiceTier : undefined,
+        providerSupportsServiceTier && selectedServiceTier === "fast"
+          ? selectedServiceTier
+          : undefined,
       provider: selectedProvider || undefined,
       mode: providerSupportsPlanMode ? modeOverride ?? selectedMode : "default",
       worktreeId,
+      attachmentIds,
     });
     eventSourceRef.current = es;
 
@@ -2155,7 +2370,7 @@ export function SessionView({
       });
       if (data.type === "started" || data.type === "stderr") {
         if (data.type === "stderr") {
-          const text = data.text.trim();
+          const text = normalizeMarkdownText(data.text).trim();
           if (text && isVisible()) {
             setStreamItems((prev) => [...prev, { type: "error", text, at: Date.now() }]);
           }
@@ -2295,6 +2510,7 @@ export function SessionView({
           streamingRef.current = false;
           setStreaming(false);
           setPendingMessage(null);
+          setPendingAttachments([]);
           setActiveStreamSessionId(detectedSessionId || null);
           if (detectedSessionId) {
             fetchEvents(projectId, detectedSessionId, worktreeId)
@@ -2313,7 +2529,7 @@ export function SessionView({
           }
         }
       } else if (data.type === "error") {
-        const text = data.text.trim();
+        const text = normalizeMarkdownText(data.text).trim();
         debugSessionIsolation("stream.error", {
           text,
           detectedSessionId,
@@ -2329,6 +2545,7 @@ export function SessionView({
           streamingRef.current = false;
           setStreaming(false);
           setPendingMessage(null);
+          setPendingAttachments([]);
         }
       }
     };
@@ -2348,6 +2565,7 @@ export function SessionView({
         streamingRef.current = false;
         setStreaming(false);
         setPendingMessage(null);
+        setPendingAttachments([]);
       }
     };
 
@@ -2358,30 +2576,59 @@ export function SessionView({
     if (!queuedStreamStart || streaming || !providerReady) return;
     const queued = queuedStreamStart;
     setQueuedStreamStart(null);
-    const started = startAgentStream(
-      queued.message,
-      queued.pendingVisibleMessage,
-      queued.modeOverride,
-      queued.resumeSessionId
-    );
-    if (!started) {
-      setStreamItems((prev) => [
-        ...prev,
-        {
-          type: "error",
-          text: "Could not resume the agent. Please retry your answer.",
-          at: Date.now(),
-        },
-      ]);
-    }
+    void (async () => {
+      const started = await startAgentStream(
+        queued.message,
+        queued.pendingVisibleMessage,
+        queued.modeOverride,
+        queued.resumeSessionId
+      );
+      if (!started) {
+        setStreamItems((prev) => [
+          ...prev,
+          {
+            type: "error",
+            text: "Could not resume the agent. Please retry your answer.",
+            at: Date.now(),
+          },
+        ]);
+      }
+    })();
   }, [queuedStreamStart, streaming, providerReady]);
 
-  const handleSend = (e: React.FormEvent) => {
+  const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!message.trim()) return;
-    const sentMessage = message;
-    if (startAgentStream(sentMessage)) {
-      setMessage("");
+    if (!message.trim() && composerAttachments.length === 0) return;
+    if (composerAttachments.length > 0 && !providerSupportsAttachments) {
+      setAttachmentError("Attachments are available for Codex and Claude Code");
+      return;
+    }
+    const sentMessage = message.trim() || "Please use the attached files as context.";
+    setAttachmentError(null);
+    try {
+      const uploadedAttachments = await uploadComposerAttachments();
+      if (
+        await startAgentStream(
+          sentMessage,
+          sentMessage,
+          undefined,
+          undefined,
+          uploadedAttachments.map((attachment) => attachment.id),
+          uploadedAttachments
+        )
+      ) {
+        composerAttachments.forEach((attachment) => {
+          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        });
+        setComposerAttachments([]);
+        setMessage("");
+      }
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "Failed to upload attachments");
+      streamingRef.current = false;
+      setStreaming(false);
+      setPendingMessage(null);
+      setPendingAttachments([]);
     }
   };
 
@@ -2466,12 +2713,12 @@ export function SessionView({
         if (streamingRef.current || eventSourceRef.current) {
           setQueuedStreamStart(resumeStart);
         } else if (
-          !startAgentStream(
+          !(await startAgentStream(
             resumeStart.message,
             resumeStart.pendingVisibleMessage,
             resumeStart.modeOverride,
             resumeStart.resumeSessionId
-          )
+          ))
         ) {
           setStreamItems((prev) => [
             ...prev,
@@ -2532,8 +2779,15 @@ export function SessionView({
   const selectedReasoningEffortLabel =
     REASONING_EFFORT_OPTIONS.find((option) => option.value === selectedReasoningEffort)?.label ??
     selectedReasoningEffort;
+  const streamBelongsToCurrentView =
+    streamItems.length === 0 ||
+    (activeStreamSessionId
+      ? activeStreamSessionId === sessionId ||
+        (!sessionId && pendingAttachedSessionIdRef.current === activeStreamSessionId)
+      : !sessionId);
+  const visibleStreamItems = streamBelongsToCurrentView ? streamItems : [];
   const latestStructuredInputRequestFromStream =
-    [...streamItems]
+    [...visibleStreamItems]
       .reverse()
       .find(
         (item): item is Extract<StreamItem, { type: "user_input_requested" }> =>
@@ -2701,7 +2955,7 @@ export function SessionView({
                       copiedId={copiedId}
                       onCopy={copyEventData}
                       hiddenPendingUserInputEventId={
-                        streamItems.length === 0 ? latestStructuredInputRequest?.id : null
+                        visibleStreamItems.length === 0 ? latestStructuredInputRequest?.id : null
                       }
                     />
                   );
@@ -2711,15 +2965,18 @@ export function SessionView({
               {/* Pending user message */}
               {pendingMessage && showPendingMessage && (
                 <div className="flex justify-end mt-4">
-                  <div className="max-w-[85%] rounded-2xl bg-secondary px-4 py-3 text-sm">
-                    {pendingMessage}
+                  <div className="max-w-[85%]">
+                    <AttachmentStrip attachments={pendingAttachments} />
+                    <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
+                      {pendingMessage}
+                    </div>
                   </div>
                 </div>
               )}
 
               {/* Stream output */}
-              {streamItems.length > 0 && (() => {
-                const streamGroups = groupStreamItemsForRender(streamItems);
+              {visibleStreamItems.length > 0 && (() => {
+                const streamGroups = groupStreamItemsForRender(visibleStreamItems);
                 return (
                 <div className="mt-4 space-y-3">
                   {streamGroups.map((render, idx) => {
@@ -2760,8 +3017,11 @@ export function SessionView({
                     if (item.type === "user_message") {
                       return (
                         <div key={render.key} className="flex justify-end">
-                          <div className="max-w-[85%] rounded-2xl bg-secondary px-4 py-3 text-sm">
-                            {item.text}
+                          <div className="max-w-[85%]">
+                            <AttachmentStrip attachments={item.attachments} />
+                            <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
+                              {normalizeMarkdownText(item.text)}
+                            </div>
                           </div>
                         </div>
                       );
@@ -2819,7 +3079,7 @@ export function SessionView({
               );
               })()}
 
-              {streamItems.length === 0 && latestStructuredInputRequest && (
+              {visibleStreamItems.length === 0 && latestStructuredInputRequest && (
                 <div className="mt-4">
                   <UserInputRequestedBlock
                     answers={userInputDraft}
@@ -2860,7 +3120,29 @@ export function SessionView({
           <div className="shrink-0 border-t border-border bg-background px-3 pb-3 pt-2 md:px-4 md:pb-4 md:pt-3">
             <div className="mx-auto max-w-3xl">
               <form onSubmit={streaming && providerSupportsLiveSteering ? handleSteer : handleSend}>
-                <div className="rounded-xl border border-border bg-input p-3">
+                <div
+                  className="rounded-xl border border-border bg-input p-3"
+                  onDragOver={(event) => {
+                    if (!providerSupportsAttachments) return;
+                    event.preventDefault();
+                  }}
+                  onDrop={(event) => {
+                    if (!providerSupportsAttachments) return;
+                    event.preventDefault();
+                    addComposerFiles(event.dataTransfer.files);
+                  }}
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    accept={Array.from(SUPPORTED_ATTACHMENT_TYPES).join(",")}
+                    onChange={(event) => {
+                      if (event.target.files) addComposerFiles(event.target.files);
+                      event.currentTarget.value = "";
+                    }}
+                  />
                   <textarea
                     ref={textareaRef}
                     value={message}
@@ -2878,6 +3160,48 @@ export function SessionView({
                     className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                     style={{ maxHeight: "calc(1.25rem * 5)" }}
                   />
+                  {composerAttachments.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {composerAttachments.map((attachment) => {
+                        const fileName = getFileDisplayName(attachment.file);
+                        return (
+                        <div
+                          key={attachment.id}
+                          className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
+                        >
+                          {attachment.previewUrl ? (
+                            <img
+                              src={attachment.previewUrl}
+                              alt=""
+                              className="h-8 w-8 shrink-0 rounded object-cover"
+                            />
+                          ) : (
+                            <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                          )}
+                          <div className="min-w-0">
+                            <div className="truncate text-foreground">{fileName}</div>
+                            <div className="text-[10px] text-muted-foreground">
+                              {formatBytes(attachment.file.size)}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeComposerAttachment(attachment.id)}
+                            className="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                            title="Remove attachment"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {attachmentError && (
+                    <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {attachmentError}
+                    </div>
+                  )}
                   {providerStatusMessage && (
                     <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                       <span className="min-w-0">{providerStatusMessage}</span>
@@ -3087,6 +3411,16 @@ export function SessionView({
                     </>)}
                     </div>
                     <div className="flex shrink-0 items-center justify-end gap-2 self-end sm:self-auto">
+                      {!streaming && providerSupportsAttachments && (
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          title="Attach files"
+                          className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        >
+                          <Paperclip className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       {streaming && (
                         <button
                           type="button"
@@ -3103,7 +3437,9 @@ export function SessionView({
                         disabled={
                           streaming && providerSupportsLiveSteering
                             ? !message.trim() || !providerReady
-                            : !message.trim() || streaming || !providerReady
+                            : (!message.trim() && composerAttachments.length === 0) ||
+                              streaming ||
+                              !providerReady
                         }
                         className="h-8 w-8 rounded-full"
                       >

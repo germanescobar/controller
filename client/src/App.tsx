@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { Component, useState, useEffect, useCallback, type ReactNode } from "react";
 import { Menu, X } from "lucide-react";
 import { toast } from "sonner";
 import { fetchProjects, type Project, type Worktree } from "./api.ts";
@@ -15,6 +15,46 @@ export type View =
   | { page: "edit-project"; projectId: string }
   | { page: "new-worktree"; projectId: string }
   | { page: "session"; projectId: string; worktreeId?: string; sessionId?: string };
+
+class AppErrorBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="flex flex-1 items-center justify-center p-4">
+        <div className="max-w-md rounded-lg border border-destructive/40 bg-destructive/10 p-4">
+          <div className="text-sm font-medium text-destructive-foreground">
+            This view crashed while rendering.
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {this.state.error.message}
+          </p>
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            className="mt-4 rounded-md bg-accent px-3 py-1.5 text-xs text-accent-foreground"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
 
 function loadSavedView(): View {
   try {
@@ -159,6 +199,7 @@ export function App() {
           </span>
         </div>
 
+        <AppErrorBoundary resetKey={JSON.stringify(activeView)}>
         {activeView.page === "empty" && (
           <div className="flex flex-1 items-center justify-center p-4">
             <div className="text-center">
@@ -230,6 +271,7 @@ export function App() {
             }}
           />
         )}
+        </AppErrorBoundary>
       </main>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

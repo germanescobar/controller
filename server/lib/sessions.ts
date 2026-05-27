@@ -25,12 +25,67 @@ export interface AgentEvent {
   data: Record<string, unknown>;
 }
 
+export interface AttachmentMetadata {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  isImage: boolean;
+  createdAt: string;
+}
+
 function storagePaths(projectPath: string) {
   const base = path.join(projectPath, ".coding-agent");
   return {
     sessions: path.join(base, "sessions"),
     events: path.join(base, "events"),
+    attachments: path.join(base, "attachments"),
   };
+}
+
+export async function saveAttachment(
+  projectPath: string,
+  attachment: AttachmentMetadata,
+  data: Buffer
+): Promise<AttachmentMetadata> {
+  const { attachments } = storagePaths(projectPath);
+  const dir = path.join(attachments, attachment.id);
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, attachment.name);
+  const metadataPath = path.join(dir, "metadata.json");
+  const saved = { ...attachment, path: filePath };
+  await fs.writeFile(filePath, data);
+  await fs.writeFile(metadataPath, JSON.stringify(saved, null, 2));
+  return saved;
+}
+
+export async function getAttachment(
+  projectPath: string,
+  attachmentId: string
+): Promise<AttachmentMetadata | null> {
+  if (!/^[a-zA-Z0-9._-]+$/.test(attachmentId)) return null;
+  const metadataPath = path.join(
+    storagePaths(projectPath).attachments,
+    attachmentId,
+    "metadata.json"
+  );
+  try {
+    const content = await fs.readFile(metadataPath, "utf-8");
+    return JSON.parse(content) as AttachmentMetadata;
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttachments(
+  projectPath: string,
+  attachmentIds: string[]
+): Promise<AttachmentMetadata[]> {
+  const attachments = await Promise.all(
+    attachmentIds.map((id) => getAttachment(projectPath, id))
+  );
+  return attachments.filter((item): item is AttachmentMetadata => Boolean(item));
 }
 
 export async function getSessions(
