@@ -1028,7 +1028,9 @@ sessionsRouter.post(
     const providerId = runtime.provider || session?.provider;
 
     try {
-      if (providerId === "codex") {
+      if (runtime.child) {
+        await stopSessionRuntime(req.params.sessionId);
+      } else if (providerId === "codex") {
         await codexAppServerManager.stopSession(req.params.sessionId);
       } else {
         await stopSessionRuntime(req.params.sessionId);
