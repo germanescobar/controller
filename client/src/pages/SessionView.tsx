@@ -111,11 +111,13 @@ function supportsAttachments(provider: string): boolean {
 }
 
 const MAX_ATTACHMENT_COUNT = 5;
-const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
-const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_SIZE = 35 * 1024 * 1024;
 const SUPPORTED_ATTACHMENT_TYPES = new Set([
   "image/png",
   "image/jpeg",
+  "image/heic",
+  "image/heif",
   "image/gif",
   "image/webp",
   "application/pdf",
@@ -125,6 +127,12 @@ const SUPPORTED_ATTACHMENT_TYPES = new Set([
   "text/csv",
   "application/zip",
 ]);
+const PREVIEWABLE_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
 
 interface ComposerAttachment {
   id: string;
@@ -133,9 +141,34 @@ interface ComposerAttachment {
 }
 
 function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getFileDisplayName(file: File): string {
+  const name = typeof file.name === "string" ? file.name.trim() : "";
+  return name || "attachment";
+}
+
+function getFileMimeType(file: File): string {
+  return typeof file.type === "string" && file.type.trim()
+    ? file.type.trim()
+    : "application/octet-stream";
+}
+
+function makeClientId(prefix: string): string {
+  const cryptoApi = typeof globalThis.crypto === "object" ? globalThis.crypto : undefined;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return `${prefix}-${cryptoApi.randomUUID()}`;
+  }
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    const values = new Uint32Array(2);
+    cryptoApi.getRandomValues(values);
+    return `${prefix}-${Date.now().toString(36)}-${values[0].toString(36)}-${values[1].toString(36)}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -666,10 +699,7 @@ function loadStoredTerminals(projectId: string, worktreeId?: string): {
 }
 
 function makeTerminalId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `terminal-${crypto.randomUUID()}`;
-  }
-  return `terminal-${Date.now()}`;
+  return makeClientId("terminal");
 }
 
 function getRunStatusText(
@@ -1521,15 +1551,23 @@ function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] })
   if (!attachments || attachments.length === 0) return null;
   return (
     <div className="mb-2 flex flex-wrap justify-end gap-2">
-      {attachments.map((attachment) => (
+      {attachments.map((attachment, index) => {
+        const id = normalizeMarkdownText(attachment.id) || `attachment-${index}`;
+        const name = normalizeMarkdownText(attachment.name) || "attachment";
+        const mimeType = normalizeMarkdownText(attachment.mimeType);
+        const path = normalizeMarkdownText(attachment.path);
+        const url = normalizeMarkdownText(attachment.url);
+        const size = typeof attachment.size === "number" ? attachment.size : Number.NaN;
+        const canPreview = PREVIEWABLE_IMAGE_TYPES.has(mimeType);
+        return (
         <div
-          key={attachment.id}
+          key={id}
           className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
-          title={attachment.path}
+          title={path}
         >
-          {attachment.isImage && attachment.url ? (
+          {attachment.isImage && url && canPreview ? (
             <img
-              src={attachment.url}
+              src={url}
               alt=""
               className="h-8 w-8 shrink-0 rounded object-cover"
             />
@@ -1537,13 +1575,16 @@ function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] })
             <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
           )}
           <div className="min-w-0">
-            <div className="truncate text-foreground">{attachment.name}</div>
-            <div className="text-[10px] text-muted-foreground">
-              {formatBytes(attachment.size)}
-            </div>
+            <div className="truncate text-foreground">{name}</div>
+            {Number.isFinite(size) ? (
+              <div className="text-[10px] text-muted-foreground">
+                {formatBytes(size)}
+              </div>
+            ) : null}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -2152,27 +2193,31 @@ export function SessionView({
       const next = [...prev];
       let totalSize = next.reduce((sum, item) => sum + item.file.size, 0);
       for (const file of nextFiles) {
+        const fileName = getFileDisplayName(file);
+        const mimeType = getFileMimeType(file);
         if (next.length >= MAX_ATTACHMENT_COUNT) {
           setAttachmentError(`Attach up to ${MAX_ATTACHMENT_COUNT} files`);
           break;
         }
-        if (!SUPPORTED_ATTACHMENT_TYPES.has(file.type)) {
-          setAttachmentError(`${file.name} is not a supported file type`);
+        if (!SUPPORTED_ATTACHMENT_TYPES.has(mimeType)) {
+          setAttachmentError(`${fileName} is not a supported file type`);
           continue;
         }
         if (file.size > MAX_ATTACHMENT_SIZE) {
-          setAttachmentError(`${file.name} is larger than 10 MB`);
+          setAttachmentError(`${fileName} is larger than 15 MB`);
           continue;
         }
         if (totalSize + file.size > MAX_ATTACHMENT_TOTAL_SIZE) {
-          setAttachmentError("Attachments are larger than 25 MB total");
+          setAttachmentError("Attachments are larger than 35 MB total");
           break;
         }
         totalSize += file.size;
         next.push({
-          id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
+          id: `${fileName}-${file.size}-${file.lastModified}-${makeClientId("attachment")}`,
           file,
-          previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+          previewUrl: PREVIEWABLE_IMAGE_TYPES.has(mimeType)
+            ? URL.createObjectURL(file)
+            : undefined,
         });
       }
       return next;
@@ -2191,8 +2236,8 @@ export function SessionView({
     if (composerAttachments.length === 0) return [];
     const uploads = await Promise.all(
       composerAttachments.map(async ({ file }) => ({
-        name: file.name,
-        mimeType: file.type,
+        name: getFileDisplayName(file),
+        mimeType: getFileMimeType(file),
         size: file.size,
         data: await fileToBase64(file),
       }))
@@ -3117,7 +3162,9 @@ export function SessionView({
                   />
                   {composerAttachments.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {composerAttachments.map((attachment) => (
+                      {composerAttachments.map((attachment) => {
+                        const fileName = getFileDisplayName(attachment.file);
+                        return (
                         <div
                           key={attachment.id}
                           className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
@@ -3132,7 +3179,7 @@ export function SessionView({
                             <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                           )}
                           <div className="min-w-0">
-                            <div className="truncate text-foreground">{attachment.file.name}</div>
+                            <div className="truncate text-foreground">{fileName}</div>
                             <div className="text-[10px] text-muted-foreground">
                               {formatBytes(attachment.file.size)}
                             </div>
@@ -3146,7 +3193,8 @@ export function SessionView({
                             <X className="h-3 w-3" />
                           </button>
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                   {attachmentError && (

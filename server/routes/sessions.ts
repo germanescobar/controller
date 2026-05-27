@@ -60,11 +60,13 @@ function isBenignProviderStderrLine(line: string): boolean {
 }
 
 const MAX_ATTACHMENT_COUNT = 5;
-const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
-const MAX_ATTACHMENT_TOTAL_SIZE = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_SIZE = 35 * 1024 * 1024;
 const SUPPORTED_ATTACHMENT_TYPES = new Set([
   "image/png",
   "image/jpeg",
+  "image/heic",
+  "image/heif",
   "image/gif",
   "image/webp",
   "application/pdf",
@@ -265,12 +267,12 @@ sessionsRouter.post("/:projectId/attachments", async (req, res) => {
         return;
       }
       if (size > MAX_ATTACHMENT_SIZE) {
-        res.status(400).json({ error: `${name} is larger than 10 MB` });
+        res.status(400).json({ error: `${name} is larger than 15 MB` });
         return;
       }
       totalSize += size;
       if (totalSize > MAX_ATTACHMENT_TOTAL_SIZE) {
-        res.status(400).json({ error: "Attachments are larger than 25 MB total" });
+        res.status(400).json({ error: "Attachments are larger than 35 MB total" });
         return;
       }
       if (typeof upload.size === "number" && upload.size !== size) {

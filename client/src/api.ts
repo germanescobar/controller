@@ -208,8 +208,18 @@ function withWorktree(worktreeId?: string, extra?: URLSearchParams): string {
 
 async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<void> {
   if (res.ok) return;
-  const body = await res.json().catch(() => ({})) as { error?: string };
-  throw new Error(body.error ?? fallbackMessage);
+  const body = await res.json().catch(() => ({})) as { error?: unknown; message?: unknown };
+  const rawMessage = body.error ?? body.message;
+  if (typeof rawMessage === "string" && rawMessage.trim()) {
+    throw new Error(rawMessage);
+  }
+  if (rawMessage && typeof rawMessage === "object") {
+    const nested = rawMessage as Record<string, unknown>;
+    if (typeof nested.message === "string" && nested.message.trim()) {
+      throw new Error(nested.message);
+    }
+  }
+  throw new Error(fallbackMessage);
 }
 
 export async function fetchSessions(
