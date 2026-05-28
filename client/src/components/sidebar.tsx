@@ -342,9 +342,16 @@ export function Sidebar({
                       </span>
                     ) : (
                       project.worktrees.map((worktree) => {
-                        const visibleSessionCount =
+                        const storedVisibleSessionCount =
                           visibleSessionCounts[worktreeVisibilityKey(project.id, worktree.id)] ??
                           SESSION_BATCH_SIZE;
+                        const activeSessionIndex = worktree.sessions.findIndex(
+                          (session) => session.id === activeSessionId
+                        );
+                        const visibleSessionCount =
+                          activeSessionIndex >= 0
+                            ? Math.max(storedVisibleSessionCount, activeSessionIndex + 1)
+                            : storedVisibleSessionCount;
                         const visibleSessions = worktree.sessions.slice(0, visibleSessionCount);
                         const remainingSessionCount =
                           worktree.sessions.length - visibleSessions.length;
