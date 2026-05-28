@@ -38,6 +38,11 @@ export interface Worktree {
   setupLogPath?: string;
 }
 
+export interface TerminalTab {
+  id: string;
+  label: string;
+}
+
 export type WorktreeCreateEvent =
   | { type: "started"; name: string; branch: string }
   | { type: "log"; stream: "stdout" | "stderr"; text: string }
@@ -514,6 +519,37 @@ export async function fetchBranchDiff(
 export async function fetchWorktrees(projectId: string): Promise<Worktree[]> {
   const res = await fetch(`${BASE}/projects/${projectId}/worktrees`);
   return res.json();
+}
+
+export async function fetchTerminalTabs(
+  projectId: string,
+  worktreeId?: string
+): Promise<TerminalTab[]> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/terminal-tabs${withWorktree(worktreeId)}`
+  );
+  await throwIfNotOk(res, "Failed to fetch terminal tabs");
+  const body = (await res.json()) as { tabs?: unknown };
+  return Array.isArray(body.tabs) ? (body.tabs as TerminalTab[]) : [];
+}
+
+export async function updateTerminalTabs(
+  projectId: string,
+  tabs: TerminalTab[],
+  worktreeId?: string,
+  options?: { removeTerminalId?: string }
+): Promise<TerminalTab[]> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/terminal-tabs${withWorktree(worktreeId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tabs, removeTerminalId: options?.removeTerminalId }),
+    }
+  );
+  await throwIfNotOk(res, "Failed to update terminal tabs");
+  const body = (await res.json()) as { tabs?: unknown };
+  return Array.isArray(body.tabs) ? (body.tabs as TerminalTab[]) : tabs;
 }
 
 export async function deleteWorktree(
