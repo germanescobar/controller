@@ -12,6 +12,7 @@ import {
   fetchBranchDiff,
   fetchGitDiff,
   fetchModels,
+  fetchTerminalTabs,
   fetchAgentProviders,
   fetchSession,
   fetchSessionRuntime,
@@ -23,7 +24,9 @@ import {
   submitSessionUserInput,
   type Project,
   uploadSessionAttachments,
+  updateTerminalTabs,
   type Worktree,
+  type TerminalTab,
   type AgentEvent,
   type AgentProviderInfo,
   type Model,
@@ -643,11 +646,6 @@ function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
 const COMPOSER_MAX_LINES = 5;
 const DEFAULT_TERMINAL_ID = "default";
 
-interface TerminalTab {
-  id: string;
-  label: string;
-}
-
 const DEFAULT_TERMINAL_TAB: TerminalTab = {
   id: DEFAULT_TERMINAL_ID,
   label: "Terminal 1",
@@ -673,6 +671,22 @@ function normalizeTerminalTabs(value: unknown): TerminalTab[] {
     .filter((tab): tab is TerminalTab => Boolean(tab));
 
   return tabs.length > 0 ? tabs : [DEFAULT_TERMINAL_TAB];
+}
+
+function terminalTabsEqual(a: TerminalTab[], b: TerminalTab[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((tab, index) => tab.id === b[index]?.id && tab.label === b[index]?.label)
+  );
+}
+
+function mergeTerminalTabs(a: TerminalTab[], b: TerminalTab[]): TerminalTab[] {
+  const seen = new Set<string>();
+  return [...a, ...b].filter((tab) => {
+    if (seen.has(tab.id)) return false;
+    seen.add(tab.id);
+    return true;
+  });
 }
 
 function loadStoredTerminals(projectId: string, worktreeId?: string): {
@@ -1690,9 +1704,6 @@ export function SessionView({
   const initialTerminalState = loadStoredTerminals(projectId, worktreeId);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(initialTerminalState.tabs);
   const [activeTerminalId, setActiveTerminalId] = useState<string>(initialTerminalState.activeId);
-  const [loadedTerminalStorageKey, setLoadedTerminalStorageKey] = useState(() =>
-    buildTerminalStorageKey(projectId, worktreeId)
-  );
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<"agent" | "terminal" | "changes">("agent");
   const [rightTab, setRightTab] = useState<"terminal" | "changes">("terminal");
@@ -1707,6 +1718,7 @@ export function SessionView({
   const stickToBottomRef = useRef(true);
   const terminalRef = useRef<TerminalHandle | null>(null);
   const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
+  const terminalTabsSavePendingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
@@ -1770,11 +1782,43 @@ export function SessionView({
   const terminalStorageKey = buildTerminalStorageKey(projectId, worktreeId);
 
   useEffect(() => {
+    let cancelled = false;
     const stored = loadStoredTerminals(projectId, worktreeId);
     setTerminalTabs(stored.tabs);
     setActiveTerminalId(stored.activeId);
-    setLoadedTerminalStorageKey(buildTerminalStorageKey(projectId, worktreeId));
     terminalRef.current = terminalRefs.current[stored.activeId] ?? null;
+
+    fetchTerminalTabs(projectId, worktreeId)
+      .then((serverTabs) => {
+        if (cancelled) return;
+        const normalizedServerTabs = normalizeTerminalTabs(serverTabs);
+        const shouldMigrateLocalTabs =
+          normalizedServerTabs.length === 1 &&
+          normalizedServerTabs[0].id === DEFAULT_TERMINAL_ID &&
+          stored.tabs.some((tab) => tab.id !== DEFAULT_TERMINAL_ID);
+        const nextTabs = shouldMigrateLocalTabs
+          ? mergeTerminalTabs(normalizedServerTabs, stored.tabs)
+          : normalizedServerTabs;
+
+        setTerminalTabs(nextTabs);
+        setActiveTerminalId((current) =>
+          nextTabs.some((tab) => tab.id === current) ? current : nextTabs[0].id
+        );
+
+        if (shouldMigrateLocalTabs) {
+          terminalTabsSavePendingRef.current = true;
+          updateTerminalTabs(projectId, nextTabs, worktreeId).finally(() => {
+            terminalTabsSavePendingRef.current = false;
+          });
+        }
+      })
+      .catch(() => {
+        // Keep the local fallback when the shared terminal registry is unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [projectId, worktreeId]);
 
   useEffect(() => {
@@ -1782,14 +1826,60 @@ export function SessionView({
   }, [activeTerminalId, terminalTabs]);
 
   useEffect(() => {
-    if (loadedTerminalStorageKey !== terminalStorageKey) return;
     try {
       window.localStorage.setItem(
         terminalStorageKey,
         JSON.stringify({ tabs: terminalTabs, activeId: activeTerminalId })
       );
     } catch {}
-  }, [loadedTerminalStorageKey, terminalStorageKey, terminalTabs, activeTerminalId]);
+  }, [terminalStorageKey, terminalTabs, activeTerminalId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncTerminalTabs = async () => {
+      if (terminalTabsSavePendingRef.current) return;
+      try {
+        const nextTabs = normalizeTerminalTabs(await fetchTerminalTabs(projectId, worktreeId));
+        if (cancelled) return;
+        setTerminalTabs((current) => (terminalTabsEqual(current, nextTabs) ? current : nextTabs));
+        setActiveTerminalId((current) =>
+          nextTabs.some((tab) => tab.id === current) ? current : nextTabs[0].id
+        );
+      } catch {
+        // Polling is best-effort; terminal tabs still work locally if this fails.
+      }
+    };
+
+    const interval = window.setInterval(syncTerminalTabs, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [projectId, worktreeId]);
+
+  const saveSharedTerminalTabs = (
+    tabs: TerminalTab[],
+    options?: { removeTerminalId?: string }
+  ) => {
+    terminalTabsSavePendingRef.current = true;
+    updateTerminalTabs(projectId, tabs, worktreeId, options)
+      .then((serverTabs) => {
+        const normalizedTabs = normalizeTerminalTabs(serverTabs);
+        setTerminalTabs((current) =>
+          terminalTabsEqual(current, normalizedTabs) ? current : normalizedTabs
+        );
+        setActiveTerminalId((current) =>
+          normalizedTabs.some((tab) => tab.id === current) ? current : normalizedTabs[0].id
+        );
+      })
+      .catch(() => {
+        // The local tab list remains usable; the next successful save/poll will converge.
+      })
+      .finally(() => {
+        terminalTabsSavePendingRef.current = false;
+      });
+  };
 
   const handleTerminalRef = (terminalId: string, handle: TerminalHandle | null) => {
     terminalRefs.current[terminalId] = handle;
@@ -1807,7 +1897,9 @@ export function SessionView({
       id: makeTerminalId(),
       label: `Terminal ${nextNumber}`,
     };
-    setTerminalTabs((prev) => [...prev, nextTab]);
+    const nextTabs = [...terminalTabs, nextTab];
+    setTerminalTabs(nextTabs);
+    saveSharedTerminalTabs(nextTabs);
     setActiveTerminalId(nextTab.id);
     setRightTab("terminal");
     if (mobilePanel === "changes") setMobilePanel("terminal");
@@ -1816,17 +1908,15 @@ export function SessionView({
   const handleCloseTerminal = (terminalId: string) => {
     if (terminalTabs.length <= 1) return;
     terminalRefs.current[terminalId]?.close();
-    setTerminalTabs((prev) => {
-      if (prev.length <= 1) return prev;
-      const closingIndex = prev.findIndex((tab) => tab.id === terminalId);
-      if (closingIndex === -1) return prev;
-      const next = prev.filter((tab) => tab.id !== terminalId);
-      if (activeTerminalId === terminalId) {
-        const nextActive = next[Math.min(closingIndex, next.length - 1)] ?? next[0];
-        setActiveTerminalId(nextActive.id);
-      }
-      return next;
-    });
+    const closingIndex = terminalTabs.findIndex((tab) => tab.id === terminalId);
+    if (closingIndex === -1) return;
+    const nextTabs = terminalTabs.filter((tab) => tab.id !== terminalId);
+    if (activeTerminalId === terminalId) {
+      const nextActive = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? nextTabs[0];
+      setActiveTerminalId(nextActive.id);
+    }
+    setTerminalTabs(nextTabs);
+    saveSharedTerminalTabs(nextTabs, { removeTerminalId: terminalId });
     terminalRefs.current[terminalId] = null;
   };
 

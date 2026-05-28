@@ -61,6 +61,14 @@ function ensureTmuxSession(sessionName: string, cwd: string): void {
   execFileSync("tmux", ["set-option", "-t", sessionName, "status", "off"], {
     stdio: "ignore",
   });
+
+  execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "on"], {
+    stdio: "ignore",
+  });
+
+  execFileSync("tmux", ["set-option", "-t", sessionName, "history-limit", "50000"], {
+    stdio: "ignore",
+  });
 }
 
 class PtyManager {

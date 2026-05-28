@@ -13,12 +13,18 @@ import {
   isMainWorktreeName,
   nextPortOffset,
   removeWorktree,
+  resolveWorktree,
   updateWorktree,
 } from "../lib/worktrees.js";
 import { projectWorktreesDir, worktreePath } from "../lib/paths.js";
 import { getSessions } from "../lib/sessions.js";
 import { getSessionRuntime } from "../lib/session-runtime.js";
 import { ptyManager } from "../lib/pty-manager.js";
+import {
+  getTerminalTabs,
+  removeTerminalTabsForWorktree,
+  setTerminalTabs,
+} from "../lib/terminal-tabs.js";
 
 export const worktreesRouter = Router();
 
@@ -34,6 +40,15 @@ function sseHeaders(res: Response) {
 
 function sseSend(res: Response, obj: Record<string, unknown>) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
+}
+
+function getQueryString(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const first = value.find((item): item is string => typeof item === "string");
+    return first;
+  }
+  return undefined;
 }
 
 worktreesRouter.get("/:projectId/branches", async (req, res) => {
@@ -62,6 +77,45 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   }
   const worktrees = await getProjectWorktrees(project.id);
   res.json(worktrees);
+});
+
+worktreesRouter.get("/:projectId/terminal-tabs", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+
+  const tabs = await getTerminalTabs(project.id, worktree.id);
+  res.json({ tabs });
+});
+
+worktreesRouter.put("/:projectId/terminal-tabs", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+
+  const body = req.body as { tabs?: unknown; removeTerminalId?: unknown };
+  const removeTerminalId =
+    typeof body.removeTerminalId === "string" ? body.removeTerminalId : undefined;
+  const tabs = await setTerminalTabs(project.id, worktree.id, body.tabs, {
+    removeTerminalId,
+  });
+  res.json({ tabs });
 });
 
 worktreesRouter.get(
@@ -316,6 +370,7 @@ worktreesRouter.delete(
     }
 
     await removeWorktree(worktree.id);
+    await removeTerminalTabsForWorktree(project.id, worktree.id);
     res.json({ ok: true });
   }
 );

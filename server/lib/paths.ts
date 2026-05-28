@@ -23,3 +23,7 @@ export function worktreePath(projectId: string, name: string): string {
 export function worktreesRegistryFile(): string {
   return path.join(orchestratorHome(), "worktrees.json");
 }
+
+export function terminalTabsRegistryFile(): string {
+  return path.join(orchestratorHome(), "terminal-tabs.json");
+}

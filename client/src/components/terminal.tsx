@@ -142,6 +142,20 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       let reconnectTimer: number | null = null;
       let disposed = false;
 
+      const fitAndSendResize = () => {
+        const fitAddon = fitRef.current;
+        const ws = wsRef.current;
+        if (!fitAddon || !ws || ws.readyState !== WebSocket.OPEN) return;
+        fitAddon.fit();
+        ws.send(
+          JSON.stringify({
+            type: "resize",
+            cols: term.cols,
+            rows: term.rows,
+          })
+        );
+      };
+
       const connect = () => {
         if (disposed) return;
         const ws = new WebSocket(wsUrl);
@@ -159,17 +173,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
           );
           hasAttachedRef.current = true;
 
-          const fitAddon = fitRef.current;
-          if (fitAddon) {
-            fitAddon.fit();
-            ws.send(
-              JSON.stringify({
-                type: "resize",
-                cols: term.cols,
-                rows: term.rows,
-              })
-            );
-          }
+          fitAndSendResize();
         };
 
         ws.onmessage = (event) => {
@@ -178,6 +182,8 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
             term.write(msg.data);
           } else if (msg.type === "error") {
             term.writeln(`\x1b[31mError: ${msg.message}\x1b[0m`);
+          } else if (msg.type === "attached") {
+            fitAndSendResize();
           }
         };
 
