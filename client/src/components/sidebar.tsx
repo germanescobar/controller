@@ -40,6 +40,8 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 
+const SESSION_BATCH_SIZE = 5;
+
 interface SidebarProps {
   projects: Project[];
   activeProjectId: string | null;
@@ -108,6 +110,10 @@ function SessionProviderIcon({
   return <MessageSquare className={className} />;
 }
 
+function worktreeVisibilityKey(projectId: string, worktreeId: string): string {
+  return `${projectId}:${worktreeId}`;
+}
+
 export function Sidebar({
   projects,
   activeProjectId,
@@ -126,6 +132,7 @@ export function Sidebar({
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
   const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(new Set());
+  const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null);
   const [confirmDeleteWorktree, setConfirmDeleteWorktree] = useState<
     { projectId: string; worktreeId: string; name: string } | null
@@ -216,6 +223,14 @@ export function Sidebar({
           : p
       )
     );
+  };
+
+  const showMoreSessions = (projectId: string, worktreeId: string) => {
+    const key = worktreeVisibilityKey(projectId, worktreeId);
+    setVisibleSessionCounts((prev) => ({
+      ...prev,
+      [key]: (prev[key] ?? SESSION_BATCH_SIZE) + SESSION_BATCH_SIZE,
+    }));
   };
 
   const confirmDeleteProject = async () => {
@@ -326,139 +341,159 @@ export function Sidebar({
                         No worktrees
                       </span>
                     ) : (
-                      project.worktrees.map((worktree) => (
-                        <div key={worktree.id}>
-                          <div className="group/worktree flex items-center">
-                            <button
-                              onClick={() => toggleWorktree(project.id, worktree.id)}
-                              className={cn(
-                                "flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors min-w-0",
-                                worktree.id === activeWorktreeId
-                                  ? "text-sidebar-foreground"
-                                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
-                              )}
-                            >
-                              {worktree.isExpanded ? (
-                                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              ) : (
-                                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              )}
-                              <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <span className="truncate">
-                                {worktree.name}
-                                {worktree.setupExitCode != null && worktree.setupExitCode !== 0 && (
-                                  <span className="ml-1 text-destructive" title="Setup failed">!</span>
+                      project.worktrees.map((worktree) => {
+                        const visibleSessionCount =
+                          visibleSessionCounts[worktreeVisibilityKey(project.id, worktree.id)] ??
+                          SESSION_BATCH_SIZE;
+                        const visibleSessions = worktree.sessions.slice(0, visibleSessionCount);
+                        const remainingSessionCount =
+                          worktree.sessions.length - visibleSessions.length;
+
+                        return (
+                          <div key={worktree.id}>
+                            <div className="group/worktree flex items-center">
+                              <button
+                                onClick={() => toggleWorktree(project.id, worktree.id)}
+                                className={cn(
+                                  "flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors min-w-0",
+                                  worktree.id === activeWorktreeId
+                                    ? "text-sidebar-foreground"
+                                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
                                 )}
-                              </span>
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onNewThread(project.id, worktree.id);
-                              }}
-                              title="New session"
-                              className="opacity-0 group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
-                            >
-                              <PenSquare className="h-3.5 w-3.5" />
-                            </button>
-                            {!worktree.isMain && (
+                              >
+                                {worktree.isExpanded ? (
+                                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                ) : (
+                                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                )}
+                                <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                <span className="truncate">
+                                  {worktree.name}
+                                  {worktree.setupExitCode != null && worktree.setupExitCode !== 0 && (
+                                    <span className="ml-1 text-destructive" title="Setup failed">!</span>
+                                  )}
+                                </span>
+                              </button>
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setConfirmDeleteWorktree({
-                                    projectId: project.id,
-                                    worktreeId: worktree.id,
-                                    name: worktree.name,
-                                  });
+                                  onNewThread(project.id, worktree.id);
                                 }}
-                                title="Delete worktree"
-                                className="opacity-0 group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                                title="New session"
+                                className="opacity-0 group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
+                                <PenSquare className="h-3.5 w-3.5" />
                               </button>
-                            )}
-                          </div>
-
-                          {worktree.isExpanded && (
-                            <div className="ml-4 flex flex-col">
-                              {worktree.sessions.length === 0 ? (
-                                <span className="px-4 py-1.5 text-xs text-muted-foreground">
-                                  No sessions
-                                </span>
-                              ) : (
-                                worktree.sessions.map((session) => (
-                                  <div key={session.id} className="group/session flex items-center">
-                                    <button
-                                      onClick={() =>
-                                        onSelectSession(project.id, session.id, worktree.id)
-                                      }
-                                      className={cn(
-                                        "flex flex-1 items-center justify-between gap-3 rounded-md px-4 py-1.5 text-sm transition-colors min-w-0",
-                                        session.id === activeSessionId
-                                          ? "bg-sidebar-accent text-sidebar-foreground"
-                                          : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
-                                      )}
-                                    >
-                                      <span className="flex min-w-0 flex-1 items-center gap-2 truncate pr-2">
-                                        <SessionProviderIcon
-                                          provider={session.provider}
-                                          className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                                        />
-                                        <span className="truncate">
-                                          {session.title || session.id.slice(0, 8)}
-                                        </span>
-                                        {completedSessions?.has(session.id) && (
-                                          <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" />
-                                        )}
-                                      </span>
-                                      {activeSessionIds.has(session.id) ? (
-                                        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground group-hover/session:hidden" />
-                                      ) : (
-                                        <span className="shrink-0 text-xs text-muted-foreground group-hover/session:hidden">
-                                          {formatTime(session.lastActiveAt)}
-                                        </span>
-                                      )}
-                                      <span
-                                        role="button"
-                                        tabIndex={0}
-                                        onClick={async (e) => {
-                                          e.stopPropagation();
-                                          setArchivedIds((prev) => new Set(prev).add(session.id));
-                                          setProjectData((prev) =>
-                                            prev.map((p) =>
-                                              p.id === project.id
-                                                ? {
-                                                    ...p,
-                                                    worktrees: p.worktrees.map((w) =>
-                                                      w.id === worktree.id
-                                                        ? {
-                                                            ...w,
-                                                            sessions: w.sessions.filter(
-                                                              (s) => s.id !== session.id
-                                                            ),
-                                                          }
-                                                        : w
-                                                    ),
-                                                  }
-                                                : p
-                                            )
-                                          );
-                                          toast.success("Session archived");
-                                          await archiveSession(project.id, session.id, worktree.id);
-                                        }}
-                                        className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
-                                        title="Archive session"
-                                      >
-                                        <Archive className="h-3.5 w-3.5" />
-                                      </span>
-                                    </button>
-                                  </div>
-                                ))
+                              {!worktree.isMain && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmDeleteWorktree({
+                                      projectId: project.id,
+                                      worktreeId: worktree.id,
+                                      name: worktree.name,
+                                    });
+                                  }}
+                                  title="Delete worktree"
+                                  className="opacity-0 group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
                               )}
                             </div>
-                          )}
-                        </div>
-                      ))
+
+                            {worktree.isExpanded && (
+                              <div className="ml-4 flex flex-col">
+                                {worktree.sessions.length === 0 ? (
+                                  <span className="px-4 py-1.5 text-xs text-muted-foreground">
+                                    No sessions
+                                  </span>
+                                ) : (
+                                  <>
+                                    {visibleSessions.map((session) => (
+                                      <div key={session.id} className="group/session flex items-center">
+                                        <button
+                                          onClick={() =>
+                                            onSelectSession(project.id, session.id, worktree.id)
+                                          }
+                                          className={cn(
+                                            "flex flex-1 items-center justify-between gap-3 rounded-md px-4 py-1.5 text-sm transition-colors min-w-0",
+                                            session.id === activeSessionId
+                                              ? "bg-sidebar-accent text-sidebar-foreground"
+                                              : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
+                                          )}
+                                        >
+                                          <span className="flex min-w-0 flex-1 items-center gap-2 truncate pr-2">
+                                            <SessionProviderIcon
+                                              provider={session.provider}
+                                              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                                            />
+                                            <span className="truncate">
+                                              {session.title || session.id.slice(0, 8)}
+                                            </span>
+                                            {completedSessions?.has(session.id) && (
+                                              <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" />
+                                            )}
+                                          </span>
+                                          {activeSessionIds.has(session.id) ? (
+                                            <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground group-hover/session:hidden" />
+                                          ) : (
+                                            <span className="shrink-0 text-xs text-muted-foreground group-hover/session:hidden">
+                                              {formatTime(session.lastActiveAt)}
+                                            </span>
+                                          )}
+                                          <span
+                                            role="button"
+                                            tabIndex={0}
+                                            onClick={async (e) => {
+                                              e.stopPropagation();
+                                              setArchivedIds((prev) => new Set(prev).add(session.id));
+                                              setProjectData((prev) =>
+                                                prev.map((p) =>
+                                                  p.id === project.id
+                                                    ? {
+                                                        ...p,
+                                                        worktrees: p.worktrees.map((w) =>
+                                                          w.id === worktree.id
+                                                            ? {
+                                                                ...w,
+                                                                sessions: w.sessions.filter(
+                                                                  (s) => s.id !== session.id
+                                                                ),
+                                                              }
+                                                            : w
+                                                        ),
+                                                      }
+                                                    : p
+                                                )
+                                              );
+                                              toast.success("Session archived");
+                                              await archiveSession(project.id, session.id, worktree.id);
+                                            }}
+                                            className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
+                                            title="Archive session"
+                                          >
+                                            <Archive className="h-3.5 w-3.5" />
+                                          </span>
+                                        </button>
+                                      </div>
+                                    ))}
+                                    {remainingSessionCount > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => showMoreSessions(project.id, worktree.id)}
+                                        className="mx-2 mt-1 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                                      >
+                                        Show more
+                                      </button>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 )}
