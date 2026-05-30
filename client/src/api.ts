@@ -22,6 +22,8 @@ export interface Session {
   createdAt: string;
   lastActiveAt: string;
   status: string;
+  focusPinnedAt?: string;
+  focusDoneAt?: string;
 }
 
 export interface Worktree {
@@ -270,6 +272,44 @@ export async function archiveSession(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/archive${withWorktree(worktreeId)}`,
     { method: "POST" }
   );
+}
+
+async function updateSessionFocus(
+  projectId: string,
+  sessionId: string,
+  action: "focus-pin" | "focus-unpin" | "focus-done",
+  worktreeId?: string
+): Promise<Session> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/${action}${withWorktree(worktreeId)}`,
+    { method: "POST" }
+  );
+  await throwIfNotOk(res, "Failed to update focus queue");
+  return res.json();
+}
+
+export async function pinSessionFocus(
+  projectId: string,
+  sessionId: string,
+  worktreeId?: string
+): Promise<Session> {
+  return updateSessionFocus(projectId, sessionId, "focus-pin", worktreeId);
+}
+
+export async function unpinSessionFocus(
+  projectId: string,
+  sessionId: string,
+  worktreeId?: string
+): Promise<Session> {
+  return updateSessionFocus(projectId, sessionId, "focus-unpin", worktreeId);
+}
+
+export async function markSessionFocusDone(
+  projectId: string,
+  sessionId: string,
+  worktreeId?: string
+): Promise<Session> {
+  return updateSessionFocus(projectId, sessionId, "focus-done", worktreeId);
 }
 
 export async function fetchEvents(

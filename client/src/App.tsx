@@ -1,8 +1,8 @@
 import { Component, useState, useEffect, useCallback, type ReactNode } from "react";
 import { Menu, X } from "lucide-react";
 import { toast } from "sonner";
-import { fetchProjects, type Project, type Worktree } from "./api.ts";
-import { Sidebar } from "./components/sidebar.tsx";
+import { fetchProjects, markSessionFocusDone, type Project, type Worktree } from "./api.ts";
+import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
 import { SettingsDialog } from "./components/settings-dialog.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
@@ -74,6 +74,9 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set());
+  const [focusMode, setFocusMode] = useState(false);
+  const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
+  const [focusRefreshKey, setFocusRefreshKey] = useState(0);
 
   const setView = (v: View) => {
     setViewState(v);
@@ -87,6 +90,35 @@ export function App() {
   useEffect(loadProjects, [loadProjects]);
 
   const closeSidebar = () => setSidebarOpen(false);
+
+  const handleFocusQueueChange = useCallback((queue: FocusQueueItem[]) => {
+    setFocusQueue(queue);
+  }, []);
+
+  const openFocusItem = useCallback((item: FocusQueueItem) => {
+    setActiveProjectId(item.projectId);
+    setView({
+      page: "session",
+      projectId: item.projectId,
+      worktreeId: item.worktreeId,
+      sessionId: item.session.id,
+    });
+    closeSidebar();
+  }, []);
+
+  const handleFocusModeToggle = useCallback(() => {
+    if (focusMode) {
+      setFocusMode(false);
+      return;
+    }
+    const firstItem = focusQueue[0];
+    if (!firstItem) {
+      toast.info("Pin a session to use focus mode");
+      return;
+    }
+    setFocusMode(true);
+    openFocusItem(firstItem);
+  }, [focusMode, focusQueue, openFocusItem]);
 
   const handleSelectProject = (projectId: string) => {
     setActiveProjectId(projectId);
@@ -134,6 +166,69 @@ export function App() {
   };
 
   const activeView = view;
+  const currentFocusIndex =
+    activeView.page === "session" && activeView.sessionId
+      ? focusQueue.findIndex(
+          (item) =>
+            item.projectId === activeView.projectId &&
+            item.worktreeId === (activeView.worktreeId ?? item.worktreeId) &&
+            item.session.id === activeView.sessionId
+        )
+      : -1;
+  const focusPosition =
+    currentFocusIndex >= 0
+      ? { current: currentFocusIndex + 1, total: focusQueue.length }
+      : focusMode
+        ? { current: 0, total: focusQueue.length }
+        : undefined;
+  const currentFocusItem = currentFocusIndex >= 0 ? focusQueue[currentFocusIndex] : null;
+
+  const handleFocusSkip = () => {
+    if (focusQueue.length === 0) {
+      setFocusMode(false);
+      toast.info("Focus queue is empty");
+      return;
+    }
+    const nextIndex =
+      currentFocusIndex >= 0 ? (currentFocusIndex + 1) % focusQueue.length : 0;
+    openFocusItem(focusQueue[nextIndex]);
+  };
+
+  const handleFocusDone = async () => {
+    if (activeView.page !== "session" || !activeView.sessionId) return;
+    const projectId = activeView.projectId;
+    const worktreeId = currentFocusItem?.worktreeId ?? activeView.worktreeId;
+    const sessionId = activeView.sessionId;
+
+    try {
+      await markSessionFocusDone(projectId, sessionId, worktreeId);
+      const nextQueue = focusQueue.filter(
+        (item) =>
+          !(
+            item.projectId === projectId &&
+            item.worktreeId === worktreeId &&
+            item.session.id === sessionId
+          )
+      );
+      setFocusQueue(nextQueue);
+      setFocusRefreshKey((key) => key + 1);
+
+      if (nextQueue.length === 0) {
+        setFocusMode(false);
+        toast.success("Focus queue complete");
+        return;
+      }
+
+      const nextIndex =
+        currentFocusIndex >= 0
+          ? currentFocusIndex % nextQueue.length
+          : 0;
+      openFocusItem(nextQueue[nextIndex]);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+    }
+  };
+
   const sessionViewKey =
     activeView.page === "session"
       ? `${activeView.projectId}:${activeView.worktreeId ?? "main"}`
@@ -179,6 +274,10 @@ export function App() {
             setSettingsOpen(true);
             closeSidebar();
           }}
+          onFocusQueueChange={handleFocusQueueChange}
+          focusMode={focusMode}
+          onFocusModeToggle={handleFocusModeToggle}
+          focusRefreshKey={focusRefreshKey}
         />
       </div>
 
@@ -269,6 +368,12 @@ export function App() {
                 },
               });
             }}
+            focusMode={focusMode}
+            focusPosition={focusPosition}
+            onFocusDone={handleFocusDone}
+            onFocusSkip={handleFocusSkip}
+            onFocusExit={() => setFocusMode(false)}
+            onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
           />
         )}
         </AppErrorBoundary>
