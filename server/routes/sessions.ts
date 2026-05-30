@@ -14,6 +14,7 @@ import {
   getSession,
   getEvents,
   archiveSession,
+  updateSessionFocus,
   saveSession,
   appendEvent,
   saveAttachment,
@@ -603,6 +604,8 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
+      focusPinnedAt: existing?.focusPinnedAt,
+      focusDoneAt: existing?.focusDoneAt,
     });
   }
 
@@ -872,6 +875,8 @@ async function streamCodexPlanSession(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
+      focusPinnedAt: existing?.focusPinnedAt,
+      focusDoneAt: existing?.focusDoneAt,
     });
   }
 
@@ -1244,6 +1249,41 @@ interface AgentUserInputQuestionForRoute {
   header: string;
   question: string;
 }
+
+function registerFocusActionRoute(
+  route: string,
+  action: "pin" | "unpin" | "done"
+) {
+  sessionsRouter.post(route, async (req, res) => {
+    const projectId = req.params.projectId as string;
+    const sessionId = req.params.sessionId as string;
+    const project = await getProject(projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const worktree = await resolveWorktree(
+      projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    const session = await updateSessionFocus(worktree.path, sessionId, action);
+    if (!session) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+
+    res.json(session);
+  });
+}
+
+registerFocusActionRoute("/:projectId/sessions/:sessionId/focus-pin", "pin");
+registerFocusActionRoute("/:projectId/sessions/:sessionId/focus-unpin", "unpin");
+registerFocusActionRoute("/:projectId/sessions/:sessionId/focus-done", "done");
 
 // Archive a session
 sessionsRouter.post(

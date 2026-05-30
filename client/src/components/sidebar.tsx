@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   PenSquare,
   FolderOpen,
@@ -13,6 +13,9 @@ import {
   MessageSquare,
   Archive,
   Loader2,
+  Pin,
+  PinOff,
+  CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -22,6 +25,9 @@ import {
   deleteProject,
   deleteWorktree,
   archiveSession,
+  pinSessionFocus,
+  unpinSessionFocus,
+  markSessionFocusDone,
   type Project,
   type Session,
   type Worktree,
@@ -56,6 +62,10 @@ interface SidebarProps {
   onNewWorktree: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSettings: () => void;
+  onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
+  focusMode?: boolean;
+  onFocusModeToggle?: () => void;
+  focusRefreshKey?: number;
 }
 
 interface WorktreeWithSessions extends Worktree {
@@ -66,6 +76,15 @@ interface WorktreeWithSessions extends Worktree {
 interface ProjectWithWorktrees extends Project {
   worktrees: WorktreeWithSessions[];
   isExpanded: boolean;
+}
+
+export interface FocusQueueItem {
+  projectId: string;
+  projectName: string;
+  worktreeId: string;
+  worktreeName: string;
+  session: Session;
+  active: boolean;
 }
 
 function CodexLogo({ className }: { className?: string }) {
@@ -127,6 +146,10 @@ export function Sidebar({
   onNewWorktree,
   onProjectsChanged,
   onSettings,
+  onFocusQueueChange,
+  focusMode = false,
+  onFocusModeToggle,
+  focusRefreshKey,
   completedSessions,
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
@@ -137,6 +160,33 @@ export function Sidebar({
   const [confirmDeleteWorktree, setConfirmDeleteWorktree] = useState<
     { projectId: string; worktreeId: string; name: string } | null
   >(null);
+
+  const focusQueue = useMemo<FocusQueueItem[]>(() => {
+    return projectData
+      .flatMap((project) =>
+        project.worktrees.flatMap((worktree) =>
+          worktree.sessions
+            .filter((session) => Boolean(session.focusPinnedAt))
+            .map((session) => ({
+              projectId: project.id,
+              projectName: project.name,
+              worktreeId: worktree.id,
+              worktreeName: worktree.name,
+              session,
+              active: activeSessionIds.has(session.id),
+            }))
+        )
+      )
+      .sort((a, b) => {
+        const aTime = new Date(a.session.focusPinnedAt ?? a.session.createdAt).getTime();
+        const bTime = new Date(b.session.focusPinnedAt ?? b.session.createdAt).getTime();
+        return aTime - bTime;
+      });
+  }, [activeSessionIds, projectData]);
+
+  useEffect(() => {
+    onFocusQueueChange?.(focusQueue);
+  }, [focusQueue, onFocusQueueChange]);
 
   const refreshActiveSessions = useCallback(
     async (data: ProjectWithWorktrees[]) => {
@@ -194,7 +244,7 @@ export function Sidebar({
 
   useEffect(() => {
     loadAll().catch(() => {});
-  }, [loadAll]);
+  }, [loadAll, focusRefreshKey]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0) return;
@@ -253,6 +303,36 @@ export function Sidebar({
     }
   };
 
+  const handleFocusPin = async (
+    projectId: string,
+    sessionId: string,
+    worktreeId: string,
+    pinned: boolean
+  ) => {
+    try {
+      if (pinned) {
+        await unpinSessionFocus(projectId, sessionId, worktreeId);
+        toast.success("Session removed from focus");
+      } else {
+        await pinSessionFocus(projectId, sessionId, worktreeId);
+        toast.success("Session added to focus");
+      }
+      await loadAll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+    }
+  };
+
+  const handleFocusDone = async (item: FocusQueueItem) => {
+    try {
+      await markSessionFocusDone(item.projectId, item.session.id, item.worktreeId);
+      toast.success("Session marked done");
+      await loadAll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+    }
+  };
+
   const formatTime = (iso: string) => {
     const diff = Date.now() - new Date(iso).getTime();
     const mins = Math.floor(diff / 60000);
@@ -278,6 +358,83 @@ export function Sidebar({
       <Separator />
 
       <ScrollArea className="flex-1 overflow-hidden px-3">
+        <div className="flex items-center justify-between py-3">
+          <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Pinned
+          </span>
+          {focusQueue.length > 0 ? (
+            <button
+              type="button"
+              onClick={onFocusModeToggle}
+              className={cn(
+                "rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                focusMode
+                  ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
+                  : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              )}
+              title={focusMode ? "Exit focus mode" : "Start focus mode"}
+            >
+              Focus Mode
+            </button>
+          ) : null}
+        </div>
+
+        <div className="flex flex-col gap-1 pb-3">
+          {focusQueue.length === 0 ? (
+            <span className="px-3 py-2 text-xs text-muted-foreground">
+              No pinned sessions
+            </span>
+          ) : (
+            focusQueue.map((item) => (
+              <div key={`${item.projectId}:${item.worktreeId}:${item.session.id}`} className="group/focus flex items-center">
+                <button
+                  onClick={() =>
+                    onSelectSession(item.projectId, item.session.id, item.worktreeId)
+                  }
+                  className={cn(
+                    "flex flex-1 items-start justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors min-w-0",
+                    item.session.id === activeSessionId
+                      ? "bg-sidebar-accent text-sidebar-foreground"
+                      : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
+                  )}
+                >
+                  <span className="flex min-w-0 flex-1 items-start gap-2">
+                    <SessionProviderIcon
+                      provider={item.session.provider}
+                      className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-left">
+                        {item.session.title || item.session.id.slice(0, 8)}
+                      </span>
+                      <span className="block truncate text-left text-[11px] text-muted-foreground">
+                        {item.projectName} / {item.worktreeName}
+                      </span>
+                    </span>
+                  </span>
+                  {item.active ? (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground group-hover/focus:hidden" />
+                  ) : null}
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleFocusDone(item);
+                    }}
+                    className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/focus:inline-flex"
+                    title="Mark done"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  </span>
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        <Separator />
+
         <div className="flex items-center justify-between py-3">
           <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             Projects
@@ -449,6 +606,27 @@ export function Sidebar({
                                               {formatTime(session.lastActiveAt)}
                                             </span>
                                           )}
+                                          <span
+                                            role="button"
+                                            tabIndex={0}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleFocusPin(
+                                                project.id,
+                                                session.id,
+                                                worktree.id,
+                                                Boolean(session.focusPinnedAt)
+                                              );
+                                            }}
+                                            className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
+                                            title={session.focusPinnedAt ? "Remove from focus" : "Add to focus"}
+                                          >
+                                            {session.focusPinnedAt ? (
+                                              <PinOff className="h-3.5 w-3.5" />
+                                            ) : (
+                                              <Pin className="h-3.5 w-3.5" />
+                                            )}
+                                          </span>
                                           <span
                                             role="button"
                                             tabIndex={0}

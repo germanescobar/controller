@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, CheckCircle2, StepForward, LogOut, Pin, PinOff } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
@@ -22,6 +23,8 @@ import {
   stopSession,
   steerSession,
   submitSessionUserInput,
+  pinSessionFocus,
+  unpinSessionFocus,
   type Project,
   uploadSessionAttachments,
   updateTerminalTabs,
@@ -45,6 +48,12 @@ interface SessionViewProps {
   project?: Project;
   onSessionCreated: (sessionId: string) => void;
   onBackgroundComplete?: (sessionId: string) => void;
+  focusMode?: boolean;
+  focusPosition?: { current: number; total: number };
+  onFocusDone?: () => void;
+  onFocusSkip?: () => void;
+  onFocusExit?: () => void;
+  onFocusPinnedChange?: () => void;
 }
 
 type StreamItem = (
@@ -1674,6 +1683,12 @@ export function SessionView({
   project,
   onSessionCreated,
   onBackgroundComplete,
+  focusMode = false,
+  focusPosition,
+  onFocusDone,
+  onFocusSkip,
+  onFocusExit,
+  onFocusPinnedChange,
 }: SessionViewProps) {
   const [message, setMessage] = useState("");
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
@@ -1692,6 +1707,7 @@ export function SessionView({
   const [selectedServiceTier, setSelectedServiceTier] =
     useState<ServiceTier>("flex");
   const [selectedMode, setSelectedMode] = useState<"default" | "plan">("default");
+  const [isFocusPinned, setIsFocusPinned] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
@@ -1966,6 +1982,16 @@ export function SessionView({
     if (currentViewRef.current.sessionId !== nextSessionId) {
       pendingAttachedSessionIdRef.current = nextSessionId;
       onSessionCreated(nextSessionId);
+      if (focusMode) {
+        pinSessionFocus(projectId, nextSessionId, worktreeId)
+          .then(() => {
+            setIsFocusPinned(true);
+            onFocusPinnedChange?.();
+          })
+          .catch((err) => {
+            toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+          });
+      }
     }
   };
 
@@ -2075,6 +2101,7 @@ export function SessionView({
             }
             setSelectedReasoningEffort(session.reasoningEffort || "medium");
             setSelectedServiceTier(session.serviceTier || "flex");
+            setIsFocusPinned(Boolean(session.focusPinnedAt));
           }
 
           if (eventsResult.status === "fulfilled") {
@@ -2093,6 +2120,7 @@ export function SessionView({
           if (!cancelled) setProviderResolved(true);
         });
     } else {
+      setIsFocusPinned(false);
       setEvents([]);
       setStreamItems([]);
       setStreaming(false);
@@ -2902,8 +2930,69 @@ export function SessionView({
   );
   const waitingForStructuredInput = Boolean(latestStructuredInputRequest);
 
+  const handleHeaderFocusPin = async () => {
+    if (!sessionId) return;
+    try {
+      if (isFocusPinned) {
+        await unpinSessionFocus(projectId, sessionId, worktreeId);
+        setIsFocusPinned(false);
+        toast.success("Session removed from focus");
+      } else {
+        await pinSessionFocus(projectId, sessionId, worktreeId);
+        setIsFocusPinned(true);
+        toast.success("Session added to focus");
+      }
+      onFocusPinnedChange?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+    }
+  };
+
   return (
     <>
+      {focusMode && (
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-blue-500/20 bg-blue-500/15 px-3 py-2 text-blue-200 md:px-4">
+          <div className="min-w-0 text-xs text-blue-200/80">
+            <span className="font-medium text-blue-200">Focus Mode</span>
+            <span className="ml-2">
+              {focusPosition && focusPosition.total > 0
+                ? `${focusPosition.current || 1} / ${focusPosition.total}`
+                : "No pinned sessions"}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onFocusSkip}
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
+              title="Next"
+            >
+              <StepForward className="h-3.5 w-3.5" />
+              Next
+            </button>
+            <button
+              type="button"
+              onClick={onFocusDone}
+              disabled={!sessionId}
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
+              title="Mark done"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Done
+            </button>
+            <button
+              type="button"
+              onClick={onFocusExit}
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
+              title="Exit focus"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              Exit
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="flex h-12 md:h-14 shrink-0 items-center justify-between border-b border-border bg-background px-3 md:px-4">
         <div className="flex items-center gap-2 md:gap-3 min-w-0">
@@ -2967,6 +3056,24 @@ export function SessionView({
               </span>
             );
           })()}
+          {sessionId && (
+            <button
+              type="button"
+              onClick={handleHeaderFocusPin}
+              className={`rounded-md p-1.5 transition-colors ${
+                isFocusPinned
+                  ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+              title={isFocusPinned ? "Remove from focus" : "Add to focus"}
+            >
+              {isFocusPinned ? (
+                <PinOff className="h-4 w-4" />
+              ) : (
+                <Pin className="h-4 w-4" />
+              )}
+            </button>
+          )}
           <button
             onClick={() => setTerminalOpen(!terminalOpen)}
             className={`ml-2 rounded-md p-1.5 transition-colors ${

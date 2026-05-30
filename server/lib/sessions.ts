@@ -15,6 +15,8 @@ export interface SessionState {
   createdAt: string;
   lastActiveAt: string;
   status: string;
+  focusPinnedAt?: string;
+  focusDoneAt?: string;
 }
 
 export interface AgentEvent {
@@ -143,6 +145,29 @@ export async function archiveSession(
   } catch {
     return false;
   }
+}
+
+export async function updateSessionFocus(
+  projectPath: string,
+  sessionId: string,
+  action: "pin" | "unpin" | "done"
+): Promise<SessionState | null> {
+  const session = await getSession(projectPath, sessionId);
+  if (!session) return null;
+
+  if (action === "pin") {
+    session.focusPinnedAt = session.focusPinnedAt ?? new Date().toISOString();
+    delete session.focusDoneAt;
+  } else if (action === "unpin") {
+    delete session.focusPinnedAt;
+    delete session.focusDoneAt;
+  } else {
+    delete session.focusPinnedAt;
+    session.focusDoneAt = new Date().toISOString();
+  }
+
+  await saveSession(projectPath, session);
+  return session;
 }
 
 export async function getEvents(
