@@ -58,11 +58,15 @@ function ensureTmuxSession(sessionName: string, cwd: string): void {
     });
   }
 
+  configureTmuxSession(sessionName);
+}
+
+function configureTmuxSession(sessionName: string): void {
   execFileSync("tmux", ["set-option", "-t", sessionName, "status", "off"], {
     stdio: "ignore",
   });
 
-  execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "on"], {
+  execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "off"], {
     stdio: "ignore",
   });
 
@@ -78,6 +82,7 @@ class PtyManager {
   getOrCreate(sessionId: string, cwd: string): { isNew: boolean; buffer: string; error?: string } {
     const existing = this.sessions.get(sessionId);
     if (existing) {
+      configureTmuxSession(tmuxSessionName(sessionId));
       return { isNew: false, buffer: existing.buffer };
     }
 

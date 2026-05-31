@@ -96,6 +96,161 @@ worktreesRouter.get("/:projectId/terminal-tabs", async (req, res) => {
   res.json({ tabs });
 });
 
+worktreesRouter.get("/:projectId/source", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+
+  const requestedPath = getQueryString(req.query.path);
+  if (!requestedPath) {
+    res.status(400).json({ error: "path is required" });
+    return;
+  }
+
+  const absolutePath = path.isAbsolute(requestedPath)
+    ? requestedPath
+    : path.resolve(worktree.path, requestedPath);
+
+  try {
+    const worktrees = await getProjectWorktrees(project.id);
+    const allowedRoots = [
+      project.path,
+      worktree.path,
+      ...worktrees.map((item) => item.path),
+    ];
+    const [targetRealPath, ...rootRealPaths] = await Promise.all([
+      fs.realpath(absolutePath),
+      ...Array.from(new Set(allowedRoots)).map((root) => fs.realpath(root)),
+    ]);
+    const matchingRoot = rootRealPaths
+      .map((rootRealPath) => ({
+        rootRealPath,
+        relativePath: path.relative(rootRealPath, targetRealPath),
+      }))
+      .filter(
+        ({ relativePath }) =>
+          relativePath === "" ||
+          (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+      )
+      .sort((a, b) => b.rootRealPath.length - a.rootRealPath.length)[0];
+
+    if (!matchingRoot) {
+      res.status(403).json({ error: "File is outside this project" });
+      return;
+    }
+
+    const stat = await fs.stat(targetRealPath);
+    if (!stat.isFile()) {
+      res.status(400).json({ error: "Path does not reference a file" });
+      return;
+    }
+
+    const maxSourceFileBytes = 1024 * 1024;
+    if (stat.size > maxSourceFileBytes) {
+      res.status(413).json({ error: "File is too large to preview" });
+      return;
+    }
+
+    const content = await fs.readFile(targetRealPath, "utf-8");
+    res.json({
+      path: targetRealPath,
+      relativePath: matchingRoot.relativePath || path.basename(targetRealPath),
+      content,
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    console.error("GET /projects/:projectId/source error:", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+worktreesRouter.get("/:projectId/files", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+
+  const requestedPath = getQueryString(req.query.path);
+  const absolutePath = requestedPath
+    ? path.isAbsolute(requestedPath)
+      ? requestedPath
+      : path.resolve(worktree.path, requestedPath)
+    : worktree.path;
+
+  try {
+    const [rootRealPath, targetRealPath] = await Promise.all([
+      fs.realpath(worktree.path),
+      fs.realpath(absolutePath),
+    ]);
+    const relativePath = path.relative(rootRealPath, targetRealPath);
+    const isInsideWorktree =
+      relativePath === "" ||
+      (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+
+    if (!isInsideWorktree) {
+      res.status(403).json({ error: "Directory is outside the selected worktree" });
+      return;
+    }
+
+    const stat = await fs.stat(targetRealPath);
+    if (!stat.isDirectory()) {
+      res.status(400).json({ error: "Path does not reference a directory" });
+      return;
+    }
+
+    const dirents = await fs.readdir(targetRealPath, { withFileTypes: true });
+    const entries = dirents
+      .filter((entry) => entry.isDirectory() || entry.isFile())
+      .map((entry) => {
+        const entryPath = path.join(targetRealPath, entry.name);
+        const entryRelativePath = path.relative(rootRealPath, entryPath);
+        return {
+          name: entry.name,
+          path: entryPath,
+          relativePath: entryRelativePath,
+          type: entry.isDirectory() ? "directory" : "file",
+        };
+      })
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    res.json({
+      path: targetRealPath,
+      relativePath: relativePath || ".",
+      entries,
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      res.status(404).json({ error: "Directory not found" });
+      return;
+    }
+    console.error("GET /projects/:projectId/files error:", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 worktreesRouter.put("/:projectId/terminal-tabs", async (req, res) => {
   const project = await getProject(req.params.projectId);
   if (!project) {

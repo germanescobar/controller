@@ -45,6 +45,19 @@ export interface TerminalTab {
   label: string;
 }
 
+export interface SourceFile {
+  path: string;
+  relativePath: string;
+  content: string;
+}
+
+export interface SourceDirectoryEntry {
+  name: string;
+  path: string;
+  relativePath: string;
+  type: "directory" | "file";
+}
+
 export type WorktreeCreateEvent =
   | { type: "started"; name: string; branch: string }
   | { type: "log"; stream: "stdout" | "stderr"; text: string }
@@ -174,7 +187,14 @@ export type SessionStreamEvent =
 
 export async function fetchProjects(): Promise<Project[]> {
   const res = await fetch(`${BASE}/projects`);
-  return res.json();
+  await throwIfNotOk(res, "Failed to fetch projects");
+  const body = await res.json().catch(() => {
+    throw new Error("Failed to fetch projects");
+  });
+  if (!Array.isArray(body)) {
+    throw new Error("Failed to fetch projects");
+  }
+  return body;
 }
 
 export async function createProject(
@@ -215,7 +235,10 @@ function withWorktree(worktreeId?: string, extra?: URLSearchParams): string {
 
 async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<void> {
   if (res.ok) return;
-  const body = await res.json().catch(() => ({})) as { error?: unknown; message?: unknown };
+  const body = await res.clone().json().catch(async () => {
+    const text = await res.text().catch(() => "");
+    return text.trim() ? { error: text.trim() } : {};
+  }) as { error?: unknown; message?: unknown };
   const rawMessage = body.error ?? body.message;
   if (typeof rawMessage === "string" && rawMessage.trim()) {
     throw new Error(rawMessage);
@@ -590,6 +613,32 @@ export async function updateTerminalTabs(
   await throwIfNotOk(res, "Failed to update terminal tabs");
   const body = (await res.json()) as { tabs?: unknown };
   return Array.isArray(body.tabs) ? (body.tabs as TerminalTab[]) : tabs;
+}
+
+export async function fetchSourceFile(
+  projectId: string,
+  filePath: string,
+  worktreeId?: string
+): Promise<SourceFile> {
+  const params = new URLSearchParams({ path: filePath });
+  const query = withWorktree(worktreeId, params);
+  const res = await fetch(`${BASE}/projects/${projectId}/source${query}`);
+  await throwIfNotOk(res, "Failed to open source file");
+  return res.json();
+}
+
+export async function fetchSourceDirectory(
+  projectId: string,
+  dirPath?: string,
+  worktreeId?: string
+): Promise<SourceDirectoryEntry[]> {
+  const params = new URLSearchParams();
+  if (dirPath) params.set("path", dirPath);
+  const query = withWorktree(worktreeId, params);
+  const res = await fetch(`${BASE}/projects/${projectId}/files${query}`);
+  await throwIfNotOk(res, "Failed to list files");
+  const body = (await res.json()) as { entries?: unknown };
+  return Array.isArray(body.entries) ? (body.entries as SourceDirectoryEntry[]) : [];
 }
 
 export async function deleteWorktree(

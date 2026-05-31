@@ -132,20 +132,25 @@
 }
 
 /* Terminal panel padding and touch scrolling */
-.terminal-panel .xterm {
+.terminal-panel {
   --terminal-bottom-padding: 24px;
   box-sizing: border-box;
+  overflow: hidden;
+  padding: 8px 12px var(--terminal-bottom-padding);
+}
+
+.terminal-panel .xterm {
+  box-sizing: border-box;
   height: 100%;
-  padding-bottom: var(--terminal-bottom-padding);
 }
 
 .terminal-panel .xterm-screen {
-  padding: 8px 12px 0;
+  padding: 0;
 }
 
 .terminal-panel .xterm .xterm-viewport {
   background-color: transparent !important;
-  bottom: var(--terminal-bottom-padding) !important;
+  bottom: 0 !important;
   overscroll-behavior: contain;
 }
 
@@ -172,4 +177,57 @@
   height: 36px;
   line-height: 1;
   font-size: 0.8125rem;
+}
+
+/* Read-only source viewer syntax colors. */
+.hljs-comment,
+.hljs-quote {
+  color: color-mix(in oklab, var(--muted-foreground) 70%, transparent);
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-subst {
+  color: oklch(0.78 0.13 245);
+}
+
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp {
+  color: oklch(0.78 0.13 155);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-selector-id {
+  color: oklch(0.82 0.11 80);
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-name,
+.hljs-selector-class {
+  color: oklch(0.8 0.11 310);
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet {
+  color: oklch(0.82 0.12 65);
+}
+
+.hljs-built_in,
+.hljs-type,
+.hljs-template-variable,
+.hljs-variable {
+  color: oklch(0.8 0.1 200);
+}
+
+.hljs-deletion {
+  color: oklch(0.75 0.17 25);
+}
+
+.hljs-addition {
+  color: oklch(0.78 0.13 145);
 }
