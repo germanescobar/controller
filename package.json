@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "tsx watch server/index.ts",
+    "dev:server": "tsx watch --env-file-if-exists=.env.local server/index.ts",
     "dev:client": "vite",
     "build": "vite build && tsc -p server/tsconfig.json"
   },

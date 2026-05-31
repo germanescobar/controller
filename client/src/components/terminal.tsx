@@ -203,10 +203,12 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       }
 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      // In dev, connect directly to the Express server (port 3100) to avoid
+      // In dev, connect directly to the Express server to avoid
       // Vite proxy issues with WebSocket upgrades from external devices.
       const host = window.location.hostname;
-      const port = import.meta.env.DEV ? "3100" : window.location.port;
+      const port = import.meta.env.DEV
+        ? (import.meta.env.VITE_API_PORT ?? "3100")
+        : window.location.port;
       const wsUrl = `${protocol}//${host}:${port}/ws/terminal`;
       let reconnectTimer: number | null = null;
       let disposed = false;

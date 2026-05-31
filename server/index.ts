@@ -12,6 +12,14 @@ import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
 
+function parsePort(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535
+    ? parsed
+    : fallback;
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -115,7 +123,7 @@ wss.on("connection", (ws: WebSocket) => {
   });
 });
 
-const PORT = 3100;
+const PORT = parsePort(process.env.PORT, 3100);
 server.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
