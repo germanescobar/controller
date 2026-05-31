@@ -1,6 +1,25 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, CheckCircle2, StepForward, LogOut, Pin, PinOff } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff } from "lucide-react";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import diff from "highlight.js/lib/languages/diff";
+import go from "highlight.js/lib/languages/go";
+import graphql from "highlight.js/lib/languages/graphql";
+import ini from "highlight.js/lib/languages/ini";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import plaintext from "highlight.js/lib/languages/plaintext";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import scss from "highlight.js/lib/languages/scss";
+import sql from "highlight.js/lib/languages/sql";
+import swift from "highlight.js/lib/languages/swift";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -13,6 +32,8 @@ import {
   fetchBranchDiff,
   fetchGitDiff,
   fetchModels,
+  fetchSourceDirectory,
+  fetchSourceFile,
   fetchTerminalTabs,
   fetchAgentProviders,
   fetchSession,
@@ -26,6 +47,8 @@ import {
   pinSessionFocus,
   unpinSessionFocus,
   type Project,
+  type SourceDirectoryEntry,
+  type SourceFile,
   uploadSessionAttachments,
   updateTerminalTabs,
   type Worktree,
@@ -425,6 +448,74 @@ function parseFullGitDiff(diff: string): DiffFile[] {
 }
 
 const ProjectRootContext = createContext<string | undefined>(undefined);
+
+interface SourceReference {
+  path: string;
+  line?: number;
+}
+
+interface OpenSourceReferenceOptions extends SourceReference {
+  label: string;
+}
+
+interface SourceFilePreview {
+  file: SourceFile;
+  line?: number;
+}
+
+type RightPanelTab = "terminal" | "changes" | "files";
+type MobilePanel = "agent" | RightPanelTab;
+
+const OpenSourceReferenceContext = createContext<
+  ((reference: OpenSourceReferenceOptions) => void) | undefined
+>(undefined);
+
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("diff", diff);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("graphql", graphql);
+hljs.registerLanguage("ini", ini);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("plaintext", plaintext);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("scss", scss);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("swift", swift);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
+
+function parseLocalCodeReference(href: string | undefined): SourceReference | null {
+  if (!href) return null;
+  let value = href.trim();
+  if (!value) return null;
+
+  if (typeof window !== "undefined") {
+    const origin = window.location.origin;
+    if (value.startsWith(`${origin}/`)) {
+      value = value.slice(origin.length);
+    }
+  }
+
+  if (!value.startsWith("/") || value.startsWith("//")) return null;
+
+  try {
+    value = decodeURI(value);
+  } catch {
+    return null;
+  }
+
+  const match = value.match(/^(.*?):([1-9]\d*)$/);
+  if (!match) return { path: value };
+  return {
+    path: match[1],
+    line: Number.parseInt(match[2], 10),
+  };
+}
 
 function relativizePath(path: string, root: string | undefined): string {
   if (!root) return path;
@@ -1069,6 +1160,47 @@ function EventBlock({
   );
 }
 
+function MarkdownLink({
+  children,
+  href,
+  ...props
+}: React.AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const openSourceReference = useContext(OpenSourceReferenceContext);
+  const sourceReference = parseLocalCodeReference(href);
+
+  if (!sourceReference) {
+    return (
+      <a href={href} {...props}>
+        {children}
+      </a>
+    );
+  }
+
+  return (
+    <a
+      href={href}
+      {...props}
+      onClick={(event) => {
+        event.preventDefault();
+        if (openSourceReference) {
+          openSourceReference({
+            ...sourceReference,
+            label: typeof children === "string" ? children : href ?? sourceReference.path,
+          });
+        } else {
+          toast.error("Source links are not available in this view");
+        }
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+const markdownComponents = {
+  a: MarkdownLink,
+};
+
 function AssistantBlock({
   text,
   children,
@@ -1080,7 +1212,9 @@ function AssistantBlock({
   return (
     <div className="space-y-2">
       <div className="prose prose-invert prose-sm max-w-none overflow-x-auto break-words">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizedText}</ReactMarkdown>
+        <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
+          {normalizedText}
+        </ReactMarkdown>
       </div>
       {children}
     </div>
@@ -1116,7 +1250,9 @@ function ReasoningBlock({ text }: { text: unknown }) {
       {expanded && (
         <div className="px-4 py-2 bg-background/30">
           <div className="prose prose-invert prose-sm max-w-none overflow-x-auto break-words text-muted-foreground/80 text-[13px]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{normalizedText}</ReactMarkdown>
+            <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
+              {normalizedText}
+            </ReactMarkdown>
           </div>
         </div>
       )}
@@ -1570,6 +1706,260 @@ function ErrorBlock({ text }: { text: unknown }) {
   );
 }
 
+function getSourceLanguage(filePath: string): string {
+  const basename = filePath.split("/").pop()?.toLowerCase() ?? "";
+  const extension = filePath.split(".").pop()?.toLowerCase();
+
+  if (basename === ".env" || basename.endsWith(".env")) return "ini";
+  if (basename === "dockerfile") return "bash";
+  if (extension === "ts" || extension === "tsx") return "typescript";
+  if (extension === "js" || extension === "jsx" || extension === "mjs" || extension === "cjs") return "javascript";
+  if (extension === "css") return "css";
+  if (extension === "scss" || extension === "sass") return "scss";
+  if (extension === "html" || extension === "htm" || extension === "xml" || extension === "svg") return "xml";
+  if (extension === "json") return "json";
+  if (extension === "graphql" || extension === "gql") return "graphql";
+  if (extension === "md" || extension === "mdx") return "markdown";
+  if (extension === "sh" || extension === "bash" || extension === "zsh") return "shell";
+  if (extension === "py") return "python";
+  if (extension === "rs") return "rust";
+  if (extension === "go") return "go";
+  if (extension === "swift") return "swift";
+  if (extension === "sql") return "sql";
+  if (extension === "yml" || extension === "yaml") return "yaml";
+  if (extension === "ini" || extension === "toml") return "ini";
+  if (extension === "diff" || extension === "patch") return "diff";
+  return "plaintext";
+}
+
+function SourceViewerPanel({
+  projectId,
+  preview,
+  worktreeId,
+  onOpenFile,
+}: {
+  projectId: string;
+  preview: SourceFilePreview | null;
+  worktreeId?: string;
+  onOpenFile: (path: string) => void;
+}) {
+  const selectedLineRef = useRef<HTMLDivElement | null>(null);
+  const selectedLine = preview?.line;
+  const highlightedCode = preview
+    ? hljs.highlight(preview.file.content, {
+        language: getSourceLanguage(preview.file.path),
+        ignoreIllegals: true,
+      }).value
+    : "";
+  const highlightedLines = highlightedCode.split("\n");
+
+  useEffect(() => {
+    if (!preview || !selectedLine) return;
+    window.setTimeout(() => {
+      selectedLineRef.current?.scrollIntoView({ block: "center" });
+    }, 0);
+  }, [preview, selectedLine]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex min-h-0 flex-1">
+        <div className="w-56 shrink-0 overflow-y-auto border-r border-border bg-muted/10 py-2">
+          <FileTree
+            activePath={preview?.file.path}
+            onOpenFile={onOpenFile}
+            projectId={projectId}
+            worktreeId={worktreeId}
+          />
+        </div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+            <FileCode className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+              {preview ? (
+                <>
+                  {preview.file.relativePath}
+                  {selectedLine ? <span className="text-muted-foreground">:{selectedLine}</span> : null}
+                </>
+              ) : (
+                <span className="font-sans text-muted-foreground">Select a file</span>
+              )}
+            </div>
+          </div>
+          {preview ? (
+            <div className="flex-1 overflow-auto py-3">
+              <div className="min-w-max font-mono text-xs leading-5">
+                {highlightedLines.map((line, index) => {
+                  const lineNumber = index + 1;
+                  const highlighted = lineNumber === selectedLine;
+                  return (
+                    <div
+                      key={lineNumber}
+                      ref={highlighted ? selectedLineRef : undefined}
+                      className={`flex ${
+                        highlighted ? "bg-amber-500/15" : "hover:bg-muted/20"
+                      }`}
+                    >
+                      <span className="w-14 shrink-0 select-none border-r border-border/60 pr-3 text-right text-muted-foreground/50">
+                        {lineNumber}
+                      </span>
+                      <span
+                        className="whitespace-pre px-3"
+                        dangerouslySetInnerHTML={{ __html: line || " " }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-muted-foreground">
+              Choose a file from the tree.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FileTree({
+  activePath,
+  onOpenFile,
+  projectId,
+  worktreeId,
+}: {
+  activePath?: string;
+  onOpenFile: (path: string) => void;
+  projectId: string;
+  worktreeId?: string;
+}) {
+  const [entriesByPath, setEntriesByPath] = useState<Record<string, SourceDirectoryEntry[]>>({});
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set([""]));
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  const entriesByPathRef = useRef(entriesByPath);
+  const loadingPathsRef = useRef(loadingPaths);
+
+  useEffect(() => {
+    entriesByPathRef.current = entriesByPath;
+  }, [entriesByPath]);
+
+  useEffect(() => {
+    loadingPathsRef.current = loadingPaths;
+  }, [loadingPaths]);
+
+  const loadDirectory = (dirPath: string) => {
+    if (entriesByPathRef.current[dirPath] || loadingPathsRef.current.has(dirPath)) return;
+    setError(null);
+    setLoadingPaths((current) => new Set(current).add(dirPath));
+    fetchSourceDirectory(projectId, dirPath || undefined, worktreeId)
+      .then((entries) => {
+        setEntriesByPath((current) => ({ ...current, [dirPath]: entries }));
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to list files");
+      })
+      .finally(() => {
+        setLoadingPaths((current) => {
+          const next = new Set(current);
+          next.delete(dirPath);
+          return next;
+        });
+      });
+  };
+
+  useEffect(() => {
+    entriesByPathRef.current = {};
+    loadingPathsRef.current = new Set();
+    setEntriesByPath({});
+    setExpandedPaths(new Set([""]));
+    setLoadingPaths(new Set());
+    setError(null);
+  }, [projectId, worktreeId]);
+
+  useEffect(() => {
+    loadDirectory("");
+  }, [projectId, worktreeId]);
+
+  const toggleDirectory = (entry: SourceDirectoryEntry) => {
+    const dirPath = entry.path;
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(dirPath)) {
+        next.delete(dirPath);
+      } else {
+        next.add(dirPath);
+        loadDirectory(dirPath);
+      }
+      return next;
+    });
+  };
+
+  const renderEntries = (dirPath: string, depth: number): React.ReactNode => {
+    const entries = entriesByPath[dirPath] ?? [];
+    if (loadingPaths.has(dirPath) && entries.length === 0) {
+      return (
+        <div className="px-3 py-1.5 text-xs text-muted-foreground">
+          Loading...
+        </div>
+      );
+    }
+
+    return entries.map((entry) => {
+      const isDirectory = entry.type === "directory";
+      const expanded = isDirectory && expandedPaths.has(entry.path);
+      const active = !isDirectory && activePath === entry.path;
+      return (
+        <div key={entry.path}>
+          <button
+            type="button"
+            onClick={() => {
+              if (isDirectory) {
+                toggleDirectory(entry);
+              } else {
+                onOpenFile(entry.path);
+              }
+            }}
+            className={`flex h-7 w-full min-w-0 items-center gap-1.5 px-2 pr-3 text-left text-xs transition-colors ${
+              active
+                ? "bg-accent/40 text-foreground"
+                : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            }`}
+            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            title={entry.relativePath}
+          >
+            {isDirectory ? (
+              expanded ? (
+                <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <Folder className="h-3.5 w-3.5 shrink-0" />
+              )
+            ) : (
+              <FileText className="h-3.5 w-3.5 shrink-0" />
+            )}
+            <span className="min-w-0 truncate">{entry.name}</span>
+          </button>
+          {expanded ? renderEntries(entry.path, depth + 1) : null}
+        </div>
+      );
+    });
+  };
+
+  return (
+    <div>
+      <div className="px-3 pb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+        Explorer
+      </div>
+      {error ? (
+        <div className="mx-2 mb-2 rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+          {error}
+        </div>
+      ) : null}
+      {renderEntries("", 0)}
+    </div>
+  );
+}
+
 function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] }) {
   if (!attachments || attachments.length === 0) return null;
   return (
@@ -1721,14 +2111,15 @@ export function SessionView({
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(initialTerminalState.tabs);
   const [activeTerminalId, setActiveTerminalId] = useState<string>(initialTerminalState.activeId);
   const [terminalOpen, setTerminalOpen] = useState(false);
-  const [mobilePanel, setMobilePanel] = useState<"agent" | "terminal" | "changes">("agent");
-  const [rightTab, setRightTab] = useState<"terminal" | "changes">("terminal");
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>("agent");
+  const [rightTab, setRightTab] = useState<RightPanelTab>("terminal");
   const [gitDiffFiles, setGitDiffFiles] = useState<DiffFile[]>([]);
   const [gitDiffLoaded, setGitDiffLoaded] = useState(false);
   const [branchDiffFiles, setBranchDiffFiles] = useState<DiffFile[]>([]);
   const [userInputDraft, setUserInputDraft] = useState<Record<string, string>>({});
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
+  const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -1918,7 +2309,7 @@ export function SessionView({
     saveSharedTerminalTabs(nextTabs);
     setActiveTerminalId(nextTab.id);
     setRightTab("terminal");
-    if (mobilePanel === "changes") setMobilePanel("terminal");
+    if (mobilePanel !== "agent") setMobilePanel("terminal");
   };
 
   const handleCloseTerminal = (terminalId: string) => {
@@ -2798,6 +3189,28 @@ export function SessionView({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const openSourcePath = (path: string, line?: number, errorLabel = path) => {
+    fetchSourceFile(projectId, path, worktreeId)
+      .then((file) => {
+        const lineCount = file.content.split("\n").length;
+        const selectedLine =
+          typeof line === "number"
+            ? Math.min(Math.max(line, 1), lineCount)
+            : undefined;
+        setSourcePreview({ file, line: selectedLine });
+        setTerminalOpen(true);
+        setRightTab("files");
+        setMobilePanel("files");
+      })
+      .catch((err) => {
+        toast.error(err instanceof Error ? err.message : `Could not open ${errorLabel}`);
+      });
+  };
+
+  const openSourceReference = (reference: OpenSourceReferenceOptions) => {
+    openSourcePath(reference.path, reference.line, reference.label);
+  };
+
   const handleStructuredUserInputSubmit = async (
     requestId: string,
     questions: UserInputQuestion[]
@@ -3039,6 +3452,17 @@ export function SessionView({
                 Changes
               </button>
             )}
+            <button
+              onClick={() => { setMobilePanel("files"); setRightTab("files"); }}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                mobilePanel === "files"
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground"
+              }`}
+            >
+              <FileCode className="h-3 w-3" />
+              Files
+            </button>
           </div>
         )}
 
@@ -3101,6 +3525,7 @@ export function SessionView({
             className="flex-1 overflow-y-auto min-h-0"
           >
             <ProjectRootContext.Provider value={activeWorktree?.path ?? project?.path}>
+            <OpenSourceReferenceContext.Provider value={openSourceReference}>
             <div className="mx-auto max-w-3xl px-3 py-4 md:px-4 md:py-6">
               {!sessionId && events.length === 0 && streamItems.length === 0 && (
                 <div className="flex flex-col items-center justify-center py-20">
@@ -3310,6 +3735,7 @@ export function SessionView({
 
               <div ref={bottomRef} />
             </div>
+            </OpenSourceReferenceContext.Provider>
             </ProjectRootContext.Provider>
           </div>
 
@@ -3654,18 +4080,18 @@ export function SessionView({
           </div>
         </div>
 
-        {/* Right panel — desktop: side panel with Terminal/Changes tabs; mobile: full screen when terminal/changes tab active */}
-        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes") && (() => {
+        {/* Right panel — desktop: side panel with Terminal/Changes/Files tabs; mobile: full screen when a panel tab is active */}
+        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files") && (() => {
           const { added: changesAdded, deleted: changesDeleted } = summarizeDiffFiles(gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles);
           const hasChanges = gitDiffFiles.length > 0 || branchDiffFiles.length > 0;
           return (
           <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${
-            mobilePanel === "terminal" || mobilePanel === "changes" ? "flex-1 md:w-1/2" : "hidden md:flex md:w-1/2"
+            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" ? "flex-1 md:w-1/2" : "hidden md:flex md:w-1/2"
           }`}>
             {/* Tab bar — desktop only; mobile uses the header tabs */}
             <div className="hidden md:flex h-9 shrink-0 items-center border-b border-border bg-[#1c1c1e] px-2 gap-1">
               <button
-                onClick={() => { setRightTab("terminal"); if (mobilePanel === "changes") setMobilePanel("terminal"); }}
+                onClick={() => { setRightTab("terminal"); if (mobilePanel !== "agent") setMobilePanel("terminal"); }}
                 className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                   rightTab === "terminal"
                     ? "bg-accent/30 text-foreground"
@@ -3677,7 +4103,7 @@ export function SessionView({
               </button>
               {hasChanges && (
                 <button
-                  onClick={() => { setRightTab("changes"); if (mobilePanel === "terminal") setMobilePanel("changes"); }}
+                  onClick={() => { setRightTab("changes"); if (mobilePanel !== "agent") setMobilePanel("changes"); }}
                   className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "changes"
                       ? "bg-accent/30 text-foreground"
@@ -3693,6 +4119,23 @@ export function SessionView({
                   </span>
                 </button>
               )}
+              <button
+                onClick={() => { setRightTab("files"); if (mobilePanel !== "agent") setMobilePanel("files"); }}
+                className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  rightTab === "files"
+                    ? "bg-accent/30 text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                title={sourcePreview?.file.relativePath ?? "Files"}
+              >
+                <FileCode className="h-3 w-3 shrink-0" />
+                <span className="shrink-0">Files</span>
+                {sourcePreview ? (
+                  <span className="max-w-36 truncate font-mono text-[10px] text-muted-foreground/70">
+                    {sourcePreview.file.relativePath}
+                  </span>
+                ) : null}
+              </button>
             </div>
             {rightTab === "terminal" && (
               <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-[#1c1c1e] px-2">
@@ -3772,6 +4215,16 @@ export function SessionView({
                     localFiles={gitDiffFiles}
                     branchFiles={branchDiffFiles}
                     projectRoot={activeWorktree?.path ?? project?.path}
+                  />
+                </div>
+              )}
+              {rightTab === "files" && (
+                <div className="absolute inset-0 overflow-hidden bg-background">
+                  <SourceViewerPanel
+                    onOpenFile={(path) => openSourcePath(path)}
+                    preview={sourcePreview}
+                    projectId={projectId}
+                    worktreeId={worktreeId}
                   />
                 </div>
               )}
