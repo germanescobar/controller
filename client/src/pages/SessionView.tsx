@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -40,6 +40,7 @@ import {
   fetchSessionRuntime,
   fetchWorktrees,
   dismissSessionUserInput,
+  runProjectScript,
   startSession,
   stopSession,
   steerSession,
@@ -2111,6 +2112,7 @@ export function SessionView({
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(initialTerminalState.tabs);
   const [activeTerminalId, setActiveTerminalId] = useState<string>(initialTerminalState.activeId);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [runScriptPending, setRunScriptPending] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("agent");
   const [rightTab, setRightTab] = useState<RightPanelTab>("terminal");
   const [gitDiffFiles, setGitDiffFiles] = useState<DiffFile[]>([]);
@@ -2310,6 +2312,24 @@ export function SessionView({
     setActiveTerminalId(nextTab.id);
     setRightTab("terminal");
     if (mobilePanel !== "agent") setMobilePanel("terminal");
+  };
+
+  const handleRunProjectScript = async () => {
+    if (runScriptPending) return;
+    setRunScriptPending(true);
+    try {
+      const result = await runProjectScript(projectId, worktreeId);
+      const normalizedTabs = normalizeTerminalTabs(result.tabs);
+      setTerminalTabs(normalizedTabs);
+      setActiveTerminalId(result.terminalId);
+      setRightTab("terminal");
+      if (mobilePanel !== "agent") setMobilePanel("terminal");
+      toast.success("Run script started");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to run project script");
+    } finally {
+      setRunScriptPending(false);
+    }
   };
 
   const handleCloseTerminal = (terminalId: string) => {
@@ -4187,6 +4207,20 @@ export function SessionView({
                   aria-label="New terminal"
                 >
                   <Plus className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRunProjectScript}
+                  disabled={runScriptPending}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Run project script"
+                  aria-label="Run project script"
+                >
+                  {runScriptPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
                 </button>
               </div>
             )}
