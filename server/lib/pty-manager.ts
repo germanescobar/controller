@@ -138,6 +138,15 @@ class PtyManager {
     this.sessions.get(sessionId)?.pty.write(data);
   }
 
+  /** Ensure a tmux session exists and run a shell command in it. */
+  runCommand(sessionId: string, cwd: string, command: string): void {
+    const sessionName = tmuxSessionName(sessionId);
+    ensureTmuxSession(sessionName, cwd);
+    execFileSync("tmux", ["send-keys", "-t", `=${sessionName}`, command, "C-m"], {
+      stdio: "ignore",
+    });
+  }
+
   /** Resize the PTY. */
   resize(sessionId: string, cols: number, rows: number): void {
     const session = this.sessions.get(sessionId);

@@ -615,6 +615,22 @@ export async function updateTerminalTabs(
   return Array.isArray(body.tabs) ? (body.tabs as TerminalTab[]) : tabs;
 }
 
+export async function runProjectScript(
+  projectId: string,
+  worktreeId?: string
+): Promise<{ terminalId: string; tabs: TerminalTab[] }> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/run-script${withWorktree(worktreeId)}`,
+    { method: "POST" }
+  );
+  await throwIfNotOk(res, "Failed to run project script");
+  const body = (await res.json()) as { terminalId?: unknown; tabs?: unknown };
+  if (typeof body.terminalId !== "string" || !Array.isArray(body.tabs)) {
+    throw new Error("Failed to run project script");
+  }
+  return { terminalId: body.terminalId, tabs: body.tabs as TerminalTab[] };
+}
+
 export async function fetchSourceFile(
   projectId: string,
   filePath: string,

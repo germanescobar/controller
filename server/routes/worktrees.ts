@@ -25,10 +25,17 @@ import {
   removeTerminalTabsForWorktree,
   setTerminalTabs,
 } from "../lib/terminal-tabs.js";
+import {
+  buildScriptEnv,
+  buildTerminalScriptCommand,
+  resolveProjectScripts,
+  type ProjectScriptCommand,
+} from "../lib/project-scripts.js";
 
 export const worktreesRouter = Router();
 
 const SETUP_TIMEOUT_MS = 5 * 60 * 1000;
+const RUN_TERMINAL_ID = "run";
 
 function sseHeaders(res: Response) {
   res.writeHead(200, {
@@ -273,6 +280,53 @@ worktreesRouter.put("/:projectId/terminal-tabs", async (req, res) => {
   res.json({ tabs });
 });
 
+worktreesRouter.post("/:projectId/run-script", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+
+  try {
+    const scripts = await resolveProjectScripts(project.path);
+    if (scripts.run.length === 0) {
+      res.status(404).json({ error: "No run script configured" });
+      return;
+    }
+
+    const terminalId = scripts.runMode === "nonconcurrent"
+      ? RUN_TERMINAL_ID
+      : `run-${Date.now().toString(36)}`;
+
+    const terminalKey = `${project.id}:${worktree.id}:${terminalId}`;
+    if (scripts.runMode === "nonconcurrent") {
+      ptyManager.kill(terminalKey);
+    }
+
+    const tabs = await setTerminalTabs(project.id, worktree.id, [
+      ...(await getTerminalTabs(project.id, worktree.id)),
+      { id: terminalId, label: "Run" },
+    ]);
+
+    const command = buildTerminalScriptCommand(
+      scripts.run,
+      buildScriptEnv({ project, worktree })
+    );
+    ptyManager.runCommand(terminalKey, worktree.path, command);
+
+    res.json({ ok: true, terminalId, tabs });
+  } catch (err) {
+    console.error("POST /projects/:projectId/run-script error:", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 worktreesRouter.get(
   "/:projectId/worktrees/:worktreeId/setup-log",
   async (req, res) => {
@@ -423,9 +477,8 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
 
   emit({ type: "worktree_created", worktree });
 
-  // Run setup script if present.
-  const setupScript = path.join(project.path, ".coding-orchestrator", "setup.sh");
-  if (existsSync(setupScript)) {
+  const scripts = await resolveProjectScripts(project.path);
+  if (scripts.setup.length > 0) {
     const codingAgentDir = path.join(targetPath, ".coding-agent");
     await fs.mkdir(codingAgentDir, { recursive: true });
     const setupLogPath = path.join(codingAgentDir, "setup.log");
@@ -433,20 +486,13 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
     emit({
       type: "log",
       stream: "stdout",
-      text: `Running ${setupScript}\n`,
+      text: `Running ${formatScriptLabels(scripts.setup)}\n`,
     });
 
-    const { exitCode, timedOut } = await runSetupScript(
-      setupScript,
+    const { exitCode, timedOut } = await runScriptCommands(
+      scripts.setup,
       targetPath,
-      {
-        WORKTREE_PATH: targetPath,
-        SOURCE_PATH: project.path,
-        WORKTREE_NAME: name,
-        BRANCH: branch,
-        PROJECT_ID: project.id,
-        PORT_OFFSET: String(portOffset),
-      },
+      buildScriptEnv({ project, worktree }),
       setupLogPath,
       (chunk, stream) => emit({ type: "log", stream, text: chunk })
     );
@@ -460,19 +506,19 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
     if (timedOut) {
       emit({
         type: "error",
-        text: `setup.sh timed out after ${SETUP_TIMEOUT_MS / 1000}s`,
+        text: `setup timed out after ${SETUP_TIMEOUT_MS / 1000}s`,
       });
     } else if (exitCode !== 0) {
       emit({
         type: "error",
-        text: `setup.sh exited with ${exitCode}`,
+        text: `setup exited with ${exitCode}`,
       });
     }
   } else {
     emit({
       type: "log",
       stream: "stdout",
-      text: "No .coding-orchestrator/setup.sh found, skipping setup.\n",
+      text: "No setup script found, skipping setup.\n",
     });
   }
 
@@ -512,6 +558,30 @@ worktreesRouter.delete(
     }
 
     ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
+
+    const scripts = await resolveProjectScripts(project.path);
+    if (scripts.archive.length > 0) {
+      const codingAgentDir = path.join(worktree.path, ".coding-agent");
+      await fs.mkdir(codingAgentDir, { recursive: true });
+      const archiveLogPath = path.join(codingAgentDir, "archive.log");
+      const { exitCode, timedOut } = await runScriptCommands(
+        scripts.archive,
+        worktree.path,
+        buildScriptEnv({ project, worktree }),
+        archiveLogPath,
+        (chunk, stream) => {
+          if (stream === "stderr") process.stderr.write(chunk);
+        }
+      );
+      if (timedOut) {
+        res.status(500).json({ error: `archive timed out after ${SETUP_TIMEOUT_MS / 1000}s` });
+        return;
+      }
+      if (exitCode !== 0) {
+        res.status(500).json({ error: `archive exited with ${exitCode}` });
+        return;
+      }
+    }
 
     // Remove via git first; fall back to fs.rm if directory still exists.
     await runGitExitCode(project.path, [
@@ -571,16 +641,39 @@ function runGitExitCode(cwd: string, args: string[]): Promise<number> {
   });
 }
 
-function runSetupScript(
-  script: string,
+async function runScriptCommands(
+  commands: ProjectScriptCommand[],
   cwd: string,
   env: Record<string, string>,
   logPath: string,
   onData: (chunk: string, stream: "stdout" | "stderr") => void
 ): Promise<{ exitCode: number; timedOut: boolean }> {
+  const logStream = createWriteStream(logPath, { flags: "w" });
+  for (const command of commands) {
+    const prompt = `$ ${command.command}\n`;
+    logStream.write(prompt);
+    onData(prompt, "stdout");
+
+    const result = await runOneScriptCommand(command.command, cwd, env, logStream, onData);
+    if (result.timedOut || result.exitCode !== 0) {
+      logStream.end();
+      return result;
+    }
+  }
+
+  logStream.end();
+  return { exitCode: 0, timedOut: false };
+}
+
+function runOneScriptCommand(
+  command: string,
+  cwd: string,
+  env: Record<string, string>,
+  logStream: ReturnType<typeof createWriteStream>,
+  onData: (chunk: string, stream: "stdout" | "stderr") => void
+): Promise<{ exitCode: number; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const logStream = createWriteStream(logPath, { flags: "w" });
-    const child = spawn("bash", [script], {
+    const child = spawn("bash", ["-lc", command], {
       cwd,
       env: { ...process.env, ...env },
     });
@@ -590,26 +683,32 @@ function runSetupScript(
       child.kill("SIGKILL");
     }, SETUP_TIMEOUT_MS);
 
-    child.stdout?.on("data", (d: Buffer) => {
-      const text = d.toString();
-      logStream.write(text);
-      onData(text, "stdout");
-    });
-    child.stderr?.on("data", (d: Buffer) => {
-      const text = d.toString();
-      logStream.write(text);
-      onData(text, "stderr");
-    });
+    child.stdout?.on("data", (d: Buffer) => writeScriptOutput(d, "stdout", logStream, onData));
+    child.stderr?.on("data", (d: Buffer) => writeScriptOutput(d, "stderr", logStream, onData));
     child.on("close", (code) => {
       clearTimeout(timer);
-      logStream.end();
       resolve({ exitCode: code ?? 1, timedOut });
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      logStream.end();
       onData(`spawn error: ${err.message}\n`, "stderr");
       resolve({ exitCode: 1, timedOut });
     });
   });
+}
+
+function writeScriptOutput(
+  data: Buffer,
+  stream: "stdout" | "stderr",
+  logStream: ReturnType<typeof createWriteStream>,
+  onData: (chunk: string, stream: "stdout" | "stderr") => void
+): void {
+  const text = data.toString();
+  logStream.write(text);
+  onData(text, stream);
+}
+
+function formatScriptLabels(commands: ProjectScriptCommand[]): string {
+  const labels = new Set(commands.map((command) => command.label));
+  return Array.from(labels).join(", ");
 }
