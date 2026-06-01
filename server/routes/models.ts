@@ -15,6 +15,55 @@ export interface Model {
   size: string;
 }
 
+function stripAnsi(value: string): string {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function getAdaModelSize(section: string): string {
+  const normalized = section.toLowerCase();
+  if (normalized.includes("cloud")) return "cloud";
+  if (normalized.includes("local")) return "local";
+  return "";
+}
+
+function parseAdaModelsOutput(stdout: string): Model[] {
+  const models: Model[] = [];
+  let section = "";
+
+  for (const rawLine of stripAnsi(stdout).split("\n")) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) continue;
+
+    const modelMatch = line.match(/^\s+(\S+)\s{2,}(.+?)\s*$/);
+    if (!modelMatch) {
+      section = line.trim();
+      continue;
+    }
+
+    const [, id, name] = modelMatch;
+    const provider = id.split("/", 1)[0];
+    if (!id || !name || !provider) continue;
+
+    models.push({
+      id,
+      name: name.trim(),
+      provider,
+      size: getAdaModelSize(section),
+    });
+  }
+
+  return models;
+}
+
+async function fetchAdaCliModels(): Promise<Model[]> {
+  try {
+    const { stdout } = await execFileAsync("ada", ["models"], { timeout: 5000 });
+    return parseAdaModelsOutput(stdout);
+  } catch {
+    return [];
+  }
+}
+
 async function fetchOllamaModels(): Promise<Model[]> {
   try {
     const { stdout } = await execFileAsync("ollama", ["list"]);
@@ -133,6 +182,28 @@ function getClaudeModels(): Model[] {
   ];
 }
 
+async function fetchAdaFallbackModels(): Promise<Model[]> {
+  const modelLists = await Promise.all([
+    fetchOllamaModels(),
+    ...PROVIDERS.map(async (p) => {
+      const key = await getApiKey(p.id);
+      if (!key) return [];
+      const fetcher = PROVIDER_FETCHERS[p.id];
+      if (!fetcher) return [];
+      return fetcher(key);
+    }),
+  ]);
+
+  return modelLists.flat();
+}
+
+async function fetchAdaModels(): Promise<Model[]> {
+  const adaCliModels = await fetchAdaCliModels();
+  if (adaCliModels.length > 0) return adaCliModels;
+
+  return fetchAdaFallbackModels();
+}
+
 modelsRouter.get("/", async (req, res) => {
   const agent = (req.query.agent as string) || "ada";
 
@@ -146,17 +217,5 @@ modelsRouter.get("/", async (req, res) => {
     return;
   }
 
-  // Default: Ada models (ollama + configured API providers)
-  const modelLists = await Promise.all([
-    fetchOllamaModels(),
-    ...PROVIDERS.map(async (p) => {
-      const key = await getApiKey(p.id);
-      if (!key) return [];
-      const fetcher = PROVIDER_FETCHERS[p.id];
-      if (!fetcher) return [];
-      return fetcher(key);
-    }),
-  ]);
-
-  res.json(modelLists.flat());
+  res.json(await fetchAdaModels());
 });
