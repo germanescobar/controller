@@ -4,7 +4,7 @@ import path from "node:path";
 export function orchestratorHome(): string {
   return (
     process.env.CODING_ORCHESTRATOR_HOME ??
-    path.join(os.homedir(), ".coding-orchestrator")
+    path.join(os.homedir(), "coding-orchestrator")
   );
 }
 

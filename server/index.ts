@@ -11,7 +11,6 @@ import { getAvailableAgentProviders } from "./lib/agents.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
-import { migrateToCentralizedHome } from "./lib/migrate.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
