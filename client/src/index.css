@@ -135,7 +135,6 @@
 .terminal-panel {
   --terminal-bottom-padding: 24px;
   box-sizing: border-box;
-  overflow: hidden;
   padding: 8px 12px var(--terminal-bottom-padding);
 }
 
@@ -150,7 +149,6 @@
 
 .terminal-panel .xterm .xterm-viewport {
   background-color: transparent !important;
-  bottom: 0 !important;
   overscroll-behavior: contain;
 }
 

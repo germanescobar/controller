@@ -149,19 +149,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         return true;
       });
 
-      term.attachCustomWheelEventHandler((event) => {
-        suppressPointerInput();
-        event.preventDefault();
-        event.stopPropagation();
-
-        if (event.deltaY !== 0) {
-          const lines = Math.max(1, Math.ceil(Math.abs(event.deltaY) / 40));
-          term.scrollLines(event.deltaY > 0 ? lines : -lines);
-        }
-
-        return false;
-      });
-
       container.addEventListener("pointerdown", suppressPointerInput);
       container.addEventListener("pointermove", suppressPointerInput);
       window.addEventListener("pointerup", suppressPointerInput);
