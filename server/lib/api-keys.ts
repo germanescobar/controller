@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import path from "node:path";
+import { apiKeysFile, ensureOrchestratorHome } from "./paths.js";
 
 export interface ProviderConfig {
   id: string;
@@ -16,16 +16,9 @@ export const PROVIDERS: ProviderConfig[] = [
 // Map of provider id -> API key
 type ApiKeyStore = Record<string, string>;
 
-const DATA_DIR = path.join(process.cwd(), ".data");
-const KEYS_FILE = path.join(DATA_DIR, "api-keys.json");
-
-async function ensureDataDir() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-}
-
 async function readStore(): Promise<ApiKeyStore> {
   try {
-    const content = await fs.readFile(KEYS_FILE, "utf-8");
+    const content = await fs.readFile(apiKeysFile(), "utf-8");
     return JSON.parse(content) as ApiKeyStore;
   } catch {
     return {};
@@ -33,8 +26,8 @@ async function readStore(): Promise<ApiKeyStore> {
 }
 
 async function writeStore(store: ApiKeyStore) {
-  await ensureDataDir();
-  await fs.writeFile(KEYS_FILE, JSON.stringify(store, null, 2));
+  await ensureOrchestratorHome();
+  await fs.writeFile(apiKeysFile(), JSON.stringify(store, null, 2));
 }
 
 export async function getApiKey(providerId: string): Promise<string | null> {
