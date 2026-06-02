@@ -148,27 +148,41 @@ const PROVIDER_FETCHERS: Record<
   openai: fetchOpenAIModels,
 };
 
+const STALE_CODEX_MODEL_IDS = new Set(["gpt-5.3-codex"]);
+
+function getCodexModelPriority(model: Model): number {
+  if (model.size === "default") return 0;
+  if (model.id === "gpt-5.5") return 1;
+  return 2;
+}
+
+function normalizeCodexModels(models: Model[]): Model[] {
+  return models
+    .filter((model) => !STALE_CODEX_MODEL_IDS.has(model.id))
+    .sort((a, b) => getCodexModelPriority(a) - getCodexModelPriority(b));
+}
+
 /** Well-known models available through Codex CLI (user authenticates separately). */
 function getCodexModels(): Model[] {
-  return [
-    { id: "gpt-5.5", name: "GPT-5.5", provider: "codex", size: "latest" },
+  return normalizeCodexModels([
+    { id: "gpt-5.5", name: "GPT-5.5", provider: "codex", size: "default" },
     { id: "gpt-5.4", name: "GPT-5.4", provider: "codex", size: "flagship" },
     { id: "gpt-5.4-mini", name: "GPT-5.4 Mini", provider: "codex", size: "fast" },
-    { id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "codex", size: "coding" },
     { id: "gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark", provider: "codex", size: "real-time" },
-    { id: "gpt-5.2", name: "GPT-5.2", provider: "codex", size: "" },
-  ];
+  ]);
 }
 
 async function fetchCodexModels(): Promise<Model[]> {
   try {
     const models = await codexAppServerManager.listModels({});
-    return models.map((model) => ({
-      id: model.model || model.id,
-      name: model.displayName || model.model || model.id,
-      provider: "codex",
-      size: model.isDefault ? "default" : "",
-    }));
+    return normalizeCodexModels(
+      models.map((model) => ({
+        id: model.model || model.id,
+        name: model.displayName || model.model || model.id,
+        provider: "codex",
+        size: model.isDefault ? "default" : "",
+      }))
+    );
   } catch {
     return getCodexModels();
   }
