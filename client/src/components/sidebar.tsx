@@ -55,7 +55,11 @@ interface SidebarProps {
   activeSessionId?: string;
   completedSessions?: Set<string>;
   onSelectProject: (projectId: string) => void;
-  onSelectSession: (projectId: string, sessionId: string, worktreeId?: string) => void;
+  onSelectSession: (
+    projectId: string,
+    sessionId: string,
+    worktreeId?: string,
+  ) => void;
   onNewThread: (projectId: string, worktreeId?: string) => void;
   onNewProject: () => void;
   onEditProject: (projectId: string) => void;
@@ -113,6 +117,26 @@ function ClaudeLogo({ className }: { className?: string }) {
   );
 }
 
+function AdaLogo({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.75"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <circle cx="11" cy="4" r="2" />
+      <circle cx="18" cy="8" r="2" />
+      <circle cx="20" cy="16" r="2" />
+      <path d="M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10Z" />
+    </svg>
+  );
+}
+
 function SessionProviderIcon({
   provider,
   className,
@@ -120,6 +144,11 @@ function SessionProviderIcon({
   provider?: string;
   className?: string;
 }) {
+  // Ada is the default provider — sessions created by the Ada CLI don't
+  // persist a `provider` field, so a missing/empty value means "ada".
+  if (!provider || provider === "ada") {
+    return <AdaLogo className={className} />;
+  }
   if (provider === "codex") {
     return <CodexLogo className={className} />;
   }
@@ -154,12 +183,20 @@ export function Sidebar({
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
-  const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(new Set());
-  const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
-  const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<string | null>(null);
-  const [confirmDeleteWorktree, setConfirmDeleteWorktree] = useState<
-    { projectId: string; worktreeId: string; name: string } | null
+  const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [visibleSessionCounts, setVisibleSessionCounts] = useState<
+    Record<string, number>
+  >({});
+  const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<
+    string | null
   >(null);
+  const [confirmDeleteWorktree, setConfirmDeleteWorktree] = useState<{
+    projectId: string;
+    worktreeId: string;
+    name: string;
+  } | null>(null);
 
   const focusQueue = useMemo<FocusQueueItem[]>(() => {
     return projectData
@@ -174,12 +211,16 @@ export function Sidebar({
               worktreeName: worktree.name,
               session,
               active: activeSessionIds.has(session.id),
-            }))
-        )
+            })),
+        ),
       )
       .sort((a, b) => {
-        const aTime = new Date(a.session.focusPinnedAt ?? a.session.createdAt).getTime();
-        const bTime = new Date(b.session.focusPinnedAt ?? b.session.createdAt).getTime();
+        const aTime = new Date(
+          a.session.focusPinnedAt ?? a.session.createdAt,
+        ).getTime();
+        const bTime = new Date(
+          b.session.focusPinnedAt ?? b.session.createdAt,
+        ).getTime();
         return aTime - bTime;
       });
   }, [activeSessionIds, projectData]);
@@ -197,17 +238,22 @@ export function Sidebar({
               .filter((s) => !archivedIds.has(s.id))
               .map(async (session) => ({
                 sessionId: session.id,
-                runtime: await fetchSessionRuntime(project.id, session.id, worktree.id)
-                  .catch(() => ({ active: false })),
-              }))
-          )
-        )
+                runtime: await fetchSessionRuntime(
+                  project.id,
+                  session.id,
+                  worktree.id,
+                ).catch(() => ({ active: false })),
+              })),
+          ),
+        ),
       );
       setActiveSessionIds(
-        new Set(entries.filter((e) => e.runtime.active).map((e) => e.sessionId))
+        new Set(
+          entries.filter((e) => e.runtime.active).map((e) => e.sessionId),
+        ),
       );
     },
-    [archivedIds]
+    [archivedIds],
   );
 
   const loadAll = useCallback(async () => {
@@ -217,17 +263,23 @@ export function Sidebar({
         const wtWithSessions = await Promise.all(
           worktrees.map(async (wt) => {
             const sessions = await fetchSessions(project.id, wt.id);
-            const existingProject = projectData.find((p) => p.id === project.id);
-            const existingWt = existingProject?.worktrees.find((w) => w.id === wt.id);
+            const existingProject = projectData.find(
+              (p) => p.id === project.id,
+            );
+            const existingWt = existingProject?.worktrees.find(
+              (w) => w.id === wt.id,
+            );
             const isActiveWt =
               wt.id === activeWorktreeId ||
-              (!activeWorktreeId && wt.isMain && project.id === activeProjectId);
+              (!activeWorktreeId &&
+                wt.isMain &&
+                project.id === activeProjectId);
             return {
               ...wt,
               sessions: sessions.filter((s) => !archivedIds.has(s.id)),
               isExpanded: existingWt?.isExpanded ?? isActiveWt,
             } satisfies WorktreeWithSessions;
-          })
+          }),
         );
         const existing = projectData.find((p) => p.id === project.id);
         return {
@@ -235,7 +287,7 @@ export function Sidebar({
           worktrees: wtWithSessions,
           isExpanded: existing?.isExpanded ?? project.id === activeProjectId,
         } satisfies ProjectWithWorktrees;
-      })
+      }),
     );
     setProjectData(next);
     await refreshActiveSessions(next);
@@ -256,7 +308,7 @@ export function Sidebar({
 
   const toggleProject = (id: string) => {
     setProjectData((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, isExpanded: !p.isExpanded } : p))
+      prev.map((p) => (p.id === id ? { ...p, isExpanded: !p.isExpanded } : p)),
     );
   };
 
@@ -267,11 +319,11 @@ export function Sidebar({
           ? {
               ...p,
               worktrees: p.worktrees.map((w) =>
-                w.id === worktreeId ? { ...w, isExpanded: !w.isExpanded } : w
+                w.id === worktreeId ? { ...w, isExpanded: !w.isExpanded } : w,
               ),
             }
-          : p
-      )
+          : p,
+      ),
     );
   };
 
@@ -299,7 +351,9 @@ export function Sidebar({
       await loadAll();
       toast.success("Worktree deleted");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to delete worktree");
+      toast.error(
+        err instanceof Error ? err.message : "Failed to delete worktree",
+      );
     }
   };
 
@@ -307,7 +361,7 @@ export function Sidebar({
     projectId: string,
     sessionId: string,
     worktreeId: string,
-    pinned: boolean
+    pinned: boolean,
   ) => {
     try {
       if (pinned) {
@@ -319,17 +373,25 @@ export function Sidebar({
       }
       await loadAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update focus queue",
+      );
     }
   };
 
   const handleFocusDone = async (item: FocusQueueItem) => {
     try {
-      await markSessionFocusDone(item.projectId, item.session.id, item.worktreeId);
+      await markSessionFocusDone(
+        item.projectId,
+        item.session.id,
+        item.worktreeId,
+      );
       toast.success("Session marked done");
       await loadAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+      toast.error(
+        err instanceof Error ? err.message : "Failed to update focus queue",
+      );
     }
   };
 
@@ -370,7 +432,7 @@ export function Sidebar({
                 "rounded-md px-2 py-1 text-xs font-medium transition-colors",
                 focusMode
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                  : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
               )}
               title={focusMode ? "Exit focus mode" : "Start focus mode"}
             >
@@ -386,16 +448,23 @@ export function Sidebar({
             </span>
           ) : (
             focusQueue.map((item) => (
-              <div key={`${item.projectId}:${item.worktreeId}:${item.session.id}`} className="group/focus flex items-center">
+              <div
+                key={`${item.projectId}:${item.worktreeId}:${item.session.id}`}
+                className="group/focus flex items-center"
+              >
                 <button
                   onClick={() =>
-                    onSelectSession(item.projectId, item.session.id, item.worktreeId)
+                    onSelectSession(
+                      item.projectId,
+                      item.session.id,
+                      item.worktreeId,
+                    )
                   }
                   className={cn(
                     "flex flex-1 items-start justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors min-w-0",
                     item.session.id === activeSessionId
                       ? "bg-sidebar-accent text-sidebar-foreground"
-                      : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
+                      : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
                   )}
                 >
                   <span className="flex min-w-0 flex-1 items-start gap-2">
@@ -443,7 +512,9 @@ export function Sidebar({
 
         <div className="flex flex-col gap-1 pb-3">
           {projectData.length === 0 ? (
-            <span className="px-3 py-2 text-xs text-muted-foreground">No projects yet</span>
+            <span className="px-3 py-2 text-xs text-muted-foreground">
+              No projects yet
+            </span>
           ) : (
             projectData.map((project) => (
               <div key={project.id}>
@@ -457,7 +528,7 @@ export function Sidebar({
                       "flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors min-w-0",
                       project.id === activeProjectId
                         ? "text-sidebar-foreground"
-                        : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
+                        : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
                     )}
                   >
                     {project.isExpanded ? (
@@ -469,21 +540,30 @@ export function Sidebar({
                     <span className="truncate">{project.name}</span>
                   </button>
                   <button
-                    onClick={(e) => { e.stopPropagation(); onNewWorktree(project.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onNewWorktree(project.id);
+                    }}
                     title="New worktree"
                     className="opacity-0 group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                   >
                     <GitBranchPlus className="h-3.5 w-3.5" />
                   </button>
                   <button
-                    onClick={(e) => { e.stopPropagation(); onEditProject(project.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEditProject(project.id);
+                    }}
                     title="Edit project"
                     className="opacity-0 group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </button>
                   <button
-                    onClick={(e) => { e.stopPropagation(); setConfirmDeleteProjectId(project.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmDeleteProjectId(project.id);
+                    }}
                     title="Delete project"
                     className="opacity-0 group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
                   >
@@ -500,16 +580,23 @@ export function Sidebar({
                     ) : (
                       project.worktrees.map((worktree) => {
                         const storedVisibleSessionCount =
-                          visibleSessionCounts[worktreeVisibilityKey(project.id, worktree.id)] ??
-                          SESSION_BATCH_SIZE;
+                          visibleSessionCounts[
+                            worktreeVisibilityKey(project.id, worktree.id)
+                          ] ?? SESSION_BATCH_SIZE;
                         const activeSessionIndex = worktree.sessions.findIndex(
-                          (session) => session.id === activeSessionId
+                          (session) => session.id === activeSessionId,
                         );
                         const visibleSessionCount =
                           activeSessionIndex >= 0
-                            ? Math.max(storedVisibleSessionCount, activeSessionIndex + 1)
+                            ? Math.max(
+                                storedVisibleSessionCount,
+                                activeSessionIndex + 1,
+                              )
                             : storedVisibleSessionCount;
-                        const visibleSessions = worktree.sessions.slice(0, visibleSessionCount);
+                        const visibleSessions = worktree.sessions.slice(
+                          0,
+                          visibleSessionCount,
+                        );
                         const remainingSessionCount =
                           worktree.sessions.length - visibleSessions.length;
 
@@ -517,12 +604,14 @@ export function Sidebar({
                           <div key={worktree.id}>
                             <div className="group/worktree flex items-center">
                               <button
-                                onClick={() => toggleWorktree(project.id, worktree.id)}
+                                onClick={() =>
+                                  toggleWorktree(project.id, worktree.id)
+                                }
                                 className={cn(
                                   "flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors min-w-0",
                                   worktree.id === activeWorktreeId
                                     ? "text-sidebar-foreground"
-                                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
+                                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
                                 )}
                               >
                                 {worktree.isExpanded ? (
@@ -533,9 +622,15 @@ export function Sidebar({
                                 <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                                 <span className="truncate">
                                   {worktree.name}
-                                  {worktree.setupExitCode != null && worktree.setupExitCode !== 0 && (
-                                    <span className="ml-1 text-destructive" title="Setup failed">!</span>
-                                  )}
+                                  {worktree.setupExitCode != null &&
+                                    worktree.setupExitCode !== 0 && (
+                                      <span
+                                        className="ml-1 text-destructive"
+                                        title="Setup failed"
+                                      >
+                                        !
+                                      </span>
+                                    )}
                                 </span>
                               </button>
                               <button
@@ -575,16 +670,23 @@ export function Sidebar({
                                 ) : (
                                   <>
                                     {visibleSessions.map((session) => (
-                                      <div key={session.id} className="group/session flex items-center">
+                                      <div
+                                        key={session.id}
+                                        className="group/session flex items-center"
+                                      >
                                         <button
                                           onClick={() =>
-                                            onSelectSession(project.id, session.id, worktree.id)
+                                            onSelectSession(
+                                              project.id,
+                                              session.id,
+                                              worktree.id,
+                                            )
                                           }
                                           className={cn(
                                             "flex flex-1 items-center justify-between gap-3 rounded-md px-4 py-1.5 text-sm transition-colors min-w-0",
                                             session.id === activeSessionId
                                               ? "bg-sidebar-accent text-sidebar-foreground"
-                                              : "text-sidebar-foreground/80 hover:bg-sidebar-accent"
+                                              : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
                                           )}
                                         >
                                           <span className="flex min-w-0 flex-1 items-center gap-2 truncate pr-2">
@@ -593,9 +695,12 @@ export function Sidebar({
                                               className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
                                             />
                                             <span className="truncate">
-                                              {session.title || session.id.slice(0, 8)}
+                                              {session.title ||
+                                                session.id.slice(0, 8)}
                                             </span>
-                                            {completedSessions?.has(session.id) && (
+                                            {completedSessions?.has(
+                                              session.id,
+                                            ) && (
                                               <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" />
                                             )}
                                           </span>
@@ -615,11 +720,15 @@ export function Sidebar({
                                                 project.id,
                                                 session.id,
                                                 worktree.id,
-                                                Boolean(session.focusPinnedAt)
+                                                Boolean(session.focusPinnedAt),
                                               );
                                             }}
                                             className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
-                                            title={session.focusPinnedAt ? "Remove from focus" : "Add to focus"}
+                                            title={
+                                              session.focusPinnedAt
+                                                ? "Remove from focus"
+                                                : "Add to focus"
+                                            }
                                           >
                                             {session.focusPinnedAt ? (
                                               <PinOff className="h-3.5 w-3.5" />
@@ -632,28 +741,40 @@ export function Sidebar({
                                             tabIndex={0}
                                             onClick={async (e) => {
                                               e.stopPropagation();
-                                              setArchivedIds((prev) => new Set(prev).add(session.id));
+                                              setArchivedIds((prev) =>
+                                                new Set(prev).add(session.id),
+                                              );
                                               setProjectData((prev) =>
                                                 prev.map((p) =>
                                                   p.id === project.id
                                                     ? {
                                                         ...p,
-                                                        worktrees: p.worktrees.map((w) =>
-                                                          w.id === worktree.id
-                                                            ? {
-                                                                ...w,
-                                                                sessions: w.sessions.filter(
-                                                                  (s) => s.id !== session.id
-                                                                ),
-                                                              }
-                                                            : w
-                                                        ),
+                                                        worktrees:
+                                                          p.worktrees.map(
+                                                            (w) =>
+                                                              w.id ===
+                                                              worktree.id
+                                                                ? {
+                                                                    ...w,
+                                                                    sessions:
+                                                                      w.sessions.filter(
+                                                                        (s) =>
+                                                                          s.id !==
+                                                                          session.id,
+                                                                      ),
+                                                                  }
+                                                                : w,
+                                                          ),
                                                       }
-                                                    : p
-                                                )
+                                                    : p,
+                                                ),
                                               );
                                               toast.success("Session archived");
-                                              await archiveSession(project.id, session.id, worktree.id);
+                                              await archiveSession(
+                                                project.id,
+                                                session.id,
+                                                worktree.id,
+                                              );
                                             }}
                                             className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
                                             title="Archive session"
@@ -666,7 +787,12 @@ export function Sidebar({
                                     {remainingSessionCount > 0 && (
                                       <button
                                         type="button"
-                                        onClick={() => showMoreSessions(project.id, worktree.id)}
+                                        onClick={() =>
+                                          showMoreSessions(
+                                            project.id,
+                                            worktree.id,
+                                          )
+                                        }
                                         className="mx-2 mt-1 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
                                       >
                                         Show more
@@ -701,7 +827,9 @@ export function Sidebar({
 
       <Dialog
         open={!!confirmDeleteProjectId}
-        onOpenChange={(open) => { if (!open) setConfirmDeleteProjectId(null); }}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDeleteProjectId(null);
+        }}
       >
         <DialogContent showCloseButton={false}>
           <DialogHeader>
@@ -715,7 +843,9 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
+            <DialogClose render={<Button variant="outline" />}>
+              Cancel
+            </DialogClose>
             <Button variant="destructive" onClick={confirmDeleteProject}>
               Delete
             </Button>
@@ -725,7 +855,9 @@ export function Sidebar({
 
       <Dialog
         open={!!confirmDeleteWorktree}
-        onOpenChange={(open) => { if (!open) setConfirmDeleteWorktree(null); }}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDeleteWorktree(null);
+        }}
       >
         <DialogContent showCloseButton={false}>
           <DialogHeader>
@@ -739,7 +871,9 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
+            <DialogClose render={<Button variant="outline" />}>
+              Cancel
+            </DialogClose>
             <Button variant="destructive" onClick={confirmDeleteWorktreeAction}>
               Delete
             </Button>
