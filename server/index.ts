@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { projectsRouter } from "./routes/projects.js";
 import { sessionsRouter } from "./routes/sessions.js";
@@ -35,6 +37,19 @@ app.get("/api/agent-providers", async (_req, res) => {
   const providers = (await getAvailableAgentProviders()).map((p) => ({ id: p.id, name: p.name }));
   res.json(providers);
 });
+
+const shouldServeClient =
+  process.env.SERVE_CLIENT_DIST === "1" || process.env.NODE_ENV === "production";
+const clientDistDir =
+  process.env.CLIENT_DIST_DIR ?? path.resolve(process.cwd(), "dist/client");
+const clientIndexPath = path.join(clientDistDir, "index.html");
+
+if (shouldServeClient && fs.existsSync(clientIndexPath)) {
+  app.use(express.static(clientDistDir));
+  app.get(/^(?!\/api\/|\/ws\/terminal).*/, (_req, res) => {
+    res.sendFile(clientIndexPath);
+  });
+}
 
 const server = http.createServer(app);
 
