@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
+import { projectsFile, ensureOrchestratorHome } from "./paths.js";
 
 export interface Project {
   id: string;
@@ -8,13 +9,6 @@ export interface Project {
   path: string;
   setupCommands?: string;
   createdAt: string;
-}
-
-const DATA_DIR = path.join(process.cwd(), ".data");
-const PROJECTS_FILE = path.join(DATA_DIR, "projects.json");
-
-async function ensureDataDir() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
 }
 
 async function writeSetupScript(projectPath: string, commands: string): Promise<void> {
@@ -27,7 +21,7 @@ async function writeSetupScript(projectPath: string, commands: string): Promise<
 
 export async function getProjects(): Promise<Project[]> {
   try {
-    const content = await fs.readFile(PROJECTS_FILE, "utf-8");
+    const content = await fs.readFile(projectsFile(), "utf-8");
     return JSON.parse(content) as Project[];
   } catch {
     return [];
@@ -39,7 +33,7 @@ export async function addProject(
   projectPath: string,
   setupCommands?: string
 ): Promise<Project> {
-  await ensureDataDir();
+  await ensureOrchestratorHome();
   const projects = await getProjects();
   const project: Project = {
     id: uuidv4(),
@@ -49,7 +43,7 @@ export async function addProject(
     createdAt: new Date().toISOString(),
   };
   projects.push(project);
-  await fs.writeFile(PROJECTS_FILE, JSON.stringify(projects, null, 2));
+  await fs.writeFile(projectsFile(), JSON.stringify(projects, null, 2));
   if (setupCommands?.trim()) {
     await writeSetupScript(projectPath, setupCommands);
   }
@@ -70,8 +64,8 @@ export async function updateProject(
   if (idx === -1) return null;
   const updated: Project = { ...projects[idx], ...patch };
   projects[idx] = updated;
-  await ensureDataDir();
-  await fs.writeFile(PROJECTS_FILE, JSON.stringify(projects, null, 2));
+  await ensureOrchestratorHome();
+  await fs.writeFile(projectsFile(), JSON.stringify(projects, null, 2));
   if (patch.setupCommands !== undefined) {
     if (patch.setupCommands.trim()) {
       await writeSetupScript(updated.path, patch.setupCommands);
@@ -88,7 +82,7 @@ export async function deleteProject(id: string): Promise<boolean> {
   const projects = await getProjects();
   const filtered = projects.filter((p) => p.id !== id);
   if (filtered.length === projects.length) return false;
-  await ensureDataDir();
-  await fs.writeFile(PROJECTS_FILE, JSON.stringify(filtered, null, 2));
+  await ensureOrchestratorHome();
+  await fs.writeFile(projectsFile(), JSON.stringify(filtered, null, 2));
   return true;
 }
