@@ -13,6 +13,7 @@ import { getAvailableAgentProviders } from "./lib/agents.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
+import { buildScriptEnv } from "./lib/project-scripts.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -99,7 +100,11 @@ wss.on("connection", (ws: WebSocket) => {
       }
 
       ptyKey = `${projectId}:${worktree.id}:${terminalId}`;
-      const result = ptyManager.getOrCreate(ptyKey, worktree.path);
+      const result = ptyManager.getOrCreate(
+        ptyKey,
+        worktree.path,
+        buildScriptEnv({ project, worktree })
+      );
 
       if (result.error) {
         ws.send(JSON.stringify({ type: "error", message: `Failed to spawn terminal: ${result.error}` }));
