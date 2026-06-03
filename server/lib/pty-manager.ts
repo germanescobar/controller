@@ -104,7 +104,7 @@ function configureTmuxSession(sessionName: string): void {
     stdio: "ignore",
   });
 
-  execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "off"], {
+  execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "on"], {
     stdio: "ignore",
   });
 

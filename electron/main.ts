@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, Menu, type MenuItemConstructorOptions } from "electron";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -62,6 +62,40 @@ async function startProductionServer(port: number): Promise<string> {
   return url;
 }
 
+function registerContextMenu(win: BrowserWindow): void {
+  win.webContents.on("context-menu", (_event, params) => {
+    const template: MenuItemConstructorOptions[] = [];
+
+    if (params.isEditable) {
+      template.push(
+        { role: "cut", enabled: params.editFlags.canCut },
+        { role: "copy", enabled: params.editFlags.canCopy },
+        { role: "paste", enabled: params.editFlags.canPaste },
+        { type: "separator" },
+        { role: "selectAll", enabled: params.editFlags.canSelectAll }
+      );
+    } else if (params.selectionText.trim().length > 0) {
+      template.push({ role: "copy" });
+    }
+
+    if (!app.isPackaged) {
+      if (template.length > 0) {
+        template.push({ type: "separator" });
+      }
+      template.push({
+        label: "Inspect Element",
+        click: () => {
+          win.webContents.inspectElement(params.x, params.y);
+        },
+      });
+    }
+
+    if (template.length === 0) return;
+
+    Menu.buildFromTemplate(template).popup({ window: win });
+  });
+}
+
 async function createWindow(loadUrl: string): Promise<void> {
   const win = new BrowserWindow({
     width: 1280,
@@ -75,6 +109,8 @@ async function createWindow(loadUrl: string): Promise<void> {
       sandbox: true,
     },
   });
+
+  registerContextMenu(win);
 
   await win.loadURL(loadUrl);
 
