@@ -3,14 +3,6 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
-const DISABLE_MOUSE_TRACKING = "\x1b[?9;1000;1002;1003;1005;1006;1015l";
-const MOUSE_TRACKING_MODES = new Set(["9", "1000", "1002", "1003", "1005", "1006", "1015"]);
-const PRIVATE_MODE_SEQUENCE = /\x1b\[\?([0-9;]*)([hl])/g;
-const SGR_MOUSE_INPUT = /\x1b\[<[0-9;]+[Mm]/g;
-const X10_MOUSE_INPUT = /\x1b\[M[\s\S]{3}/g;
-const POINTER_SUPPRESSION_MS = 250;
-const CURSOR_VERTICAL_INPUT = /^(?:\x1b\[[AB]|\x1bO[AB])+$/;
-
 export type TerminalSpecialKey =
   | "escape"
   | "tab"
@@ -33,26 +25,6 @@ interface TerminalProps {
   projectId: string;
   worktreeId?: string;
   terminalId: string;
-}
-
-function stripMouseTrackingEnableSequences(data: string): string {
-  return data.replace(PRIVATE_MODE_SEQUENCE, (sequence, rawModes: string, command: string) => {
-    if (command !== "h") return sequence;
-
-    const modes = rawModes.split(";").filter(Boolean);
-    const allowedModes = modes.filter((mode) => !MOUSE_TRACKING_MODES.has(mode));
-
-    if (allowedModes.length === modes.length) return sequence;
-    return allowedModes.length > 0 ? `\x1b[?${allowedModes.join(";")}h` : "";
-  });
-}
-
-function stripMouseTrackingInput(data: string): string {
-  return data.replace(SGR_MOUSE_INPUT, "").replace(X10_MOUSE_INPUT, "");
-}
-
-function isVerticalCursorInput(data: string): boolean {
-  return CURSOR_VERTICAL_INPUT.test(data);
 }
 
 function encodeSpecialKey(term: XTerm, key: TerminalSpecialKey): string {
@@ -87,8 +59,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const fitRef = useRef<FitAddon | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const hasAttachedRef = useRef(false);
-    const suppressPointerInputUntilRef = useRef(0);
-    const keyboardInputUntilRef = useRef(0);
 
     useImperativeHandle(ref, () => ({
       sendSpecialKey(key: TerminalSpecialKey) {
@@ -130,28 +100,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(container);
-      term.write(DISABLE_MOUSE_TRACKING);
-
-      const suppressPointerInput = () => {
-        suppressPointerInputUntilRef.current = Date.now() + POINTER_SUPPRESSION_MS;
-      };
-
-      term.attachCustomKeyEventHandler((event) => {
-        if (
-          event.key === "ArrowUp" ||
-          event.key === "ArrowDown" ||
-          event.key === "ArrowLeft" ||
-          event.key === "ArrowRight"
-        ) {
-          keyboardInputUntilRef.current = Date.now() + POINTER_SUPPRESSION_MS;
-        }
-
-        return true;
-      });
-
-      container.addEventListener("pointerdown", suppressPointerInput);
-      container.addEventListener("pointermove", suppressPointerInput);
-      window.addEventListener("pointerup", suppressPointerInput);
 
       requestAnimationFrame(() => {
         fitAddon.fit();
@@ -170,9 +118,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
 
       return () => {
         resizeObserver.disconnect();
-        container.removeEventListener("pointerdown", suppressPointerInput);
-        container.removeEventListener("pointermove", suppressPointerInput);
-        window.removeEventListener("pointerup", suppressPointerInput);
         term.dispose();
         termRef.current = null;
         fitRef.current = null;
@@ -237,11 +182,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         ws.onmessage = (event) => {
           const msg = JSON.parse(event.data);
           if (msg.type === "output") {
-            term.write(stripMouseTrackingEnableSequences(String(msg.data)));
+            term.write(String(msg.data));
           } else if (msg.type === "error") {
             term.writeln(`\x1b[31mError: ${msg.message}\x1b[0m`);
           } else if (msg.type === "attached") {
-            term.write(DISABLE_MOUSE_TRACKING);
             fitAndSendResize();
           }
         };
@@ -265,19 +209,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       connect();
 
       const inputDisposable = term.onData((data: string) => {
-        const input = stripMouseTrackingInput(data);
-        if (!input) return;
-        if (
-          isVerticalCursorInput(input) &&
-          Date.now() <= suppressPointerInputUntilRef.current &&
-          Date.now() > keyboardInputUntilRef.current
-        ) {
-          return;
-        }
-
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "input", data: input }));
+          ws.send(JSON.stringify({ type: "input", data }));
         }
       });
 
