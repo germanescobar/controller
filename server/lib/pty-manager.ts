@@ -47,6 +47,33 @@ function killTmuxSession(sessionName: string): void {
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function formatEnvAssignments(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
+    .join(" ");
+}
+
+function buildTmuxShellCommand(env: Record<string, string>): string {
+  const shell = process.env.SHELL || "/bin/sh";
+  return `exec env ${formatEnvAssignments(env)} ${shellQuote(shell)} -i`;
+}
+
+function setTmuxEnvironment(sessionName: string, env: Record<string, string>): void {
+  for (const [key, value] of Object.entries(env)) {
+    try {
+      execFileSync("tmux", ["set-environment", "-t", `=${sessionName}`, key, value], {
+        stdio: "ignore",
+      });
+    } catch {
+      // Ignore env set failures on older tmux versions.
+    }
+  }
+}
+
 function ensureTmuxSession(sessionName: string, cwd: string, env?: Record<string, string>): void {
   const exists = (() => {
     try {
@@ -60,22 +87,13 @@ function ensureTmuxSession(sessionName: string, cwd: string, env?: Record<string
   })();
 
   if (!exists) {
-    execFileSync("tmux", ["new-session", "-d", "-s", sessionName, "-c", cwd], {
-      stdio: "ignore",
-    });
+    const args = ["new-session", "-d", "-s", sessionName, "-c", cwd];
+    if (env) args.push(buildTmuxShellCommand(env));
+    execFileSync("tmux", args, { stdio: "ignore" });
   }
 
-  // Inject worktree env vars into the tmux session so the shell inherits them.
   if (env) {
-    for (const [key, value] of Object.entries(env)) {
-      try {
-        execFileSync("tmux", ["set-environment", "-t", `=${sessionName}`, key, value], {
-          stdio: "ignore",
-        });
-      } catch {
-        // Silently ignore env set failures on older tmux versions.
-      }
-    }
+    setTmuxEnvironment(sessionName, env);
   }
 
   configureTmuxSession(sessionName);
@@ -104,14 +122,7 @@ class PtyManager {
     if (existing) {
       // Re-apply env vars on reconnection in case they weren't set before.
       if (extraEnv) {
-        const sessionName = tmuxSessionName(sessionId);
-        for (const [key, value] of Object.entries(extraEnv)) {
-          try {
-            execFileSync("tmux", ["set-environment", "-t", `=${sessionName}`, key, value], {
-              stdio: "ignore",
-            });
-          } catch { /* ignore */ }
-        }
+        setTmuxEnvironment(tmuxSessionName(sessionId), extraEnv);
       }
       configureTmuxSession(tmuxSessionName(sessionId));
       return { isNew: false, buffer: existing.buffer };

@@ -100,7 +100,11 @@ wss.on("connection", (ws: WebSocket) => {
       }
 
       ptyKey = `${projectId}:${worktree.id}:${terminalId}`;
-      const result = ptyManager.getOrCreate(ptyKey, worktree.path);
+      const result = ptyManager.getOrCreate(
+        ptyKey,
+        worktree.path,
+        buildScriptEnv({ project, worktree })
+      );
 
       if (result.error) {
         ws.send(JSON.stringify({ type: "error", message: `Failed to spawn terminal: ${result.error}` }));
