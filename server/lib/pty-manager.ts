@@ -47,15 +47,35 @@ function killTmuxSession(sessionName: string): void {
   }
 }
 
-function ensureTmuxSession(sessionName: string, cwd: string): void {
-  try {
-    execFileSync("tmux", ["has-session", "-t", `=${sessionName}`], {
-      stdio: "ignore",
-    });
-  } catch {
+function ensureTmuxSession(sessionName: string, cwd: string, env?: Record<string, string>): void {
+  const exists = (() => {
+    try {
+      execFileSync("tmux", ["has-session", "-t", `=${sessionName}`], {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  if (!exists) {
     execFileSync("tmux", ["new-session", "-d", "-s", sessionName, "-c", cwd], {
       stdio: "ignore",
     });
+  }
+
+  // Inject worktree env vars into the tmux session so the shell inherits them.
+  if (env) {
+    for (const [key, value] of Object.entries(env)) {
+      try {
+        execFileSync("tmux", ["set-environment", "-t", `=${sessionName}`, key, value], {
+          stdio: "ignore",
+        });
+      } catch {
+        // Silently ignore env set failures on older tmux versions.
+      }
+    }
   }
 
   configureTmuxSession(sessionName);
@@ -79,24 +99,38 @@ class PtyManager {
   private sessions = new Map<string, PtySession>();
 
   /** Get or create a PTY for a session. Returns the existing buffer if reconnecting. */
-  getOrCreate(sessionId: string, cwd: string): { isNew: boolean; buffer: string; error?: string } {
+  getOrCreate(sessionId: string, cwd: string, extraEnv?: Record<string, string>): { isNew: boolean; buffer: string; error?: string } {
     const existing = this.sessions.get(sessionId);
     if (existing) {
+      // Re-apply env vars on reconnection in case they weren't set before.
+      if (extraEnv) {
+        const sessionName = tmuxSessionName(sessionId);
+        for (const [key, value] of Object.entries(extraEnv)) {
+          try {
+            execFileSync("tmux", ["set-environment", "-t", `=${sessionName}`, key, value], {
+              stdio: "ignore",
+            });
+          } catch { /* ignore */ }
+        }
+      }
       configureTmuxSession(tmuxSessionName(sessionId));
       return { isNew: false, buffer: existing.buffer };
     }
 
-    // Build a clean env — filter out keys that can interfere with node-pty
+    // Build a clean env — copy process.env then layer on worktree vars
     const env: Record<string, string> = {};
     for (const [key, val] of Object.entries(process.env)) {
       if (val === undefined) continue;
       env[key] = val;
     }
+    if (extraEnv) {
+      Object.assign(env, extraEnv);
+    }
 
     let ptyProcess: pty.IPty;
     const sessionName = tmuxSessionName(sessionId);
     try {
-      ensureTmuxSession(sessionName, cwd);
+      ensureTmuxSession(sessionName, cwd, extraEnv);
       ptyProcess = pty.spawn("tmux", ["attach-session", "-t", `=${sessionName}`], {
         name: "xterm-256color",
         cols: 80,
