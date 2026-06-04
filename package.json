@@ -13,29 +13,21 @@
     "package:electron": "npm run build && electron-builder --dir"
   },
   "build": {
-    "appId": "com.coding-orchestrator.app",
-    "productName": "Coding Orchestrator",
+    "appId": "com.germanescobar.controller",
+    "productName": "Controller",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
+      "build/**/*",
       "package.json"
     ],
     "asarUnpack": [
       "node_modules/node-pty/**/*"
     ],
     "mac": {
-      "target": [
-        "dir"
-      ]
-    },
-    "win": {
-      "target": [
-        "dir"
-      ]
-    },
-    "linux": {
+      "icon": "build/icon.icns",
       "target": [
         "dir"
       ]
