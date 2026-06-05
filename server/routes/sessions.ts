@@ -60,6 +60,16 @@ function isBenignProviderStderrLine(line: string): boolean {
   return false;
 }
 
+// Kill a spawned agent that produces no stdout for this long — catches hangs
+// where the process is alive but stalled (e.g. an upstream request that never
+// streams). Long-running tool calls (builds, tests) still emit start/finish
+// events, so a multi-minute window avoids false positives. Override per-deploy.
+const AGENT_INACTIVITY_TIMEOUT_MS = Number(
+  process.env.AGENT_INACTIVITY_TIMEOUT_MS ?? 5 * 60 * 1000
+);
+// Comment-line ping so idle proxies don't drop a quiet SSE connection.
+const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
+
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_SIZE = 35 * 1024 * 1024;
@@ -559,8 +569,10 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
 
-  // Close stdin for CLIs that otherwise wait briefly for piped input.
-  if (providerId === "codex" || providerId === "claude") {
+  // Close stdin for CLIs that otherwise wait on an open pipe. We pass the
+  // prompt as an argv argument, so none of these providers need stdin; leaving
+  // it open has been observed to make Ada hang silently mid-run.
+  if (providerId === "ada" || providerId === "codex" || providerId === "claude") {
     child.stdin?.end();
   }
 
@@ -635,12 +647,64 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
   sseSend({ type: "started" });
 
+  // Heartbeat keeps the SSE connection alive through idle proxies; the watchdog
+  // reaps a child that has gone silent (alive but stalled) so the run fails
+  // visibly instead of hanging forever.
+  const providerName = provider.name;
+  let heartbeat: NodeJS.Timeout | undefined;
+  let watchdog: NodeJS.Timeout | undefined;
+  let watchdogFired = false;
+
+  function clearStreamTimers() {
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    if (watchdog) {
+      clearTimeout(watchdog);
+      watchdog = undefined;
+    }
+  }
+
+  function resetWatchdog() {
+    if (watchdogFired) return;
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(onInactivityTimeout, AGENT_INACTIVITY_TIMEOUT_MS);
+  }
+
+  function onInactivityTimeout() {
+    watchdogFired = true;
+    sseSend({
+      type: "ada_event",
+      event: {
+        type: "run.failed",
+        sessionId: streamSessionId,
+        error: `No output from ${providerName} for ${Math.round(
+          AGENT_INACTIVITY_TIMEOUT_MS / 1000
+        )}s; stopping the stalled run.`,
+        timestamp: new Date().toISOString(),
+      },
+    });
+    if (child.exitCode === null && !child.killed) {
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }, 2000);
+    }
+  }
+
+  heartbeat = setInterval(() => {
+    if (clientConnected) res.write(": ping\n\n");
+  }, SSE_HEARTBEAT_INTERVAL_MS);
+  resetWatchdog();
+
   if (resumeSessionId && shouldPersist) {
     persistSessionStart(resumeSessionId).catch(() => {});
   }
 
   // Forward stderr text and keep fallback approval handling for older prompts.
   child.stderr?.on("data", (data: Buffer) => {
+    resetWatchdog();
     const raw = data.toString();
     const text = stripAnsi(raw).trim();
 
@@ -659,6 +723,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   });
 
   child.stdout?.on("data", (data: Buffer) => {
+    resetWatchdog();
     const raw = data.toString();
     stdoutBuffer += raw;
     if (raw.includes("[y/n]")) {
@@ -712,6 +777,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   });
 
   child.on("close", (code) => {
+    clearStreamTimers();
     eventProcessing
       .catch(() => {})
       .then(async () => {
@@ -759,6 +825,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   });
 
   child.on("error", (err) => {
+    clearStreamTimers();
     if (streamSessionId) {
       markSessionInactive(streamSessionId);
     }
@@ -772,6 +839,12 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   // navigates back to the session.
   req.on("close", () => {
     clientConnected = false;
+    // Stop pinging a gone client, but keep the watchdog so a hung child is
+    // still reaped even after the SSE connection drops.
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
   });
 });
 
