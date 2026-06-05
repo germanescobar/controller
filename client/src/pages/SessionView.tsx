@@ -258,6 +258,33 @@ function truncateInlineText(value: string, maxLength: number): string {
   return `${normalized.slice(0, maxLength)}...`;
 }
 
+function CollapsibleUserMessage({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const lineCount = text.split("\n").length;
+  const shouldCollapse = lineCount > 12 || text.length > 1000;
+
+  return (
+    <div>
+      <div
+        className={`whitespace-pre-wrap break-words ${
+          !expanded && shouldCollapse ? "max-h-[15rem] overflow-hidden" : ""
+        }`}
+      >
+        {text}
+      </div>
+      {shouldCollapse && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="mt-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function buildToolInputPreview(input?: Record<string, unknown>): string {
   if (!input) return "";
 
@@ -1056,7 +1083,7 @@ function EventBlock({
         <div className="max-w-[85%]">
           <AttachmentStrip attachments={attachments} />
           <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-            {normalizeMarkdownText(data.text)}
+            <CollapsibleUserMessage text={normalizeMarkdownText(data.text)} />
           </div>
         </div>
       </div>
@@ -3610,7 +3637,7 @@ export function SessionView({
                   <div className="max-w-[85%]">
                     <AttachmentStrip attachments={pendingAttachments} />
                     <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-                      {pendingMessage}
+                      <CollapsibleUserMessage text={pendingMessage} />
                     </div>
                   </div>
                 </div>
@@ -3662,7 +3689,7 @@ export function SessionView({
                           <div className="max-w-[85%]">
                             <AttachmentStrip attachments={item.attachments} />
                             <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-                              {normalizeMarkdownText(item.text)}
+                              <CollapsibleUserMessage text={normalizeMarkdownText(item.text)} />
                             </div>
                           </div>
                         </div>
