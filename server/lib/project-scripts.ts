@@ -78,8 +78,19 @@ export function buildTerminalScriptCommand(
   commands: ProjectScriptCommand[],
   env: Record<string, string>
 ): string {
-  const body = commands.map((item) => item.command).join("\n");
-  return `${formatEnvAssignments(env)} bash -lc ${shellQuote(`set -e\n${body}`)}`;
+  const body = joinShellCommands(commands.map((item) => item.command));
+  return `${formatEnvAssignments(env)} bash -lc ${shellQuote(`set -e; ${body}`)}`;
+}
+
+function joinShellCommands(commands: string[]): string {
+  return commands.reduce((script, command) => {
+    if (!script) return command;
+    return `${script}${needsCommandSeparator(script) ? ";" : ""}\n${command}`;
+  }, "");
+}
+
+function needsCommandSeparator(command: string): boolean {
+  return !/[;&|]\s*$/.test(command);
 }
 
 function emptyProjectScripts(): ProjectScripts {

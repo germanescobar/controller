@@ -1,6 +1,6 @@
 import * as pty from "node-pty";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
 
 interface PtySession {
   pty: pty.IPty;
@@ -19,6 +19,10 @@ function tmuxSessionName(sessionId: string): string {
   const safeId = sanitizeTmuxName(sessionId).slice(0, 160);
   const hash = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
   return `${TMUX_SESSION_PREFIX}${safeId}-${hash}`;
+}
+
+function tmuxFirstPaneTarget(sessionName: string): string {
+  return `${sessionName}:0.0`;
 }
 
 function tmuxPrefix(prefix: string): string {
@@ -60,6 +64,19 @@ function formatEnvAssignments(env: Record<string, string>): string {
 function buildTmuxShellCommand(env: Record<string, string>): string {
   const shell = process.env.SHELL || "/bin/sh";
   return `exec env ${formatEnvAssignments(env)} ${shellQuote(shell)} -i`;
+}
+
+function runTmux(args: string[], options?: ExecFileSyncOptions): void {
+  try {
+    execFileSync("tmux", args, options);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const output = typeof err === "object" && err !== null && "stderr" in err
+      ? (err as { stderr?: Buffer | string }).stderr
+      : undefined;
+    const stderr = Buffer.isBuffer(output) ? output.toString().trim() : output?.trim();
+    throw new Error(stderr ? `${message}: ${stderr}` : message);
+  }
 }
 
 function setTmuxEnvironment(sessionName: string, env: Record<string, string>): void {
@@ -187,8 +204,8 @@ class PtyManager {
   runCommand(sessionId: string, cwd: string, command: string): void {
     const sessionName = tmuxSessionName(sessionId);
     ensureTmuxSession(sessionName, cwd);
-    execFileSync("tmux", ["send-keys", "-t", `=${sessionName}`, command, "C-m"], {
-      stdio: "ignore",
+    runTmux(["send-keys", "-t", tmuxFirstPaneTarget(sessionName), command, "C-m"], {
+      stdio: ["ignore", "ignore", "pipe"],
     });
   }
 
