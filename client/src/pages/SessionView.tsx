@@ -1721,7 +1721,7 @@ function getSourceLanguage(filePath: string): string {
   if (extension === "json") return "json";
   if (extension === "graphql" || extension === "gql") return "graphql";
   if (extension === "md" || extension === "mdx") return "markdown";
-  if (extension === "sh" || extension === "bash" || extension === "zsh") return "shell";
+  if (extension === "sh" || extension === "bash" || extension === "zsh") return "bash";
   if (extension === "py") return "python";
   if (extension === "rs") return "rust";
   if (extension === "go") return "go";
