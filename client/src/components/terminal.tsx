@@ -52,6 +52,15 @@ function encodeSpecialKey(term: XTerm, key: TerminalSpecialKey): string {
   }
 }
 
+function forceSelectionMouseEvent(event: MouseEvent): void {
+  if (event.button !== 0) return;
+
+  Object.defineProperties(event, {
+    altKey: { configurable: true, value: true },
+    shiftKey: { configurable: true, value: true },
+  });
+}
+
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal({ projectId, worktreeId, terminalId }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -95,11 +104,13 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         cursorBlink: true,
         scrollback: 50000,
         allowProposedApi: true,
+        macOptionClickForcesSelection: true,
       });
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(container);
+      container.addEventListener("mousedown", forceSelectionMouseEvent, { capture: true });
 
       requestAnimationFrame(() => {
         fitAddon.fit();
@@ -118,6 +129,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
 
       return () => {
         resizeObserver.disconnect();
+        container.removeEventListener("mousedown", forceSelectionMouseEvent, { capture: true });
         term.dispose();
         termRef.current = null;
         fitRef.current = null;
