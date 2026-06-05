@@ -64,9 +64,10 @@ function isBenignProviderStderrLine(line: string): boolean {
 // where the process is alive but stalled (e.g. an upstream request that never
 // streams). Long-running tool calls (builds, tests) still emit start/finish
 // events, so a multi-minute window avoids false positives. Override per-deploy.
-const AGENT_INACTIVITY_TIMEOUT_MS = Number(
-  process.env.AGENT_INACTIVITY_TIMEOUT_MS ?? 5 * 60 * 1000
-);
+const AGENT_INACTIVITY_TIMEOUT_MS = (() => {
+  const parsed = Number(process.env.AGENT_INACTIVITY_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
+})();
 // Comment-line ping so idle proxies don't drop a quiet SSE connection.
 const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
 
@@ -674,17 +675,17 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
   function onInactivityTimeout() {
     watchdogFired = true;
-    sseSend({
-      type: "ada_event",
-      event: {
-        type: "run.failed",
-        sessionId: streamSessionId,
-        error: `No output from ${providerName} for ${Math.round(
-          AGENT_INACTIVITY_TIMEOUT_MS / 1000
-        )}s; stopping the stalled run.`,
-        timestamp: new Date().toISOString(),
-      },
-    });
+    const failureEvent: AgentStreamEvent = {
+      type: "run.failed",
+      sessionId: streamSessionId,
+      error: `No output from ${providerName} for ${Math.round(
+        AGENT_INACTIVITY_TIMEOUT_MS / 1000
+      )}s; stopping the stalled run.`,
+      timestamp: new Date().toISOString(),
+    };
+    sseSend({ type: "ada_event", event: failureEvent });
+    // Persist to disk so the failure is visible after reconnects.
+    persistAgentEvent(failureEvent);
     if (child.exitCode === null && !child.killed) {
       child.kill("SIGTERM");
       setTimeout(() => {
