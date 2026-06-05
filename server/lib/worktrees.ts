@@ -152,14 +152,23 @@ export async function removeWorktree(worktreeId: string): Promise<boolean> {
   return true;
 }
 
-/** Monotonic per-project port offset: max existing + 1, starting at 1. */
+/**
+ * Gap between consecutive worktree port offsets. Projects often run several
+ * services on consecutive ports (e.g. 5000 and 5001), so a stride of 1 would
+ * let one worktree's higher port collide with the next worktree's base port.
+ * A stride of 3 leaves room between worktrees; projects that need more are
+ * responsible for picking free ports at runtime.
+ */
+export const PORT_OFFSET_STRIDE = 3;
+
+/** Monotonic per-project port offset: max existing + stride, starting at stride. */
 export async function nextPortOffset(projectId: string): Promise<number> {
   const registry = await readRegistry();
   const used = registry
     .filter((w) => w.projectId === projectId && typeof w.portOffset === "number")
     .map((w) => w.portOffset as number);
-  if (used.length === 0) return 1;
-  return Math.max(...used) + 1;
+  if (used.length === 0) return PORT_OFFSET_STRIDE;
+  return Math.max(...used) + PORT_OFFSET_STRIDE;
 }
 
 export function isMainWorktreeName(name: string): boolean {
