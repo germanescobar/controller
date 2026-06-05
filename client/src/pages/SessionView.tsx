@@ -3427,8 +3427,8 @@ export function SessionView({
       )}
 
       {/* Header */}
-      <header className="flex h-12 md:h-14 shrink-0 items-center justify-between border-b border-border bg-background px-3 md:px-4">
-        <div className="flex items-center gap-2 md:gap-3 min-w-0">
+      <header className={`${sessionId ? "flex" : "hidden md:flex"} h-12 md:h-14 shrink-0 items-center justify-end md:justify-between border-b border-border bg-background px-3 md:px-4`}>
+        <div className="hidden md:flex items-center gap-2 md:gap-3 min-w-0">
           <h1 className="text-sm font-medium truncate">
             {project?.name ?? "Project"}
           </h1>

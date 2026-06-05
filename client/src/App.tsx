@@ -233,6 +233,14 @@ export function App() {
     activeView.page === "session"
       ? `${activeView.projectId}:${activeView.worktreeId ?? "main"}`
       : "non-session";
+  const mobileHeaderProjectId =
+    activeView.page === "session" ||
+    activeView.page === "edit-project" ||
+    activeView.page === "new-worktree"
+      ? activeView.projectId
+      : null;
+  const mobileHeaderTitle =
+    projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Coding Orchestrator";
 
   return (
     <div className="dark flex h-dvh w-full bg-background text-foreground">
@@ -293,8 +301,8 @@ export function App() {
               <Menu className="h-5 w-5" />
             )}
           </button>
-          <span className="ml-3 text-sm font-medium">
-            Coding Orchestrator
+          <span className="ml-3 min-w-0 flex-1 truncate text-sm font-medium">
+            {mobileHeaderTitle}
           </span>
         </div>
 
