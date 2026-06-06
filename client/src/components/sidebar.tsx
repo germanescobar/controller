@@ -406,7 +406,7 @@ export function Sidebar({
   };
 
   return (
-    <aside className="flex h-full w-64 flex-col border-r border-border bg-sidebar">
+    <aside className="flex h-full flex-col border-r border-border bg-sidebar" style={{ width: "100%" }}>
       <div className="flex flex-col gap-1 p-3">
         <button
           onClick={onNewProject}

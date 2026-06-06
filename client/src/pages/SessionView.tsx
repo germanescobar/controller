@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
+import { useResizablePanel } from "@/lib/useResizablePanel";
 import {
   fetchEvents,
   fetchBranchDiff,
@@ -2139,6 +2140,13 @@ export function SessionView({
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(initialTerminalState.tabs);
   const [activeTerminalId, setActiveTerminalId] = useState<string>(initialTerminalState.activeId);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const rightPanelResize = useResizablePanel({
+    storageKey: "rightPanelWidth",
+    defaultWidth: Math.round(window.innerWidth / 2),
+    minWidth: 280,
+    maxWidth: Math.round(window.innerWidth * 0.75),
+    invert: true,
+  });
   const [runScriptPending, setRunScriptPending] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>("agent");
   const [rightTab, setRightTab] = useState<RightPanelTab>("terminal");
@@ -3564,7 +3572,7 @@ export function SessionView({
         {/* Chat panel — hidden on mobile when terminal or changes tab is active */}
         <div className={`flex-col min-h-0 min-w-0 w-full ${
           sessionId && mobilePanel !== "agent" ? "hidden md:flex" : "flex"
-        } ${terminalOpen ? "md:w-1/2 md:border-r md:border-border" : "flex-1"}`}>
+        } flex-1`}>
           {/* Messages / Events area */}
           <div
             ref={scrollContainerRef}
@@ -4127,14 +4135,26 @@ export function SessionView({
           </div>
         </div>
 
+        {/* Chat ↔ Right panel resize handle — desktop only */}
+        {terminalOpen && mobilePanel === "agent" && (
+          <div
+            {...rightPanelResize.handleProps}
+            className={`hidden md:flex w-1.5 cursor-col-resize shrink-0 items-center justify-center bg-transparent hover:bg-border/50 active:bg-border transition-colors ${
+              rightPanelResize.dragging ? "bg-border" : ""
+            }`}
+          />
+        )}
+
         {/* Right panel — desktop: side panel with Terminal/Changes/Files tabs; mobile: full screen when a panel tab is active */}
         {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files") && (() => {
           const { added: changesAdded, deleted: changesDeleted } = summarizeDiffFiles(gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles);
           const hasChanges = gitDiffFiles.length > 0 || branchDiffFiles.length > 0;
           return (
           <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${
-            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" ? "flex-1 md:w-1/2" : "hidden md:flex md:w-1/2"
-          }`}>
+            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" ? "flex-1 md:w-1/2" : "hidden md:flex"
+          }`}
+          style={terminalOpen && mobilePanel === "agent" ? { width: `${rightPanelResize.width}px`, minWidth: `${rightPanelResize.width}px` } : undefined}
+          >
             {/* Tab bar — desktop only; mobile uses the header tabs */}
             <div className="hidden md:flex h-9 shrink-0 items-center border-b border-border bg-[#1c1c1e] px-2 gap-1">
               <button
