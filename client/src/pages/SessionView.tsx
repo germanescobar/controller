@@ -2230,8 +2230,14 @@ export function SessionView({
   const providerSupportsAttachments = supportsAttachments(selectedProvider);
   const selectedModelEntry = models.find((m) => m.id === selectedModel);
   const modelSupportsAttachments = modelAcceptsAttachments(selectedModelEntry);
-  const modelSupportsImages = selectedModelEntry?.capabilities?.images === true;
-  const modelSupportsFiles = selectedModelEntry?.capabilities?.files === true;
+  const providerUsesImplicitAttachmentTypes =
+    selectedProvider === "codex" || selectedProvider === "claude";
+  const modelSupportsImages =
+    providerUsesImplicitAttachmentTypes ||
+    selectedModelEntry?.capabilities?.images === true;
+  const modelSupportsFiles =
+    providerUsesImplicitAttachmentTypes ||
+    selectedModelEntry?.capabilities?.files === true;
   // Restrict the file picker to the mime types the selected model can accept.
   // For providers without per-model capabilities (codex/claude) we keep the
   // full list. For Ada models we filter down to whatever `ada models --json`
