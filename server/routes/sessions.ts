@@ -569,6 +569,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   let streamSessionId = resumeSessionId ?? "";
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
+  let runTerminated = false;
 
   // Close stdin for CLIs that otherwise wait on an open pipe. We pass the
   // prompt as an argv argument, so none of these providers need stdin; leaving
@@ -675,6 +676,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
   function onInactivityTimeout() {
     watchdogFired = true;
+    runTerminated = true;
     const failureEvent: AgentStreamEvent = {
       type: "run.failed",
       sessionId: streamSessionId,
@@ -756,6 +758,9 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
                 ) {
                   persistAgentEvent(event);
                 }
+                if (event.type === "run.completed" || event.type === "run.failed") {
+                  runTerminated = true;
+                }
                 sseSend({ type: "ada_event", event });
               })
               .catch(() => {});
@@ -777,51 +782,81 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     }
   });
 
-  child.on("close", (code) => {
+  child.on("close", (code, signal) => {
     clearStreamTimers();
     eventProcessing
       .catch(() => {})
       .then(async () => {
-    const lastLine = pausedForClaudeUserInput ? "" : stdoutBuffer.trim();
-    if (lastLine.length > 0) {
-      try {
-        const parsed = parseProviderEvent(lastLine);
-        const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
-        for (const event of events) {
-          if (pausedForClaudeUserInput) break;
-          if (shouldPersist && event.type !== "run.completed" && event.type !== "run.failed") {
-            persistAgentEvent(event);
-          }
-          sseSend({ type: "ada_event", event });
-          if (providerId === "claude" && event.type === "user.input_requested") {
-            pausedForClaudeUserInput = true;
+        const lastLine = pausedForClaudeUserInput ? "" : stdoutBuffer.trim();
+        if (lastLine.length > 0) {
+          try {
+            const parsed = parseProviderEvent(lastLine);
+            const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+            for (const event of events) {
+              if (pausedForClaudeUserInput) break;
+              if (shouldPersist && event.type !== "run.completed" && event.type !== "run.failed") {
+                persistAgentEvent(event);
+              }
+              if (event.type === "run.completed" || event.type === "run.failed") {
+                runTerminated = true;
+              }
+              sseSend({ type: "ada_event", event });
+              if (providerId === "claude" && event.type === "user.input_requested") {
+                pausedForClaudeUserInput = true;
+              }
+            }
+          } catch {
+            sseSend({
+              type: "error",
+              text: `Failed to parse final ${provider.name} stream JSON line.`,
+              raw: lastLine,
+            });
           }
         }
-      } catch {
-        sseSend({
-          type: "error",
-          text: `Failed to parse final ${provider.name} stream JSON line.`,
-          raw: lastLine,
-        });
-      }
-    }
 
-    // Update runtime state and lastActiveAt once the stream closes.
-    if (streamSessionId) {
-      if (!pausedForClaudeUserInput && code === 0) {
-        await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
-      }
-      markSessionInactive(streamSessionId);
-      getSession(worktreePath, streamSessionId).then((existing) => {
-        if (existing) {
-          existing.lastActiveAt = new Date().toISOString();
-          saveSession(worktreePath, existing);
+        const effectiveExitCode = pausedForClaudeUserInput ? 0 : code;
+        const errorPrefix = signal
+          ? `${providerName} exited on signal ${signal}`
+          : `${providerName} exited with code ${effectiveExitCode}`;
+        console.log(`[session] ${errorPrefix} (session=${streamSessionId || "unknown"})`);
+
+        // Emit a synthetic run.failed when the process ended abnormally
+        // without already reporting completion or failure via stdout events.
+        if (!runTerminated && !pausedForClaudeUserInput && streamSessionId) {
+          const errorText =
+            signal
+              ? `${providerName} process was terminated by signal ${signal}.`
+              : effectiveExitCode !== 0
+                ? `${providerName} process exited with code ${effectiveExitCode}.`
+                : null;
+          if (errorText) {
+            const failureEvent: AgentStreamEvent = {
+              type: "run.failed",
+              sessionId: streamSessionId,
+              error: errorText,
+              timestamp: new Date().toISOString(),
+            };
+            sseSend({ type: "ada_event", event: failureEvent });
+            persistAgentEvent(failureEvent);
+          }
         }
-      }).catch(() => {});
-    }
 
-    sseSend({ type: "done", exitCode: pausedForClaudeUserInput ? 0 : code });
-    if (clientConnected) res.end();
+        // Update runtime state and lastActiveAt once the stream closes.
+        if (streamSessionId) {
+          if (!pausedForClaudeUserInput && code === 0) {
+            await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+          }
+          markSessionInactive(streamSessionId);
+          getSession(worktreePath, streamSessionId).then((existing) => {
+            if (existing) {
+              existing.lastActiveAt = new Date().toISOString();
+              saveSession(worktreePath, existing);
+            }
+          }).catch(() => {});
+        }
+
+        sseSend({ type: "done", exitCode: effectiveExitCode });
+        if (clientConnected) res.end();
       });
   });
 
