@@ -676,6 +676,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
   function onInactivityTimeout() {
     watchdogFired = true;
+    runTerminated = true;
     const failureEvent: AgentStreamEvent = {
       type: "run.failed",
       sessionId: streamSessionId,
