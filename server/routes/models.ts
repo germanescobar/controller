@@ -8,61 +8,99 @@ const execFileAsync = promisify(execFile);
 
 export const modelsRouter = Router();
 
+export interface ModelCapabilities {
+  images: boolean;
+  files: boolean;
+}
+
 export interface Model {
   id: string;
   name: string;
   provider: string;
   size: string;
+  group?: string;
+  contextWindowTokens?: number;
+  capabilities?: ModelCapabilities;
 }
 
-function stripAnsi(value: string): string {
-  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+interface AdaModelCapabilities {
+  attachments?: {
+    images?: unknown;
+    files?: unknown;
+  };
 }
 
-function getAdaModelSize(section: string): string {
-  const normalized = section.toLowerCase();
+interface AdaModelEntry {
+  label?: unknown;
+  value?: unknown;
+  group?: unknown;
+  contextWindowTokens?: unknown;
+  capabilities?: AdaModelCapabilities;
+}
+
+interface AdaModelsJson {
+  models?: AdaModelEntry[];
+}
+
+function normalizeModelSize(group: string | undefined): string {
+  const normalized = (group ?? "").toLowerCase();
   if (normalized.includes("cloud")) return "cloud";
   if (normalized.includes("local")) return "local";
   return "";
 }
 
-function parseAdaModelsOutput(stdout: string): Model[] {
+function normalizeCapabilities(
+  raw: AdaModelCapabilities | undefined
+): ModelCapabilities | undefined {
+  const attachments = raw?.attachments;
+  if (!attachments || typeof attachments !== "object") return undefined;
+  const images = attachments.images === true;
+  const files = attachments.files === true;
+  if (!images && !files) return undefined;
+  return { images, files };
+}
+
+function parseAdaModelsJson(stdout: string): Model[] {
+  let data: AdaModelsJson;
+  try {
+    data = JSON.parse(stdout) as AdaModelsJson;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(data.models)) return [];
+
   const models: Model[] = [];
-  let section = "";
-
-  for (const rawLine of stripAnsi(stdout).split("\n")) {
-    const line = rawLine.trimEnd();
-    if (!line.trim()) continue;
-
-    const modelMatch = line.match(/^\s+(\S+)\s{2,}(.+?)\s*$/);
-    if (!modelMatch) {
-      section = line.trim();
-      continue;
-    }
-
-    const [, id, name] = modelMatch;
-    const provider = id.split("/", 1)[0];
-    if (!id || !name || !provider) continue;
-
+  for (const entry of data.models) {
+    const id = typeof entry.value === "string" ? entry.value.trim() : "";
+    const name = typeof entry.label === "string" ? entry.label.trim() : "";
+    if (!id) continue;
+    const provider = id.split("/", 1)[0] || "";
+    const group = typeof entry.group === "string" ? entry.group.trim() : "";
+    const contextWindowTokens =
+      typeof entry.contextWindowTokens === "number" && Number.isFinite(entry.contextWindowTokens)
+        ? entry.contextWindowTokens
+        : undefined;
     models.push({
       id,
-      name: name.trim(),
+      name: name || id,
       provider,
-      size: getAdaModelSize(section),
+      size: normalizeModelSize(group),
+      group: group || undefined,
+      contextWindowTokens,
+      capabilities: normalizeCapabilities(entry.capabilities),
     });
   }
-
   return models;
 }
 
 async function fetchAdaCliModels(): Promise<Model[]> {
   try {
     const apiKeyEnv = await getApiKeyEnvVars();
-    const { stdout } = await execFileAsync("ada", ["models"], {
+    const { stdout } = await execFileAsync("ada", ["models", "--json"], {
       env: { ...process.env, ...apiKeyEnv },
       timeout: 5000,
     });
-    return parseAdaModelsOutput(stdout);
+    return parseAdaModelsJson(stdout);
   } catch {
     return [];
   }
