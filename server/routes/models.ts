@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { getApiKey, PROVIDERS } from "../lib/api-keys.js";
+import { getApiKey, getApiKeyEnvVars, PROVIDERS } from "../lib/api-keys.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
 
 const execFileAsync = promisify(execFile);
@@ -57,7 +57,11 @@ function parseAdaModelsOutput(stdout: string): Model[] {
 
 async function fetchAdaCliModels(): Promise<Model[]> {
   try {
-    const { stdout } = await execFileAsync("ada", ["models"], { timeout: 5000 });
+    const apiKeyEnv = await getApiKeyEnvVars();
+    const { stdout } = await execFileAsync("ada", ["models"], {
+      env: { ...process.env, ...apiKeyEnv },
+      timeout: 5000,
+    });
     return parseAdaModelsOutput(stdout);
   } catch {
     return [];
