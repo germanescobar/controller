@@ -20,7 +20,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   fetchSessions,
-  fetchSessionRuntime,
+  fetchActiveRuntimes,
   fetchWorktrees,
   deleteProject,
   deleteWorktree,
@@ -229,32 +229,14 @@ export function Sidebar({
     onFocusQueueChange?.(focusQueue);
   }, [focusQueue, onFocusQueueChange]);
 
-  const refreshActiveSessions = useCallback(
-    async (data: ProjectWithWorktrees[]) => {
-      const entries = await Promise.all(
-        data.flatMap((project) =>
-          project.worktrees.flatMap((worktree) =>
-            worktree.sessions
-              .filter((s) => !archivedIds.has(s.id))
-              .map(async (session) => ({
-                sessionId: session.id,
-                runtime: await fetchSessionRuntime(
-                  project.id,
-                  session.id,
-                  worktree.id,
-                ).catch(() => ({ active: false })),
-              })),
-          ),
-        ),
-      );
-      setActiveSessionIds(
-        new Set(
-          entries.filter((e) => e.runtime.active).map((e) => e.sessionId),
-        ),
-      );
-    },
-    [archivedIds],
-  );
+  const refreshActiveSessions = useCallback(async () => {
+    // One bulk request replaces the previous per-session /runtime polling loop
+    // (which issued N requests every 2s for every non-archived session).
+    const entries = await fetchActiveRuntimes().catch(() => []);
+    setActiveSessionIds(
+      new Set(entries.filter((entry) => entry.active).map((entry) => entry.sessionId)),
+    );
+  }, []);
 
   const loadAll = useCallback(async () => {
     const next = await Promise.all(
@@ -290,7 +272,7 @@ export function Sidebar({
       }),
     );
     setProjectData(next);
-    await refreshActiveSessions(next);
+    await refreshActiveSessions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
 
@@ -301,10 +283,10 @@ export function Sidebar({
   useEffect(() => {
     if (activeSessionIds.size === 0) return;
     const interval = window.setInterval(() => {
-      refreshActiveSessions(projectData).catch(() => {});
+      refreshActiveSessions().catch(() => {});
     }, 2000);
     return () => window.clearInterval(interval);
-  }, [activeSessionIds, projectData, refreshActiveSessions]);
+  }, [activeSessionIds, refreshActiveSessions]);
 
   const toggleProject = (id: string) => {
     setProjectData((prev) =>
