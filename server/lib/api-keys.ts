@@ -10,6 +10,7 @@ export interface ProviderConfig {
 export const PROVIDERS: ProviderConfig[] = [
   { id: "groq", name: "Groq", envVar: "GROQ_API_KEY" },
   { id: "ollama-cloud", name: "Ollama Cloud", envVar: "OLLAMA_API_KEY" },
+  { id: "openrouter", name: "OpenRouter", envVar: "OPENROUTER_API_KEY" },
   { id: "openai", name: "OpenAI", envVar: "OPENAI_API_KEY" },
 ];
 
