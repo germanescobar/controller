@@ -8,6 +8,7 @@ import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
 import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
+import { useResizablePanel } from "./lib/useResizablePanel.ts";
 
 export type View =
   | { page: "empty" }
@@ -229,6 +230,14 @@ export function App() {
     }
   };
 
+  // Sidebar resizing
+  const sidebarResize = useResizablePanel({
+    storageKey: "sidebarWidth",
+    defaultWidth: 256, // w-64
+    minWidth: 180,
+    maxWidth: 480,
+  });
+
   const sessionViewKey =
     activeView.page === "session"
       ? `${activeView.projectId}:${activeView.worktreeId ?? "main"}`
@@ -252,9 +261,10 @@ export function App() {
       )}
 
       <div
-        className={`fixed inset-y-0 left-0 z-40 w-64 transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
+        style={{ width: `${sidebarResize.width}px`, minWidth: `${sidebarResize.width}px` }}
       >
         <Sidebar
           projects={projects}
@@ -288,6 +298,14 @@ export function App() {
           focusRefreshKey={focusRefreshKey}
         />
       </div>
+
+      {/* Sidebar resize handle — desktop only */}
+      <div
+        {...sidebarResize.handleProps}
+        className={`hidden md:flex w-1.5 cursor-col-resize shrink-0 items-center justify-center bg-transparent hover:bg-border/50 active:bg-border transition-colors ${
+          sidebarResize.dragging ? "bg-border" : ""
+        }`}
+      />
 
       <main className="flex flex-1 flex-col min-h-0 min-w-0">
         <div className="flex h-12 shrink-0 items-center border-b border-border bg-background px-3 md:hidden">
