@@ -154,7 +154,7 @@ const adaProvider: AgentProvider = {
   name: "Ada",
   command: "ada",
 
-  spawn({ message, cwd, env, resumeSessionId, model, reasoningEffort, serviceTier }) {
+  spawn({ message, cwd, env, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier }) {
     const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
     if (reasoningEffort) {
       cmdArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
@@ -163,7 +163,11 @@ const adaProvider: AgentProvider = {
       cmdArgs.push("-c", `service_tier="${serviceTier}"`);
     }
 
-    const args = ["chat", message];
+    const args = ["chat"];
+    for (const attachment of attachments) {
+      args.push("--attach", attachment.path);
+    }
+    args.push(message);
     if (resumeSessionId) args.push("--resume", resumeSessionId);
 
     const fullCmd = `ada ${[...cmdArgs, ...args].join(" ")}`;

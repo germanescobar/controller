@@ -144,7 +144,25 @@ function supportsLiveSteering(provider: string): boolean {
 }
 
 function supportsAttachments(provider: string): boolean {
-  return provider === "codex" || provider === "claude";
+  return provider === "ada" || provider === "codex" || provider === "claude";
+}
+
+function modelAcceptsAttachments(model: Model | undefined): boolean {
+  if (!model) return false;
+  if (model.provider === "codex" || model.provider === "claude") return true;
+  // For Ada and other providers, defer to the per-model capability flag
+  // reported by `ada models --json`. Models without capabilities are
+  // treated as not supporting attachments.
+  if (!model.capabilities) return false;
+  return model.capabilities.images || model.capabilities.files;
+}
+
+function isImageMimeType(mimeType: string): boolean {
+  return mimeType.startsWith("image/");
+}
+
+function isFileMimeType(mimeType: string): boolean {
+  return !isImageMimeType(mimeType);
 }
 
 const MAX_ATTACHMENT_COUNT = 5;
@@ -2210,6 +2228,29 @@ export function SessionView({
   const providerSupportsServiceTier = supportsServiceTier(selectedProvider);
   const providerSupportsLiveSteering = supportsLiveSteering(selectedProvider);
   const providerSupportsAttachments = supportsAttachments(selectedProvider);
+  const selectedModelEntry = models.find((m) => m.id === selectedModel);
+  const modelSupportsAttachments = modelAcceptsAttachments(selectedModelEntry);
+  const modelSupportsImages = selectedModelEntry?.capabilities?.images === true;
+  const modelSupportsFiles = selectedModelEntry?.capabilities?.files === true;
+  // Restrict the file picker to the mime types the selected model can accept.
+  // For providers without per-model capabilities (codex/claude) we keep the
+  // full list. For Ada models we filter down to whatever `ada models --json`
+  // reports.
+  const attachmentAcceptMimeTypes: string[] = (() => {
+    if (!providerSupportsAttachments) return [];
+    if (!selectedModelEntry) {
+      return selectedProvider === "ada" ? [] : Array.from(SUPPORTED_ATTACHMENT_TYPES);
+    }
+    if (selectedProvider === "ada" && !selectedModelEntry.capabilities) return [];
+    const types: string[] = [];
+    for (const mimeType of SUPPORTED_ATTACHMENT_TYPES) {
+      if (isImageMimeType(mimeType) && !modelSupportsImages) continue;
+      if (!isImageMimeType(mimeType) && !modelSupportsFiles) continue;
+      types.push(mimeType);
+    }
+    return types;
+  })();
+  const canAttachMore = providerSupportsAttachments && modelSupportsAttachments;
   const shouldPollChanges = terminalOpen || rightTab === "changes" || mobilePanel === "changes";
   const providerStatusMessage =
     !sessionId && providerLoadError
@@ -2767,6 +2808,18 @@ export function SessionView({
           setAttachmentError(`${fileName} is not a supported file type`);
           continue;
         }
+        if (isImageMimeType(mimeType) && !modelSupportsImages) {
+          setAttachmentError(
+            `The selected model does not support image attachments`
+          );
+          continue;
+        }
+        if (!isImageMimeType(mimeType) && !modelSupportsFiles) {
+          setAttachmentError(
+            `The selected model does not support file attachments`
+          );
+          continue;
+        }
         if (file.size > MAX_ATTACHMENT_SIZE) {
           setAttachmentError(`${fileName} is larger than 15 MB`);
           continue;
@@ -3163,9 +3216,39 @@ export function SessionView({
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!message.trim() && composerAttachments.length === 0) return;
-    if (composerAttachments.length > 0 && !providerSupportsAttachments) {
-      setAttachmentError("Attachments are available for Codex and Claude Code");
-      return;
+    if (composerAttachments.length > 0) {
+      if (!providerSupportsAttachments) {
+        setAttachmentError(
+          `Attachments are not supported by the ${selectedProvider} provider`
+        );
+        return;
+      }
+      if (!modelSupportsAttachments) {
+        setAttachmentError(
+          `The selected model does not support attachments${
+            selectedModelEntry ? ` (${selectedModelEntry.name})` : ""
+          }`
+        );
+        return;
+      }
+      if (
+        composerAttachments.some((attachment) =>
+          isImageMimeType(getFileMimeType(attachment.file))
+        ) &&
+        !modelSupportsImages
+      ) {
+        setAttachmentError("The selected model does not support image attachments");
+        return;
+      }
+      if (
+        composerAttachments.some((attachment) =>
+          isFileMimeType(getFileMimeType(attachment.file))
+        ) &&
+        !modelSupportsFiles
+      ) {
+        setAttachmentError("The selected model does not support file attachments");
+        return;
+      }
     }
     const sentMessage = message.trim() || "Please use the attached files as context.";
     setAttachmentError(null);
@@ -3801,11 +3884,11 @@ export function SessionView({
                 <div
                   className="rounded-xl border border-border bg-input p-3"
                   onDragOver={(event) => {
-                    if (!providerSupportsAttachments) return;
+                    if (!canAttachMore) return;
                     event.preventDefault();
                   }}
                   onDrop={(event) => {
-                    if (!providerSupportsAttachments) return;
+                    if (!canAttachMore) return;
                     event.preventDefault();
                     addComposerFiles(event.dataTransfer.files);
                   }}
@@ -3815,7 +3898,7 @@ export function SessionView({
                     type="file"
                     multiple
                     className="hidden"
-                    accept={Array.from(SUPPORTED_ATTACHMENT_TYPES).join(",")}
+                    accept={attachmentAcceptMimeTypes.join(",")}
                     onChange={(event) => {
                       if (event.target.files) addComposerFiles(event.target.files);
                       event.currentTarget.value = "";
@@ -4048,17 +4131,25 @@ export function SessionView({
                                 ) : (
                                   Object.entries(
                                     models.reduce<Record<string, Model[]>>((acc, m) => {
-                                      const provider = m.provider || "ollama";
-                                      if (!acc[provider]) acc[provider] = [];
-                                      acc[provider].push(m);
+                                      // Prefer the structured `group` field from
+                                      // `ada models --json`; fall back to the
+                                      // provider when the model list comes from
+                                      // another source.
+                                      const key = m.group || m.provider || "ollama";
+                                      if (!acc[key]) acc[key] = [];
+                                      acc[key].push(m);
                                       return acc;
                                     }, {})
-                                  ).map(([provider, providerModels]) => (
-                                    <div key={provider}>
+                                  ).map(([group, providerModels]) => (
+                                    <div key={group}>
                                       <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                                        {provider}
+                                        {group}
                                       </div>
-                                      {providerModels.map((model) => (
+                                      {providerModels.map((model) => {
+                                        const caps = model.capabilities;
+                                        const supportsAttachments =
+                                          modelAcceptsAttachments(model);
+                                        return (
                                         <button
                                           key={model.id}
                                           type="button"
@@ -4073,13 +4164,38 @@ export function SessionView({
                                           }`}
                                         >
                                           <span className="min-w-0 truncate font-mono text-xs">{model.name}</span>
-                                          {model.size && (
-                                            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                                              {model.size}
-                                            </span>
-                                          )}
+                                          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                                            {supportsAttachments && (
+                                              <span
+                                                title={
+                                                  caps?.images && caps?.files
+                                                    ? "Supports image and file attachments"
+                                                    : caps?.images
+                                                    ? "Supports image attachments"
+                                                    : "Supports file attachments"
+                                                }
+                                              >
+                                                <Paperclip
+                                                  className="h-3 w-3 text-muted-foreground"
+                                                  aria-label={
+                                                    caps?.images && caps?.files
+                                                      ? "Supports image and file attachments"
+                                                      : caps?.images
+                                                      ? "Supports image attachments"
+                                                      : "Supports file attachments"
+                                                  }
+                                                />
+                                              </span>
+                                            )}
+                                            {model.size && (
+                                              <span className="text-xs text-muted-foreground">
+                                                {model.size}
+                                              </span>
+                                            )}
+                                          </span>
                                         </button>
-                                      ))}
+                                        );
+                                      })}
                                     </div>
                                   ))
                                 )}
@@ -4089,11 +4205,17 @@ export function SessionView({
                     </>)}
                     </div>
                     <div className="flex shrink-0 items-center justify-end gap-2 self-end sm:self-auto">
-                      {!streaming && providerSupportsAttachments && (
+                      {!streaming && canAttachMore && (
                         <button
                           type="button"
                           onClick={() => fileInputRef.current?.click()}
-                          title="Attach files"
+                          title={
+                            !providerSupportsAttachments
+                              ? `${selectedProvider} does not support attachments`
+                              : !modelSupportsAttachments
+                              ? "Selected model does not support attachments"
+                              : "Attach files"
+                          }
                           className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         >
                           <Paperclip className="h-3.5 w-3.5" />

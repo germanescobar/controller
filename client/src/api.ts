@@ -446,11 +446,19 @@ export async function dismissSessionUserInput(
   }
 }
 
+export interface ModelCapabilities {
+  images: boolean;
+  files: boolean;
+}
+
 export interface Model {
   id: string;
   name: string;
   provider: string;
   size: string;
+  group?: string;
+  contextWindowTokens?: number;
+  capabilities?: ModelCapabilities;
 }
 
 export type ReasoningEffort =

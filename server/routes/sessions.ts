@@ -509,7 +509,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     res.status(400).json({ error: "message query param is required" });
     return;
   }
-  if (attachmentIds.length > 0 && providerId !== "codex" && providerId !== "claude") {
+  if (attachmentIds.length > 0 && providerId !== "ada" && providerId !== "codex" && providerId !== "claude") {
     res.status(400).json({ error: `${provider.name} does not support attachments` });
     return;
   }
@@ -584,8 +584,11 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
     markSessionActive(sessionId, { provider: providerId, child });
-    // Write user message (only for non-Ada providers that don't persist their own events)
-    if (shouldPersist && !userMessageWritten) {
+    // Always write a user_message event so attachments persist for reloaded
+    // sessions. Some providers (e.g. Ada) also write their own user_message
+    // event with empty attachments; the GET /events endpoint collapses
+    // consecutive duplicates with the same text.
+    if (!userMessageWritten) {
       userMessageWritten = true;
       await appendEvent(worktreePath, sessionId, {
         id: randomUUID(),
@@ -1472,6 +1475,52 @@ sessionsRouter.get(
       return;
     }
     const events = await getEvents(worktree.path, req.params.sessionId);
-    res.json(events);
+    res.json(dedupeUserMessageEvents(events));
   }
 );
+
+/**
+ * Collapse consecutive `user_message` events with identical text into a single
+ * event, preferring the entry that carries attachments. Some providers (e.g.
+ * Ada) write their own `user_message` to the events file, while we also write
+ * one to persist attachments. This keeps the UI from showing the same user
+ * turn twice when the session is reloaded.
+ */
+function dedupeUserMessageEvents(events: AgentEvent[]): AgentEvent[] {
+  const result: AgentEvent[] = [];
+  for (const event of events) {
+    const previous = result[result.length - 1];
+    if (
+      previous &&
+      previous.type === "user_message" &&
+      event.type === "user_message" &&
+      getUserMessageText(previous) !== "" &&
+      getUserMessageText(previous) === getUserMessageText(event)
+    ) {
+      const previousAttachments = pickUserMessageAttachments(previous);
+      const currentAttachments = pickUserMessageAttachments(event);
+      result[result.length - 1] = {
+        ...previous,
+        data: {
+          ...previous.data,
+          ...event.data,
+          attachments: previousAttachments ?? currentAttachments,
+        },
+      };
+      continue;
+    }
+    result.push(event);
+  }
+  return result;
+}
+
+function getUserMessageText(event: AgentEvent): string {
+  const text = (event.data as { text?: unknown }).text;
+  return typeof text === "string" ? text : "";
+}
+
+function pickUserMessageAttachments(event: AgentEvent): unknown[] | undefined {
+  const attachments = (event.data as { attachments?: unknown }).attachments;
+  if (!Array.isArray(attachments) || attachments.length === 0) return undefined;
+  return attachments;
+}
