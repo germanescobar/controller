@@ -7,7 +7,9 @@ import {
 } from "electron";
 import path from "node:path";
 import { createServer } from "node:net";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
