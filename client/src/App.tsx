@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { fetchProjects, markSessionFocusDone, type Project, type Worktree } from "./api.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
 import { SettingsDialog } from "./components/settings-dialog.tsx";
+import { StatusBar } from "./components/StatusBar.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
 import { NewWorktree } from "./pages/NewWorktree.tsx";
@@ -403,6 +404,8 @@ export function App() {
           />
         )}
         </AppErrorBoundary>
+
+        <StatusBar />
       </main>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

@@ -9,7 +9,8 @@
     "dev:server": "tsx watch --env-file-if-exists=.env.local server/index.ts",
     "dev:client": "vite",
     "dev:electron": "concurrently -k \"npm run dev:server\" \"npm run dev:client\" \"node electron/wait-and-launch.mjs\"",
-    "build": "vite build && tsc -p server/tsconfig.json && tsc -p electron/tsconfig.json",
+    "build": "vite build && tsc -p server/tsconfig.json && tsc -p electron/tsconfig.json && npm run build:electron-assets",
+    "build:electron-assets": "node electron/copy-assets.mjs",
     "package:electron": "npm run build && electron-builder --dir"
   },
   "build": {

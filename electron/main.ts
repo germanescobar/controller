@@ -1,9 +1,16 @@
-import { app, BrowserWindow, Menu, type MenuItemConstructorOptions } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  type MenuItemConstructorOptions,
+  ipcMain,
+} from "electron";
 import path from "node:path";
+import { createServer } from "node:net";
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_CLIENT_PORT = 4500;
-const DEFAULT_API_PORT = 3100;
+const MAX_PORT_SEARCH_OFFSET = 100;
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -16,13 +23,6 @@ function parsePort(value: string | undefined, fallback: number): number {
 function getDevUrl(): string {
   const port = parsePort(process.env.VITE_DEV_SERVER_PORT, DEFAULT_CLIENT_PORT);
   return `http://localhost:${port}`;
-}
-
-function getBackendPort(): number {
-  return parsePort(
-    process.env.PORT ?? process.env.API_PORT ?? process.env.VITE_API_PORT,
-    DEFAULT_API_PORT
-  );
 }
 
 async function waitForServer(url: string): Promise<void> {
@@ -45,6 +45,52 @@ async function waitForServer(url: string): Promise<void> {
   );
 }
 
+function tryBindPort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer();
+    probe.once("error", () => {
+      resolve(false);
+    });
+    probe.once("listening", () => {
+      probe.close(() => resolve(true));
+    });
+    probe.listen(port, "127.0.0.1");
+  });
+}
+
+async function checkPortAvailable(
+  port: number
+): Promise<{ available: boolean; suggestion?: number; error?: string }> {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { available: false, error: "Port out of range" };
+  }
+  if (await tryBindPort(port)) {
+    return { available: true };
+  }
+  for (let offset = 1; offset <= MAX_PORT_SEARCH_OFFSET; offset += 1) {
+    const candidate = port + offset;
+    if (candidate > 65535) break;
+    if (await tryBindPort(candidate)) {
+      return { available: false, suggestion: candidate };
+    }
+  }
+  return { available: false, error: "No free port found nearby" };
+}
+
+type ControllerStatus =
+  | { state: "starting"; port: number }
+  | { state: "listening"; port: number }
+  | { state: "error"; port?: number; message: string };
+
+let mainWindow: BrowserWindow | null = null;
+
+function broadcastStatus(status: ControllerStatus): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    win.webContents.send("controller:status", status);
+  }
+}
+
 async function startProductionServer(port: number): Promise<string> {
   const appPath = app.getAppPath();
   const clientDistDir = path.join(appPath, "dist/client");
@@ -55,11 +101,24 @@ async function startProductionServer(port: number): Promise<string> {
   process.env.SERVE_CLIENT_DIST = "1";
   process.env.NODE_ENV = "production";
 
+  broadcastStatus({ state: "starting", port });
+
   await import(pathToFileURL(serverEntry).href);
 
   const url = `http://localhost:${port}`;
   await waitForServer(`${url}/api/agent-providers`);
+  broadcastStatus({ state: "listening", port });
   return url;
+}
+
+function getPreloadPath(): string {
+  // After the build, the main, preload, and welcome assets all live in
+  // dist/electron/ relative to the packaged app root.
+  return path.join(__dirname, "preload.js");
+}
+
+function getWelcomeHtmlPath(): string {
+  return path.join(__dirname, "welcome.html");
 }
 
 function registerContextMenu(win: BrowserWindow): void {
@@ -96,39 +155,124 @@ function registerContextMenu(win: BrowserWindow): void {
   });
 }
 
-async function createWindow(loadUrl: string): Promise<void> {
+interface CreateWindowOptions {
+  loadUrl?: string;
+  loadFile?: string;
+  show?: boolean;
+}
+
+async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow> {
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
     minWidth: 960,
     minHeight: 640,
     title: "Coding Orchestrator",
+    show: options.show ?? true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: getPreloadPath(),
     },
   });
 
   registerContextMenu(win);
 
-  await win.loadURL(loadUrl);
+  if (options.loadFile) {
+    await win.loadFile(options.loadFile);
+  } else if (options.loadUrl) {
+    await win.loadURL(options.loadUrl);
+  } else {
+    throw new Error("createWindow requires either loadUrl or loadFile");
+  }
 
   if (!app.isPackaged) {
     win.webContents.openDevTools({ mode: "detach" });
   }
+
+  return win;
+}
+
+async function openWelcomeWindow(): Promise<BrowserWindow> {
+  const win = await createWindow({
+    loadFile: getWelcomeHtmlPath(),
+    show: false,
+  });
+  mainWindow = win;
+  win.on("closed", () => {
+    if (mainWindow === win) mainWindow = null;
+  });
+  return win;
+}
+
+async function openMainAppWindow(loadUrl: string): Promise<BrowserWindow> {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    await mainWindow.loadURL(loadUrl);
+    return mainWindow;
+  }
+  const win = await createWindow({ loadUrl });
+  mainWindow = win;
+  win.on("closed", () => {
+    if (mainWindow === win) mainWindow = null;
+  });
+  return win;
+}
+
+function registerIpcHandlers(): void {
+  ipcMain.handle("controller:check-port", async (_event, port: unknown) => {
+    const parsed = Number(port);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      return { available: false, error: "Port out of range" };
+    }
+    return checkPortAvailable(parsed);
+  });
+
+  ipcMain.handle("controller:start-server", async (_event, port: unknown) => {
+    const parsed = Number(port);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      throw new Error("Port out of range");
+    }
+    try {
+      const url = await startProductionServer(parsed);
+      // Replace the welcome window with the main app shell. The renderer
+      // also calls `navigateToApp`, but doing it from the main process makes
+      // the transition robust if the renderer misses the IPC reply.
+      await openMainAppWindow(url);
+      return { port: parsed, url };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      broadcastStatus({ state: "error", port: parsed, message });
+      throw err;
+    }
+  });
+
+  ipcMain.on("controller:show-window", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win) win.show();
+  });
+
+  ipcMain.on("controller:quit", () => {
+    app.quit();
+  });
 }
 
 app.whenReady().then(async () => {
-  const loadUrl = app.isPackaged
-    ? await startProductionServer(getBackendPort())
-    : getDevUrl();
+  registerIpcHandlers();
 
-  await createWindow(loadUrl);
+  if (!app.isPackaged) {
+    await createWindow({ loadUrl: getDevUrl() });
+  } else {
+    await openWelcomeWindow();
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow(loadUrl);
+      if (app.isPackaged) {
+        void openWelcomeWindow();
+      } else {
+        void createWindow({ loadUrl: getDevUrl() });
+      }
     }
   });
 }).catch((error: unknown) => {

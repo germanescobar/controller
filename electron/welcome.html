@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Controller</title>
+    <link rel="stylesheet" href="./welcome.css" />
+  </head>
+  <body>
+    <main class="welcome">
+      <div class="welcome__card" role="dialog" aria-labelledby="welcome-title" aria-describedby="welcome-subtitle">
+        <header class="welcome__header">
+          <div class="welcome__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="4 17 10 11 4 5"></polyline>
+              <line x1="12" y1="19" x2="20" y2="19"></line>
+            </svg>
+          </div>
+          <h1 id="welcome-title" class="welcome__title">Welcome to Controller</h1>
+          <p id="welcome-subtitle" class="welcome__subtitle">
+            Pick the port the local backend will run on. To open this app from your
+            phone, install
+            <a href="https://tailscale.com/" target="_blank" rel="noopener noreferrer">Tailscale</a>
+            to reach it over a private network.
+          </p>
+        </header>
+
+        <form class="welcome__form" id="welcome-form" novalidate>
+          <label class="welcome__label" for="port-input">Backend port</label>
+          <div class="welcome__input-row">
+            <input
+              id="port-input"
+              name="port"
+              type="text"
+              inputmode="numeric"
+              autocomplete="off"
+              spellcheck="false"
+              class="welcome__input"
+              value="4500"
+              aria-describedby="port-feedback"
+            />
+            <button
+              id="continue-btn"
+              type="submit"
+              class="welcome__button welcome__button--primary"
+              disabled
+            >
+              Continue
+            </button>
+          </div>
+          <p id="port-feedback" class="welcome__feedback" role="status" aria-live="polite">
+            Checking port...
+          </p>
+        </form>
+      </div>
+    </main>
+    <script src="./welcome.js"></script>
+  </body>
+</html>
