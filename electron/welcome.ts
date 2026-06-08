@@ -11,21 +11,25 @@ const CHECK_PORT_TIMEOUT_MS = 5000;
 const AUTO_START_TIMEOUT_MS = 5000;
 const AUTO_START_SHOW_WINDOW_MS = 1500;
 
-declare const window: Window & {
-  controller?: {
-    isElectron: true;
-    checkPort: (port: number) => Promise<{
-      available: boolean;
-      suggestion?: number;
-      error?: string;
-    }>;
-    startServer: (port: number) => Promise<{ port: number; url: string }>;
-    onStatus: (cb: (status: unknown) => void) => () => void;
-    navigateToApp: (url: string) => void;
-    showWindow: () => void;
-    quit: () => void;
-  };
-};
+interface ControllerBridge {
+  isElectron: true;
+  checkPort: (port: number) => Promise<{
+    available: boolean;
+    suggestion?: number;
+    error?: string;
+  }>;
+  startServer: (port: number) => Promise<{ port: number; url: string }>;
+  onStatus: (cb: (status: unknown) => void) => () => void;
+  navigateToApp: (url: string) => void;
+  showWindow: () => void;
+  quit: () => void;
+}
+
+declare global {
+  interface Window {
+    controller?: ControllerBridge;
+  }
+}
 
 interface DomRefs {
   form: HTMLFormElement;

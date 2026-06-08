@@ -188,7 +188,13 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      // Sandboxed preloads run in a CommonJS context regardless of the
+      // project's "type": "module" setting, so an ESM preload fails to
+      // load with "Cannot use import statement outside a module". The
+      // strong isolation we need still comes from contextIsolation +
+      // nodeIntegration: false + the minimal contextBridge surface in
+      // electron/preload.ts.
+      sandbox: false,
       preload: getPreloadPath(),
     },
   });
