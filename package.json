@@ -25,7 +25,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "node_modules/node-pty/**/*"
+      "node_modules/node-pty/**/*",
+      "dist/electron/**/*"
     ],
     "mac": {
       "icon": "build/icon.icns",

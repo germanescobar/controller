@@ -169,6 +169,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
     minHeight: 640,
     title: "Coding Orchestrator",
     show: options.show ?? true,
+    backgroundColor: "#0b0b0d",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -178,6 +179,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
   });
 
   registerContextMenu(win);
+  attachErrorReporting(win);
 
   if (options.loadFile) {
     await win.loadFile(options.loadFile);
@@ -194,10 +196,30 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
   return win;
 }
 
+function attachErrorReporting(win: BrowserWindow): void {
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    console.error(
+      `[controller] webContents did-fail-load (${errorCode} ${errorDescription}) for ${validatedURL}`
+    );
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    console.error(
+      `[controller] render process gone: reason=${details.reason} exitCode=${details.exitCode}`
+    );
+  });
+  win.webContents.on("preload-error", (_event, preloadPath, error) => {
+    console.error(`[controller] preload error in ${preloadPath}:`, error);
+  });
+  win.webContents.on("console-message", (_event, level, message, line, source) => {
+    const tag = level >= 2 ? "error" : level === 1 ? "warn" : "log";
+    console[tag](`[controller:renderer] ${source}:${line} ${message}`);
+  });
+}
+
 async function openWelcomeWindow(): Promise<BrowserWindow> {
   const win = await createWindow({
     loadFile: getWelcomeHtmlPath(),
-    show: false,
+    show: true,
   });
   mainWindow = win;
   win.on("closed", () => {
@@ -257,13 +279,27 @@ function registerIpcHandlers(): void {
   });
 }
 
+process.on("uncaughtException", (error) => {
+  console.error("[controller] uncaughtException:", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[controller] unhandledRejection:", reason);
+});
+
 app.whenReady().then(async () => {
   registerIpcHandlers();
 
-  if (!app.isPackaged) {
-    await createWindow({ loadUrl: getDevUrl() });
-  } else {
-    await openWelcomeWindow();
+  try {
+    if (!app.isPackaged) {
+      await createWindow({ loadUrl: getDevUrl() });
+    } else {
+      await openWelcomeWindow();
+    }
+  } catch (error) {
+    console.error("[controller] failed to open initial window:", error);
+    await showStartupErrorWindow(error);
+    return;
   }
 
   app.on("activate", () => {
@@ -279,6 +315,38 @@ app.whenReady().then(async () => {
   console.error("Failed to start Coding Orchestrator Electron shell:", error);
   app.quit();
 });
+
+async function showStartupErrorWindow(error: unknown): Promise<void> {
+  const message = error instanceof Error ? `${error.message}\n\n${error.stack ?? ""}` : String(error);
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Controller failed to start</title>
+<style>
+  body { margin: 0; padding: 32px; background: #0b0b0d; color: #f3f3f5;
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; line-height: 1.5; }
+  h1 { font-size: 16px; margin: 0 0 12px; color: #ef4444; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #15151a;
+        border: 1px solid #2a2a31; border-radius: 8px; padding: 16px; font-size: 12px; }
+</style></head><body>
+<h1>Controller failed to start</h1>
+<pre>${escapeHtml(message)}</pre>
+</body></html>`;
+  const errorWin = new BrowserWindow({
+    width: 720,
+    height: 480,
+    title: "Controller failed to start",
+    backgroundColor: "#0b0b0d",
+  });
+  attachErrorReporting(errorWin);
+  await errorWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+}
+
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
