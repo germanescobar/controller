@@ -69,6 +69,14 @@ export interface SessionRuntime {
   active: boolean;
 }
 
+export interface SessionRuntimeEntry {
+  sessionId: string;
+  active: boolean;
+  provider?: string;
+  projectId?: string;
+  worktreeId?: string;
+}
+
 export interface AgentEvent {
   id: string;
   sessionId: string;
@@ -284,6 +292,24 @@ export async function fetchSessionRuntime(
   );
   await throwIfNotOk(res, "Failed to fetch session runtime");
   return res.json();
+}
+
+/**
+ * Bulk snapshot of every session runtime the server knows about. Cheaper than
+ * calling `fetchSessionRuntime` per session — useful for the sidebar, which
+ * needs the active state of every session in the workspace.
+ */
+export async function fetchActiveRuntimes(): Promise<SessionRuntimeEntry[]> {
+  const res = await fetch(`${BASE}/runtimes`);
+  await throwIfNotOk(res, "Failed to fetch session runtimes");
+  const body = (await res.json()) as { sessions?: unknown };
+  if (!body || !Array.isArray(body.sessions)) return [];
+  return body.sessions.filter(
+    (entry): entry is SessionRuntimeEntry =>
+      Boolean(entry) &&
+      typeof (entry as SessionRuntimeEntry).sessionId === "string" &&
+      typeof (entry as SessionRuntimeEntry).active === "boolean",
+  );
 }
 
 export async function archiveSession(

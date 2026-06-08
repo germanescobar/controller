@@ -29,6 +29,7 @@ import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import {
+  fetchActiveRuntimes,
   fetchEvents,
   fetchBranchDiff,
   fetchGitDiff,
@@ -38,7 +39,6 @@ import {
   fetchTerminalTabs,
   fetchAgentProviders,
   fetchSession,
-  fetchSessionRuntime,
   fetchWorktrees,
   dismissSessionUserInput,
   runProjectScript,
@@ -2581,9 +2581,9 @@ export function SessionView({
       Promise.allSettled([
         fetchSession(projectId, sessionId, worktreeId),
         fetchEvents(projectId, sessionId, worktreeId),
-        fetchSessionRuntime(projectId, sessionId, worktreeId),
+        fetchActiveRuntimes(),
       ])
-        .then(([sessionResult, eventsResult, runtimeResult]) => {
+        .then(([sessionResult, eventsResult, runtimesResult]) => {
           if (cancelled) return;
           if (sessionResult.status === "fulfilled") {
             const session = sessionResult.value;
@@ -2603,8 +2603,11 @@ export function SessionView({
             setEvents([]);
           }
 
-          if (runtimeResult.status === "fulfilled") {
-            setStreaming(runtimeResult.value.active);
+          if (runtimesResult.status === "fulfilled") {
+            const active = runtimesResult.value.some(
+              (entry) => entry.sessionId === sessionId && entry.active,
+            );
+            setStreaming(active);
           } else {
             setStreaming(false);
           }
@@ -2646,13 +2649,16 @@ export function SessionView({
     let cancelled = false;
     const interval = window.setInterval(async () => {
       try {
-        const [evts, runtime] = await Promise.all([
+        const [evts, runtimes] = await Promise.all([
           fetchEvents(projectId, sessionId, worktreeId),
-          fetchSessionRuntime(projectId, sessionId, worktreeId),
+          fetchActiveRuntimes(),
         ]);
         if (cancelled) return;
         setEvents(evts);
-        if (!runtime.active) {
+        const isActive = runtimes.some(
+          (entry) => entry.sessionId === sessionId && entry.active,
+        );
+        if (!isActive) {
           setStreaming(false);
           setPendingMessage(null);
           setPendingAttachments([]);

@@ -1,9 +1,15 @@
 import type { ChildProcess } from "node:child_process";
 
+export interface SessionRuntimeMetadata {
+  projectId: string;
+  worktreeId: string;
+}
+
 export interface SessionRuntimeState {
   active: boolean;
   provider?: string;
   child?: ChildProcess;
+  metadata?: SessionRuntimeMetadata;
 }
 
 const runtimes = new Map<string, SessionRuntimeState>();
@@ -26,6 +32,33 @@ export function markSessionInactive(sessionId: string) {
 
 export function getSessionRuntime(sessionId: string): SessionRuntimeState {
   return runtimes.get(sessionId) ?? { active: false };
+}
+
+export interface SessionRuntimeSummary {
+  sessionId: string;
+  active: boolean;
+  provider?: string;
+  projectId?: string;
+  worktreeId?: string;
+}
+
+/**
+ * Snapshot the runtime map so callers can answer "is session X active?" in a
+ * single request. Sessions without metadata (e.g. populated by an older
+ * server build) are returned without `projectId`/`worktreeId`.
+ */
+export function listSessionRuntimes(): SessionRuntimeSummary[] {
+  const summaries: SessionRuntimeSummary[] = [];
+  for (const [sessionId, state] of runtimes) {
+    summaries.push({
+      sessionId,
+      active: state.active,
+      provider: state.provider,
+      projectId: state.metadata?.projectId,
+      worktreeId: state.metadata?.worktreeId,
+    });
+  }
+  return summaries;
 }
 
 export async function stopSessionRuntime(sessionId: string): Promise<void> {
