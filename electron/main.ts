@@ -51,10 +51,11 @@ function tryBindPort(port: number, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = createServer();
     let settled = false;
-    const finish = (value: boolean) => {
+    const finish = (value: boolean, reason: string) => {
       if (settled) return;
       settled = true;
       probe.removeAllListeners();
+      console.log(`[controller] tryBindPort(${port}) -> ${value} (${reason})`);
       // Resolve immediately; close the probe in the background. Waiting
       // for the close callback can hang the Promise indefinitely on some
       // macOS / network-stack edge cases.
@@ -65,9 +66,9 @@ function tryBindPort(port: number, timeoutMs = 1000): Promise<boolean> {
         // Ignore close errors — we've already resolved.
       }
     };
-    probe.once("error", () => finish(false));
-    probe.once("listening", () => finish(true));
-    setTimeout(() => finish(false), timeoutMs);
+    probe.once("error", (err) => finish(false, `error: ${err.message}`));
+    probe.once("listening", () => finish(true, "listening"));
+    setTimeout(() => finish(false, "timeout"), timeoutMs);
     probe.listen(port, "127.0.0.1");
   });
 }
@@ -305,13 +306,17 @@ process.on("unhandledRejection", (reason) => {
 });
 
 app.whenReady().then(async () => {
+  console.log("[controller] app ready");
   registerIpcHandlers();
 
   try {
     if (!app.isPackaged) {
+      console.log("[controller] dev mode, opening dev URL");
       await createWindow({ loadUrl: getDevUrl() });
     } else {
+      console.log("[controller] packaged mode, opening welcome window");
       await openWelcomeWindow();
+      console.log("[controller] welcome window opened");
     }
   } catch (error) {
     console.error("[controller] failed to open initial window:", error);
