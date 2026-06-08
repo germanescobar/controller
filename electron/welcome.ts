@@ -7,6 +7,7 @@ const MAX_PORT = 65535;
 const STORAGE_KEY = "controller.port";
 const DEFAULT_PORT = 4500;
 const FEEDBACK_DEBOUNCE_MS = 250;
+const CHECK_PORT_TIMEOUT_MS = 5000;
 
 declare const window: Window & {
   controller?: {
@@ -177,7 +178,11 @@ async function refreshPortCheck(
 
   let result: { available: boolean; suggestion?: number; error?: string };
   try {
-    result = await window.controller.checkPort(port);
+    result = await withTimeout(
+      window.controller.checkPort(port),
+      CHECK_PORT_TIMEOUT_MS,
+      "Port check timed out"
+    );
   } catch (err) {
     if (seq !== checkSeq) return;
     setInputValidity(refs.input, true);
@@ -238,6 +243,22 @@ function debounce(
       void fn(raw);
     }, delay);
   };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
 }
 
 async function handleSubmit(

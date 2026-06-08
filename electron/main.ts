@@ -47,15 +47,27 @@ async function waitForServer(url: string): Promise<void> {
   );
 }
 
-function tryBindPort(port: number): Promise<boolean> {
+function tryBindPort(port: number, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = createServer();
-    probe.once("error", () => {
-      resolve(false);
-    });
-    probe.once("listening", () => {
-      probe.close(() => resolve(true));
-    });
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      probe.removeAllListeners();
+      // Resolve immediately; close the probe in the background. Waiting
+      // for the close callback can hang the Promise indefinitely on some
+      // macOS / network-stack edge cases.
+      resolve(value);
+      try {
+        probe.close();
+      } catch {
+        // Ignore close errors — we've already resolved.
+      }
+    };
+    probe.once("error", () => finish(false));
+    probe.once("listening", () => finish(true));
+    setTimeout(() => finish(false), timeoutMs);
     probe.listen(port, "127.0.0.1");
   });
 }
@@ -249,7 +261,10 @@ function registerIpcHandlers(): void {
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
       return { available: false, error: "Port out of range" };
     }
-    return checkPortAvailable(parsed);
+    console.log(`[controller] check-port ${parsed}`);
+    const result = await checkPortAvailable(parsed);
+    console.log(`[controller] check-port ${parsed} ->`, result);
+    return result;
   });
 
   ipcMain.handle("controller:start-server", async (_event, port: unknown) => {
