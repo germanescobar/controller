@@ -65,15 +65,7 @@ The Vite dev server listens on port 4500 by default and proxies `/api` and `/ws/
 npm run dev:electron
 ```
 
-This starts the existing Express and Vite dev servers, waits for the Vite URL, and opens the Electron shell at the same React UI.
-
-### Build
-
-```bash
-npm run build
-```
-
-The production build outputs the client, server, and Electron main process under `dist/`.
+This starts the existing Express and Vite dev servers, waits for the Vite URL, and opens the Electron shell at the same React UI. The development path skips the welcome screen described below.
 
 ### Package Electron
 
@@ -82,6 +74,12 @@ npm run package:electron
 ```
 
 This creates a local current-OS Electron package under `release/`. The packaged app starts the local Express backend and loads the built client through it.
+
+#### First-run welcome screen
+
+The **packaged** build shows a one-time "Welcome to Controller" screen on first launch. Pick the port the local backend will run on (default `4500`; ports below `1024` are rejected), then click **Continue**. The chosen port is remembered in `localStorage`, so subsequent launches skip the welcome screen and go straight to the app on the saved port. If that port is taken on a later launch, the welcome screen reappears with a one-click suggestion for the next free port.
+
+The same window shows a "Listening on port N" footer in the main app shell, with a popover that surfaces the local URL (with a Copy button) and a reminder to reach the app from your phone over a private network like Tailscale.
 
 ### Network Access
 

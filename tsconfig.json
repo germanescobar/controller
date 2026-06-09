@@ -16,6 +16,6 @@
       "@/*": ["./client/src/*"]
     }
   },
-  "include": ["client", "vite.config.ts"],
+  "include": ["client", "shared", "vite.config.ts"],
   "exclude": ["node_modules"]
 }

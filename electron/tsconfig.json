@@ -6,8 +6,8 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "../dist/electron",
-    "rootDir": "."
+    "outDir": "../dist",
+    "rootDir": ".."
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../shared/*.ts"]
 }
