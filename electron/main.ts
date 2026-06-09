@@ -221,11 +221,24 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 
   registerContextMenu(win);
   attachErrorReporting(win);
+  console.log(
+    `[controller] BrowserWindow created (loadFile=${options.loadFile ?? "none"}, loadUrl=${options.loadUrl ?? "none"})`
+  );
 
   if (options.loadFile) {
+    const loadStart = Date.now();
+    console.log(`[controller] loadFile start: ${options.loadFile}`);
     await win.loadFile(options.loadFile);
+    console.log(
+      `[controller] loadFile resolved (+${Date.now() - loadStart}ms)`
+    );
   } else if (options.loadUrl) {
+    const loadStart = Date.now();
+    console.log(`[controller] loadURL start: ${options.loadUrl}`);
     await win.loadURL(options.loadUrl);
+    console.log(
+      `[controller] loadURL resolved (+${Date.now() - loadStart}ms)`
+    );
   } else {
     throw new Error("createWindow requires either loadUrl or loadFile");
   }
@@ -238,6 +251,16 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 }
 
 function attachErrorReporting(win: BrowserWindow): void {
+  const t0 = Date.now();
+  win.webContents.on("did-start-loading", () => {
+    console.log(`[controller] did-start-loading (+${Date.now() - t0}ms)`);
+  });
+  win.webContents.on("did-finish-load", () => {
+    console.log(`[controller] did-finish-load (+${Date.now() - t0}ms)`);
+  });
+  win.webContents.on("dom-ready", () => {
+    console.log(`[controller] dom-ready (+${Date.now() - t0}ms)`);
+  });
   win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     console.error(
       `[controller] webContents did-fail-load (${errorCode} ${errorDescription}) for ${validatedURL}`
@@ -332,33 +355,25 @@ process.on("unhandledRejection", (reason) => {
 });
 
 app.whenReady().then(async () => {
-  console.log("[controller] app ready");
+  const readyAt = Date.now();
+  console.log(`[controller] app ready at ${readyAt}`);
   registerIpcHandlers();
-
-  // Eagerly authorize the macOS keychain entry that Electron's safeStorage
-  // uses. The prompt is a system-modal dialog that blocks the main thread;
-  // triggering it now (before any window opens) makes the wait explicit
-  // and prevents it from getting tangled with the welcome window's load.
-  if (process.platform === "darwin" && app.isPackaged) {
-    try {
-      // Importing safeStorage dynamically because it's only available in
-      // the main process and we want to keep this code path narrow.
-      const { safeStorage } = await import("electron");
-      const available = safeStorage.isEncryptionAvailable();
-      console.log(`[controller] safeStorage available = ${available}`);
-    } catch (err) {
-      console.warn("[controller] safeStorage check failed:", err);
-    }
-  }
+  console.log(
+    `[controller] ipc handlers registered (+${Date.now() - readyAt}ms)`
+  );
 
   try {
     if (!app.isPackaged) {
       console.log("[controller] dev mode, opening dev URL");
       await createWindow({ loadUrl: getDevUrl() });
     } else {
-      console.log("[controller] packaged mode, opening welcome window");
+      console.log(
+        `[controller] packaged mode, opening welcome window (+${Date.now() - readyAt}ms)`
+      );
       await openWelcomeWindow();
-      console.log("[controller] welcome window opened");
+      console.log(
+        `[controller] welcome window opened (+${Date.now() - readyAt}ms)`
+      );
     }
   } catch (error) {
     console.error("[controller] failed to open initial window:", error);
