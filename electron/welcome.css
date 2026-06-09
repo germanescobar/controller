@@ -78,6 +78,14 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: 12px;
   color: var(--muted);
+  overflow: hidden;
+}
+
+.welcome__icon img {
+  display: block;
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
 }
 
 .welcome__title {
