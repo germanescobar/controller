@@ -328,3 +328,121 @@ test("ada parser: unknown event types are dropped, never forwarded as AgentStrea
     );
   }
 });
+
+test("ada parser: consumes accumulated tool.call.delta fragments when a later tool reuses the same index", () => {
+  // Regression guard: a `tool.call` that arrives with a structured
+  // `input` was leaving the accumulated `inputDelta` fragments in
+  // the parser state. If a subsequent tool call reused the same
+  // `index` and *did* need the fallback, the stale fragments would
+  // be parsed as that new call's input. Worse, if the new call also
+  // emitted `tool.call.delta` fragments for the same `index`, the
+  // new fragments would be concatenated onto the stale ones,
+  // producing a corrupt JSON string.
+  const events = runFixture(
+    [
+      JSON.stringify({ type: "run.started", sessionId: "sess-10" }),
+      // First call at index 0: emits deltas AND arrives with a
+      // structured `input`. The parser should pick the structured
+      // one and *drop the fragments*.
+      JSON.stringify({
+        type: "tool.call.delta",
+        index: 0,
+        inputDelta: '{"command":"STALE"}',
+      }),
+      JSON.stringify({
+        type: "tool.call",
+        id: "call-A",
+        name: "run_command",
+        index: 0,
+        input: { command: "echo hello" },
+      }),
+      // Second call at the same index 0: emits deltas with no
+      // structured `input` on the final event. Without the cleanup
+      // the parser would see `{"command":"STALE"}{"command":"ls"}`
+      // — invalid JSON — and fall through to an empty `input`,
+      // hiding the tool arguments from the UI.
+      JSON.stringify({
+        type: "tool.call.delta",
+        index: 0,
+        inputDelta: '{"command":',
+      }),
+      JSON.stringify({
+        type: "tool.call.delta",
+        index: 0,
+        inputDelta: '"ls"}',
+      }),
+      JSON.stringify({
+        type: "tool.call",
+        id: "call-B",
+        name: "run_command",
+        index: 0,
+        input: {},
+      }),
+    ].join("\n")
+  );
+
+  const toolCalls = events.filter(
+    (event): event is {
+      type: "tool.call";
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    } => event.type === "tool.call"
+  );
+  assert.equal(toolCalls.length, 2, "expected two normalized tool.call events");
+
+  // First call: structured input wins.
+  assert.equal(toolCalls[0].id, "call-A");
+  assert.deepEqual(toolCalls[0].input, { command: "echo hello" });
+
+  // Second call: fragments are *only* the new deltas. The stale
+  // '{"command":"STALE"}' from the first call must not leak in.
+  assert.equal(toolCalls[1].id, "call-B");
+  assert.deepEqual(toolCalls[1].input, { command: "ls" });
+});
+
+test("ada parser: empty final tool.call with no prior deltas leaves input empty, not the previous call's", () => {
+  // Companion regression guard: a `tool.call` with no `input` and
+  // no prior `tool.call.delta` should yield an empty `input`
+  // object, not silently inherit the previous call's accumulated
+  // fragments.
+  const events = runFixture(
+    [
+      JSON.stringify({ type: "run.started", sessionId: "sess-11" }),
+      JSON.stringify({
+        type: "tool.call.delta",
+        index: 0,
+        inputDelta: '{"command":"first"}',
+      }),
+      JSON.stringify({
+        type: "tool.call",
+        id: "call-1",
+        name: "run_command",
+        index: 0,
+        input: { command: "first" },
+      }),
+      // No more deltas for the next call. The structured `input`
+      // is empty, and the fragment map must also be empty (the
+      // previous call was already consumed).
+      JSON.stringify({
+        type: "tool.call",
+        id: "call-2",
+        name: "run_command",
+        index: 0,
+        input: {},
+      }),
+    ].join("\n")
+  );
+
+  const toolCalls = events.filter(
+    (event): event is {
+      type: "tool.call";
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    } => event.type === "tool.call"
+  );
+  assert.equal(toolCalls.length, 2);
+  assert.deepEqual(toolCalls[0].input, { command: "first" });
+  assert.deepEqual(toolCalls[1].input, {}, "input must be empty, not inherited");
+});

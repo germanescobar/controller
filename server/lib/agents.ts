@@ -263,6 +263,7 @@ function mapAdaEvent(
     const flushed = flushAdaAccumulatedSegments(state);
     const id = typeof raw.id === "string" ? raw.id : "";
     const name = typeof raw.name === "string" ? raw.name : "";
+    const index = typeof raw.index === "number" ? raw.index : 0;
     const inputRaw = raw.input;
     let input: Record<string, unknown> =
       inputRaw && typeof inputRaw === "object" && !Array.isArray(inputRaw)
@@ -274,7 +275,6 @@ function mapAdaEvent(
       // them as JSON fragments that concatenate into a valid JSON
       // document; if they don't parse, keep the empty object so the
       // UI at least sees the tool name and id.
-      const index = typeof raw.index === "number" ? raw.index : 0;
       const deltaString = state.toolCallInputs.get(index);
       if (deltaString) {
         try {
@@ -286,8 +286,15 @@ function mapAdaEvent(
           // leave `input` empty; client will still see id + name
         }
       }
-      state.toolCallInputs.delete(index);
     }
+
+    // Always clear the consumed fragments for this index, regardless of
+    // which path produced the final `input`. Otherwise a later tool
+    // call that reuses the same `index` would either parse the stale
+    // fragments on its own fallback path or, if it also emits
+    // `tool.call.delta` fragments, concatenate them onto the stale
+    // ones and corrupt the JSON.
+    state.toolCallInputs.delete(index);
 
     const event: AgentStreamEvent = { type: "tool.call", id, name, input };
     return flushed.length > 0 ? [...flushed, event] : event;
