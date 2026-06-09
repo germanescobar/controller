@@ -514,6 +514,32 @@ export async function fetchAgentProviders(): Promise<AgentProviderInfo[]> {
   return res.json();
 }
 
+export interface AgentStatus {
+  id: string;
+  name: string;
+  installed: boolean;
+  enabled: boolean;
+  resolvedPath: string | null;
+  version: string | null;
+}
+
+export async function fetchAgents(): Promise<AgentStatus[]> {
+  const res = await fetch(`${BASE}/agents`);
+  return res.json();
+}
+
+export async function updateAgent(
+  agentId: string,
+  patch: { enabled?: boolean; path?: string | null }
+): Promise<AgentStatus> {
+  const res = await fetch(`${BASE}/agents/${agentId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  return res.json();
+}
+
 export async function fetchModels(agent?: string): Promise<Model[]> {
   const params = agent ? `?agent=${encodeURIComponent(agent)}` : "";
   const res = await fetch(`${BASE}/models${params}`);

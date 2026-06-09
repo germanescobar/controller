@@ -9,12 +9,14 @@ import { sessionsRouter } from "./routes/sessions.js";
 import { worktreesRouter } from "./routes/worktrees.js";
 import { modelsRouter } from "./routes/models.js";
 import { apiKeysRouter } from "./routes/api-keys.js";
+import { agentsRouter } from "./routes/agents.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
 import { listSessionRuntimes } from "./lib/session-runtime.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
 import { buildScriptEnv } from "./lib/project-scripts.js";
+import { restoreLoginShellPath } from "./lib/shell-env.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -33,8 +35,10 @@ app.use("/api/projects", worktreesRouter);
 app.use("/api/projects", sessionsRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
+app.use("/api/agents", agentsRouter);
 
-// Agent providers
+// Available agent providers (installed AND enabled). Kept for the session
+// picker and the Electron health check; richer status lives at /api/agents.
 app.get("/api/agent-providers", async (_req, res) => {
   const providers = (await getAvailableAgentProviders()).map((p) => ({ id: p.id, name: p.name }));
   res.json(providers);
@@ -152,6 +156,18 @@ wss.on("connection", (ws: WebSocket) => {
 });
 
 const PORT = parsePort(process.env.PORT, 3100);
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+
+// In a packaged Electron build launched from Finder/Dock the inherited PATH is
+// minimal, so agent CLIs (and the node their shebangs need) fail to spawn.
+// Restore the login-shell PATH before accepting requests. Skipped in dev,
+// where the terminal PATH is already inherited.
+async function start(): Promise<void> {
+  if (process.env.NODE_ENV === "production") {
+    await restoreLoginShellPath();
+  }
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+void start();

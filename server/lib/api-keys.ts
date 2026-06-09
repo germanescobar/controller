@@ -11,8 +11,11 @@ export const PROVIDERS: ProviderConfig[] = [
   { id: "groq", name: "Groq", envVar: "GROQ_API_KEY" },
   { id: "ollama-cloud", name: "Ollama Cloud", envVar: "OLLAMA_API_KEY" },
   { id: "openrouter", name: "OpenRouter", envVar: "OPENROUTER_API_KEY" },
-  { id: "openai", name: "OpenAI", envVar: "OPENAI_API_KEY" },
 ];
+
+// Provider ids no longer supported. A stored key for any of these is pruned
+// the next time the store is read so it stops being surfaced or injected.
+const REMOVED_PROVIDER_IDS = ["openai"];
 
 // Map of provider id -> API key
 type ApiKeyStore = Record<string, string>;
@@ -20,10 +23,22 @@ type ApiKeyStore = Record<string, string>;
 async function readStore(): Promise<ApiKeyStore> {
   try {
     const content = await fs.readFile(apiKeysFile(), "utf-8");
-    return JSON.parse(content) as ApiKeyStore;
+    const store = JSON.parse(content) as ApiKeyStore;
+    return pruneRemovedProviders(store);
   } catch {
     return {};
   }
+}
+
+/** Drop keys for removed providers, persisting the change when one is found. */
+async function pruneRemovedProviders(store: ApiKeyStore): Promise<ApiKeyStore> {
+  const hadRemoved = REMOVED_PROVIDER_IDS.some((id) => id in store);
+  if (!hadRemoved) return store;
+  for (const id of REMOVED_PROVIDER_IDS) {
+    delete store[id];
+  }
+  await writeStore(store);
+  return store;
 }
 
 async function writeStore(store: ApiKeyStore) {

@@ -1,7 +1,9 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { spawn, type ChildProcess } from "node:child_process";
+import {
+  resolveCommand,
+  getCommandVersion,
+} from "./command-resolver.js";
+import { getAgentSetting, getAgentSettings } from "./agent-settings.js";
 
 export interface AgentPlanStep {
   step: string;
@@ -86,6 +88,8 @@ export interface SpawnOptions {
   message: string;
   cwd: string;
   env: Record<string, string>;
+  /** Resolved absolute path to the CLI executable. Falls back to the bare command name. */
+  command?: string;
   attachments?: AgentAttachment[];
   resumeSessionId?: string;
   model?: string;
@@ -413,7 +417,7 @@ const adaProvider: AgentProvider = {
   name: "Ada",
   command: "ada",
 
-  spawn({ message, cwd, env, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier }) {
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier }) {
     const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
     if (reasoningEffort) {
       cmdArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
@@ -432,7 +436,7 @@ const adaProvider: AgentProvider = {
     const fullCmd = `ada ${[...cmdArgs, ...args].join(" ")}`;
     console.log(`[ada] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn("ada", [...cmdArgs, ...args], {
+    return spawn(command ?? "ada", [...cmdArgs, ...args], {
       cwd,
       env: { ...process.env, ...env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -463,7 +467,7 @@ const codexProvider: AgentProvider = {
   name: "Codex",
   command: "codex",
 
-  spawn({ message, cwd, env, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
     // Flags must come before the prompt argument
     const flags = ["--json", "--full-auto", "--skip-git-repo-check", "--model", model || ""];
     if (reasoningEffort) {
@@ -491,7 +495,7 @@ const codexProvider: AgentProvider = {
     const fullCmd = `codex ${args.join(" ")}`;
     console.log(`[codex] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn("codex", args, {
+    return spawn(command ?? "codex", args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -524,7 +528,7 @@ const claudeProvider: AgentProvider = {
   name: "Claude",
   command: "claude",
 
-  spawn({ message, cwd, env, attachments = [], resumeSessionId, model, reasoningEffort, mode }) {
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, mode }) {
     const args = [
       "-p",
       "--output-format",
@@ -549,7 +553,7 @@ const claudeProvider: AgentProvider = {
     const fullCmd = `claude ${args.join(" ")}`;
     console.log(`[claude] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn("claude", args, {
+    return spawn(command ?? "claude", args, {
       cwd,
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1197,24 +1201,66 @@ export function getAgentProviders(): AgentProvider[] {
   return Object.values(providers);
 }
 
-async function isCommandAvailable(command: string): Promise<boolean> {
-  try {
-    await execFileAsync("sh", ["-lc", `command -v ${command}`]);
-    return true;
-  } catch {
-    return false;
-  }
+export interface AgentStatus {
+  id: string;
+  name: string;
+  /** The CLI resolves on PATH (or via an explicit path override). */
+  installed: boolean;
+  /** The user has enabled this agent in Settings. */
+  enabled: boolean;
+  /** Absolute path the CLI resolved to, or null when not installed. */
+  resolvedPath: string | null;
+  /** Best-effort `--version` output, or null. */
+  version: string | null;
 }
 
-export async function getAvailableAgentProviders(): Promise<AgentProvider[]> {
-  const availability = await Promise.all(
-    Object.values(providers).map(async (provider) => ({
-      provider,
-      available: await isCommandAvailable(provider.command),
-    }))
-  );
+/**
+ * Resolve an agent's CLI to an absolute executable path, honoring an explicit
+ * path override from settings. Throws an actionable error when it can't be
+ * found so the caller can surface it to the user.
+ */
+export async function resolveAgentCommand(agentId: string): Promise<string> {
+  const provider = providers[agentId];
+  if (!provider) {
+    throw new Error(`Unknown agent provider: ${agentId}`);
+  }
+  const setting = await getAgentSetting(agentId);
+  const resolved = resolveCommand(provider.command, setting.path);
+  if (!resolved) {
+    throw new Error(
+      `${provider.name} CLI ("${provider.command}") was not found on PATH. ` +
+        `Set its path in Settings → Agents, or install it.`
+    );
+  }
+  return resolved;
+}
 
-  return availability
-    .filter(({ available }) => available)
-    .map(({ provider }) => provider);
+/** Install + enable status for every registered agent. */
+export async function getAgentStatuses(): Promise<AgentStatus[]> {
+  const settings = await getAgentSettings();
+  return Promise.all(
+    Object.values(providers).map(async (provider) => {
+      const setting = settings[provider.id] ?? { enabled: true, path: null };
+      const resolvedPath = resolveCommand(provider.command, setting.path);
+      const installed = resolvedPath !== null;
+      const version = installed ? await getCommandVersion(resolvedPath) : null;
+      return {
+        id: provider.id,
+        name: provider.name,
+        installed,
+        enabled: setting.enabled,
+        resolvedPath,
+        version,
+      };
+    })
+  );
+}
+
+/** Providers that are both installed and enabled — the ones a user can run. */
+export async function getAvailableAgentProviders(): Promise<AgentProvider[]> {
+  const statuses = await getAgentStatuses();
+  const availableIds = new Set(
+    statuses.filter((status) => status.installed && status.enabled).map((status) => status.id)
+  );
+  return Object.values(providers).filter((provider) => availableIds.has(provider.id));
 }

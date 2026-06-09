@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   getAgentProvider,
+  resolveAgentCommand,
   type AgentStreamEvent,
   type AgentStreamParseResult,
   type AgentAttachment,
@@ -396,9 +397,13 @@ export class CodexAppServerManager {
       return;
     }
 
+    // Resolve before spawning so a missing CLI surfaces a clear error rather
+    // than an ENOENT from a packaged build's minimal PATH (issue #65).
+    const codexCommand = await resolveAgentCommand("codex");
+
     this.initializePromise = new Promise<void>((resolve, reject) => {
       const child = spawn(
-        "codex",
+        codexCommand,
         ["app-server", "--listen", "stdio://", "--enable", "default_mode_request_user_input"],
         {
           env: { ...process.env, ...env },
