@@ -69,21 +69,21 @@ function tryBindPort(
   port: number,
   host: string,
   timeoutMs = 1000
-): Promise<boolean> {
+): Promise<{ bound: boolean; reason: string }> {
   return new Promise((resolve) => {
     const probe = createServer();
     let settled = false;
-    const finish = (value: boolean, reason: string) => {
+    const finish = (bound: boolean, reason: string) => {
       if (settled) return;
       settled = true;
       probe.removeAllListeners();
       console.log(
-        `[controller ${elapsed()}] tryBindPort(${port}, ${host}) -> ${value} (${reason})`
+        `[controller ${elapsed()}] tryBindPort(${port}, ${host}) -> ${bound ? "free" : "in-use"} (${reason})`
       );
       // Resolve immediately; close the probe in the background. Waiting
       // for the close callback can hang the Promise indefinitely on some
       // macOS / network-stack edge cases.
-      resolve(value);
+      resolve({ bound, reason });
       try {
         probe.close();
       } catch {
@@ -97,19 +97,20 @@ function tryBindPort(
   });
 }
 
-// Returns true only if the port is bindable on the wildcard address. On
-// macOS, the default Node `net.Server.listen(port)` (no host) binds to
-// `::` with IPV6_V6ONLY=0, which conflicts with anything on any
-// interface — including processes bound to a specific external IP
-// (e.g. `192.168.1.5:4500`) and processes bound to `0.0.0.0:4500`.
-//
-// Probing only loopback (127.0.0.1 and ::1) yields false positives: a
-// process on a specific external IP doesn't block our loopback bind, but
-// it WOULD block the Express server's later `listen(PORT)` call (which
-// defaults to all interfaces), so the welcome screen would happily
-// approve a port that's already serving someone else.
+// Returns true only if the port is bindable on BOTH the IPv4 wildcard
+// (0.0.0.0) and the IPv6 wildcard (::). On macOS the kernel tracks
+// IPv4 and IPv6 socket bindings separately, so an IPv4-only bind to
+// `0.0.0.0:4500` does NOT conflict with an IPv6-only bind to `::` —
+// but the Express server's later `listen(PORT)` will pick whichever
+// family the kernel routes the new connection through, and fail with
+// EADDRINUSE. Probing both families covers Vite (which binds 0.0.0.0
+// on macOS) and anything bound to a specific external IP.
 async function isPortFree(port: number): Promise<boolean> {
-  return tryBindPort(port, "::");
+  const [ipv4, ipv6] = await Promise.all([
+    tryBindPort(port, "0.0.0.0"),
+    tryBindPort(port, "::"),
+  ]);
+  return ipv4.bound && ipv6.bound;
 }
 
 async function checkPortAvailable(
