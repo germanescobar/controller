@@ -139,10 +139,31 @@ type ControllerStatus =
 
 let mainWindow: BrowserWindow | null = null;
 
+// Tracks the Express server we most recently started in this process.
+// Cleared when the server is no longer reachable (so we don't hand the
+// renderer a stale URL on next activate).
+let activeServer: { port: number; url: string } | null = null;
+
 function broadcastStatus(status: ControllerStatus): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     win.webContents.send("controller:status", status);
+  }
+}
+
+// Returns true if the previously-started server is still reachable on its
+// port. We probe with a short-timeout fetch against the agent-providers
+// endpoint (the same one the renderer uses) so a stuck or crashed child
+// process is detected.
+async function isActiveServerAlive(): Promise<boolean> {
+  if (!activeServer) return false;
+  try {
+    const res = await fetch(`${activeServer.url}/api/agent-providers`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -162,6 +183,7 @@ async function startProductionServer(port: number): Promise<string> {
 
   const url = `http://localhost:${port}`;
   await waitForServer(`${url}/api/agent-providers`);
+  activeServer = { port, url };
   broadcastStatus({ state: "listening", port });
   return url;
 }
@@ -352,6 +374,7 @@ function registerIpcHandlers(): void {
       return { port: parsed, url };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      activeServer = null;
       broadcastStatus({ state: "error", port: parsed, message });
       throw err;
     }
@@ -396,13 +419,30 @@ app.whenReady().then(async () => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      if (app.isPackaged) {
-        void openWelcomeWindow();
-      } else {
-        void createWindow({ loadUrl: getDevUrl() });
+    if (BrowserWindow.getAllWindows().length > 0) return;
+
+    // Reopening after closing the last window (the macOS dock-icon path).
+    // If we still have a live server from this session, just bring back
+    // the main app window pointing at it — the user already picked a port
+    // and the orphan Express process is still serving. Otherwise fall
+    // back to the welcome screen.
+    void (async () => {
+      if (app.isPackaged && (await isActiveServerAlive())) {
+        logWithTime(
+          `activate: reusing active server on port ${activeServer!.port}`
+        );
+        await openMainAppWindow(activeServer!.url);
+        return;
       }
-    }
+      activeServer = null;
+      if (app.isPackaged) {
+        logWithTime("activate: no active server, opening welcome window");
+        await openWelcomeWindow();
+      } else {
+        logWithTime("activate: dev mode, opening dev URL");
+        await createWindow({ loadUrl: getDevUrl() });
+      }
+    })();
   });
 }).catch((error: unknown) => {
   errorWithTime("Failed to start Coding Orchestrator Electron shell:", error);
