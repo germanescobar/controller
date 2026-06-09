@@ -10,7 +10,8 @@
     "dev:client": "vite",
     "dev:electron": "concurrently -k \"npm run dev:server\" \"npm run dev:client\" \"node electron/wait-and-launch.mjs\"",
     "build": "vite build && tsc -p server/tsconfig.json && tsc -p electron/tsconfig.json",
-    "package:electron": "npm run build && electron-builder --dir"
+    "package:electron": "npm run build && electron-builder --dir",
+    "test": "node --import tsx --test 'server/lib/__tests__/**/*.test.ts'"
   },
   "build": {
     "appId": "com.germanescobar.controller",

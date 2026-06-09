@@ -149,6 +149,258 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
 // Ada provider
 // ---------------------------------------------------------------------------
 
+interface AdaParserState {
+  sessionId: string;
+  // Current assistant text / reasoning segment being assembled from
+  // token-level deltas. Emitted as a single `assistant.text` /
+  // `assistant.reasoning` event the next time a non-delta event arrives
+  // (or when the run completes) so the rest of the system — and the
+  // UI — only ever sees the normalized full-event types.
+  textSegment: string;
+  reasoningSegment: string;
+  // Per-index accumulator for `tool.call.delta` `inputDelta` strings.
+  // Used as a fallback if a downstream `tool.call` event arrives without
+  // the final structured `input` field.
+  toolCallInputs: Map<number, string>;
+}
+
+function createAdaParserState(): AdaParserState {
+  return {
+    sessionId: "",
+    textSegment: "",
+    reasoningSegment: "",
+    toolCallInputs: new Map(),
+  };
+}
+
+/**
+ * Drain any in-progress text / reasoning segment accumulators into
+ * standalone full events, in the order the segments were started
+ * (reasoning first, then text). The caller decides what to do with
+ * the returned events (e.g. prepend them to the current batch).
+ */
+function flushAdaAccumulatedSegments(
+  state: AdaParserState
+): AgentStreamEvent[] {
+  const out: AgentStreamEvent[] = [];
+  if (state.reasoningSegment) {
+    out.push({ type: "assistant.reasoning", text: state.reasoningSegment });
+    state.reasoningSegment = "";
+  }
+  if (state.textSegment) {
+    out.push({ type: "assistant.text", text: state.textSegment });
+    state.textSegment = "";
+  }
+  return out;
+}
+
+/**
+ * Reset segment accumulators and any per-index tool call deltas. Called
+ * at the start of every new run so a resumed session doesn't bleed
+ * stale text into the new turn.
+ */
+function resetAdaParserState(state: AdaParserState): void {
+  state.textSegment = "";
+  state.reasoningSegment = "";
+  state.toolCallInputs.clear();
+}
+
+/**
+ * Map a single raw Ada stream event (one JSONL line) to the
+ * normalized `AgentStreamEvent` shape. Returns `null` for events that
+ * should be dropped, an array when the line produces multiple
+ * normalized events (e.g. flushing a text segment before a tool call),
+ * or a single event otherwise.
+ */
+function mapAdaEvent(
+  raw: Record<string, unknown>,
+  state: AdaParserState
+): AgentStreamEvent | AgentStreamEvent[] | null {
+  const type = raw.type as string | undefined;
+  if (!type) return null;
+
+  if (type === "run.started") {
+    const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : "";
+    state.sessionId = sessionId;
+    resetAdaParserState(state);
+    return {
+      type: "run.started",
+      sessionId,
+      model: typeof raw.model === "string" ? raw.model : "",
+      workingDirectory:
+        typeof raw.workingDirectory === "string" ? raw.workingDirectory : "",
+      timestamp:
+        typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+    };
+  }
+
+  if (type === "assistant.text.delta") {
+    const text = typeof raw.text === "string" ? raw.text : "";
+    if (!text) return null;
+    state.textSegment += text;
+    return null;
+  }
+
+  if (type === "assistant.reasoning.delta") {
+    const text = typeof raw.text === "string" ? raw.text : "";
+    if (!text) return null;
+    state.reasoningSegment += text;
+    return null;
+  }
+
+  if (type === "tool.call.delta") {
+    const index = typeof raw.index === "number" ? raw.index : 0;
+    const inputDelta = typeof raw.inputDelta === "string" ? raw.inputDelta : "";
+    if (inputDelta) {
+      state.toolCallInputs.set(index, (state.toolCallInputs.get(index) ?? "") + inputDelta);
+    }
+    return null;
+  }
+
+  if (type === "tool.call") {
+    // Flush any pending prose so it renders before the tool call in
+    // the live transcript.
+    const flushed = flushAdaAccumulatedSegments(state);
+    const id = typeof raw.id === "string" ? raw.id : "";
+    const name = typeof raw.name === "string" ? raw.name : "";
+    const inputRaw = raw.input;
+    let input: Record<string, unknown> =
+      inputRaw && typeof inputRaw === "object" && !Array.isArray(inputRaw)
+        ? (inputRaw as Record<string, unknown>)
+        : {};
+
+    if (Object.keys(input).length === 0) {
+      // Fall back to the accumulated `inputDelta` strings. Ada emits
+      // them as JSON fragments that concatenate into a valid JSON
+      // document; if they don't parse, keep the empty object so the
+      // UI at least sees the tool name and id.
+      const index = typeof raw.index === "number" ? raw.index : 0;
+      const deltaString = state.toolCallInputs.get(index);
+      if (deltaString) {
+        try {
+          const parsed = JSON.parse(deltaString);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            input = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // leave `input` empty; client will still see id + name
+        }
+      }
+      state.toolCallInputs.delete(index);
+    }
+
+    const event: AgentStreamEvent = { type: "tool.call", id, name, input };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "tool.result") {
+    // Tool results can follow a tool call, but they can also follow a
+    // short text or reasoning segment — flush those first so the
+    // transcript order matches the model's emission order.
+    const flushed = flushAdaAccumulatedSegments(state);
+    const event: AgentStreamEvent = {
+      type: "tool.result",
+      id: typeof raw.id === "string" ? raw.id : "",
+      name: typeof raw.name === "string" ? raw.name : "",
+      content: normalizeToolResultContent(raw.content),
+      isError: raw.isError === true,
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "run.completed" || type === "run.failed") {
+    // Final flush — anything still being accumulated belongs in the
+    // transcript before the run terminates.
+    const flushed = flushAdaAccumulatedSegments(state);
+    state.toolCallInputs.clear();
+    const sessionId =
+      typeof raw.sessionId === "string" && raw.sessionId
+        ? raw.sessionId
+        : state.sessionId;
+    if (type === "run.completed") {
+      const event: AgentStreamEvent = {
+        type: "run.completed",
+        sessionId,
+        status: raw.status === "max_iterations" ? "max_iterations" : "completed",
+        stopReason: typeof raw.stopReason === "string" ? raw.stopReason : "completed",
+        timestamp:
+          typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+      };
+      return flushed.length > 0 ? [...flushed, event] : event;
+    }
+    const event: AgentStreamEvent = {
+      type: "run.failed",
+      sessionId,
+      error: normalizeErrorMessage(raw.error, "Ada run failed"),
+      timestamp:
+        typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "plan.updated") {
+    const flushed = flushAdaAccumulatedSegments(state);
+    const plan = Array.isArray(raw.plan)
+      ? (raw.plan
+          .map((step) => normalizePlanStep(step))
+          .filter((step): step is AgentPlanStep => step !== null))
+      : [];
+    const event: AgentStreamEvent = {
+      type: "plan.updated",
+      explanation:
+        typeof raw.explanation === "string" || raw.explanation === null
+          ? (raw.explanation as string | null)
+          : null,
+      plan,
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "plan.delta") {
+    const flushed = flushAdaAccumulatedSegments(state);
+    const event: AgentStreamEvent = {
+      type: "plan.delta",
+      id: typeof raw.id === "string" ? raw.id : "",
+      delta: typeof raw.delta === "string" ? raw.delta : "",
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "user.input_requested") {
+    const flushed = flushAdaAccumulatedSegments(state);
+    const questions = Array.isArray(raw.questions)
+      ? (raw.questions
+          .map((question) => normalizeUserInputQuestion(question))
+          .filter((question): question is AgentUserInputQuestion => question !== null))
+      : [];
+    const event: AgentStreamEvent = {
+      type: "user.input_requested",
+      id: typeof raw.id === "string" ? raw.id : "",
+      questions,
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "thread.status") {
+    const flushed = flushAdaAccumulatedSegments(state);
+    const event: AgentStreamEvent = {
+      type: "thread.status",
+      threadId: typeof raw.threadId === "string" ? raw.threadId : "",
+      status: typeof raw.status === "string" ? raw.status : "",
+      activeFlags: Array.isArray(raw.activeFlags)
+        ? (raw.activeFlags.filter((flag): flag is string => typeof flag === "string"))
+        : undefined,
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  // Unknown event shape — drop it. The previous implementation cast
+  // unknown shapes to `AgentStreamEvent`, which let Ada's delta events
+  // leak into the SSE stream and reach a client that didn't know how
+  // to handle them.
+  return null;
+}
+
 const adaProvider: AgentProvider = {
   id: "ada",
   name: "Ada",
@@ -180,10 +432,18 @@ const adaProvider: AgentProvider = {
     });
   },
 
-  parseEvent(line: string): AgentStreamEvent | null {
-    const event = JSON.parse(line);
-    // Ada events already match our normalized format
-    return event as AgentStreamEvent;
+  createParser() {
+    const state = createAdaParserState();
+    return (line: string): AgentStreamParseResult => {
+      const raw = JSON.parse(line) as Record<string, unknown>;
+      return mapAdaEvent(raw, state);
+    };
+  },
+
+  parseEvent(line: string): AgentStreamParseResult {
+    const state = createAdaParserState();
+    const raw = JSON.parse(line) as Record<string, unknown>;
+    return mapAdaEvent(raw, state);
   },
 };
 
