@@ -125,9 +125,9 @@ function AdaLogo({ className }: { className?: string }) {
       className={className}
       fill="none"
       stroke="currentColor"
-      stroke-width="1.75"
-      stroke-linecap="round"
-      stroke-linejoin="round"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
     >
       <circle cx="11" cy="4" r="2" />
       <circle cx="18" cy="8" r="2" />
