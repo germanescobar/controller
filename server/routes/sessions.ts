@@ -584,7 +584,11 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   /** Write the user message + create/update session file once we know the sessionId. */
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
-    markSessionActive(sessionId, { provider: providerId, child });
+    markSessionActive(sessionId, {
+      provider: providerId,
+      child,
+      metadata: { projectId: req.params.projectId, worktreeId },
+    });
     // Always write a user_message event so attachments persist for reloaded
     // sessions. Some providers (e.g. Ada) also write their own user_message
     // event with empty attachments; the GET /events endpoint collapses
@@ -954,7 +958,10 @@ async function streamCodexPlanSession(
 
   async function persistSessionStart(sessionId: string) {
     streamSessionId = sessionId;
-    markSessionActive(sessionId, { provider: providerId });
+    markSessionActive(sessionId, {
+      provider: providerId,
+      metadata: { projectId, worktreeId },
+    });
     if (!userMessageWritten) {
       userMessageWritten = true;
       await appendEvent(worktreePath, sessionId, {

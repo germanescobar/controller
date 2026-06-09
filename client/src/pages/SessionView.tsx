@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, createContext, useContext } from "react";
+import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
 import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play } from "lucide-react";
 import hljs from "highlight.js/lib/core";
@@ -29,6 +29,7 @@ import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import {
+  fetchActiveRuntimes,
   fetchEvents,
   fetchBranchDiff,
   fetchGitDiff,
@@ -38,7 +39,6 @@ import {
   fetchTerminalTabs,
   fetchAgentProviders,
   fetchSession,
-  fetchSessionRuntime,
   fetchWorktrees,
   dismissSessionUserInput,
   runProjectScript,
@@ -705,7 +705,7 @@ function DiffView({ files }: { files: DiffFile[] }) {
   );
 }
 
-function RunDiffCard({ data }: { data: Record<string, unknown> }) {
+const RunDiffCard = memo(function RunDiffCard({ data }: { data: Record<string, unknown> }) {
   const [showAllFiles, setShowAllFiles] = useState(false);
   const projectRoot = useContext(ProjectRootContext);
   const diff = typeof data.diff === "string" ? data.diff : "";
@@ -756,7 +756,7 @@ function RunDiffCard({ data }: { data: Record<string, unknown> }) {
       </div>
     </div>
   );
-}
+});
 
 function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -944,6 +944,7 @@ const WORKING_STREAM_TYPES = new Set([
   "plan_delta",
   "thread_status",
 ]);
+const EMPTY_STREAM_ITEMS: StreamItem[] = [];
 
 function isWorkingEvent(event: AgentEvent): boolean {
   return WORKING_EVENT_TYPES.has(event.type);
@@ -1080,7 +1081,7 @@ function WorkingBlock({
   );
 }
 
-function EventBlock({
+const EventBlock = memo(function EventBlock({
   event,
   copiedId,
   onCopy,
@@ -1205,7 +1206,7 @@ function EventBlock({
       )}
     </div>
   );
-}
+});
 
 function MarkdownLink({
   children,
@@ -1248,7 +1249,7 @@ const markdownComponents = {
   a: MarkdownLink,
 };
 
-function AssistantBlock({
+const AssistantBlock = memo(function AssistantBlock({
   text,
   children,
 }: {
@@ -1266,9 +1267,9 @@ function AssistantBlock({
       {children}
     </div>
   );
-}
+});
 
-function ReasoningBlock({ text }: { text: unknown }) {
+const ReasoningBlock = memo(function ReasoningBlock({ text }: { text: unknown }) {
   const [expanded, setExpanded] = useState(false);
   const normalizedText = normalizeMarkdownText(text);
   const preview = normalizedText.replace(/\s+/g, " ").trim();
@@ -1305,9 +1306,9 @@ function ReasoningBlock({ text }: { text: unknown }) {
       )}
     </div>
   );
-}
+});
 
-function ToolCallRow({
+const ToolCallRow = memo(function ToolCallRow({
   input,
   inputPreview,
   tool,
@@ -1355,9 +1356,9 @@ function ToolCallRow({
       )}
     </div>
   );
-}
+});
 
-function ToolResultRow({
+const ToolResultRow = memo(function ToolResultRow({
   content,
   isError,
   isLong,
@@ -1427,9 +1428,9 @@ function ToolResultRow({
       )}
     </div>
   );
-}
+});
 
-function WorkingChildEvent({ event }: { event: AgentEvent }) {
+const WorkingChildEvent = memo(function WorkingChildEvent({ event }: { event: AgentEvent }) {
   const data = event.data;
 
   if (event.type === "tool_call") {
@@ -1494,9 +1495,9 @@ function WorkingChildEvent({ event }: { event: AgentEvent }) {
   }
 
   return null;
-}
+});
 
-function WorkingChildStreamItem({ item }: { item: StreamItem }) {
+const WorkingChildStreamItem = memo(function WorkingChildStreamItem({ item }: { item: StreamItem }) {
   if (item.type === "tool_call") {
     return (
       <ToolCallRow
@@ -1530,7 +1531,7 @@ function WorkingChildStreamItem({ item }: { item: StreamItem }) {
     );
   }
   return null;
-}
+});
 
 function PlanUpdatedBlock({
   explanation,
@@ -2581,9 +2582,9 @@ export function SessionView({
       Promise.allSettled([
         fetchSession(projectId, sessionId, worktreeId),
         fetchEvents(projectId, sessionId, worktreeId),
-        fetchSessionRuntime(projectId, sessionId, worktreeId),
+        fetchActiveRuntimes(),
       ])
-        .then(([sessionResult, eventsResult, runtimeResult]) => {
+        .then(([sessionResult, eventsResult, runtimesResult]) => {
           if (cancelled) return;
           if (sessionResult.status === "fulfilled") {
             const session = sessionResult.value;
@@ -2603,8 +2604,11 @@ export function SessionView({
             setEvents([]);
           }
 
-          if (runtimeResult.status === "fulfilled") {
-            setStreaming(runtimeResult.value.active);
+          if (runtimesResult.status === "fulfilled") {
+            const active = runtimesResult.value.some(
+              (entry) => entry.sessionId === sessionId && entry.active,
+            );
+            setStreaming(active);
           } else {
             setStreaming(false);
           }
@@ -2646,13 +2650,16 @@ export function SessionView({
     let cancelled = false;
     const interval = window.setInterval(async () => {
       try {
-        const [evts, runtime] = await Promise.all([
+        const [evts, runtimes] = await Promise.all([
           fetchEvents(projectId, sessionId, worktreeId),
-          fetchSessionRuntime(projectId, sessionId, worktreeId),
+          fetchActiveRuntimes(),
         ]);
         if (cancelled) return;
         setEvents(evts);
-        if (!runtime.active) {
+        const isActive = runtimes.some(
+          (entry) => entry.sessionId === sessionId && entry.active,
+        );
+        if (!isActive) {
           setStreaming(false);
           setPendingMessage(null);
           setPendingAttachments([]);
@@ -3327,13 +3334,13 @@ export function SessionView({
     }
   };
 
-  const copyEventData = (event: AgentEvent) => {
+  const copyEventData = useCallback((event: AgentEvent) => {
     navigator.clipboard.writeText(JSON.stringify(event.data, null, 2));
     setCopiedId(event.id);
     setTimeout(() => setCopiedId(null), 2000);
-  };
+  }, []);
 
-  const openSourcePath = (path: string, line?: number, errorLabel = path) => {
+  const openSourcePath = useCallback((path: string, line?: number, errorLabel = path) => {
     fetchSourceFile(projectId, path, worktreeId)
       .then((file) => {
         const lineCount = file.content.split("\n").length;
@@ -3349,11 +3356,11 @@ export function SessionView({
       .catch((err) => {
         toast.error(err instanceof Error ? err.message : `Could not open ${errorLabel}`);
       });
-  };
+  }, [projectId, worktreeId]);
 
-  const openSourceReference = (reference: OpenSourceReferenceOptions) => {
+  const openSourceReference = useCallback((reference: OpenSourceReferenceOptions) => {
     openSourcePath(reference.path, reference.line, reference.label);
-  };
+  }, [openSourcePath]);
 
   const handleStructuredUserInputSubmit = async (
     requestId: string,
@@ -3460,7 +3467,7 @@ export function SessionView({
       ? activeStreamSessionId === sessionId ||
         (!sessionId && pendingAttachedSessionIdRef.current === activeStreamSessionId)
       : !sessionId);
-  const visibleStreamItems = streamBelongsToCurrentView ? streamItems : [];
+  const visibleStreamItems = streamBelongsToCurrentView ? streamItems : EMPTY_STREAM_ITEMS;
   const latestStructuredInputRequestFromStream =
     [...visibleStreamItems]
       .reverse()
@@ -3486,6 +3493,11 @@ export function SessionView({
     pendingMessage
   );
   const waitingForStructuredInput = Boolean(latestStructuredInputRequest);
+  const eventRenderItems = useMemo(() => groupEventsForRender(events), [events]);
+  const streamRenderItems = useMemo(
+    () => groupStreamItemsForRender(visibleStreamItems),
+    [visibleStreamItems]
+  );
 
   const handleHeaderFocusPin = async () => {
     if (!sessionId) return;
@@ -3684,7 +3696,7 @@ export function SessionView({
 
               {/* Event timeline */}
               <div className="space-y-4">
-                {groupEventsForRender(events).map((renderItem) => {
+                {eventRenderItems.map((renderItem) => {
                   if (renderItem.kind === "working_group") {
                     const groupEvents = renderItem.events;
                     if (groupEvents.length === 1) {
@@ -3741,11 +3753,9 @@ export function SessionView({
               )}
 
               {/* Stream output */}
-              {visibleStreamItems.length > 0 && (() => {
-                const streamGroups = groupStreamItemsForRender(visibleStreamItems);
-                return (
+              {visibleStreamItems.length > 0 && (
                 <div className="mt-4 space-y-3">
-                  {streamGroups.map((render, idx) => {
+                  {streamRenderItems.map((render, idx) => {
                     if (render.kind === "working_group") {
                       if (render.items.length === 1) {
                         return (
@@ -3759,7 +3769,7 @@ export function SessionView({
                       const stepCount = render.items.filter(
                         (it) => it.type === "tool_call"
                       ).length;
-                      const live = streaming && idx === streamGroups.length - 1;
+                      const live = streaming && idx === streamRenderItems.length - 1;
                       return (
                         <WorkingBlock
                           key={render.key}
@@ -3842,8 +3852,7 @@ export function SessionView({
                     return null;
                   })}
                 </div>
-              );
-              })()}
+              )}
 
               {visibleStreamItems.length === 0 && latestStructuredInputRequest && (
                 <div className="mt-4">

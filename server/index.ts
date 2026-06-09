@@ -10,6 +10,7 @@ import { worktreesRouter } from "./routes/worktrees.js";
 import { modelsRouter } from "./routes/models.js";
 import { apiKeysRouter } from "./routes/api-keys.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
+import { listSessionRuntimes } from "./lib/session-runtime.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
@@ -37,6 +38,13 @@ app.use("/api/api-keys", apiKeysRouter);
 app.get("/api/agent-providers", async (_req, res) => {
   const providers = (await getAvailableAgentProviders()).map((p) => ({ id: p.id, name: p.name }));
   res.json(providers);
+});
+
+// Bulk session runtime snapshot — replaces the per-session /runtime polling
+// the sidebar and SessionView were doing. One request returns the active
+// state for every session currently known to the runtime map.
+app.get("/api/runtimes", (_req, res) => {
+  res.json({ sessions: listSessionRuntimes() });
 });
 
 const shouldServeClient =
