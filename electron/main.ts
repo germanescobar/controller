@@ -47,7 +47,11 @@ async function waitForServer(url: string): Promise<void> {
   );
 }
 
-function tryBindPort(port: number, timeoutMs = 1000): Promise<boolean> {
+function tryBindPort(
+  port: number,
+  host: string,
+  timeoutMs = 1000
+): Promise<boolean> {
   return new Promise((resolve) => {
     const probe = createServer();
     let settled = false;
@@ -55,7 +59,9 @@ function tryBindPort(port: number, timeoutMs = 1000): Promise<boolean> {
       if (settled) return;
       settled = true;
       probe.removeAllListeners();
-      console.log(`[controller] tryBindPort(${port}) -> ${value} (${reason})`);
+      console.log(
+        `[controller] tryBindPort(${port}, ${host}) -> ${value} (${reason})`
+      );
       // Resolve immediately; close the probe in the background. Waiting
       // for the close callback can hang the Promise indefinitely on some
       // macOS / network-stack edge cases.
@@ -69,8 +75,22 @@ function tryBindPort(port: number, timeoutMs = 1000): Promise<boolean> {
     probe.once("error", (err) => finish(false, `error: ${err.message}`));
     probe.once("listening", () => finish(true, "listening"));
     setTimeout(() => finish(false, "timeout"), timeoutMs);
-    probe.listen(port, "127.0.0.1");
+    probe.listen(port, host);
   });
+}
+
+// Returns true only if the port is bindable on BOTH IPv4 loopback (127.0.0.1)
+// and IPv6 loopback (::1). On macOS, the Vite dev server (and many others)
+// bind to 0.0.0.0 / ::, which conflicts with both. Probing only one family
+// yields false positives — e.g. a server on ::1:4500 doesn't block an
+// IPv4-only bind to 127.0.0.1:4500, so the welcome screen would happily
+// start the backend on a port that's already serving someone else.
+async function isPortFree(port: number): Promise<boolean> {
+  const [ipv4, ipv6] = await Promise.all([
+    tryBindPort(port, "127.0.0.1"),
+    tryBindPort(port, "::1"),
+  ]);
+  return ipv4 && ipv6;
 }
 
 async function checkPortAvailable(
@@ -79,13 +99,13 @@ async function checkPortAvailable(
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return { available: false, error: "Port out of range" };
   }
-  if (await tryBindPort(port)) {
+  if (await isPortFree(port)) {
     return { available: true };
   }
   for (let offset = 1; offset <= MAX_PORT_SEARCH_OFFSET; offset += 1) {
     const candidate = port + offset;
     if (candidate > 65535) break;
-    if (await tryBindPort(candidate)) {
+    if (await isPortFree(candidate)) {
       return { available: false, suggestion: candidate };
     }
   }
@@ -314,6 +334,22 @@ process.on("unhandledRejection", (reason) => {
 app.whenReady().then(async () => {
   console.log("[controller] app ready");
   registerIpcHandlers();
+
+  // Eagerly authorize the macOS keychain entry that Electron's safeStorage
+  // uses. The prompt is a system-modal dialog that blocks the main thread;
+  // triggering it now (before any window opens) makes the wait explicit
+  // and prevents it from getting tangled with the welcome window's load.
+  if (process.platform === "darwin" && app.isPackaged) {
+    try {
+      // Importing safeStorage dynamically because it's only available in
+      // the main process and we want to keep this code path narrow.
+      const { safeStorage } = await import("electron");
+      const available = safeStorage.isEncryptionAvailable();
+      console.log(`[controller] safeStorage available = ${available}`);
+    } catch (err) {
+      console.warn("[controller] safeStorage check failed:", err);
+    }
+  }
 
   try {
     if (!app.isPackaged) {
