@@ -24,20 +24,16 @@ ipcRenderer.on("controller:status", (_event, status: ControllerStatus) => {
 
 const bridge: ControllerBridge = {
   isElectron: true,
-  checkPort: (port) => {
-    console.log(`[controller:preload] checkPort(${port})`);
-    return ipcRenderer.invoke(
+  checkPort: (port) =>
+    ipcRenderer.invoke(
       "controller:check-port",
       port
-    ) as Promise<ControllerCheckResult>;
-  },
-  startServer: (port) => {
-    console.log(`[controller:preload] startServer(${port})`);
-    return ipcRenderer.invoke("controller:start-server", port) as Promise<{
+    ) as Promise<ControllerCheckResult>,
+  startServer: (port) =>
+    ipcRenderer.invoke("controller:start-server", port) as Promise<{
       port: number;
       url: string;
-    }>;
-  },
+    }>,
   onStatus: (cb) => {
     statusListeners.add(cb);
     return () => {

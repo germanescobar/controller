@@ -323,11 +323,7 @@ function applySuggestion(refs: DomRefs, port: number): void {
 }
 
 async function tryAutoStart(refs: DomRefs, port: number): Promise<boolean> {
-  if (!window.controller) {
-    console.error("[welcome] tryAutoStart: no controller bridge");
-    return false;
-  }
-  console.log(`[welcome] tryAutoStart: checkPort(${port})`);
+  if (!window.controller) return false;
   let check: { available: boolean; suggestion?: number; error?: string };
   try {
     check = await window.controller.checkPort(port);
@@ -335,12 +331,9 @@ async function tryAutoStart(refs: DomRefs, port: number): Promise<boolean> {
     console.error("[welcome] tryAutoStart: checkPort failed:", err);
     return false;
   }
-  console.log(`[welcome] tryAutoStart: checkPort(${port}) ->`, check);
   if (!check.available) return false;
-  console.log(`[welcome] tryAutoStart: startServer(${port})`);
   try {
     const result = await window.controller.startServer(port);
-    console.log(`[welcome] tryAutoStart: startServer ->`, result);
     window.controller.navigateToApp(result.url);
     return true;
   } catch (err) {
@@ -350,12 +343,10 @@ async function tryAutoStart(refs: DomRefs, port: number): Promise<boolean> {
 }
 
 function init(): void {
-  console.log("[welcome] init() start");
   const refs = getDomRefs();
   const saved = readSavedPort();
   const initialPort = saved ?? DEFAULT_PORT;
   refs.input.value = String(initialPort);
-  console.log(`[welcome] initial port = ${initialPort} (saved=${saved})`);
 
   const handleSuggestion = (port: number) => {
     applySuggestion(refs, port);
@@ -379,18 +370,15 @@ function init(): void {
   // First-run: show the window immediately so the user sees the welcome screen.
   // Subsequent runs: try to auto-start on the saved port without showing the UI.
   if (saved === null) {
-    console.log("[welcome] first run, showing window");
     window.controller?.showWindow();
     void refreshPortCheck(refs, refs.input.value, handleSuggestion);
     return;
   }
 
-  console.log(`[welcome] attempting auto-start on saved port ${saved}`);
   // Show the window after a short delay regardless, so the user always sees
   // *something* even if the auto-start IPC hangs. This is a hard fallback
   // in addition to the per-IPC timeouts in the main process.
   const showWindowTimeout = setTimeout(() => {
-    console.warn("[welcome] auto-start taking too long, showing window");
     window.controller?.showWindow();
     setFeedback(
       refs.feedback,
@@ -407,11 +395,7 @@ function init(): void {
         "Auto-start timed out"
       );
       clearTimeout(showWindowTimeout);
-      if (started) {
-        console.log("[welcome] auto-start succeeded");
-        return;
-      }
-      console.log("[welcome] auto-start returned false, showing window");
+      if (started) return;
       window.controller?.showWindow();
       void refreshPortCheck(refs, refs.input.value, handleSuggestion);
     } catch (err) {

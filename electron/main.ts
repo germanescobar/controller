@@ -269,18 +269,11 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 
   registerContextMenu(win);
   attachErrorReporting(win);
-  logWithTime(
-    `BrowserWindow created (loadFile=${options.loadFile ?? "none"}, loadUrl=${options.loadUrl ?? "none"})`
-  );
 
   if (options.loadFile) {
-    logWithTime(`loadFile start: ${options.loadFile}`);
     await win.loadFile(options.loadFile);
-    logWithTime(`loadFile resolved`);
   } else if (options.loadUrl) {
-    logWithTime(`loadURL start: ${options.loadUrl}`);
     await win.loadURL(options.loadUrl);
-    logWithTime(`loadURL resolved`);
   } else {
     throw new Error("createWindow requires either loadUrl or loadFile");
   }
@@ -293,11 +286,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 }
 
 function attachErrorReporting(win: BrowserWindow): void {
-  win.webContents.on("did-start-loading", () => {
-    logWithTime(`did-start-loading`);
-  });
   win.webContents.on("did-finish-load", () => {
-    logWithTime(`did-finish-load`);
     // Re-send the current status to this window, since the original
     // broadcast may have happened before the window existed (e.g. when
     // startProductionServer finishes and then openMainAppWindow creates
@@ -305,9 +294,6 @@ function attachErrorReporting(win: BrowserWindow): void {
     if (latestStatus) {
       win.webContents.send("controller:status", latestStatus);
     }
-  });
-  win.webContents.on("dom-ready", () => {
-    logWithTime(`dom-ready`);
   });
   win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     errorWithTime(
