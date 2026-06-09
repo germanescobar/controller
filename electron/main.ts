@@ -287,11 +287,15 @@ function attachErrorReporting(win: BrowserWindow): void {
   win.webContents.on("preload-error", (_event, preloadPath, error) => {
     errorWithTime(`preload error in ${preloadPath}:`, error);
   });
-  win.webContents.on("console-message", (_event, level, message, line, source) => {
-    const tag = level >= 2 ? "error" : level === 1 ? "warn" : "log";
-    const prefix = `[controller:renderer ${elapsed()}] ${source}:${line}`;
-    if (level >= 2) console.error(prefix, message);
-    else if (level === 1) console.warn(prefix, message);
+  win.webContents.on("console-message", (event) => {
+    const { level, message, lineNumber, sourceId } = event;
+    // `level` is one of 'info' | 'warning' | 'error' | 'debug'.
+    const isError = level === "error";
+    const isWarn = level === "warning";
+    const tag = isError ? "error" : isWarn ? "warn" : "log";
+    const prefix = `[controller:renderer ${elapsed()}] ${sourceId}:${lineNumber}`;
+    if (isError) console.error(prefix, message);
+    else if (isWarn) console.warn(prefix, message);
     else console.log(prefix, message);
   });
 }
