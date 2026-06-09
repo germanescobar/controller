@@ -12,6 +12,9 @@ const statusListeners = new Set<(status: ControllerStatus) => void>();
 let latestStatus: ControllerStatus | null = null;
 
 ipcRenderer.on("controller:status", (_event, status: ControllerStatus) => {
+  console.log(
+    `[controller:preload] received controller:status -> ${JSON.stringify(status)}`
+  );
   latestStatus = status;
   for (const listener of statusListeners) {
     try {
@@ -44,7 +47,10 @@ const bridge: ControllerBridge = {
       statusListeners.delete(cb);
     };
   },
-  getStatus: () => latestStatus,
+  getStatus: () => {
+    console.log(`[controller:preload] getStatus() -> ${JSON.stringify(latestStatus)}`);
+    return latestStatus;
+  },
   navigateToApp: (url) => {
     window.location.href = url;
   },

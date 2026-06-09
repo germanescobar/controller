@@ -303,7 +303,12 @@ function attachErrorReporting(win: BrowserWindow): void {
     // startProductionServer finishes and then openMainAppWindow creates
     // a fresh BrowserWindow).
     if (latestStatus) {
+      logWithTime(
+        `did-finish-load: re-sending controller:status -> ${latestStatus.state}`
+      );
       win.webContents.send("controller:status", latestStatus);
+    } else {
+      logWithTime(`did-finish-load: no latestStatus to re-send`);
     }
   });
   win.webContents.on("dom-ready", () => {
