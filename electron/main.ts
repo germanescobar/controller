@@ -97,18 +97,19 @@ function tryBindPort(
   });
 }
 
-// Returns true only if the port is bindable on BOTH IPv4 loopback (127.0.0.1)
-// and IPv6 loopback (::1). On macOS, the Vite dev server (and many others)
-// bind to 0.0.0.0 / ::, which conflicts with both. Probing only one family
-// yields false positives — e.g. a server on ::1:4500 doesn't block an
-// IPv4-only bind to 127.0.0.1:4500, so the welcome screen would happily
-// start the backend on a port that's already serving someone else.
+// Returns true only if the port is bindable on the wildcard address. On
+// macOS, the default Node `net.Server.listen(port)` (no host) binds to
+// `::` with IPV6_V6ONLY=0, which conflicts with anything on any
+// interface — including processes bound to a specific external IP
+// (e.g. `192.168.1.5:4500`) and processes bound to `0.0.0.0:4500`.
+//
+// Probing only loopback (127.0.0.1 and ::1) yields false positives: a
+// process on a specific external IP doesn't block our loopback bind, but
+// it WOULD block the Express server's later `listen(PORT)` call (which
+// defaults to all interfaces), so the welcome screen would happily
+// approve a port that's already serving someone else.
 async function isPortFree(port: number): Promise<boolean> {
-  const [ipv4, ipv6] = await Promise.all([
-    tryBindPort(port, "127.0.0.1"),
-    tryBindPort(port, "::1"),
-  ]);
-  return ipv4 && ipv6;
+  return tryBindPort(port, "::");
 }
 
 async function checkPortAvailable(
