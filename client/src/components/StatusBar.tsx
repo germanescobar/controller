@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, Copy } from "lucide-react";
+import { Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,10 +13,10 @@ import {
   type ControllerStatus,
 } from "@/lib/controller";
 
-function statusLabel(status: ControllerStatus | null): string {
-  if (!status) return "Connecting...";
-  if (status.state === "starting") return `Starting on port ${status.port}...`;
+function labelFor(status: ControllerStatus | null): string {
+  if (!status) return "Backend";
   if (status.state === "listening") return `Listening on port ${status.port}`;
+  if (status.state === "starting") return "Starting backend...";
   return status.message || "Backend error";
 }
 
@@ -29,7 +29,13 @@ function dotColor(status: ControllerStatus | null): string {
 }
 
 export function StatusBar() {
-  const [status, setStatus] = useState<ControllerStatus | null>(null);
+  // Read the current state synchronously so we don't flash "Backend"
+  // when the server is already up (e.g. when the user reactivates a
+  // still-running packaged app).
+  const [status, setStatus] = useState<ControllerStatus | null>(() => {
+    if (!isControllerAvailable()) return null;
+    return getController().getStatus();
+  });
 
   useEffect(() => {
     if (!isControllerAvailable()) return;
@@ -73,8 +79,7 @@ export function StatusBar() {
             aria-hidden
             className={`h-2 w-2 shrink-0 rounded-full ${dotColor(status)}`}
           />
-          <Activity className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate">{statusLabel(status)}</span>
+          <span className="truncate">{labelFor(status)}</span>
         </span>
       </PopoverTrigger>
       <PopoverContent>

@@ -7,8 +7,12 @@ import type {
 } from "../shared/controller.js";
 
 const statusListeners = new Set<(status: ControllerStatus) => void>();
+// Cached so getStatus() can return synchronously, which is what the
+// StatusBar needs on mount to avoid flashing "Connecting...".
+let latestStatus: ControllerStatus | null = null;
 
 ipcRenderer.on("controller:status", (_event, status: ControllerStatus) => {
+  latestStatus = status;
   for (const listener of statusListeners) {
     try {
       listener(status);
@@ -40,6 +44,7 @@ const bridge: ControllerBridge = {
       statusListeners.delete(cb);
     };
   },
+  getStatus: () => latestStatus,
   navigateToApp: (url) => {
     window.location.href = url;
   },
