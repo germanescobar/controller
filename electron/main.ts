@@ -144,7 +144,13 @@ let mainWindow: BrowserWindow | null = null;
 // renderer a stale URL on next activate).
 let activeServer: { port: number; url: string } | null = null;
 
+// Last status we broadcast. Kept here so newly-opened windows can pick
+// up the current state via controller:get-status (the broadcast runs
+// before the main app window exists, so it has no listeners).
+let latestStatus: ControllerStatus | null = null;
+
 function broadcastStatus(status: ControllerStatus): void {
+  latestStatus = status;
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     win.webContents.send("controller:status", status);
@@ -292,6 +298,13 @@ function attachErrorReporting(win: BrowserWindow): void {
   });
   win.webContents.on("did-finish-load", () => {
     logWithTime(`did-finish-load`);
+    // Re-send the current status to this window, since the original
+    // broadcast may have happened before the window existed (e.g. when
+    // startProductionServer finishes and then openMainAppWindow creates
+    // a fresh BrowserWindow).
+    if (latestStatus) {
+      win.webContents.send("controller:status", latestStatus);
+    }
   });
   win.webContents.on("dom-ready", () => {
     logWithTime(`dom-ready`);
