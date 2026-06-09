@@ -250,7 +250,7 @@ export function App() {
       ? activeView.projectId
       : null;
   const mobileHeaderTitle =
-    projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Coding Orchestrator";
+    projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Controller";
 
   return (
     <div className="dark flex h-dvh w-full bg-background text-foreground">

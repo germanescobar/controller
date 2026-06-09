@@ -250,7 +250,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
     height: 860,
     minWidth: 960,
     minHeight: 640,
-    title: "Coding Orchestrator",
+    title: "Controller",
     show: options.show ?? true,
     backgroundColor: "#0b0b0d",
     webPreferences: {
