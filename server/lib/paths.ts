@@ -26,6 +26,12 @@ export function apiKeysFile(): string {
   return path.join(orchestratorHome(), "api-keys.json");
 }
 
+// --- Agents ---
+
+export function agentSettingsFile(): string {
+  return path.join(orchestratorHome(), "agents.json");
+}
+
 // --- Worktrees ---
 
 export function worktreesRoot(): string {

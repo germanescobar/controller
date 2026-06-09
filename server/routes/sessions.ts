@@ -24,7 +24,11 @@ import {
   type AttachmentMetadata,
 } from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
-import { getAgentProvider, type AgentStreamEvent } from "../lib/agents.js";
+import {
+  getAgentProvider,
+  resolveAgentCommand,
+  type AgentStreamEvent,
+} from "../lib/agents.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
 import {
   getSessionRuntime,
@@ -540,6 +544,18 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     return;
   }
 
+  // Resolve the CLI to an absolute path before streaming so a missing agent
+  // fails with a clean 400 instead of a mid-stream ENOENT.
+  let resolvedCommand: string;
+  try {
+    resolvedCommand = await resolveAgentCommand(providerId);
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -552,6 +568,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     message,
     cwd: worktree.path,
     env: apiKeyEnv,
+    command: resolvedCommand,
     attachments,
     resumeSessionId,
     model,

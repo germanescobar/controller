@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { getApiKey, getApiKeyEnvVars, PROVIDERS } from "../lib/api-keys.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
+import { resolveAgentCommand } from "../lib/agents.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -95,8 +96,9 @@ function parseAdaModelsJson(stdout: string): Model[] {
 
 async function fetchAdaCliModels(): Promise<Model[]> {
   try {
+    const adaCommand = await resolveAgentCommand("ada");
     const apiKeyEnv = await getApiKeyEnvVars();
-    const { stdout } = await execFileAsync("ada", ["models", "--json"], {
+    const { stdout } = await execFileAsync(adaCommand, ["models", "--json"], {
       env: { ...process.env, ...apiKeyEnv },
       timeout: 5000,
     });
@@ -160,34 +162,11 @@ async function fetchGroqModels(apiKey: string): Promise<Model[]> {
   }
 }
 
-async function fetchOpenAIModels(apiKey: string): Promise<Model[]> {
-  try {
-    const response = await fetch("https://api.openai.com/v1/models", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!response.ok) return [];
-    const data = (await response.json()) as {
-      data: Array<{ id: string; owned_by?: string }>;
-    };
-    return data.data
-      .filter((m) => m.id.startsWith("gpt-") || m.id.startsWith("o"))
-      .map((m) => ({
-        id: `openai/${m.id}`,
-        name: m.id,
-        provider: "openai",
-        size: "",
-      }));
-  } catch {
-    return [];
-  }
-}
-
 const PROVIDER_FETCHERS: Record<
   string,
   (apiKey: string) => Promise<Model[]>
 > = {
   groq: fetchGroqModels,
-  openai: fetchOpenAIModels,
 };
 
 const STALE_CODEX_MODEL_IDS = new Set(["gpt-5.3-codex"]);
