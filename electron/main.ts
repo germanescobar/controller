@@ -14,6 +14,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
 
+// Mark the start of the main process so every log line can be prefixed
+// with elapsed time. Helpful for diagnosing slow first-launch flows where
+// macOS Gatekeeper / code-sign verification can take 30+ seconds before
+// any of our code runs.
+const PROCESS_START_MS = Date.now();
+function elapsed(): string {
+  return `+${Date.now() - PROCESS_START_MS}ms`;
+}
+function logWithTime(...args: unknown[]): void {
+  console.log(`[controller ${elapsed()}]`, ...args);
+}
+function warnWithTime(...args: unknown[]): void {
+  console.warn(`[controller ${elapsed()}]`, ...args);
+}
+function errorWithTime(...args: unknown[]): void {
+  console.error(`[controller ${elapsed()}]`, ...args);
+}
+
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number(value);
@@ -60,7 +78,7 @@ function tryBindPort(
       settled = true;
       probe.removeAllListeners();
       console.log(
-        `[controller] tryBindPort(${port}, ${host}) -> ${value} (${reason})`
+        `[controller ${elapsed()}] tryBindPort(${port}, ${host}) -> ${value} (${reason})`
       );
       // Resolve immediately; close the probe in the background. Waiting
       // for the close callback can hang the Promise indefinitely on some
@@ -221,24 +239,18 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 
   registerContextMenu(win);
   attachErrorReporting(win);
-  console.log(
-    `[controller] BrowserWindow created (loadFile=${options.loadFile ?? "none"}, loadUrl=${options.loadUrl ?? "none"})`
+  logWithTime(
+    `BrowserWindow created (loadFile=${options.loadFile ?? "none"}, loadUrl=${options.loadUrl ?? "none"})`
   );
 
   if (options.loadFile) {
-    const loadStart = Date.now();
-    console.log(`[controller] loadFile start: ${options.loadFile}`);
+    logWithTime(`loadFile start: ${options.loadFile}`);
     await win.loadFile(options.loadFile);
-    console.log(
-      `[controller] loadFile resolved (+${Date.now() - loadStart}ms)`
-    );
+    logWithTime(`loadFile resolved`);
   } else if (options.loadUrl) {
-    const loadStart = Date.now();
-    console.log(`[controller] loadURL start: ${options.loadUrl}`);
+    logWithTime(`loadURL start: ${options.loadUrl}`);
     await win.loadURL(options.loadUrl);
-    console.log(
-      `[controller] loadURL resolved (+${Date.now() - loadStart}ms)`
-    );
+    logWithTime(`loadURL resolved`);
   } else {
     throw new Error("createWindow requires either loadUrl or loadFile");
   }
@@ -251,32 +263,34 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 }
 
 function attachErrorReporting(win: BrowserWindow): void {
-  const t0 = Date.now();
   win.webContents.on("did-start-loading", () => {
-    console.log(`[controller] did-start-loading (+${Date.now() - t0}ms)`);
+    logWithTime(`did-start-loading`);
   });
   win.webContents.on("did-finish-load", () => {
-    console.log(`[controller] did-finish-load (+${Date.now() - t0}ms)`);
+    logWithTime(`did-finish-load`);
   });
   win.webContents.on("dom-ready", () => {
-    console.log(`[controller] dom-ready (+${Date.now() - t0}ms)`);
+    logWithTime(`dom-ready`);
   });
   win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    console.error(
-      `[controller] webContents did-fail-load (${errorCode} ${errorDescription}) for ${validatedURL}`
+    errorWithTime(
+      `webContents did-fail-load (${errorCode} ${errorDescription}) for ${validatedURL}`
     );
   });
   win.webContents.on("render-process-gone", (_event, details) => {
-    console.error(
-      `[controller] render process gone: reason=${details.reason} exitCode=${details.exitCode}`
+    errorWithTime(
+      `render process gone: reason=${details.reason} exitCode=${details.exitCode}`
     );
   });
   win.webContents.on("preload-error", (_event, preloadPath, error) => {
-    console.error(`[controller] preload error in ${preloadPath}:`, error);
+    errorWithTime(`preload error in ${preloadPath}:`, error);
   });
   win.webContents.on("console-message", (_event, level, message, line, source) => {
     const tag = level >= 2 ? "error" : level === 1 ? "warn" : "log";
-    console[tag](`[controller:renderer] ${source}:${line} ${message}`);
+    const prefix = `[controller:renderer ${elapsed()}] ${source}:${line}`;
+    if (level >= 2) console.error(prefix, message);
+    else if (level === 1) console.warn(prefix, message);
+    else console.log(prefix, message);
   });
 }
 
@@ -311,9 +325,9 @@ function registerIpcHandlers(): void {
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
       return { available: false, error: "Port out of range" };
     }
-    console.log(`[controller] check-port ${parsed}`);
+    logWithTime(`check-port ${parsed}`);
     const result = await checkPortAvailable(parsed);
-    console.log(`[controller] check-port ${parsed} ->`, result);
+    logWithTime(`check-port ${parsed} ->`, result);
     return result;
   });
 
@@ -322,6 +336,7 @@ function registerIpcHandlers(): void {
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
       throw new Error("Port out of range");
     }
+    logWithTime(`start-server ${parsed}`);
     try {
       const url = await startProductionServer(parsed);
       // Replace the welcome window with the main app shell. The renderer
@@ -347,36 +362,29 @@ function registerIpcHandlers(): void {
 }
 
 process.on("uncaughtException", (error) => {
-  console.error("[controller] uncaughtException:", error);
+  errorWithTime("uncaughtException:", error);
 });
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[controller] unhandledRejection:", reason);
+  errorWithTime("unhandledRejection:", reason);
 });
 
 app.whenReady().then(async () => {
-  const readyAt = Date.now();
-  console.log(`[controller] app ready at ${readyAt}`);
+  logWithTime("app ready");
   registerIpcHandlers();
-  console.log(
-    `[controller] ipc handlers registered (+${Date.now() - readyAt}ms)`
-  );
+  logWithTime("ipc handlers registered");
 
   try {
     if (!app.isPackaged) {
-      console.log("[controller] dev mode, opening dev URL");
+      logWithTime("dev mode, opening dev URL");
       await createWindow({ loadUrl: getDevUrl() });
     } else {
-      console.log(
-        `[controller] packaged mode, opening welcome window (+${Date.now() - readyAt}ms)`
-      );
+      logWithTime("packaged mode, opening welcome window");
       await openWelcomeWindow();
-      console.log(
-        `[controller] welcome window opened (+${Date.now() - readyAt}ms)`
-      );
+      logWithTime("welcome window opened");
     }
   } catch (error) {
-    console.error("[controller] failed to open initial window:", error);
+    errorWithTime("failed to open initial window:", error);
     await showStartupErrorWindow(error);
     return;
   }
@@ -391,7 +399,7 @@ app.whenReady().then(async () => {
     }
   });
 }).catch((error: unknown) => {
-  console.error("Failed to start Coding Orchestrator Electron shell:", error);
+  errorWithTime("Failed to start Coding Orchestrator Electron shell:", error);
   app.quit();
 });
 
