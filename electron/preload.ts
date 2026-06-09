@@ -12,9 +12,6 @@ const statusListeners = new Set<(status: ControllerStatus) => void>();
 let latestStatus: ControllerStatus | null = null;
 
 ipcRenderer.on("controller:status", (_event, status: ControllerStatus) => {
-  console.log(
-    `[controller:preload] received controller:status -> ${JSON.stringify(status)}`
-  );
   latestStatus = status;
   for (const listener of statusListeners) {
     try {
@@ -48,8 +45,16 @@ const bridge: ControllerBridge = {
     };
   },
   getStatus: () => {
-    console.log(`[controller:preload] getStatus() -> ${JSON.stringify(latestStatus)}`);
-    return latestStatus;
+    if (latestStatus !== null) return latestStatus;
+    // Fall back to a synchronous IPC call so the very first render of
+    // the StatusBar sees the current state. sendSync is deprecated in
+    // newer Electron, but it's still the only way to read state
+    // synchronously from the renderer. The cache above is hot in the
+    // common case (renderer mounts after the main process has already
+    // broadcast), so this is a rare path.
+    return ipcRenderer.sendSync("controller:get-status") as
+      | ControllerStatus
+      | null;
   },
   navigateToApp: (url) => {
     window.location.href = url;

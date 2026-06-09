@@ -303,12 +303,7 @@ function attachErrorReporting(win: BrowserWindow): void {
     // startProductionServer finishes and then openMainAppWindow creates
     // a fresh BrowserWindow).
     if (latestStatus) {
-      logWithTime(
-        `did-finish-load: re-sending controller:status -> ${latestStatus.state}`
-      );
       win.webContents.send("controller:status", latestStatus);
-    } else {
-      logWithTime(`did-finish-load: no latestStatus to re-send`);
     }
   });
   win.webContents.on("dom-ready", () => {
@@ -366,6 +361,14 @@ async function openMainAppWindow(loadUrl: string): Promise<BrowserWindow> {
 }
 
 function registerIpcHandlers(): void {
+  // Synchronous read of the latest known status. The renderer's
+  // getStatus() uses this as a fallback when its cache is cold (which
+  // happens whenever a new window mounts before the IPC broadcast
+  // arrives).
+  ipcMain.on("controller:get-status", (event) => {
+    event.returnValue = latestStatus;
+  });
+
   ipcMain.handle("controller:check-port", async (_event, port: unknown) => {
     const parsed = Number(port);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
