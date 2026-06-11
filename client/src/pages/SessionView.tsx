@@ -88,6 +88,18 @@ interface SessionViewProps {
   // item. See issue #81 follow-up: "respond and advance to the next
   // conversation".
   onFocusAdvanceAfterSend?: (sessionId: string) => void;
+  /**
+   * When non-null, a focus-mode advance has been scheduled after a
+   * send. While this is set, SessionView preserves the in-flight
+   * user-message bubble in the originating session (we skip the
+   * session-change cleanup that would otherwise wipe it) so the user
+   * always has time to see the message they just sent. Typing in the
+   * originating composer cancels the pending advance.
+   */
+  focusAdvanceCountdown?: {
+    sentFromSessionId: string;
+    onCancel: () => void;
+  } | null;
 }
 
 type StreamItem = (
@@ -2184,6 +2196,7 @@ export function SessionView({
   onFocusExit,
   onFocusPinnedChange,
   onFocusAdvanceAfterSend,
+  focusAdvanceCountdown = null,
 }: SessionViewProps) {
   const [message, setMessage] = useState("");
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
@@ -2247,6 +2260,7 @@ export function SessionView({
   const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
   const terminalTabsSavePendingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const hadVisibleFocusAdvanceRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
@@ -2519,6 +2533,52 @@ export function SessionView({
   }, [sessionId, focusMode]);
 
   useEffect(() => {
+    const isOriginatingCountdown =
+      Boolean(focusAdvanceCountdown) &&
+      focusAdvanceCountdown?.sentFromSessionId === sessionId;
+    const textarea = textareaRef.current;
+
+    if (isOriginatingCountdown) {
+      hadVisibleFocusAdvanceRef.current = true;
+      if (document.activeElement === textarea) {
+        textarea?.blur();
+      }
+      return;
+    }
+
+    if (
+      hadVisibleFocusAdvanceRef.current &&
+      focusMode &&
+      sessionId &&
+      textarea &&
+      !textarea.disabled
+    ) {
+      textarea.focus();
+    }
+    hadVisibleFocusAdvanceRef.current = false;
+  }, [focusAdvanceCountdown, focusMode, sessionId]);
+
+  useEffect(() => {
+    const isOriginatingCountdown =
+      Boolean(focusAdvanceCountdown) &&
+      focusAdvanceCountdown?.sentFromSessionId === sessionId;
+    if (!isOriginatingCountdown || !focusAdvanceCountdown) return;
+
+    const handleStayShortcut = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      event.stopPropagation();
+      focusAdvanceCountdown.onCancel();
+    };
+
+    window.addEventListener("keydown", handleStayShortcut, true);
+    return () => window.removeEventListener("keydown", handleStayShortcut, true);
+  }, [focusAdvanceCountdown, sessionId]);
+
+
+  useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
 
@@ -2676,6 +2736,21 @@ export function SessionView({
 
   // When loading an existing session, restore the provider and model that were used
   useEffect(() => {
+    // While a focus-mode auto-advance countdown is pending and we
+    // are still on the originating session, don't touch the
+    // in-flight state. The session hasn't actually changed yet (the
+    // parent is about to navigate in FOCUS_ADVANCE_COUNTDOWN_MS),
+    // and clearing pendingMessage / pendingAttachments / events
+    // here is what made the user's message look "lost" before the
+    // fix in #104. Bail out and let the session-change effect run
+    // when the advance actually commits.
+    if (
+      focusAdvanceCountdown &&
+      focusAdvanceCountdown.sentFromSessionId === sessionId
+    ) {
+      return;
+    }
+
     let cancelled = false;
     const viewingActiveStream = targetMatchesStreamContext(sendContextRef.current, {
       projectId,
@@ -2742,7 +2817,7 @@ export function SessionView({
     return () => {
       cancelled = true;
     };
-  }, [projectId, sessionId, worktreeId]);
+  }, [projectId, sessionId, worktreeId, focusAdvanceCountdown]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -4252,7 +4327,26 @@ export function SessionView({
                     <textarea
                       ref={textareaRef}
                       value={message}
-                      onChange={(e) => setMessage(e.target.value)}
+                      onChange={(e) => {
+                        setMessage(e.target.value);
+                        // Typing in the composer of the originating
+                        // session signals "I want to keep working
+                        // here" — cancel any pending auto-advance
+                        // countdown. Don't cancel if the user is
+                        // typing in some other session's view (the
+                        // countdown target is different from the
+                        // session they're in, which is the case
+                        // where the user manually navigated and
+                        // typed somewhere else — the right thing is
+                        // still to advance to the queued target).
+                        if (
+                          focusAdvanceCountdown &&
+                          focusAdvanceCountdown.sentFromSessionId === sessionId &&
+                          e.target.value.length > 0
+                        ) {
+                          focusAdvanceCountdown.onCancel();
+                        }
+                      }}
                       onKeyDown={handleKeyDown}
                       placeholder={
                         streaming && providerSupportsLiveSteering
