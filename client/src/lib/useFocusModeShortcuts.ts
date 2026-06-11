@@ -5,7 +5,9 @@ import { useEffect, useRef } from "react";
  *
  * - `N` advances to the next pinned session (only while focus mode is active).
  *   If a focus-advance countdown is pending, `N` commits it immediately
- *   (matches the **Go now** button in the focus banner — see issue #104).
+ *   (see issue #104).
+ * - `S` cancels a pending focus-advance countdown and stays on the current
+ *   session (only while focus mode is active).
  * - `D` marks the current session done (only while focus mode is active).
  * - `F` enters focus mode (no-op if already active).
  * - `E` exits focus mode (no-op if not active).
@@ -93,7 +95,7 @@ export function useFocusModeShortcuts({
       //      drive the focus-mode loop from the keyboard after typing.
       //   2. Focus is elsewhere: if a focus-advance countdown is
       //      pending, cancel it (matches the **Stay** button in the
-      //      focus banner). If no countdown is pending, the Esc key
+      //      focus-advance toast). If no countdown is pending, the Esc key
       //      is a no-op here.
       // Suppressed inside dialogs (let them close) and the terminal
       // (let it forward the key to the running process).
@@ -109,10 +111,19 @@ export function useFocusModeShortcuts({
         return;
       }
 
-      if (isEditableTarget(event.target)) return;
-
       const key = event.key.toLowerCase();
       const inFocusMode = focusModeRef.current;
+
+      // Let the toast's "Press S to stay" shortcut work even while the
+      // composer is focused. Because this path runs before editable-target
+      // suppression, preventDefault keeps the literal "s" out of the textarea.
+      if (inFocusMode && key === "s" && onCancelAdvanceRef.current) {
+        event.preventDefault();
+        onCancelAdvanceRef.current();
+        return;
+      }
+
+      if (isEditableTarget(event.target)) return;
 
       if (key === "f") {
         if (inFocusMode) return;
@@ -139,7 +150,7 @@ export function useFocusModeShortcuts({
       }
     }
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, []);
 }

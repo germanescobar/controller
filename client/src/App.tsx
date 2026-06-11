@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { Menu, X } from "lucide-react";
+import { ArrowRight, Menu, X } from "lucide-react";
 import { toast } from "sonner";
 import { fetchProjects, markSessionFocusDone, type Project, type Worktree } from "./api.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
@@ -14,7 +14,7 @@ import { useFocusModeShortcuts } from "./lib/useFocusModeShortcuts.ts";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
- * Time the focus banner shows a "Going to <next> in N..." countdown
+ * Time the focus-advance toast shows a "Moving to next..." countdown
  * before actually navigating. The countdown is what keeps the user
  * from losing sight of the message they just sent: the in-flight
  * bubble stays on screen for at least this long, and they can
@@ -22,13 +22,73 @@ import { pickNextFocusItem } from "./lib/focus-advance.ts";
  *
  * Single source of truth — do not introduce a second timing knob.
  */
-const FOCUS_ADVANCE_COUNTDOWN_MS = 3000;
+const FOCUS_ADVANCE_COUNTDOWN_MS = 10000;
 
 export interface PendingFocusAdvance {
   sentFromSessionId: string;
   next: FocusQueueItem;
-  /** Epoch ms when the advance was scheduled (for "Go now" labels). */
+  /** Epoch ms when the advance was scheduled. */
   scheduledAt: number;
+}
+
+function FocusAdvanceToast({
+  scheduledAt,
+  durationMs,
+  onCancel,
+}: {
+  scheduledAt: number;
+  durationMs: number;
+  onCancel: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  const elapsedMs = Math.max(0, now - scheduledAt);
+  const progress = Math.min(1, elapsedMs / durationMs);
+  const remainingProgress = Math.max(0, 1 - progress);
+  const secondsRemaining = Math.max(0, Math.ceil((durationMs - elapsedMs) / 1000));
+
+  return (
+    <div className="w-80 overflow-hidden rounded-lg border border-blue-400/20 bg-[#151922] text-slate-100 shadow-xl shadow-black/35">
+      <div className="p-3">
+        <div className="flex items-start gap-2">
+          <div className="mt-0.5 rounded-md border border-blue-400/15 bg-blue-400/10 p-1 text-blue-300">
+            <ArrowRight className="h-3.5 w-3.5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-slate-50">
+              Advancing to next conversation
+            </div>
+            <div className="mt-0.5 text-xs text-slate-400">
+              <span className="hidden md:inline">
+                Press <span className="font-medium text-slate-200">S</span> to stay ·{" "}
+              </span>
+              <span>{secondsRemaining}s</span>
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 flex justify-end md:hidden">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md px-2 py-1 text-xs font-medium text-slate-300 transition-colors hover:bg-white/5 hover:text-slate-100"
+          >
+            Stay
+          </button>
+        </div>
+      </div>
+      <div className="h-1 bg-slate-700/80">
+        <div
+          className="h-full bg-blue-400 transition-[width] duration-200 ease-linear"
+          style={{ width: `${remainingProgress * 100}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 export type View =
@@ -99,14 +159,22 @@ export function App() {
   const [focusMode, setFocusMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
-  // Scheduled "advance to the next focus item" while a 3-second
-  // countdown is showing in the focus banner. Set by
+  // Scheduled "advance to the next focus item" while a 10-second
+  // countdown is showing in a toast. Set by
   // `handleFocusAdvanceAfterSend` after a send, cleared either by the
   // timer firing (then we navigate) or by any of the cancel paths
-  // (Stay button, Esc, manual nav, unmount). See issue #104.
+  // (S, Esc, manual nav, unmount). See issue #104.
   const [pendingFocusAdvance, setPendingFocusAdvance] =
     useState<PendingFocusAdvance | null>(null);
+  const pendingFocusAdvanceRef = useRef<PendingFocusAdvance | null>(null);
   const advanceTimerRef = useRef<number | null>(null);
+  const advanceToastIdRef = useRef<string | number | null>(null);
+
+  const dismissAdvanceToast = () => {
+    if (advanceToastIdRef.current === null) return;
+    toast.dismiss(advanceToastIdRef.current);
+    advanceToastIdRef.current = null;
+  };
 
   const setView = (v: View) => {
     setViewState(v);
@@ -118,6 +186,8 @@ export function App() {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
+    pendingFocusAdvanceRef.current = null;
+    dismissAdvanceToast();
     setPendingFocusAdvance((current) => (current ? null : current));
   };
 
@@ -149,15 +219,16 @@ export function App() {
    * (it just no-ops).
    */
   const commitPendingAdvance = useCallback(() => {
-    setPendingFocusAdvance((current) => {
-      if (!current) return current;
-      openFocusItem(current.next);
-      return null;
-    });
+    const pending = pendingFocusAdvanceRef.current;
+    if (!pending) return;
+    pendingFocusAdvanceRef.current = null;
+    setPendingFocusAdvance(null);
     if (advanceTimerRef.current !== null) {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
+    dismissAdvanceToast();
+    openFocusItem(pending.next);
   }, [openFocusItem]);
 
   /**
@@ -165,11 +236,13 @@ export function App() {
    * the timer. Safe to call when nothing is pending.
    */
   const cancelPendingAdvance = useCallback(() => {
+    pendingFocusAdvanceRef.current = null;
     setPendingFocusAdvance(null);
     if (advanceTimerRef.current !== null) {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
+    dismissAdvanceToast();
   }, []);
 
   // Clear the countdown on unmount so a stale timer doesn't fire
@@ -180,6 +253,8 @@ export function App() {
         window.clearTimeout(advanceTimerRef.current);
         advanceTimerRef.current = null;
       }
+      pendingFocusAdvanceRef.current = null;
+      dismissAdvanceToast();
     };
   }, []);
 
@@ -192,6 +267,7 @@ export function App() {
   const handleFocusModeToggle = useCallback(() => {
     if (focusMode) {
       setFocusMode(false);
+      cancelPendingAdvance();
       return;
     }
     const firstItem = focusQueue[0];
@@ -201,7 +277,7 @@ export function App() {
     }
     setFocusMode(true);
     openFocusItem(firstItem);
-  }, [focusMode, focusQueue, openFocusItem]);
+  }, [focusMode, focusQueue, openFocusItem, cancelPendingAdvance]);
 
   const handleFocusModeEnter = useCallback(() => {
     const firstItem = focusQueue[0];
@@ -221,6 +297,8 @@ export function App() {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
+    pendingFocusAdvanceRef.current = null;
+    dismissAdvanceToast();
     setPendingFocusAdvance(null);
   }, []);
 
@@ -290,8 +368,7 @@ export function App() {
   const handleFocusSkip = () => {
     // If a countdown is already scheduled, `N` (and the **Next**
     // button) commit it immediately rather than skipping to a
-    // *third* session. This matches the "Go now" affordance in the
-    // countdown UI.
+    // *third* session.
     if (pendingFocusAdvance) {
       commitPendingAdvance();
       return;
@@ -347,8 +424,7 @@ export function App() {
   // them away from the originating session before the in-flight
   // user bubble can render is what made the message look "lost"
   // (issue #104). The countdown gives them FOCUS_ADVANCE_COUNTDOWN_MS
-  // to see the bubble, with **Stay** / **Go now** affordances and
-  // an Esc shortcut for cancelling.
+  // to see the bubble, with S / Esc shortcuts for cancelling.
   //
   // The "sent from" session id is passed in so we can apply the
   // stay-put rule when the only pinned item is the one the user
@@ -364,16 +440,33 @@ export function App() {
       if (advanceTimerRef.current !== null) {
         window.clearTimeout(advanceTimerRef.current);
       }
-      setPendingFocusAdvance({
+      dismissAdvanceToast();
+      const pendingAdvance = {
         sentFromSessionId,
         next,
         scheduledAt: Date.now(),
-      });
+      };
+      pendingFocusAdvanceRef.current = pendingAdvance;
+      setPendingFocusAdvance(pendingAdvance);
+      advanceToastIdRef.current = toast.custom(
+        () => (
+          <FocusAdvanceToast
+            scheduledAt={pendingAdvance.scheduledAt}
+            durationMs={FOCUS_ADVANCE_COUNTDOWN_MS}
+            onCancel={cancelPendingAdvance}
+          />
+        ),
+        {
+          duration: Infinity,
+          position: "top-right",
+          unstyled: true,
+        },
+      );
       advanceTimerRef.current = window.setTimeout(() => {
         commitPendingAdvance();
       }, FOCUS_ADVANCE_COUNTDOWN_MS);
     },
-    [focusMode, focusQueue, commitPendingAdvance],
+    [focusMode, focusQueue, commitPendingAdvance, cancelPendingAdvance],
   );
 
   // Sidebar resizing
@@ -556,25 +649,17 @@ export function App() {
             focusPosition={focusPosition}
             onFocusDone={handleFocusDone}
             onFocusSkip={handleFocusSkip}
-            onFocusExit={() => setFocusMode(false)}
+            onFocusExit={handleFocusModeExit}
             onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
             onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
             focusAdvanceCountdown={
               pendingFocusAdvance
                 ? {
-                    // The countdown is parent-owned and ticks for
-                    // FOCUS_ADVANCE_COUNTDOWN_MS from scheduledAt.
-                    // We surface the originating session id so
-                    // SessionView can show the countdown only on
-                    // the session the user is actually reading
-                    // (and not, e.g., on a non-originating session
-                    // they navigated to while a background
-                    // advance is still scheduled).
+                    // SessionView only needs the origin to preserve
+                    // the pending message and cancel if the user
+                    // starts typing there again. The visible
+                    // countdown lives in the toast.
                     sentFromSessionId: pendingFocusAdvance.sentFromSessionId,
-                    target: pendingFocusAdvance.next,
-                    scheduledAt: pendingFocusAdvance.scheduledAt,
-                    totalMs: FOCUS_ADVANCE_COUNTDOWN_MS,
-                    onCommitNow: commitPendingAdvance,
                     onCancel: cancelPendingAdvance,
                   }
                 : null

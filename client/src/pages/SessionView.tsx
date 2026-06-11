@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Clock, ArrowRight } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -89,29 +89,15 @@ interface SessionViewProps {
   // conversation".
   onFocusAdvanceAfterSend?: (sessionId: string) => void;
   /**
-   * When non-null, a focus-mode auto-advance has been scheduled
-   * (sent-from-session → target) and is showing a countdown in the
-   * focus banner. The originating session is `sentFromSessionId`;
-   * after `totalMs` the parent will navigate to `target`. The user
-   * can commit now or cancel via the banner buttons. Issue #104.
-   *
-   * While this is set, SessionView preserves the in-flight
+   * When non-null, a focus-mode advance has been scheduled after a
+   * send. While this is set, SessionView preserves the in-flight
    * user-message bubble in the originating session (we skip the
-   * session-change cleanup that would otherwise wipe it) so the
-   * user always has time to see the message they just sent.
+   * session-change cleanup that would otherwise wipe it) so the user
+   * always has time to see the message they just sent. Typing in the
+   * originating composer cancels the pending advance.
    */
   focusAdvanceCountdown?: {
     sentFromSessionId: string;
-    target: {
-      projectId: string;
-      projectName: string;
-      worktreeId: string;
-      worktreeName: string;
-      session: { id: string; title?: string };
-    };
-    scheduledAt: number;
-    totalMs: number;
-    onCommitNow: () => void;
     onCancel: () => void;
   } | null;
 }
@@ -2274,6 +2260,7 @@ export function SessionView({
   const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
   const terminalTabsSavePendingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const hadVisibleFocusAdvanceRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const reasoningEffortPickerRef = useRef<HTMLDivElement>(null);
@@ -2544,6 +2531,52 @@ export function SessionView({
     if (!textarea || textarea.disabled) return;
     textarea.focus();
   }, [sessionId, focusMode]);
+
+  useEffect(() => {
+    const isOriginatingCountdown =
+      Boolean(focusAdvanceCountdown) &&
+      focusAdvanceCountdown?.sentFromSessionId === sessionId;
+    const textarea = textareaRef.current;
+
+    if (isOriginatingCountdown) {
+      hadVisibleFocusAdvanceRef.current = true;
+      if (document.activeElement === textarea) {
+        textarea?.blur();
+      }
+      return;
+    }
+
+    if (
+      hadVisibleFocusAdvanceRef.current &&
+      focusMode &&
+      sessionId &&
+      textarea &&
+      !textarea.disabled
+    ) {
+      textarea.focus();
+    }
+    hadVisibleFocusAdvanceRef.current = false;
+  }, [focusAdvanceCountdown, focusMode, sessionId]);
+
+  useEffect(() => {
+    const isOriginatingCountdown =
+      Boolean(focusAdvanceCountdown) &&
+      focusAdvanceCountdown?.sentFromSessionId === sessionId;
+    if (!isOriginatingCountdown || !focusAdvanceCountdown) return;
+
+    const handleStayShortcut = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      event.stopPropagation();
+      focusAdvanceCountdown.onCancel();
+    };
+
+    window.addEventListener("keydown", handleStayShortcut, true);
+    return () => window.removeEventListener("keydown", handleStayShortcut, true);
+  }, [focusAdvanceCountdown, sessionId]);
+
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -3830,40 +3863,6 @@ export function SessionView({
     [visibleStreamItems]
   );
 
-  // Tick the focus-advance countdown once per second so the banner
-  // shows a live seconds-remaining value. Mirrors the pattern in
-  // WorkingBlock (line 1059) — use a small `useState` of `Date.now()`
-  // and a 1Hz interval, with a 250ms cadence so the displayed value
-  // doesn't lag the actual timeout by a full second.
-  const [countdownNow, setCountdownNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!focusAdvanceCountdown) return;
-    const interval = window.setInterval(() => {
-      setCountdownNow(Date.now());
-    }, 250);
-    return () => window.clearInterval(interval);
-  }, [focusAdvanceCountdown]);
-  const countdownSecondsRemaining = focusAdvanceCountdown
-    ? Math.max(
-        0,
-        Math.ceil(
-          (focusAdvanceCountdown.scheduledAt +
-            focusAdvanceCountdown.totalMs -
-            countdownNow) /
-            1000,
-        ),
-      )
-    : 0;
-  // Hide the countdown UI for sessions other than the originating
-  // one. The parent still tracks the timer (so manual nav cancels
-  // it), but we only want the visible countdown on the session the
-  // user is actually staring at while the timer ticks.
-  const visibleFocusAdvance =
-    focusAdvanceCountdown &&
-    focusAdvanceCountdown.sentFromSessionId === sessionId
-      ? focusAdvanceCountdown
-      : null;
-
   const handleHeaderFocusPin = async () => {
     if (!sessionId) return;
     try {
@@ -3886,67 +3885,23 @@ export function SessionView({
     <>
       {focusMode && (
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-blue-500/20 bg-blue-500/15 px-3 py-2 text-blue-200 md:px-4">
-          <div className="min-w-0 flex-1 text-xs text-blue-200/80">
-            {visibleFocusAdvance ? (
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="inline-flex items-center gap-1.5 font-medium text-blue-100">
-                  <Clock className="h-3.5 w-3.5 text-blue-200/80" />
-                  Auto-advancing in {countdownSecondsRemaining}s
-                </span>
-                <span className="text-blue-200/60">·</span>
-                <span className="truncate">
-                  Going to{" "}
-                  <span className="font-medium text-blue-100">
-                    {visibleFocusAdvance.target.projectName}
-                    {visibleFocusAdvance.target.worktreeName
-                      ? ` · ${visibleFocusAdvance.target.worktreeName}`
-                      : ""}
-                  </span>
-                </span>
-                <span className="ml-1 inline-flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={visibleFocusAdvance.onCommitNow}
-                    className="inline-flex items-center gap-1 rounded-md bg-blue-500/30 px-2 py-0.5 text-[11px] font-medium text-blue-50 transition-colors hover:bg-blue-500/45"
-                    title="Go to the next session now (N)"
-                  >
-                    Go now
-                    <Kbd>N</Kbd>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={visibleFocusAdvance.onCancel}
-                    className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-blue-200/80 transition-colors hover:bg-blue-500/25 hover:text-blue-100"
-                    title="Stay on this session (Esc)"
-                  >
-                    Stay
-                  </button>
-                </span>
-              </div>
-            ) : (
-              <>
-                <span className="font-medium text-blue-200">Focus Mode</span>
-                <span className="ml-2">
-                  {focusPosition && focusPosition.total > 0
-                    ? `${focusPosition.current || 1} / ${focusPosition.total}`
-                    : "No pinned sessions"}
-                </span>
-              </>
-            )}
+          <div className="min-w-0 text-xs text-blue-200/80">
+            <span className="font-medium text-blue-200">Focus Mode</span>
+            <span className="ml-2">
+              {focusPosition && focusPosition.total > 0
+                ? `${focusPosition.current || 1} / ${focusPosition.total}`
+                : "No pinned sessions"}
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={onFocusSkip}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title={visibleFocusAdvance ? "Go now (N)" : "Next (N)"}
+              title="Next (N)"
             >
-              {visibleFocusAdvance ? (
-                <ArrowRight className="h-3.5 w-3.5" />
-              ) : (
-                <StepForward className="h-3.5 w-3.5" />
-              )}
-              {visibleFocusAdvance ? "Go now" : "Next"}
+              <StepForward className="h-3.5 w-3.5" />
+              Next
               <Kbd>N</Kbd>
             </button>
             <button
