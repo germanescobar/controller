@@ -1184,6 +1184,15 @@ const EventBlock = memo(function EventBlock({
     return <ErrorBlock text={msg} />;
   }
 
+  // run_cancelled: same soft, non-error indicator as the live SSE
+  // path so reloads and `fetchEvents()` replays don't fall through
+  // to the generic expandable card fallback (see issue #94 follow-up).
+  if (event.type === "run_cancelled") {
+    const reason =
+      typeof data.reason === "string" && data.reason.trim() ? data.reason : "";
+    return <CancelledBlock reason={reason} />;
+  }
+
   // Fallback: generic expandable
   return (
     <div className="rounded-lg border border-border bg-card">
