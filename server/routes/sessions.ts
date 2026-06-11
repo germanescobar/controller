@@ -587,6 +587,13 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
   let runTerminated = false;
+  // True when the most recent terminal event we streamed was
+  // `run.cancelled` (i.e. Ada exited cleanly with code 130 after a
+  // cooperative abort). When the child then closes with a non-zero
+  // status, we must NOT synthesize a `run.failed` on top of it — the
+  // synthetic banner is the exact bug this flag exists to prevent
+  // (see issue #94).
+  let runCancelled = false;
 
   // Close stdin for CLIs that otherwise wait on an open pipe. We pass the
   // prompt as an argv argument, so none of these providers need stdin; leaving
@@ -701,6 +708,21 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   function onInactivityTimeout() {
     watchdogFired = true;
     runTerminated = true;
+    // If the run was already cancelled cooperatively, the inactivity
+    // timeout is firing *because* the process is winding down on
+    // SIGINT — Ada may be silent in the gap between the `run.cancelled`
+    // event and the final exit. Reap the child silently so the run
+    // ends, but do NOT emit a second terminal event on top of the
+    // `run.cancelled` we already streamed (issue #94).
+    if (runCancelled) {
+      if (child.exitCode === null && !child.killed) {
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          if (child.exitCode === null) child.kill("SIGKILL");
+        }, 2000);
+      }
+      return;
+    }
     const failureEvent: AgentStreamEvent = {
       type: "run.failed",
       sessionId: streamSessionId,
@@ -778,12 +800,18 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
                 } else if (
                   shouldPersist &&
                   event.type !== "run.completed" &&
-                  event.type !== "run.failed"
+                  event.type !== "run.failed" &&
+                  event.type !== "run.cancelled"
                 ) {
                   persistAgentEvent(event);
                 }
-                if (event.type === "run.completed" || event.type === "run.failed") {
+                if (
+                  event.type === "run.completed" ||
+                  event.type === "run.failed" ||
+                  event.type === "run.cancelled"
+                ) {
                   runTerminated = true;
+                  runCancelled = event.type === "run.cancelled";
                 }
                 sseSend({ type: "ada_event", event });
               })
@@ -818,11 +846,21 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
             const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
             for (const event of events) {
               if (pausedForClaudeUserInput) break;
-              if (shouldPersist && event.type !== "run.completed" && event.type !== "run.failed") {
+              if (
+                shouldPersist &&
+                event.type !== "run.completed" &&
+                event.type !== "run.failed" &&
+                event.type !== "run.cancelled"
+              ) {
                 persistAgentEvent(event);
               }
-              if (event.type === "run.completed" || event.type === "run.failed") {
+              if (
+                event.type === "run.completed" ||
+                event.type === "run.failed" ||
+                event.type === "run.cancelled"
+              ) {
                 runTerminated = true;
+                runCancelled = event.type === "run.cancelled";
               }
               sseSend({ type: "ada_event", event });
               if (providerId === "claude" && event.type === "user.input_requested") {
@@ -846,7 +884,17 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
         // Emit a synthetic run.failed when the process ended abnormally
         // without already reporting completion or failure via stdout events.
-        if (!runTerminated && !pausedForClaudeUserInput && streamSessionId) {
+        // Skip this entirely when the run was cancelled cooperatively:
+        // Ada emits `run.cancelled` and then exits with code 130, which
+        // is *not* an abnormal termination — surfacing both events would
+        // produce the misleading "Ada process exited with code 130" banner
+        // (see issue #94).
+        if (
+          !runTerminated &&
+          !runCancelled &&
+          !pausedForClaudeUserInput &&
+          streamSessionId
+        ) {
           const errorText =
             signal
               ? `${providerName} process was terminated by signal ${signal}.`
@@ -1115,6 +1163,8 @@ function getPersistedEventType(event: AgentStreamEvent): string {
       return "user_input_requested";
     case "thread.status":
       return "thread_status";
+    case "run.cancelled":
+      return "run_cancelled";
     default:
       return event.type;
   }
@@ -1142,6 +1192,8 @@ function getPersistedEventData(event: AgentStreamEvent): Record<string, unknown>
         status: event.status,
         activeFlags: event.activeFlags ?? [],
       };
+    case "run.cancelled":
+      return { reason: event.reason };
     default:
       return event as Record<string, unknown>;
   }

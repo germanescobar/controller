@@ -92,6 +92,7 @@ type StreamItem = (
   | { type: "user_input_requested"; id: string; questions: UserInputQuestion[] }
   | { type: "thread_status"; status: string; activeFlags: string[] }
   | { type: "error"; text: unknown }
+  | { type: "run_cancelled"; reason: string }
 ) & { at: number };
 
 function isSessionIsolationDebugEnabled(): boolean {
@@ -1183,6 +1184,15 @@ const EventBlock = memo(function EventBlock({
     return <ErrorBlock text={msg} />;
   }
 
+  // run_cancelled: same soft, non-error indicator as the live SSE
+  // path so reloads and `fetchEvents()` replays don't fall through
+  // to the generic expandable card fallback (see issue #94 follow-up).
+  if (event.type === "run_cancelled") {
+    const reason =
+      typeof data.reason === "string" && data.reason.trim() ? data.reason : "";
+    return <CancelledBlock reason={reason} />;
+  }
+
   // Fallback: generic expandable
   return (
     <div className="rounded-lg border border-border bg-card">
@@ -1750,6 +1760,21 @@ function ErrorBlock({ text }: { text: unknown }) {
         </Badge>
         <span className="text-xs text-destructive-foreground">{normalizedText}</span>
       </div>
+    </div>
+  );
+}
+
+function CancelledBlock({ reason }: { reason: string }) {
+  // Soft, non-error indicator for a cooperative run cancellation
+  // (Ada SIGINT path, see coding-agent#66). Mirrors the muted
+  // styling of a `run.completed` indicator so the user sees a single
+  // clean "Run cancelled" line and *not* a red error banner.
+  const label = `Run cancelled${reason ? ` · ${reason}` : ""}`;
+  return (
+    <div className="flex items-center gap-2 py-1">
+      <div className="h-px flex-1 bg-border" />
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <div className="h-px flex-1 bg-border" />
     </div>
   );
 }
@@ -3103,6 +3128,22 @@ export function SessionView({
         } else if (adaEvent.type === "thread.status") {
           // Thread status changes are useful internally, but they're noisy in
           // the visible transcript when there's no actionable information.
+        } else if (adaEvent.type === "run.cancelled") {
+          // Clean cancellation (Ada SIGINT path). Surface a soft
+          // indicator carrying the orchestrator-supplied reason, but
+          // do NOT set runFailed: the run is expected to exit with
+          // code 130, and the synthetic "Ada process exited with
+          // code 130" banner has already been suppressed server-side.
+          if (isVisible()) {
+            setStreamItems((prev) => [
+              ...prev,
+              {
+                type: "run_cancelled",
+                reason: adaEvent.reason,
+                at: Date.now(),
+              },
+            ]);
+          }
         } else if (adaEvent.type === "run.failed") {
           runFailed = true;
           if (isVisible()) {
@@ -3847,6 +3888,10 @@ export function SessionView({
 
                     if (item.type === "error") {
                       return <ErrorBlock key={render.key} text={item.text} />;
+                    }
+
+                    if (item.type === "run_cancelled") {
+                      return <CancelledBlock key={render.key} reason={item.reason} />;
                     }
 
                     return null;

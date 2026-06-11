@@ -82,6 +82,12 @@ export type AgentStreamEvent =
       sessionId: string;
       error: string;
       timestamp: string;
+    }
+  | {
+      type: "run.cancelled";
+      sessionId: string;
+      reason: string;
+      timestamp: string;
     };
 
 export interface SpawnOptions {
@@ -319,7 +325,7 @@ function mapAdaEvent(
     return flushed.length > 0 ? [...flushed, event] : event;
   }
 
-  if (type === "run.completed" || type === "run.failed") {
+  if (type === "run.completed" || type === "run.failed" || type === "run.cancelled") {
     // Final flush — anything still being accumulated belongs in the
     // transcript before the run terminates.
     const flushed = flushAdaAccumulatedSegments(state);
@@ -334,6 +340,23 @@ function mapAdaEvent(
         sessionId,
         status: raw.status === "max_iterations" ? "max_iterations" : "completed",
         stopReason: typeof raw.stopReason === "string" ? raw.stopReason : "completed",
+        timestamp:
+          typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+      };
+      return flushed.length > 0 ? [...flushed, event] : event;
+    }
+    if (type === "run.cancelled") {
+      // Clean cancellation: Ada emits this when SIGINT aborts the run
+      // cooperatively (see coding-agent#66). The orchestrator surfaces
+      // it as a non-error terminal event so the UI does not flash a
+      // red "exited with code 130" banner on top of it.
+      const event: AgentStreamEvent = {
+        type: "run.cancelled",
+        sessionId,
+        reason:
+          typeof raw.reason === "string" && raw.reason.trim()
+            ? raw.reason
+            : "user_interrupt",
         timestamp:
           typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
       };

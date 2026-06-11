@@ -269,6 +269,80 @@ test("ada parser: run.failed flushes any in-flight text before emitting the fail
   assert.equal(failed.sessionId, "sess-6");
 });
 
+test("ada parser: run.cancelled flushes in-flight text and emits a normalized terminal event", () => {
+  // Clean-cancellation path: Ada SIGINTs the run cooperatively and
+  // emits `run.cancelled` before exiting with code 130 (see
+  // coding-agent#66). The orchestrator must surface this as a
+  // `run.cancelled` event (not drop it as an unknown type, and not
+  // synthesize a `run.failed`) so the UI can show a soft "Run
+  // cancelled" indicator instead of a red error banner.
+  const events = runFixture(
+    [
+      JSON.stringify({ type: "run.started", sessionId: "sess-cancel-1" }),
+      JSON.stringify({ type: "assistant.text.delta", text: "I was about to " }),
+      JSON.stringify({ type: "assistant.text.delta", text: "finish." }),
+      JSON.stringify({
+        type: "run.cancelled",
+        sessionId: "sess-cancel-1",
+        reason: "user_interrupt",
+        timestamp: "2026-06-10T00:00:00.000Z",
+      }),
+    ].join("\n")
+  );
+
+  const types = events.map((event) => event.type);
+  assert.deepEqual(types, [
+    "run.started",
+    "assistant.text",
+    "run.cancelled",
+  ]);
+
+  const text = events.find((event) => event.type === "assistant.text") as
+    | { type: "assistant.text"; text: string }
+    | undefined;
+  assert.ok(text, "expected an assistant.text event before run.cancelled");
+  assert.equal(text.text, "I was about to finish.");
+
+  const cancelled = events.find((event) => event.type === "run.cancelled") as
+    | {
+        type: "run.cancelled";
+        sessionId: string;
+        reason: string;
+        timestamp: string;
+      }
+    | undefined;
+  assert.ok(cancelled, "expected a run.cancelled event");
+  assert.equal(cancelled.sessionId, "sess-cancel-1");
+  assert.equal(cancelled.reason, "user_interrupt");
+  assert.equal(cancelled.timestamp, "2026-06-10T00:00:00.000Z");
+});
+
+test("ada parser: run.cancelled defaults reason to user_interrupt when omitted", () => {
+  // The orchestrator should still get a usable `reason` when Ada
+  // emits `run.cancelled` without one (older versions, partial
+  // payloads, etc.). "user_interrupt" is the only reason Ada emits
+  // today, so it's a safe default.
+  const events = runFixture(
+    [
+      JSON.stringify({ type: "run.started", sessionId: "sess-cancel-2" }),
+      JSON.stringify({
+        type: "run.cancelled",
+        sessionId: "sess-cancel-2",
+      }),
+    ].join("\n")
+  );
+
+  const cancelled = events.find((event) => event.type === "run.cancelled") as
+    | { type: "run.cancelled"; reason: string; timestamp: string }
+    | undefined;
+  assert.ok(cancelled, "expected a run.cancelled event");
+  assert.equal(cancelled.reason, "user_interrupt");
+  assert.ok(
+    typeof cancelled.timestamp === "string" && cancelled.timestamp.length > 0,
+    "expected a generated timestamp when Ada omits one"
+  );
+});
+
 test("ada parser: a fresh run.started clears any in-flight segment from a prior run", () => {
   // Without a state reset, stale text accumulated by a previous run
   // would leak into the new turn. The parser should start each new
@@ -323,6 +397,7 @@ test("ada parser: unknown event types are dropped, never forwarded as AgentStrea
         "thread.status",
         "run.completed",
         "run.failed",
+        "run.cancelled",
       ].includes(event.type),
       `event type ${event.type} is not a normalized AgentStreamEvent`
     );

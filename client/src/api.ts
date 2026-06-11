@@ -184,6 +184,12 @@ export type AdaStreamEvent =
       sessionId: string;
       error: string;
       timestamp: string;
+    }
+  | {
+      type: "run.cancelled";
+      sessionId: string;
+      reason: string;
+      timestamp: string;
     };
 
 export type SessionStreamEvent =
