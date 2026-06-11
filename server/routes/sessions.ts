@@ -649,7 +649,10 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
-      focusPinnedAt: existing?.focusPinnedAt,
+      // Auto-pin brand-new sessions to the focus queue (issue #81).
+      // Resuming an existing session preserves its current pinned state
+      // and respects any prior explicit unpin.
+      focusPinnedAt: existing?.focusPinnedAt ?? new Date().toISOString(),
       focusDoneAt: existing?.focusDoneAt,
     });
   }
@@ -1059,7 +1062,10 @@ async function streamCodexPlanSession(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
-      focusPinnedAt: existing?.focusPinnedAt,
+      // Auto-pin brand-new sessions to the focus queue (issue #81).
+      // Resuming an existing session preserves its current pinned state
+      // and respects any prior explicit unpin.
+      focusPinnedAt: existing?.focusPinnedAt ?? new Date().toISOString(),
       focusDoneAt: existing?.focusDoneAt,
     });
   }

@@ -246,6 +246,30 @@ export function App() {
     }
   };
 
+  // After the user sends a message in focus mode, advance to the next
+  // focus item. The "sent from" session id is passed in so we can apply
+  // the stay-put rule when the only pinned item is the one the user
+  // just replied to. The auto-pin from issue #81 may have placed the
+  // just-sent session at the head of the queue already, but we still
+  // skip it to honor the user's "what's next?" intent.
+  const handleFocusAdvanceAfterSend = useCallback(
+    (sentFromSessionId: string) => {
+      if (!focusMode) return;
+      if (focusQueue.length === 0) return;
+      const sentIndex = focusQueue.findIndex(
+        (item) => item.session.id === sentFromSessionId,
+      );
+      const startIndex = sentIndex >= 0 ? sentIndex : -1;
+      const nextIndex = (startIndex + 1 + focusQueue.length) % focusQueue.length;
+      const next = focusQueue[nextIndex];
+      // Stay-put rule: don't navigate to the session the user just sent
+      // to. If that's the only pinned item, we silently do nothing.
+      if (next.session.id === sentFromSessionId) return;
+      openFocusItem(next);
+    },
+    [focusMode, focusQueue, openFocusItem],
+  );
+
   // Sidebar resizing
   const sidebarResize = useResizablePanel({
     storageKey: "sidebarWidth",
@@ -425,6 +449,7 @@ export function App() {
             onFocusSkip={handleFocusSkip}
             onFocusExit={() => setFocusMode(false)}
             onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
+            onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
           />
         )}
         </AppErrorBoundary>
