@@ -16,6 +16,7 @@ import {
   archiveSession,
   updateSessionFocus,
   saveSession,
+  resolveSessionFocusState,
   appendEvent,
   saveAttachment,
   getAttachment,
@@ -635,6 +636,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     // Merge with existing session file (preserve title/createdAt from earlier messages)
     const existing = await getSession(worktreePath, sessionId);
     const title = existing?.title || (message.length > 60 ? message.slice(0, 60) + "..." : message);
+    const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
       title,
@@ -649,8 +651,12 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
-      focusPinnedAt: existing?.focusPinnedAt,
-      focusDoneAt: existing?.focusDoneAt,
+      // Focus-queue state is resolved by `resolveSessionFocusState` so
+      // the auto-pin-on-create + respect-prior-unpin rules live in one
+      // tested helper rather than being inlined here (issue #81).
+      focusPinnedAt: focus.focusPinnedAt,
+      focusDoneAt: focus.focusDoneAt,
+      userUnpinned: focus.userUnpinned,
     });
   }
 
@@ -1045,6 +1051,7 @@ async function streamCodexPlanSession(
 
     const existing = await getSession(worktreePath, sessionId);
     const title = existing?.title || (message.length > 60 ? `${message.slice(0, 60)}...` : message);
+    const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
       title,
@@ -1059,8 +1066,10 @@ async function streamCodexPlanSession(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
-      focusPinnedAt: existing?.focusPinnedAt,
-      focusDoneAt: existing?.focusDoneAt,
+      // See the SSE-stream persistSessionStart for the rationale.
+      focusPinnedAt: focus.focusPinnedAt,
+      focusDoneAt: focus.focusDoneAt,
+      userUnpinned: focus.userUnpinned,
     });
   }
 

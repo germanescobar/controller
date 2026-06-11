@@ -80,6 +80,12 @@ interface SessionViewProps {
   onFocusSkip?: () => void;
   onFocusExit?: () => void;
   onFocusPinnedChange?: () => void;
+  // Fires right after the user sends a message (or answers an agent
+  // prompt) in focus mode, with the id of the session the message was
+  // sent from. The parent can use this to advance to the next focus
+  // item. See issue #81 follow-up: "respond and advance to the next
+  // conversation".
+  onFocusAdvanceAfterSend?: (sessionId: string) => void;
 }
 
 type StreamItem = (
@@ -2153,6 +2159,7 @@ export function SessionView({
   onFocusSkip,
   onFocusExit,
   onFocusPinnedChange,
+  onFocusAdvanceAfterSend,
 }: SessionViewProps) {
   const [message, setMessage] = useState("");
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
@@ -2515,16 +2522,15 @@ export function SessionView({
     if (currentViewRef.current.sessionId !== nextSessionId) {
       pendingAttachedSessionIdRef.current = nextSessionId;
       onSessionCreated(nextSessionId);
-      if (focusMode) {
-        pinSessionFocus(projectId, nextSessionId, worktreeId)
-          .then(() => {
-            setIsFocusPinned(true);
-            onFocusPinnedChange?.();
-          })
-          .catch((err) => {
-            toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
-          });
-      }
+      // Server auto-pins every brand-new session to the focus queue
+      // (issue #81). We just need to (a) reflect that locally so the
+      // session chrome renders the right state and (b) nudge the
+      // sidebar to refresh so the new pin shows up in the queue.
+      // We deliberately do NOT call `pinSessionFocus` here: an explicit
+      // pin would clobber the server's `userUnpinned` flag and could
+      // re-pin a session the user has previously removed.
+      setIsFocusPinned(true);
+      onFocusPinnedChange?.();
     }
   };
 
@@ -2953,6 +2959,17 @@ export function SessionView({
         providerLoadError ?? "Could not start because agent providers are not ready. Retry provider discovery."
       );
       return false;
+    }
+
+    // In focus mode, signal the parent to advance to the next focus
+    // item as soon as the user commits to a message. The parent owns
+    // the navigation logic and the "stay put if the only pinned item
+    // is the one we just sent to" rule (issue #81 follow-up).
+    // Only fire for messages sent from a known session — the new-thread
+    // composer (no `sessionId` yet) is handled by the server-side
+    // auto-pin on creation, and there's nothing to "advance past".
+    if (focusMode && onFocusAdvanceAfterSend && sessionId) {
+      onFocusAdvanceAfterSend(sessionId);
     }
 
     const streamSessionId = resumeSessionIdOverride ?? sessionId;

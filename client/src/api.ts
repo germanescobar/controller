@@ -24,6 +24,10 @@ export interface Session {
   status: string;
   focusPinnedAt?: string;
   focusDoneAt?: string;
+  // True when the user explicitly unpinned the session from the focus
+  // queue. Used by the server to prevent auto-pin from silently
+  // re-pinning a session the user removed.
+  userUnpinned?: boolean;
 }
 
 export interface Worktree {

@@ -17,6 +17,11 @@ export interface SessionState {
   status: string;
   focusPinnedAt?: string;
   focusDoneAt?: string;
+  // Set when the user explicitly unpins the session. Auto-pin on
+  // creation/interaction respects this flag and will not re-pin a
+  // session the user has deliberately removed from their focus queue.
+  // Cleared on archive.
+  userUnpinned?: boolean;
 }
 
 export interface AgentEvent {
@@ -140,6 +145,9 @@ export async function archiveSession(
     const content = await fs.readFile(filePath, "utf-8");
     const session = JSON.parse(content) as SessionState;
     session.status = "archived";
+    // Archiving drops any prior explicit-unpin signal: a rehydrated
+    // session starts with a clean focus-queue slate.
+    delete session.userUnpinned;
     await fs.writeFile(filePath, JSON.stringify(session, null, 2));
     return true;
   } catch {
@@ -158,16 +166,83 @@ export async function updateSessionFocus(
   if (action === "pin") {
     session.focusPinnedAt = session.focusPinnedAt ?? new Date().toISOString();
     delete session.focusDoneAt;
+    // An explicit pin always overrides a previous unpin: the user is
+    // telling us they want this session in the focus queue right now.
+    delete session.userUnpinned;
   } else if (action === "unpin") {
     delete session.focusPinnedAt;
     delete session.focusDoneAt;
+    // Record that the user explicitly removed this session from the
+    // focus queue. Future auto-pin attempts will no-op until the
+    // session is archived (or the user pins it explicitly).
+    session.userUnpinned = true;
   } else {
     delete session.focusPinnedAt;
     session.focusDoneAt = new Date().toISOString();
+    // "Done" is a workflow state, not a user opt-out of the focus
+    // queue — clear any prior explicit-unpin signal.
+    delete session.userUnpinned;
   }
 
   await saveSession(projectPath, session);
   return session;
+}
+
+/**
+ * Pin a session to the focus queue if it is not already pinned, not
+ * archived, and not previously explicitly unpinned by the user. Returns
+ * the (possibly updated) session, or `null` if the session does not
+ * exist. If the session is already pinned (or blocked by `userUnpinned`)
+ * the file is left untouched and the existing session is returned.
+ */
+export async function pinSessionIfNeeded(
+  projectPath: string,
+  sessionId: string
+): Promise<SessionState | null> {
+  const session = await getSession(projectPath, sessionId);
+  if (!session) return null;
+  if (session.status === "archived") return session;
+  if (session.focusPinnedAt) return session;
+  if (session.userUnpinned) return session;
+
+  session.focusPinnedAt = new Date().toISOString();
+  delete session.focusDoneAt;
+  await saveSession(projectPath, session);
+  return session;
+}
+
+/**
+ * Returns the focus-queue fields a session should be persisted with at
+ * first-write time. On first persist of a brand-new session, the
+ * session is auto-pinned (issue #81). On resume of an existing
+ * session, the existing focus state is preserved verbatim — including
+ * any prior `userUnpinned` opt-out, so a session the user explicitly
+ * removed from the focus queue stays removed on subsequent messages.
+ *
+ * The route handlers use this when calling `saveSession` so the
+ * auto-pin rule (and the "respect prior unpin" carve-out) lives in
+ * one testable place rather than being inlined into two `saveSession`
+ * call sites.
+ */
+export function resolveSessionFocusState(
+  existing: SessionState | null
+): {
+  focusPinnedAt: string | undefined;
+  focusDoneAt: string | undefined;
+  userUnpinned: boolean | undefined;
+} {
+  if (!existing) {
+    return {
+      focusPinnedAt: new Date().toISOString(),
+      focusDoneAt: undefined,
+      userUnpinned: undefined,
+    };
+  }
+  return {
+    focusPinnedAt: existing.focusPinnedAt,
+    focusDoneAt: existing.focusDoneAt,
+    userUnpinned: existing.userUnpinned,
+  };
 }
 
 export async function getEvents(
