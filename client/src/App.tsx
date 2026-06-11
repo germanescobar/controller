@@ -22,7 +22,7 @@ import { pickNextFocusItem } from "./lib/focus-advance.ts";
  *
  * Single source of truth — do not introduce a second timing knob.
  */
-const FOCUS_ADVANCE_COUNTDOWN_MS = 10000;
+const FOCUS_ADVANCE_COUNTDOWN_MS = 4000;
 
 export interface PendingFocusAdvance {
   sentFromSessionId: string;
@@ -159,7 +159,7 @@ export function App() {
   const [focusMode, setFocusMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
-  // Scheduled "advance to the next focus item" while a 10-second
+  // Scheduled "advance to the next focus item" while a 4-second
   // countdown is showing in a toast. Set by
   // `handleFocusAdvanceAfterSend` after a send, cleared either by the
   // timer firing (then we navigate) or by any of the cancel paths
