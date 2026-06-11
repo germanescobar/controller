@@ -10,6 +10,7 @@ import { EditProject } from "./pages/EditProject.tsx";
 import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
+import { useFocusModeShortcuts } from "./lib/useFocusModeShortcuts.ts";
 
 export type View =
   | { page: "empty" }
@@ -121,6 +122,20 @@ export function App() {
     setFocusMode(true);
     openFocusItem(firstItem);
   }, [focusMode, focusQueue, openFocusItem]);
+
+  const handleFocusModeEnter = useCallback(() => {
+    const firstItem = focusQueue[0];
+    if (!firstItem) {
+      toast.info("Pin a session to use focus mode");
+      return;
+    }
+    setFocusMode(true);
+    openFocusItem(firstItem);
+  }, [focusQueue, openFocusItem]);
+
+  const handleFocusModeExit = useCallback(() => {
+    setFocusMode(false);
+  }, []);
 
   const handleSelectProject = (projectId: string) => {
     setActiveProjectId(projectId);
@@ -237,6 +252,15 @@ export function App() {
     defaultWidth: 256, // w-64
     minWidth: 180,
     maxWidth: 480,
+  });
+
+  // Focus mode keyboard shortcuts (N / D / F / E).
+  useFocusModeShortcuts({
+    focusMode,
+    onSkip: handleFocusSkip,
+    onDone: handleFocusDone,
+    onEnter: handleFocusModeEnter,
+    onExit: handleFocusModeExit,
   });
 
   const sessionViewKey =

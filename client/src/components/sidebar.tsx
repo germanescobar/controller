@@ -416,7 +416,7 @@ export function Sidebar({
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
                   : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
               )}
-              title={focusMode ? "Exit focus mode" : "Start focus mode"}
+              title={focusMode ? "Exit focus mode (E)" : "Start focus mode (F)"}
             >
               Focus Mode
             </button>
