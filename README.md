@@ -9,6 +9,7 @@ A web-based UI for managing and interacting with AI coding agents. It provides a
 - **Session management** — create, resume, and archive coding sessions within each project. Sessions persist their event history to disk.
 - **Real-time streaming** — agent output (text, reasoning, tool calls, tool results) is streamed to the browser via SSE.
 - **Model selection** — choose which model to use for each session.
+- **Slash-command skills** — type `/<skill-name>` in the chat input to activate an installed skill for Ada, Codex, or Claude. The orchestrator is the only source of truth for slash commands; it prepends the `SKILL.md` body at send time and turns off the agent CLIs' own slash-command paths so the two never compete.
 - **API key management** — configure provider API keys through a settings dialog; keys are passed as environment variables to the agent process.
 - **Responsive UI** — dark-themed interface with a collapsible sidebar that works on desktop and mobile.
 - **Desktop shell** — optional Electron wrapper that runs the same UI and backend as the browser app.

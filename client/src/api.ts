@@ -524,6 +524,38 @@ export async function fetchAgentProviders(): Promise<AgentProviderInfo[]> {
   return res.json();
 }
 
+export type SkillScope = "user" | "system" | "repo";
+
+export interface AgentSkill {
+  name: string;
+  description: string;
+  path: string;
+  scope: SkillScope;
+}
+
+export async function fetchAgentSkills(
+  providerId: string,
+  cwd: string
+): Promise<AgentSkill[]> {
+  const params = new URLSearchParams();
+  if (cwd) params.set("cwd", cwd);
+  const qs = params.toString();
+  const res = await fetch(
+    `${BASE}/agents/${encodeURIComponent(providerId)}/skills${qs ? `?${qs}` : ""}`
+  );
+  await throwIfNotOk(res, "Failed to fetch skills");
+  const body = (await res.json()) as { skills?: unknown };
+  if (!body || !Array.isArray(body.skills)) return [];
+  return body.skills.filter(
+    (entry): entry is AgentSkill =>
+      Boolean(entry) &&
+      typeof (entry as AgentSkill).name === "string" &&
+      typeof (entry as AgentSkill).description === "string" &&
+      typeof (entry as AgentSkill).path === "string" &&
+      typeof (entry as AgentSkill).scope === "string"
+  );
+}
+
 export interface AgentStatus {
   id: string;
   name: string;
@@ -588,6 +620,7 @@ export function startSession(
     mode?: "default" | "plan";
     worktreeId?: string;
     attachmentIds?: string[];
+    skillName?: string;
   }
 ): EventSource {
   const params = new URLSearchParams({ message });
@@ -601,6 +634,7 @@ export function startSession(
   if (options?.attachmentIds?.length) {
     params.set("attachmentIds", options.attachmentIds.join(","));
   }
+  if (options?.skillName) params.set("skillName", options.skillName);
   return new EventSource(
     `${BASE}/projects/${projectId}/sessions/stream?${params}`
   );

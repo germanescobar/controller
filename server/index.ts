@@ -10,6 +10,7 @@ import { worktreesRouter } from "./routes/worktrees.js";
 import { modelsRouter } from "./routes/models.js";
 import { apiKeysRouter } from "./routes/api-keys.js";
 import { agentsRouter } from "./routes/agents.js";
+import { skillsRouter } from "./routes/skills.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
 import { listSessionRuntimes } from "./lib/session-runtime.js";
 import { getProject } from "./lib/projects.js";
@@ -36,6 +37,7 @@ app.use("/api/projects", sessionsRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/agents", agentsRouter);
+app.use("/api/agents", skillsRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session
 // picker and the Electron health check; richer status lives at /api/agents.

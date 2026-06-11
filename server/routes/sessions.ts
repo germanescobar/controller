@@ -32,6 +32,12 @@ import {
 } from "../lib/agents.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
 import {
+  buildSkillHistoryMessage,
+  buildSkillPrefix,
+  extractSkillInvocation,
+  getSkillProvider,
+} from "../lib/skills.js";
+import {
   getSessionRuntime,
   markSessionActive,
   markSessionInactive,
@@ -120,6 +126,59 @@ function attachmentPublicMetadata(
     isImage: attachment.isImage,
     createdAt: attachment.createdAt,
     url: `/api/projects/${projectId}/attachments/${attachment.id}?worktreeId=${encodeURIComponent(worktreeId)}&v=${encodeURIComponent(attachment.createdAt)}`,
+  };
+}
+
+interface SkillResolution {
+  /** What we hand to the provider (`<skill block>` + `<user text>`). */
+  agentMessage: string;
+  /** What we persist to history so the user sees `[/skill: name] <text>` on reload. */
+  historyText: string;
+}
+
+/**
+ * Resolve an optional skill activation for the current turn. Returns the
+ * augmented message + history text, or an error string the caller turns
+ * into a 400. `skillName === undefined` means "no skill active" and the
+ * caller passes the original `message` through unchanged.
+ *
+ * The orchestrator is the only source of truth for `/<skill-name>`
+ * invocations across providers (see issue #98): the agent sees the skill
+ * body prepended to the user text, and the session history records the
+ * activation with a `[/skill: name] …` marker so the conversation reads
+ * naturally on reload.
+ */
+async function resolveSkillActivation(
+  skillName: string | undefined,
+  providerId: string,
+  cwd: string,
+  userText: string
+): Promise<SkillResolution | { error: string }> {
+  if (!skillName) {
+    return { agentMessage: userText, historyText: userText };
+  }
+  const provider = getSkillProvider(providerId);
+  if (!provider) {
+    return { error: `Unknown agent provider for skill: ${providerId}` };
+  }
+  const body = await provider.readBody(skillName, cwd);
+  if (!body) {
+    return {
+      error: `Skill "${skillName}" was not found for ${provider.name}. ` +
+        `The agent's slash-command paths are disabled; the orchestrator is the only source of truth.`,
+    };
+  }
+  // Strip a defensive leading `/<name>` from the user text. The orchestrator
+  // is the only path, so the message we hand to the agent is the bare user
+  // text; the skill block is prepended as system-style context.
+  const invocation = extractSkillInvocation(userText);
+  const trimmedText =
+    invocation && invocation.skillName === body.metadata.name.toLowerCase()
+      ? invocation.rest
+      : userText;
+  return {
+    agentMessage: buildSkillPrefix(body.metadata.name, body.body) + trimmedText,
+    historyText: buildSkillHistoryMessage(body.metadata.name, trimmedText),
   };
 }
 
@@ -503,6 +562,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     ?.split(",")
     .map((id) => id.trim())
     .filter(Boolean) ?? [];
+  const skillName = (req.query.skillName as string | undefined)?.trim() || undefined;
 
   const provider = getAgentProvider(providerId);
   if (!provider) {
@@ -525,6 +585,24 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     return;
   }
 
+  // Resolve the requested skill (if any). The orchestrator is the only
+  // source of truth for `/<skill-name>` invocations across providers;
+  // we read the body server-side at send time so the wire payload gets
+  // the freshest `SKILL.md` and the message we hand to the provider
+  // already has the skill block prepended (see issue #98).
+  const skillResolution = await resolveSkillActivation(
+    skillName,
+    providerId,
+    worktree.path,
+    message
+  );
+  if ("error" in skillResolution) {
+    res.status(400).json({ error: skillResolution.error });
+    return;
+  }
+  const agentMessage = skillResolution.agentMessage;
+  const historyText = skillResolution.historyText;
+
   const runStartTree = await createWorktreeSnapshot(worktree.path);
 
   if (providerId === "codex" && attachments.length === 0) {
@@ -533,7 +611,8 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       worktreeId: worktree.id,
       projectId: req.params.projectId,
       runStartTree,
-      message,
+      message: agentMessage,
+      historyText,
       resumeSessionId,
       model,
       reasoningEffort,
@@ -566,7 +645,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   const apiKeyEnv = await getApiKeyEnvVars();
 
   const child = provider.spawn({
-    message,
+    message: agentMessage,
     cwd: worktree.path,
     env: apiKeyEnv,
     command: resolvedCommand,
@@ -620,13 +699,15 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     // consecutive duplicates with the same text.
     if (!userMessageWritten) {
       userMessageWritten = true;
+      const skillMarker = parseSkillMarker(historyText);
       await appendEvent(worktreePath, sessionId, {
         id: randomUUID(),
         sessionId,
         timestamp: new Date().toISOString(),
         type: "user_message",
         data: {
-          text: message,
+          text: historyText,
+          ...(skillMarker ? { skillName: skillMarker.skillName } : {}),
           attachments: attachments.map((attachment) =>
             attachmentPublicMetadata(req.params.projectId, worktreeId, attachment)
           ),
@@ -635,7 +716,7 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
     }
     // Merge with existing session file (preserve title/createdAt from earlier messages)
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing?.title || (message.length > 60 ? message.slice(0, 60) + "..." : message);
+    const title = existing?.title || (historyText.length > 60 ? historyText.slice(0, 60) + "..." : historyText);
     const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
@@ -971,6 +1052,8 @@ async function streamCodexPlanSession(
     projectId: string;
     runStartTree: string | null;
     message: string;
+    /** What to persist to history (e.g. `[/skill: name] <text>`). */
+    historyText: string;
     resumeSessionId?: string;
     model?: string;
     reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -986,6 +1069,7 @@ async function streamCodexPlanSession(
     projectId,
     runStartTree,
     message,
+    historyText,
     resumeSessionId,
     model,
     reasoningEffort,
@@ -1035,13 +1119,15 @@ async function streamCodexPlanSession(
     });
     if (!userMessageWritten) {
       userMessageWritten = true;
+      const skillMarker = parseSkillMarker(historyText);
       await appendEvent(worktreePath, sessionId, {
         id: randomUUID(),
         sessionId,
         timestamp: new Date().toISOString(),
         type: "user_message",
         data: {
-          text: message,
+          text: historyText,
+          ...(skillMarker ? { skillName: skillMarker.skillName } : {}),
           attachments: attachments.map((attachment) =>
             attachmentPublicMetadata(projectId, worktreeId, attachment)
           ),
@@ -1050,7 +1136,7 @@ async function streamCodexPlanSession(
     }
 
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing?.title || (message.length > 60 ? `${message.slice(0, 60)}...` : message);
+    const title = existing?.title || (historyText.length > 60 ? `${historyText.slice(0, 60)}...` : historyText);
     const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
@@ -1600,34 +1686,95 @@ sessionsRouter.get(
 );
 
 /**
- * Collapse consecutive `user_message` events with identical text into a single
- * event, preferring the entry that carries attachments. Some providers (e.g.
- * Ada) write their own `user_message` to the events file, while we also write
- * one to persist attachments. This keeps the UI from showing the same user
- * turn twice when the session is reloaded.
+ * Collapse consecutive `user_message` events that represent the same turn.
+ *
+ * Two cases trigger a collapse:
+ *
+ * 1. **Identical text.** The orchestrator and the agent sometimes each write
+ *    a `user_message` for the same turn (the orchestrator to persist
+ *    attachments, the agent to log what it received). Identical text means
+ *    the same turn.
+ *
+ * 2. **Skill marker vs. agent echo.** When a skill is active the orchestrator
+ *    writes a `user_message` whose text is `[/skill: name] <user text>`, and
+ *    the agent writes its own `user_message` with the full prompt (skill
+ *    body + user text). The two texts differ, but the orchestrator's text is
+ *    the canonical user turn; the agent's is just an echo of the wire
+ *    payload. Collapse them, keeping the orchestrator's marker so the UI
+ *    can render a `Skill: <name>` badge.
  */
-function dedupeUserMessageEvents(events: AgentEvent[]): AgentEvent[] {
+export function dedupeUserMessageEvents(events: AgentEvent[]): AgentEvent[] {
   const result: AgentEvent[] = [];
   for (const event of events) {
     const previous = result[result.length - 1];
     if (
       previous &&
       previous.type === "user_message" &&
-      event.type === "user_message" &&
-      getUserMessageText(previous) !== "" &&
-      getUserMessageText(previous) === getUserMessageText(event)
+      event.type === "user_message"
     ) {
-      const previousAttachments = pickUserMessageAttachments(previous);
-      const currentAttachments = pickUserMessageAttachments(event);
-      result[result.length - 1] = {
-        ...previous,
-        data: {
-          ...previous.data,
-          ...event.data,
-          attachments: previousAttachments ?? currentAttachments,
-        },
-      };
-      continue;
+      const previousText = getUserMessageText(previous);
+      const currentText = getUserMessageText(event);
+
+      if (previousText !== "" && previousText === currentText) {
+        const previousAttachments = pickUserMessageAttachments(previous);
+        const currentAttachments = pickUserMessageAttachments(event);
+        result[result.length - 1] = {
+          ...previous,
+          data: {
+            ...previous.data,
+            ...event.data,
+            attachments: previousAttachments ?? currentAttachments,
+          },
+        };
+        continue;
+      }
+
+      const previousMarker = parseSkillMarker(previousText);
+      if (
+        previousMarker &&
+        !parseSkillMarker(currentText) &&
+        currentText.endsWith(previousMarker.rest) &&
+        currentText.includes(previousMarker.rest)
+      ) {
+        // The previous event is the orchestrator's `[/skill: name] <rest>`
+        // marker, and the current one is the agent's echo of the same turn
+        // (the full prompt it received, which contains the same `<rest>` as
+        // a suffix). Keep the marker as the canonical text — it carries
+        // the skill tag for the UI. Inherit the echo's attachments only
+        // when the marker has none.
+        const previousAttachments = pickUserMessageAttachments(previous);
+        const currentAttachments = pickUserMessageAttachments(event);
+        result[result.length - 1] = {
+          ...previous,
+          data: {
+            ...previous.data,
+            attachments: previousAttachments ?? currentAttachments,
+          },
+        };
+        continue;
+      }
+
+      // The reverse ordering: the agent wrote the echo first, the
+      // orchestrator's marker second. Keep the marker (drop the previous
+      // echo) and inherit any attachments the echo may have carried.
+      const currentMarker = parseSkillMarker(currentText);
+      if (
+        currentMarker &&
+        !previousMarker &&
+        previousText.endsWith(currentMarker.rest) &&
+        previousText.includes(currentMarker.rest)
+      ) {
+        const previousAttachments = pickUserMessageAttachments(previous);
+        const currentAttachments = pickUserMessageAttachments(event);
+        result[result.length - 1] = {
+          ...event,
+          data: {
+            ...event.data,
+            attachments: currentAttachments ?? previousAttachments,
+          },
+        };
+        continue;
+      }
     }
     result.push(event);
   }
@@ -1643,4 +1790,12 @@ function pickUserMessageAttachments(event: AgentEvent): unknown[] | undefined {
   const attachments = (event.data as { attachments?: unknown }).attachments;
   if (!Array.isArray(attachments) || attachments.length === 0) return undefined;
   return attachments;
+}
+
+export function parseSkillMarker(
+  text: string
+): { skillName: string; rest: string } | null {
+  const match = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(text);
+  if (!match) return null;
+  return { skillName: match[1], rest: match[2] };
 }

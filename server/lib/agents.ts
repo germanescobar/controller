@@ -559,6 +559,12 @@ const claudeProvider: AgentProvider = {
       "--verbose",
       "--permission-mode",
       mode === "plan" ? "plan" : "bypassPermissions",
+      // Turn off Claude Code's built-in slash commands so the orchestrator
+      // is the only path. The orchestrator's skill catalog is the single
+      // source of truth for `/<name>` invocations; the CLI's `/help`,
+      // `/clear`, and any marketplace-installed plugin skills are out of
+      // scope for v1 (see issue #98).
+      "--disable-slash-commands",
     ];
 
     if (model) {
