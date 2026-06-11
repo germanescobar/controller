@@ -4,12 +4,16 @@ import { useEffect, useRef } from "react";
  * Global keyboard shortcuts that drive the focus-mode loop from the keyboard.
  *
  * - `N` advances to the next pinned session (only while focus mode is active).
+ *   If a focus-advance countdown is pending, `N` commits it immediately
+ *   (matches the **Go now** button in the focus banner — see issue #104).
  * - `D` marks the current session done (only while focus mode is active).
  * - `F` enters focus mode (no-op if already active).
  * - `E` exits focus mode (no-op if not active).
  * - `Esc` blurs the currently-focused input/textarea/contenteditable so the
  *   shortcuts above can fire afterwards. It is intentionally a no-op when the
- *   focus is inside a dialog or the embedded terminal.
+ *   focus is inside a dialog or the embedded terminal. If a focus-advance
+ *   countdown is pending and focus is *not* in an editable element, Esc
+ *   cancels the countdown (matches the **Stay** button).
  *
  * Shortcuts are suppressed when the user is typing (input, textarea, select,
  * contenteditable), when a dialog is open (role="dialog" or <dialog>), when
@@ -22,6 +26,12 @@ export interface UseFocusModeShortcutsOptions {
   onDone: () => void;
   onEnter: () => void;
   onExit: () => void;
+  /**
+   * Optional. Called when the user presses Esc (and focus is not in
+   * an editable element) while a focus-advance countdown is
+   * pending. Issue #104.
+   */
+  onCancelAdvance?: () => void;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -51,6 +61,7 @@ export function useFocusModeShortcuts({
   onDone,
   onEnter,
   onExit,
+  onCancelAdvance,
 }: UseFocusModeShortcutsOptions): void {
   // Keep handler refs in sync so the keydown listener doesn't have to
   // re-attach on every render of the host component.
@@ -59,6 +70,7 @@ export function useFocusModeShortcuts({
   const onDoneRef = useRef(onDone);
   const onEnterRef = useRef(onEnter);
   const onExitRef = useRef(onExit);
+  const onCancelAdvanceRef = useRef(onCancelAdvance);
 
   useEffect(() => {
     focusModeRef.current = focusMode;
@@ -66,7 +78,8 @@ export function useFocusModeShortcuts({
     onDoneRef.current = onDone;
     onEnterRef.current = onEnter;
     onExitRef.current = onExit;
-  }, [focusMode, onSkip, onDone, onEnter, onExit]);
+    onCancelAdvanceRef.current = onCancelAdvance;
+  }, [focusMode, onSkip, onDone, onEnter, onExit, onCancelAdvance]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -75,14 +88,23 @@ export function useFocusModeShortcuts({
       if (isInsideDialog(event.target)) return;
       if (isInsideTerminal(event.target)) return;
 
-      // Esc blurs the currently-focused input/textarea/contenteditable so the
-      // user can drive the focus-mode loop from the keyboard after typing.
-      // Suppressed inside dialogs (let them close) and the terminal (let it
-      // forward the key to the running process).
+      // Esc handling has two paths:
+      //   1. Focus is in an editable element: blur it so the user can
+      //      drive the focus-mode loop from the keyboard after typing.
+      //   2. Focus is elsewhere: if a focus-advance countdown is
+      //      pending, cancel it (matches the **Stay** button in the
+      //      focus banner). If no countdown is pending, the Esc key
+      //      is a no-op here.
+      // Suppressed inside dialogs (let them close) and the terminal
+      // (let it forward the key to the running process).
       if (event.key === "Escape") {
         const target = event.target;
         if (isEditableTarget(target) && target instanceof HTMLElement) {
           target.blur();
+          return;
+        }
+        if (onCancelAdvanceRef.current) {
+          onCancelAdvanceRef.current();
         }
         return;
       }
