@@ -211,6 +211,40 @@ export async function pinSessionIfNeeded(
   return session;
 }
 
+/**
+ * Returns the focus-queue fields a session should be persisted with at
+ * first-write time. On first persist of a brand-new session, the
+ * session is auto-pinned (issue #81). On resume of an existing
+ * session, the existing focus state is preserved verbatim — including
+ * any prior `userUnpinned` opt-out, so a session the user explicitly
+ * removed from the focus queue stays removed on subsequent messages.
+ *
+ * The route handlers use this when calling `saveSession` so the
+ * auto-pin rule (and the "respect prior unpin" carve-out) lives in
+ * one testable place rather than being inlined into two `saveSession`
+ * call sites.
+ */
+export function resolveSessionFocusState(
+  existing: SessionState | null
+): {
+  focusPinnedAt: string | undefined;
+  focusDoneAt: string | undefined;
+  userUnpinned: boolean | undefined;
+} {
+  if (!existing) {
+    return {
+      focusPinnedAt: new Date().toISOString(),
+      focusDoneAt: undefined,
+      userUnpinned: undefined,
+    };
+  }
+  return {
+    focusPinnedAt: existing.focusPinnedAt,
+    focusDoneAt: existing.focusDoneAt,
+    userUnpinned: existing.userUnpinned,
+  };
+}
+
 export async function getEvents(
   projectPath: string,
   sessionId: string

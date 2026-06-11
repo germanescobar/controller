@@ -7,6 +7,7 @@ import {
   archiveSession,
   getSession,
   pinSessionIfNeeded,
+  resolveSessionFocusState,
   saveSession,
   updateSessionFocus,
   type SessionState,
@@ -152,5 +153,57 @@ test("archiveSession clears userUnpinned so a rehydrated session gets a clean sl
     const after = await getSession(projectPath, "session-1");
     assert.equal(after?.status, "archived");
     assert.equal(after?.userUnpinned, undefined, "userUnpinned should be cleared on archive");
+  });
+});
+
+test("resolveSessionFocusState pins a brand-new session", () => {
+  const state = resolveSessionFocusState(null);
+  assert.ok(state.focusPinnedAt, "new session should be auto-pinned");
+  assert.equal(state.userUnpinned, undefined);
+  assert.equal(state.focusDoneAt, undefined);
+});
+
+test("resolveSessionFocusState preserves an existing pinned session's state", () => {
+  const existing = makeSession({
+    focusPinnedAt: "2026-01-01T00:00:00.000Z",
+    focusDoneAt: undefined,
+    userUnpinned: undefined,
+  });
+  const state = resolveSessionFocusState(existing);
+  assert.equal(state.focusPinnedAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(state.userUnpinned, undefined);
+  assert.equal(state.focusDoneAt, undefined);
+});
+
+test("resolveSessionFocusState does NOT re-pin a user-unpinned session on resume (regression: PR #102 Codex review)", async () => {
+  // Scenario: user created a session, then explicitly unpinned it.
+  // The session file on disk therefore has userUnpinned: true and no
+  // focusPinnedAt. A follow-up message hits the resume path, which
+  // must (a) leave the session unpinned and (b) keep the userUnpinned
+  // flag so the opt-out survives.
+  await withTempProject(async (projectPath) => {
+    await saveSession(
+      projectPath,
+      makeSession({ userUnpinned: true /* no focusPinnedAt */ })
+    );
+
+    // Simulate what persistSessionStart does: read the existing
+    // session, resolve the focus state, save with the resolved values.
+    const existing = await getSession(projectPath, "session-1");
+    assert.ok(existing, "precondition: session exists on disk");
+    assert.equal(existing?.userUnpinned, true);
+    assert.equal(existing?.focusPinnedAt, undefined);
+
+    const focus = resolveSessionFocusState(existing);
+    await saveSession(projectPath, {
+      ...makeSession({ userUnpinned: true }),
+      focusPinnedAt: focus.focusPinnedAt,
+      focusDoneAt: focus.focusDoneAt,
+      userUnpinned: focus.userUnpinned,
+    });
+
+    const after = await getSession(projectPath, "session-1");
+    assert.equal(after?.focusPinnedAt, undefined, "user-unpinned session must not be re-pinned on resume");
+    assert.equal(after?.userUnpinned, true, "userUnpinned flag must be preserved on resume");
   });
 });
