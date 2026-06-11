@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -42,6 +42,7 @@ import {
   fetchSession,
   fetchWorktrees,
   dismissSessionUserInput,
+  fetchAgentSkills,
   runProjectScript,
   startSession,
   stopSession,
@@ -49,6 +50,7 @@ import {
   submitSessionUserInput,
   pinSessionFocus,
   unpinSessionFocus,
+  type AgentSkill,
   type Project,
   type SourceDirectoryEntry,
   type SourceFile,
@@ -1103,15 +1105,29 @@ const EventBlock = memo(function EventBlock({
   const [expanded, setExpanded] = useState(false);
   const data = event.data;
 
-  // user_message: show as chat bubble
+  // user_message: show as chat bubble. If a skill was active, render a
+  // small `Skill: <name>` badge in the bubble header and strip the
+  // `[/skill: name] ` marker from the visible text.
   if (event.type === "user_message" && data.text) {
     const attachments = (data.attachments as SessionAttachment[] | undefined) ?? [];
+    const rawText = normalizeMarkdownText(data.text);
+    const skillMatch = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(rawText);
+    const skillName = skillMatch?.[1];
+    const visibleText = skillMatch ? skillMatch[2] : rawText;
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%]">
           <AttachmentStrip attachments={attachments} />
           <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-            <CollapsibleUserMessage text={normalizeMarkdownText(data.text)} />
+            {skillName && (
+              <div className="mb-1.5 flex justify-end">
+                <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  <Sparkles className="h-3 w-3 text-primary" />
+                  <span>Skill: {skillName}</span>
+                </span>
+              </div>
+            )}
+            <CollapsibleUserMessage text={visibleText} />
           </div>
         </div>
       </div>
@@ -1161,6 +1177,14 @@ const EventBlock = memo(function EventBlock({
 
   // Working-group events are rendered inside WorkingBlock at the parent level.
   if (isWorkingEvent(event)) {
+    return null;
+  }
+
+  // Skill metadata events emitted by the agent CLI (e.g. Ada's
+  // `skills_loaded`) are pure bookkeeping. The user already gets a
+  // `Skill: <name>` badge on the matching user message bubble, so
+  // rendering the raw JSON here would just show the skill body again.
+  if (event.type === "skills_loaded") {
     return null;
   }
   // Silence unused-warning suppression (expanded used by fallback case below).
@@ -2209,6 +2233,13 @@ export function SessionView({
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
+  // Slash-command skills. The list is fetched for the current provider +
+  // worktree; `activeSkill` is what gets sent as `skillName` on the next
+  // message (the chip + autocomplete popover UI is driven by these).
+  const [availableSkills, setAvailableSkills] = useState<AgentSkill[]>([]);
+  const [activeSkill, setActiveSkill] = useState<AgentSkill | null>(null);
+  const [skillPopoverOpen, setSkillPopoverOpen] = useState(false);
+  const [skillHighlightIndex, setSkillHighlightIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -2608,6 +2639,41 @@ export function SessionView({
       .catch(() => {});
   }, [projectId, worktreeId]);
 
+  // Slash-command skill catalog for the current provider + cwd. We don't
+  // surface this on the very first paint (it's not blocking) and we always
+  // re-fetch when the user switches provider or worktree so the chip and
+  // autocomplete reflect whatever's installed in that worktree.
+  useEffect(() => {
+    if (!providerReady) {
+      setAvailableSkills([]);
+      setActiveSkill(null);
+      return;
+    }
+    const cwd = activeWorktree?.path ?? project?.path ?? "";
+    let cancelled = false;
+    fetchAgentSkills(selectedProvider, cwd)
+      .then((skills) => {
+        if (cancelled) return;
+        setAvailableSkills(skills);
+        // If the active skill no longer exists in the new catalog (provider
+        // switch, worktree switch), drop it so we don't send a stale name.
+        setActiveSkill((current) => {
+          if (!current) return null;
+          return skills.some((entry) => entry.name === current.name)
+            ? current
+            : null;
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAvailableSkills([]);
+        setActiveSkill(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProvider, activeWorktree?.path, project?.path, providerReady]);
+
   // When loading an existing session, restore the provider and model that were used
   useEffect(() => {
     let cancelled = false;
@@ -2920,6 +2986,96 @@ export function SessionView({
     return uploadSessionAttachments(projectId, uploads, worktreeId);
   };
 
+  // Slash-command filtering. The popover is open while the input starts
+  // with `/` and we have a list of candidate skills. Typing more after
+  // `/` narrows the list to skills whose name *starts with* the typed
+  // token; an empty filter shows every skill.
+  const skillQuery = useMemo(() => {
+    if (!message.startsWith("/")) return null;
+    const match = /^\/([A-Za-z0-9._-]*)/.exec(message);
+    if (!match) return null;
+    return { token: match[1], rest: message.slice(match[0].length) };
+  }, [message]);
+  const filteredSkills = useMemo(() => {
+    if (skillQuery === null) return [];
+    const needle = skillQuery.token.toLowerCase();
+    if (!needle) return availableSkills;
+    return availableSkills.filter((entry) =>
+      entry.name.toLowerCase().startsWith(needle)
+    );
+  }, [availableSkills, skillQuery]);
+  // Popover visibility: open while a `/` query is in progress and at least
+  // one candidate exists. Keep the highlight index in range whenever the
+  // filtered list changes.
+  useEffect(() => {
+    if (skillQuery !== null && filteredSkills.length > 0) {
+      setSkillPopoverOpen(true);
+      setSkillHighlightIndex((current) =>
+        Math.min(current, filteredSkills.length - 1)
+      );
+    } else {
+      setSkillPopoverOpen(false);
+    }
+  }, [skillQuery, filteredSkills.length]);
+
+  /**
+   * Promote the chosen skill to the active chip and strip its leading
+   * `/<token>` from the textarea. The chip is the single visible
+   * representation of the active skill — the textarea just shows the rest
+   * of the user's text.
+   */
+  const applySkillChoice = useCallback(
+    (skill: AgentSkill) => {
+      if (skillQuery === null) return;
+      const rest = skillQuery.rest.replace(/^\s+/, "");
+      setMessage(rest);
+      setActiveSkill(skill);
+      setSkillPopoverOpen(false);
+      textareaRef.current?.focus();
+    },
+    [skillQuery]
+  );
+
+  const clearActiveSkill = useCallback(() => {
+    setActiveSkill(null);
+    textareaRef.current?.focus();
+  }, []);
+
+  // Reset the chip when starting a new conversation in a different provider
+  // or worktree — `useEffect` on `selectedProvider` already runs the catalog
+  // reload, which clears an invalid `activeSkill` on its own. The steer
+  // path keeps the same skill across the turn.
+  useEffect(() => {
+    if (streaming && !providerSupportsLiveSteering) {
+      setActiveSkill(null);
+    }
+  }, [streaming, providerSupportsLiveSteering]);
+
+  // Submit-after-chip effect: when the user hits Enter on an exact
+  // `/<skill>` match, the keyboard handler applies the chip, sets
+  // `pendingSkillSubmit`, and React re-renders. This effect then runs
+  // after the render so `message` and `activeSkill` reflect the chip,
+  // and submits the turn in one keystroke.
+  const [pendingSkillSubmit, setPendingSkillSubmit] = useState<
+    { rest: string; skill: AgentSkill } | null
+  >(null);
+  useEffect(() => {
+    if (!pendingSkillSubmit) return;
+    const { rest, skill } = pendingSkillSubmit;
+    // Clear before submitting so a re-render from startAgentStream's
+    // state updates doesn't try to submit again.
+    setPendingSkillSubmit(null);
+    if (rest.length === 0 && composerAttachments.length === 0) return;
+    void startAgentStream(
+      rest,
+      `[/skill: ${skill.name}] ${rest}`,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+  }, [pendingSkillSubmit]);
+
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (
@@ -3004,6 +3160,7 @@ export function SessionView({
       mode: providerSupportsPlanMode ? modeOverride ?? selectedMode : "default",
       worktreeId,
       attachmentIds,
+      skillName: activeSkill?.name,
     });
     eventSourceRef.current = es;
 
@@ -3336,13 +3493,18 @@ export function SessionView({
       }
     }
     const sentMessage = message.trim() || "Please use the attached files as context.";
+    // Local history mirror of `[/skill: name] <text>` so the in-flight
+    // message reads the same as the persisted event the server writes.
+    const visibleMessage = activeSkill
+      ? `[/skill: ${activeSkill.name}] ${sentMessage}`
+      : sentMessage;
     setAttachmentError(null);
     try {
       const uploadedAttachments = await uploadComposerAttachments();
       if (
         await startAgentStream(
           sentMessage,
-          sentMessage,
+          visibleMessage,
           undefined,
           undefined,
           uploadedAttachments.map((attachment) => attachment.id),
@@ -3354,6 +3516,8 @@ export function SessionView({
         });
         setComposerAttachments([]);
         setMessage("");
+        setActiveSkill(null);
+        setSkillPopoverOpen(false);
       }
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : "Failed to upload attachments");
@@ -3396,6 +3560,59 @@ export function SessionView({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (skillPopoverOpen && filteredSkills.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSkillHighlightIndex((current) =>
+          (current + 1) % filteredSkills.length
+        );
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSkillHighlightIndex((current) =>
+          (current - 1 + filteredSkills.length) % filteredSkills.length
+        );
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const choice = filteredSkills[skillHighlightIndex];
+        if (choice) applySkillChoice(choice);
+        return;
+      }
+      if (e.key === "Enter" && skillQuery !== null) {
+        e.preventDefault();
+        const choice = filteredSkills[skillHighlightIndex];
+        // When the typed `/<token>` is an exact (case-insensitive)
+        // match for a known skill, Enter both applies the chip and
+        // submits the turn in a single keystroke — that's the
+        // documented `/skill text` flow. Partial matches (fuzzy picks)
+        // only set the chip, so the user can keep typing after the
+        // autocompleted prefix and submit on a follow-up Enter.
+        const exactMatch = filteredSkills.some(
+          (entry) =>
+            entry.name.toLowerCase() === skillQuery.token.toLowerCase()
+        );
+        if (exactMatch && choice) {
+          const rest = skillQuery.rest.replace(/^\s+/, "");
+          // Apply the chip immediately so the bubble picks up the
+          // `[/skill: name] <rest>` marker on render, and queue the
+          // submit for the post-render effect (see `pendingSkillSubmit`).
+          applySkillChoice(choice);
+          setPendingSkillSubmit({ rest, skill: choice });
+        } else if (choice) {
+          applySkillChoice(choice);
+        }
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSkillPopoverOpen(false);
+        return;
+      }
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (streaming && providerSupportsLiveSteering) {
@@ -3816,16 +4033,29 @@ export function SessionView({
               </div>
 
               {/* Pending user message */}
-              {pendingMessage && showPendingMessage && (
+              {pendingMessage && showPendingMessage && (() => {
+                const pendingMatch = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(pendingMessage);
+                const pendingSkillName = pendingMatch?.[1];
+                const pendingVisible = pendingMatch ? pendingMatch[2] : pendingMessage;
+                return (
                 <div className="flex justify-end mt-4">
                   <div className="max-w-[85%]">
                     <AttachmentStrip attachments={pendingAttachments} />
                     <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-                      <CollapsibleUserMessage text={pendingMessage} />
+                      {pendingSkillName && (
+                        <div className="mb-1.5 flex justify-end">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            <Sparkles className="h-3 w-3 text-primary" />
+                            <span>Skill: {pendingSkillName}</span>
+                          </span>
+                        </div>
+                      )}
+                      <CollapsibleUserMessage text={pendingVisible} />
                     </div>
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* Stream output */}
               {visibleStreamItems.length > 0 && (
@@ -3998,23 +4228,99 @@ export function SessionView({
                       event.currentTarget.value = "";
                     }}
                   />
-                  <textarea
-                    ref={textareaRef}
-                    value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder={
-                      streaming && providerSupportsLiveSteering
-                        ? "Steer the agent..."
-                        : sessionId
-                        ? "Ask for follow-up changes"
-                        : "Describe what you want to build..."
-                    }
-                    rows={1}
-                    disabled={streaming && !providerSupportsLiveSteering}
-                    className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
-                    style={{ maxHeight: "calc(1.25rem * 5)" }}
-                  />
+                  {activeSkill && !skillPopoverOpen && (
+                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                      <span
+                        data-testid="active-skill-chip"
+                        className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-1 text-xs font-medium text-foreground"
+                        title={activeSkill.description || activeSkill.name}
+                      >
+                        <Sparkles className="h-3 w-3 text-primary" />
+                        <span>/{activeSkill.name}</span>
+                        <button
+                          type="button"
+                          onClick={clearActiveSkill}
+                          className="ml-1 flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                          aria-label="Clear active skill"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    </div>
+                  )}
+                  <div className="relative">
+                    <textarea
+                      ref={textareaRef}
+                      value={message}
+                      onChange={(e) => setMessage(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder={
+                        streaming && providerSupportsLiveSteering
+                          ? "Steer the agent..."
+                          : availableSkills.length > 0
+                          ? "Describe what you want to build… type / to use a skill"
+                          : sessionId
+                          ? "Ask for follow-up changes"
+                          : "Describe what you want to build..."
+                      }
+                      rows={1}
+                      disabled={streaming && !providerSupportsLiveSteering}
+                      className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
+                      style={{ maxHeight: "calc(1.25rem * 5)" }}
+                    />
+                    {skillPopoverOpen && filteredSkills.length > 0 && (
+                      <div
+                        role="listbox"
+                        aria-label="Skills"
+                        className="absolute bottom-full left-0 z-20 mb-1 w-[min(28rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg"
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
+                        <div className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Skills
+                        </div>
+                        <div className="max-h-64 overflow-y-auto">
+                          {filteredSkills.map((entry, index) => (
+                            <button
+                              key={entry.path}
+                              type="button"
+                              role="option"
+                              aria-selected={index === skillHighlightIndex}
+                              onClick={() => applySkillChoice(entry)}
+                              onMouseEnter={() => setSkillHighlightIndex(index)}
+                              className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
+                                index === skillHighlightIndex
+                                  ? "bg-accent text-accent-foreground"
+                                  : "text-popover-foreground hover:bg-accent/60"
+                              }`}
+                            >
+                              <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 text-sm font-medium">
+                                  <span>/{entry.name}</span>
+                                  <Badge variant="outline" className="text-[10px]">
+                                    {entry.scope}
+                                  </Badge>
+                                </div>
+                                {entry.description && (
+                                  <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                                    {entry.description}
+                                  </div>
+                                )}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                        <div className="mt-1 flex items-center justify-between border-t border-border/60 px-2 py-1 text-[10px] text-muted-foreground">
+                          <span>
+                            <Kbd>↑</Kbd> <Kbd>↓</Kbd> to navigate
+                          </span>
+                          <span>
+                            <Kbd>Tab</Kbd> / <Kbd>Enter</Kbd> to select · <Kbd>Esc</Kbd> to dismiss
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   {composerAttachments.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
                       {composerAttachments.map((attachment) => {
