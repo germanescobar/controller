@@ -25,6 +25,7 @@ import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
@@ -2466,6 +2467,19 @@ export function SessionView({
     };
   }, [projectId, worktreeId, sessionId]);
 
+  // While focus mode is active, drop the user straight into the composer
+  // whenever the active session changes (entering focus mode, skipping to
+  // the next pinned session, or marking the current one done). This keeps
+  // the focus-mode triage loop keyboard-driven: the user can `Esc` out of
+  // the input to fire a shortcut and is placed back at the keyboard the
+  // moment the new session is ready.
+  useEffect(() => {
+    if (!focusMode || !sessionId) return;
+    const textarea = textareaRef.current;
+    if (!textarea || textarea.disabled) return;
+    textarea.focus();
+  }, [sessionId, focusMode]);
+
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -3575,29 +3589,32 @@ export function SessionView({
               type="button"
               onClick={onFocusSkip}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title="Next"
+              title="Next (N)"
             >
               <StepForward className="h-3.5 w-3.5" />
               Next
+              <Kbd>N</Kbd>
             </button>
             <button
               type="button"
               onClick={onFocusDone}
               disabled={!sessionId}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title="Mark done"
+              title="Mark done (D)"
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
               Done
+              <Kbd>D</Kbd>
             </button>
             <button
               type="button"
               onClick={onFocusExit}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
-              title="Exit focus"
+              title="Exit focus mode (E)"
             >
               <LogOut className="h-3.5 w-3.5" />
               Exit
+              <Kbd>E</Kbd>
             </button>
           </div>
         </div>
