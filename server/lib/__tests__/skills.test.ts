@@ -61,6 +61,24 @@ function withHome(run: (home: string) => Promise<void>): Promise<void> {
   });
 }
 
+/**
+ * Set `$CODEX_HOME` for the duration of `run` and restore the previous
+ * value (or absence) afterwards. Lets the test probe the env-var
+ * resolution path the loader uses for the Codex provider.
+ */
+function withCodexHome(
+  codexHome: string,
+  run: (codexHome: string) => Promise<void>
+): Promise<void> {
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  return run(codexHome).finally(() => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+    rmSync(codexHome, { recursive: true, force: true });
+  });
+}
+
 function withProviderHome(
   providerId: "ada" | "codex" | "claude",
   run: (home: string, provider: SkillProvider) => Promise<void>
@@ -268,5 +286,71 @@ test("repo skills are listed only when cwd is inside a git work tree", async () 
 test("readBody returns null for an unknown skill", async () => {
   await withProviderHome("ada", async (_home, provider) => {
     assert.equal(await provider.readBody("not-a-skill", os.tmpdir()), null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex-specific env var and binary-relative resolution
+// ---------------------------------------------------------------------------
+
+test("codex provider honors $CODEX_HOME for both user and system skills", async () => {
+  // Set up two separate codex home roots: the "real" $HOME/.codex has
+  // nothing, but $CODEX_HOME has both a user skill and a system skill.
+  // The loader should find the latter and ignore the former.
+  await withHome(async (realHome) => {
+    await withCodexHome(makeTempDir("codex-home-"), async (codexHome) => {
+      // Real home has no skills — the real $HOME/.codex/skills must
+      // not contribute. We assert this implicitly by NOT creating it.
+      void realHome;
+
+      makeSkillFile(
+        path.join(codexHome, "skills"),
+        "imagegen",
+        { name: "imagegen", description: "Generate images" },
+        "body"
+      );
+      makeSkillFile(
+        path.join(codexHome, "skills/.system"),
+        "openai-docs",
+        { name: "openai-docs", description: "OpenAI reference" },
+        "body"
+      );
+
+      const provider = getSkillProvider("codex");
+      assert.ok(provider);
+      const metadata = await provider.listMetadata(os.tmpdir());
+      const byName = Object.fromEntries(
+        metadata.map((entry) => [entry.name, entry.scope])
+      );
+      assert.equal(byName["imagegen"], "user");
+      assert.equal(byName["openai-docs"], "system");
+    });
+  });
+});
+
+test("codex provider expands ~ in $CODEX_HOME", async () => {
+  // The provider must expand a leading `~` in $CODEX_HOME the same way
+  // the rest of the orchestrator does (see `command-resolver.ts`).
+  await withHome(async (realHome) => {
+    const codexHome = path.join(realHome, "codex-from-tilde");
+    process.env.CODEX_HOME = "~/" + path.basename(codexHome);
+    try {
+      makeSkillFile(
+        path.join(codexHome, "skills"),
+        "imagegen",
+        { name: "imagegen", description: "i" },
+        "body"
+      );
+      const provider = getSkillProvider("codex");
+      assert.ok(provider);
+      const metadata = await provider.listMetadata(os.tmpdir());
+      assert.ok(
+        metadata.some((entry) => entry.name === "imagegen"),
+        "imagegen should be discovered under the tilde-expanded $CODEX_HOME"
+      );
+    } finally {
+      delete process.env.CODEX_HOME;
+      rmSync(codexHome, { recursive: true, force: true });
+    }
   });
 });

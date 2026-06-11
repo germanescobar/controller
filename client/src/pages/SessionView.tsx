@@ -3051,6 +3051,31 @@ export function SessionView({
     }
   }, [streaming, providerSupportsLiveSteering]);
 
+  // Submit-after-chip effect: when the user hits Enter on an exact
+  // `/<skill>` match, the keyboard handler applies the chip, sets
+  // `pendingSkillSubmit`, and React re-renders. This effect then runs
+  // after the render so `message` and `activeSkill` reflect the chip,
+  // and submits the turn in one keystroke.
+  const [pendingSkillSubmit, setPendingSkillSubmit] = useState<
+    { rest: string; skill: AgentSkill } | null
+  >(null);
+  useEffect(() => {
+    if (!pendingSkillSubmit) return;
+    const { rest, skill } = pendingSkillSubmit;
+    // Clear before submitting so a re-render from startAgentStream's
+    // state updates doesn't try to submit again.
+    setPendingSkillSubmit(null);
+    if (rest.length === 0 && composerAttachments.length === 0) return;
+    void startAgentStream(
+      rest,
+      `[/skill: ${skill.name}] ${rest}`,
+      undefined,
+      undefined,
+      undefined,
+      undefined
+    );
+  }, [pendingSkillSubmit]);
+
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (
@@ -3550,10 +3575,35 @@ export function SessionView({
         );
         return;
       }
-      if (e.key === "Tab" || (e.key === "Enter" && skillQuery !== null)) {
+      if (e.key === "Tab") {
         e.preventDefault();
         const choice = filteredSkills[skillHighlightIndex];
         if (choice) applySkillChoice(choice);
+        return;
+      }
+      if (e.key === "Enter" && skillQuery !== null) {
+        e.preventDefault();
+        const choice = filteredSkills[skillHighlightIndex];
+        // When the typed `/<token>` is an exact (case-insensitive)
+        // match for a known skill, Enter both applies the chip and
+        // submits the turn in a single keystroke — that's the
+        // documented `/skill text` flow. Partial matches (fuzzy picks)
+        // only set the chip, so the user can keep typing after the
+        // autocompleted prefix and submit on a follow-up Enter.
+        const exactMatch = filteredSkills.some(
+          (entry) =>
+            entry.name.toLowerCase() === skillQuery.token.toLowerCase()
+        );
+        if (exactMatch && choice) {
+          const rest = skillQuery.rest.replace(/^\s+/, "");
+          // Apply the chip immediately so the bubble picks up the
+          // `[/skill: name] <rest>` marker on render, and queue the
+          // submit for the post-render effect (see `pendingSkillSubmit`).
+          applySkillChoice(choice);
+          setPendingSkillSubmit({ rest, skill: choice });
+        } else if (choice) {
+          applySkillChoice(choice);
+        }
         return;
       }
       if (e.key === "Escape") {
@@ -3561,6 +3611,7 @@ export function SessionView({
         setSkillPopoverOpen(false);
         return;
       }
+      return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();

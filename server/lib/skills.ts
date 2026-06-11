@@ -24,6 +24,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { resolveCommand } from "./command-resolver.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -70,7 +71,7 @@ interface ParsedSkillFile {
 interface ProviderConfig {
   repoDirName: string;
   userDirs: () => string[];
-  systemDirs?: () => string[];
+  systemDirs?: () => Promise<string[]> | string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -259,12 +260,74 @@ function adaUserSkillsHome(): string {
   return path.join(os.homedir(), ".ada", "skills");
 }
 
+/**
+ * The Codex CLI uses `$CODEX_HOME` as the root of its state directory and
+ * ships its bundled skills under `$CODEX_HOME/skills/.system` (when
+ * `$CODEX_HOME` is set) or `~/.codex/skills/.system` (the default). Some
+ * packaged installs put the system skills next to the resolved `codex`
+ * binary instead. We honor all three so the orchestrator surfaces bundled
+ * skills no matter where the deployment put them.
+ */
+function codexHome(): string {
+  const override = process.env.CODEX_HOME?.trim();
+  if (override) return expandHome(override);
+  return path.join(os.homedir(), ".codex");
+}
+
 function codexUserSkillsHome(): string {
-  return path.join(os.homedir(), ".codex", "skills");
+  return path.join(codexHome(), "skills");
 }
 
 function codexSystemSkillsHome(): string {
-  return path.join(os.homedir(), ".codex", "skills", ".system");
+  return path.join(codexHome(), "skills", ".system");
+}
+
+/**
+ * System skills may also live next to the resolved codex binary. Common
+ * install layouts include:
+ *   - `/opt/codex/bin/codex` → `/opt/codex/skills/.system`
+ *   - `<pkg>/bin/codex` → `<pkg>/skills/.system`
+ *   - `<pkg>/releases/<ver>/bin/codex` → `<pkg>/releases/<ver>/skills/.system`
+ *
+ * We probe a couple of relative candidates and return whichever ones
+ * actually exist on disk. Resolution is best-effort: if the binary can't
+ * be located or none of the candidates are present, the user/system
+ * paths above still cover the common case.
+ */
+async function codexBinarySiblingSystemDirs(): Promise<string[]> {
+  const binary = resolveCommand("codex");
+  if (!binary) return [];
+  // `realpath` collapses symlinks (e.g. Homebrew shims), so the probe
+  // candidates below land on the actual on-disk location of the binary.
+  let realBinary: string;
+  try {
+    realBinary = await fs.realpath(binary);
+  } catch {
+    realBinary = binary;
+  }
+  const binDir = path.dirname(realBinary);
+  const candidates = [
+    path.join(binDir, "..", "skills", ".system"),
+    path.join(binDir, "..", "..", "skills", ".system"),
+  ];
+  const out: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isDirectory()) out.push(candidate);
+    } catch {
+      // not present; skip
+    }
+  }
+  return out;
+}
+
+function expandHome(input: string): string {
+  if (input === "~") return os.homedir();
+  if (input.startsWith(`~${path.sep}`)) {
+    return path.join(os.homedir(), input.slice(2));
+  }
+  return input;
 }
 
 function claudeUserSkillsHome(): string {
@@ -279,7 +342,10 @@ const ADA_CONFIG: ProviderConfig = {
 const CODEX_CONFIG: ProviderConfig = {
   repoDirName: ".codex/skills",
   userDirs: () => [codexUserSkillsHome()],
-  systemDirs: () => [codexSystemSkillsHome()],
+  systemDirs: async () => [
+    codexSystemSkillsHome(),
+    ...(await codexBinarySiblingSystemDirs()),
+  ],
 };
 
 const CLAUDE_CONFIG: ProviderConfig = {
@@ -290,7 +356,7 @@ const CLAUDE_CONFIG: ProviderConfig = {
 async function collectDirs(config: ProviderConfig, cwd: string) {
   return [
     ...(await userSkillDirs(config.userDirs())),
-    ...(await systemSkillDirs(config.systemDirs?.())),
+    ...(await systemSkillDirs(await config.systemDirs?.())),
     ...(await repoSkillDirs(config.repoDirName, cwd)),
   ];
 }
