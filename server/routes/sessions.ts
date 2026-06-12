@@ -739,6 +739,11 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       focusDoneAt: focus.focusDoneAt,
       userUnpinned: focus.userUnpinned,
     });
+    // Notify the client if the session was auto-pinned so it can update
+    // the focus-queue indicator without a full page reload.
+    if (focus.focusPinnedAt && !existing?.focusPinnedAt) {
+      sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
+    }
   }
 
   /** Convert a normalized agent event to a persisted AgentEvent and append it. */
@@ -1157,6 +1162,9 @@ async function streamCodexPlanSession(
       focusDoneAt: focus.focusDoneAt,
       userUnpinned: focus.userUnpinned,
     });
+    if (focus.focusPinnedAt && !existing?.focusPinnedAt) {
+      sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
+    }
   }
 
   function persistAgentEvent(event: AgentStreamEvent) {
