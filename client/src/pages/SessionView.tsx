@@ -3293,6 +3293,9 @@ export function SessionView({
             setStreamItems((prev) => [...prev, { type: "error", text, at: Date.now() }]);
           }
         }
+      } else if (data.type === "session_focus") {
+        setIsFocusPinned(Boolean(data.focusPinnedAt));
+        onFocusPinnedChange?.();
       } else if (data.type === "ada_event") {
         const adaEvent = data.event;
         if (adaEvent.type === "run.started") {

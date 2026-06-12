@@ -175,6 +175,31 @@ test("resolveSessionFocusState preserves an existing pinned session's state", ()
   assert.equal(state.focusDoneAt, undefined);
 });
 
+test("resolveSessionFocusState auto-pins an existing unpinned session on reply", () => {
+  // Scenario: session exists but was never pinned (e.g. created before auto-pin,
+  // or focus queue was off). User sends a new message — it should appear in the
+  // focus queue automatically.
+  const existing = makeSession({ focusPinnedAt: undefined, userUnpinned: undefined });
+  const state = resolveSessionFocusState(existing);
+  assert.ok(state.focusPinnedAt, "unpinned session should be auto-pinned on reply");
+  assert.equal(state.userUnpinned, undefined);
+  assert.equal(state.focusDoneAt, undefined);
+});
+
+test("resolveSessionFocusState auto-pins a 'done' session on reply", () => {
+  // Scenario: user marked a session as done, then sends another message.
+  // It should surface back in the focus queue.
+  const existing = makeSession({
+    focusPinnedAt: undefined,
+    focusDoneAt: "2026-01-01T00:00:00.000Z",
+    userUnpinned: undefined,
+  });
+  const state = resolveSessionFocusState(existing);
+  assert.ok(state.focusPinnedAt, "done session should be auto-pinned on reply");
+  assert.equal(state.focusDoneAt, undefined, "focusDoneAt should be cleared on auto-pin");
+  assert.equal(state.userUnpinned, undefined);
+});
+
 test("resolveSessionFocusState does NOT re-pin a user-unpinned session on resume (regression: PR #102 Codex review)", async () => {
   // Scenario: user created a session, then explicitly unpinned it.
   // The session file on disk therefore has userUnpinned: true and no

@@ -201,7 +201,8 @@ export type SessionStreamEvent =
   | { type: "ada_event"; event: AdaStreamEvent }
   | { type: "stderr"; text: string }
   | { type: "done"; exitCode: number | null }
-  | { type: "error"; text: string; raw?: string };
+  | { type: "error"; text: string; raw?: string }
+  | { type: "session_focus"; focusPinnedAt: string | undefined };
 
 export async function fetchProjects(): Promise<Project[]> {
   const res = await fetch(`${BASE}/projects`);
