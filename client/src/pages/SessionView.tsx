@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
+import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext, createElement } from "react";
 import { diffLines } from "diff";
 import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw } from "lucide-react";
 import hljs from "highlight.js/lib/core";
@@ -2248,7 +2248,7 @@ function PreviewPanel({
         </div>
       ) : null}
       {state.url ? (
-        React.createElement("webview", {
+        createElement("webview", {
           ref: (element: PreviewWebviewElement | null) => {
             webviewRef.current = element;
           },
