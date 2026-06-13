@@ -77,20 +77,11 @@ function validatePreviewUrl(
   try {
     url = new URL(normalizePreviewUrl(input));
   } catch {
-    return { allowed: false, error: "Enter a valid localhost or project file URL" };
+    return { allowed: false, error: "Enter a valid web or project file URL" };
   }
 
   if (url.protocol === "http:" || url.protocol === "https:") {
-    const hostname = url.hostname.toLowerCase();
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname === "[::1]"
-    ) {
-      return { allowed: true, url: url.toString() };
-    }
-    return { allowed: false, error: "Only localhost preview URLs are allowed in v1" };
+    return { allowed: true, url: url.toString() };
   }
 
   if (url.protocol === "file:") {
@@ -109,7 +100,7 @@ function validatePreviewUrl(
     return { allowed: true, url: url.toString() };
   }
 
-  return { allowed: false, error: "Only localhost and project file previews are allowed in v1" };
+  return { allowed: false, error: "Only web URLs and project file previews are allowed" };
 }
 
 async function waitForServer(url: string): Promise<void> {

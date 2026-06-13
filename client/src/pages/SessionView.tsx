@@ -543,7 +543,7 @@ const OpenSourceReferenceContext = createContext<
 const PreviewContext = createContext<PreviewActions>({ available: false, open: () => {} });
 
 const PREVIEW_URL_PATTERN =
-  /\b(?:https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s"'`<>)\]]*|(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)[^\s"'`<>)\]]*|file:\/\/[^\s"'`<>)\]]+)/gi;
+  /\b(?:https?:\/\/[^\s"'`<>)\]]+|(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)[^\s"'`<>)\]]*|file:\/\/[^\s"'`<>)\]]+)/gi;
 
 function extractPreviewUrls(text: string): string[] {
   const seen = new Set<string>();
@@ -2202,7 +2202,7 @@ function PreviewPanel({
         <input
           value={state.input}
           onChange={(event) => onStateChange({ input: event.target.value })}
-          placeholder="http://localhost:5173 or project file path"
+          placeholder="https://example.com, localhost:5173, or project file path"
           className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
         />
         <button
@@ -2242,7 +2242,7 @@ function PreviewPanel({
           <span className="min-w-0 truncate">{state.title ?? state.url}</span>
           {projectRoot ? (
             <span className="hidden shrink-0 text-muted-foreground/50 lg:inline">
-              Local/project preview only
+              Web URLs and project files
             </span>
           ) : null}
         </div>
@@ -2263,7 +2263,7 @@ function PreviewPanel({
             <Globe2 className="mx-auto mb-3 h-7 w-7 text-muted-foreground/60" />
             <div className="text-sm font-medium text-foreground">No preview open</div>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Open a localhost URL or an HTML/file path inside the active project.
+              Open a web URL or an HTML/file path inside the active project.
             </p>
           </div>
         </div>
