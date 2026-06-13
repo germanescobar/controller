@@ -9,6 +9,12 @@ export interface ControllerCheckResult {
   error?: string;
 }
 
+export interface PreviewUrlCheckResult {
+  allowed: boolean;
+  url?: string;
+  error?: string;
+}
+
 export interface ControllerBridge {
   isElectron: true;
   checkPort: (port: number) => Promise<ControllerCheckResult>;
@@ -19,6 +25,10 @@ export interface ControllerBridge {
   // re-mounting UI that needs the current state without waiting
   // for the next broadcast.
   getStatus: () => ControllerStatus | null;
+  validatePreviewUrl: (
+    url: string,
+    projectRoot?: string
+  ) => Promise<PreviewUrlCheckResult>;
   navigateToApp: (url: string) => void;
   showWindow: () => void;
   quit: () => void;

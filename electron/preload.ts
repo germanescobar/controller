@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   ControllerBridge,
   ControllerCheckResult,
+  PreviewUrlCheckResult,
   ControllerStatus,
 } from "../shared/controller.js";
 
@@ -52,6 +53,12 @@ const bridge: ControllerBridge = {
       | ControllerStatus
       | null;
   },
+  validatePreviewUrl: (url, projectRoot) =>
+    ipcRenderer.invoke(
+      "controller:validate-preview-url",
+      url,
+      projectRoot
+    ) as Promise<PreviewUrlCheckResult>,
   navigateToApp: (url) => {
     window.location.href = url;
   },

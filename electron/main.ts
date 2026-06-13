@@ -4,6 +4,7 @@ import {
   Menu,
   type MenuItemConstructorOptions,
   ipcMain,
+  type WebContents,
 } from "electron";
 import path from "node:path";
 import { createServer } from "node:net";
@@ -43,6 +44,72 @@ function parsePort(value: string | undefined, fallback: number): number {
 function getDevUrl(): string {
   const port = parsePort(process.env.VITE_DEV_SERVER_PORT, DEFAULT_CLIENT_PORT);
   return `http://localhost:${port}`;
+}
+
+function normalizePreviewUrl(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error("Enter a URL to preview");
+
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#].*)?$/i.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+
+  if (path.isAbsolute(trimmed)) {
+    return pathToFileURL(trimmed).toString();
+  }
+
+  return new URL(trimmed).toString();
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === "" ||
+    (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
+function validatePreviewUrl(
+  input: string,
+  projectRoot?: string
+): { allowed: boolean; url?: string; error?: string } {
+  let url: URL;
+  try {
+    url = new URL(normalizePreviewUrl(input));
+  } catch {
+    return { allowed: false, error: "Enter a valid localhost or project file URL" };
+  }
+
+  if (url.protocol === "http:" || url.protocol === "https:") {
+    const hostname = url.hostname.toLowerCase();
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1" ||
+      hostname === "[::1]"
+    ) {
+      return { allowed: true, url: url.toString() };
+    }
+    return { allowed: false, error: "Only localhost preview URLs are allowed in v1" };
+  }
+
+  if (url.protocol === "file:") {
+    if (!projectRoot) {
+      return { allowed: false, error: "Project files can only be previewed after the worktree is loaded" };
+    }
+    let filePath: string;
+    try {
+      filePath = fileURLToPath(url);
+    } catch {
+      return { allowed: false, error: "Invalid file URL" };
+    }
+    if (!isPathInside(projectRoot, filePath)) {
+      return { allowed: false, error: "File previews must stay inside the active project" };
+    }
+    return { allowed: true, url: url.toString() };
+  }
+
+  return { allowed: false, error: "Only localhost and project file previews are allowed in v1" };
 }
 
 async function waitForServer(url: string): Promise<void> {
@@ -256,6 +323,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       // Sandboxed preloads run in a CommonJS context regardless of the
       // project's "type": "module" setting, so an ESM preload fails to
       // load with "Cannot use import statement outside a module". The
@@ -283,6 +351,25 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
   }
 
   return win;
+}
+
+function attachPreviewWebviewGuards(contents: WebContents): void {
+  contents.setWindowOpenHandler(({ url }) => {
+    warnWithTime(`blocked preview popup: ${url}`);
+    return { action: "deny" };
+  });
+  contents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    warnWithTime(`blocked preview permission request: ${permission}`);
+    callback(false);
+  });
+  contents.on("will-attach-webview", (_event, webPreferences, params) => {
+    const src = typeof params.src === "string" ? params.src : "";
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
+    delete webPreferences.preload;
+    logWithTime(`preview webview attached: ${src || "(empty)"}`);
+  });
 }
 
 function attachErrorReporting(win: BrowserWindow): void {
@@ -387,6 +474,19 @@ function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.handle(
+    "controller:validate-preview-url",
+    (_event, url: unknown, projectRoot: unknown) => {
+      if (typeof url !== "string") {
+        return { allowed: false, error: "URL must be a string" };
+      }
+      return validatePreviewUrl(
+        url,
+        typeof projectRoot === "string" && projectRoot.trim() ? projectRoot : undefined
+      );
+    }
+  );
+
   ipcMain.on("controller:show-window", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win) win.show();
@@ -409,6 +509,11 @@ app.whenReady().then(async () => {
   logWithTime("app ready");
   registerIpcHandlers();
   logWithTime("ipc handlers registered");
+  app.on("web-contents-created", (_event, contents) => {
+    if (contents.getType() === "window") {
+      attachPreviewWebviewGuards(contents);
+    }
+  });
 
   try {
     if (!app.isPackaged) {

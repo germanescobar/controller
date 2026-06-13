@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -29,6 +29,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
+import { getController, isControllerAvailable } from "@/lib/controller";
 import {
   fetchActiveRuntimes,
   fetchEvents,
@@ -520,12 +521,46 @@ interface SourceFilePreview {
   line?: number;
 }
 
-type RightPanelTab = "terminal" | "changes" | "files";
+interface PreviewActions {
+  available: boolean;
+  open: (url: string) => void;
+}
+
+interface PreviewState {
+  input: string;
+  url: string | null;
+  title: string | null;
+  loading: boolean;
+  error: string | null;
+}
+
+type RightPanelTab = "terminal" | "changes" | "files" | "preview";
 type MobilePanel = "agent" | RightPanelTab;
 
 const OpenSourceReferenceContext = createContext<
   ((reference: OpenSourceReferenceOptions) => void) | undefined
 >(undefined);
+const PreviewContext = createContext<PreviewActions>({ available: false, open: () => {} });
+
+const PREVIEW_URL_PATTERN =
+  /\b(?:https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?[^\s"'`<>)\]]*|(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)[^\s"'`<>)\]]*|file:\/\/[^\s"'`<>)\]]+)/gi;
+
+function extractPreviewUrls(text: string): string[] {
+  const seen = new Set<string>();
+  const urls: string[] = [];
+  for (const match of text.matchAll(PREVIEW_URL_PATTERN)) {
+    const raw = match[0].replace(/[.,;:!?]+$/, "");
+    const normalized = raw.startsWith("http") || raw.startsWith("file://") ? raw : `http://${raw}`;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    urls.push(normalized);
+  }
+  return urls.slice(0, 3);
+}
+
+function usePreviewActions(): PreviewActions {
+  return useContext(PreviewContext);
+}
 
 hljs.registerLanguage("bash", bash);
 hljs.registerLanguage("css", css);
@@ -1290,6 +1325,33 @@ const markdownComponents = {
   a: MarkdownLink,
 };
 
+const PreviewUrlActions = memo(function PreviewUrlActions({ content }: { content: string }) {
+  const preview = usePreviewActions();
+  const urls = useMemo(() => extractPreviewUrls(content), [content]);
+
+  if (!preview.available || urls.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1.5 px-4 pb-2">
+      {urls.map((url) => (
+        <button
+          key={url}
+          type="button"
+          onClick={() => preview.open(url)}
+          className="inline-flex max-w-full items-center gap-1.5 rounded border border-border bg-background/70 px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          title={url}
+        >
+          <Globe2 className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate">Open Preview</span>
+          <span className="max-w-48 truncate font-mono text-[10px] text-muted-foreground/70">
+            {url}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+});
+
 const AssistantBlock = memo(function AssistantBlock({
   text,
   children,
@@ -1467,6 +1529,7 @@ const ToolResultRow = memo(function ToolResultRow({
           {content}
         </pre>
       )}
+      <PreviewUrlActions content={content} />
     </div>
   );
 });
@@ -2064,6 +2127,151 @@ function FileTree({
   );
 }
 
+type PreviewWebviewElement = HTMLElement & {
+  reload: () => void;
+};
+
+function previewEventString(event: Event, key: "url" | "errorDescription" | "title"): string | null {
+  const value = (event as Event & Record<typeof key, unknown>)[key];
+  return typeof value === "string" ? value : null;
+}
+
+function PreviewPanel({
+  projectRoot,
+  state,
+  onClear,
+  onOpenUrl,
+  onStateChange,
+}: {
+  projectRoot?: string;
+  state: PreviewState;
+  onClear: () => void;
+  onOpenUrl: (url: string) => void;
+  onStateChange: (state: Partial<PreviewState>) => void;
+}) {
+  const webviewRef = useRef<PreviewWebviewElement | null>(null);
+
+  useEffect(() => {
+    const webview = webviewRef.current;
+    if (!webview) return;
+
+    const handleStart = () => onStateChange({ loading: true, error: null });
+    const handleStop = () => onStateChange({ loading: false });
+    const handleFail = (event: Event) => {
+      onStateChange({
+        loading: false,
+        error: previewEventString(event, "errorDescription") ?? "Preview failed to load",
+      });
+    };
+    const handleTitle = (event: Event) => {
+      onStateChange({ title: previewEventString(event, "title") });
+    };
+    const handleWillNavigate = (event: Event) => {
+      const nextUrl = previewEventString(event, "url");
+      if (!nextUrl || nextUrl === state.url) return;
+      event.preventDefault();
+      onOpenUrl(nextUrl);
+    };
+
+    webview.addEventListener("did-start-loading", handleStart);
+    webview.addEventListener("did-stop-loading", handleStop);
+    webview.addEventListener("did-fail-load", handleFail);
+    webview.addEventListener("page-title-updated", handleTitle);
+    webview.addEventListener("will-navigate", handleWillNavigate);
+    return () => {
+      webview.removeEventListener("did-start-loading", handleStart);
+      webview.removeEventListener("did-stop-loading", handleStop);
+      webview.removeEventListener("did-fail-load", handleFail);
+      webview.removeEventListener("page-title-updated", handleTitle);
+      webview.removeEventListener("will-navigate", handleWillNavigate);
+    };
+  }, [onOpenUrl, onStateChange, state.url]);
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    onOpenUrl(state.input);
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <form
+        onSubmit={submit}
+        className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-[#1c1c1e] px-2"
+      >
+        <Globe2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <input
+          value={state.input}
+          onChange={(event) => onStateChange({ input: event.target.value })}
+          placeholder="http://localhost:5173 or project file path"
+          className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
+        />
+        <button
+          type="submit"
+          className="h-7 shrink-0 rounded border border-border bg-background px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          Open
+        </button>
+        <button
+          type="button"
+          onClick={() => webviewRef.current?.reload()}
+          disabled={!state.url}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          title="Reload preview"
+          aria-label="Reload preview"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} />
+        </button>
+        <button
+          type="button"
+          onClick={onClear}
+          disabled={!state.url}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          title="Close preview"
+          aria-label="Close preview"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </form>
+      {state.error ? (
+        <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {state.error}
+        </div>
+      ) : null}
+      {state.title || state.url ? (
+        <div className="flex h-7 shrink-0 items-center gap-2 border-b border-border px-3 text-[11px] text-muted-foreground">
+          <span className="min-w-0 truncate">{state.title ?? state.url}</span>
+          {projectRoot ? (
+            <span className="hidden shrink-0 text-muted-foreground/50 lg:inline">
+              Local/project preview only
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {state.url ? (
+        React.createElement("webview", {
+          ref: (element: PreviewWebviewElement | null) => {
+            webviewRef.current = element;
+          },
+          src: state.url,
+          partition: "controller-preview",
+          className: "min-h-0 flex-1",
+          webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
+        })
+      ) : (
+        <div className="flex flex-1 items-center justify-center px-6 text-center">
+          <div className="max-w-sm">
+            <Globe2 className="mx-auto mb-3 h-7 w-7 text-muted-foreground/60" />
+            <div className="text-sm font-medium text-foreground">No preview open</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Open a localhost URL or an HTML/file path inside the active project.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] }) {
   if (!attachments || attachments.length === 0) return null;
   return (
@@ -2233,6 +2441,13 @@ export function SessionView({
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
+  const [previewState, setPreviewState] = useState<PreviewState>({
+    input: "",
+    url: null,
+    title: null,
+    loading: false,
+    error: null,
+  });
   // Slash-command skills. The list is fetched for the current provider +
   // worktree; `activeSkill` is what gets sent as `skillName` on the next
   // message (the chip + autocomplete popover UI is driven by these).
@@ -2322,6 +2537,8 @@ export function SessionView({
     return types;
   })();
   const canAttachMore = providerSupportsAttachments && modelSupportsAttachments;
+  const previewAvailable = isControllerAvailable();
+  const previewProjectRoot = activeWorktree?.path ?? project?.path;
   const shouldPollChanges = terminalOpen || rightTab === "changes" || mobilePanel === "changes";
   const providerStatusMessage =
     !sessionId && providerLoadError
@@ -3651,6 +3868,61 @@ export function SessionView({
     openSourcePath(reference.path, reference.line, reference.label);
   }, [openSourcePath]);
 
+  const updatePreviewState = useCallback((next: Partial<PreviewState>) => {
+    setPreviewState((current) => ({ ...current, ...next }));
+  }, []);
+
+  const clearPreview = useCallback(() => {
+    setPreviewState((current) => ({
+      ...current,
+      url: null,
+      title: null,
+      loading: false,
+      error: null,
+    }));
+  }, []);
+
+  const openPreviewUrl = useCallback((url: string) => {
+    if (!isControllerAvailable()) {
+      toast.error("Preview is only available in the Electron app");
+      return;
+    }
+    setTerminalOpen(true);
+    setRightTab("preview");
+    setMobilePanel("preview");
+    updatePreviewState({ input: url, loading: true, error: null });
+    getController()
+      .validatePreviewUrl(url, previewProjectRoot)
+      .then((result) => {
+        if (!result.allowed || !result.url) {
+          updatePreviewState({
+            loading: false,
+            error: result.error ?? "Preview URL is not allowed",
+          });
+          toast.error(result.error ?? "Preview URL is not allowed");
+          return;
+        }
+        setPreviewState((current) => ({
+          ...current,
+          input: result.url ?? url,
+          url: result.url ?? url,
+          title: null,
+          loading: true,
+          error: null,
+        }));
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Failed to open preview";
+        updatePreviewState({ loading: false, error: message });
+        toast.error(message);
+      });
+  }, [previewProjectRoot, updatePreviewState]);
+
+  const previewActions = useMemo<PreviewActions>(() => ({
+    available: previewAvailable,
+    open: openPreviewUrl,
+  }), [openPreviewUrl, previewAvailable]);
+
   const handleStructuredUserInputSubmit = async (
     requestId: string,
     questions: UserInputQuestion[]
@@ -3911,6 +4183,19 @@ export function SessionView({
               <FileCode className="h-3 w-3" />
               Files
             </button>
+            {previewAvailable && (
+              <button
+                onClick={() => { setMobilePanel("preview"); setRightTab("preview"); setTerminalOpen(true); }}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                  mobilePanel === "preview"
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground"
+                }`}
+              >
+                <Globe2 className="h-3 w-3" />
+                Preview
+              </button>
+            )}
           </div>
         )}
 
@@ -3974,6 +4259,7 @@ export function SessionView({
           >
             <ProjectRootContext.Provider value={activeWorktree?.path ?? project?.path}>
             <OpenSourceReferenceContext.Provider value={openSourceReference}>
+            <PreviewContext.Provider value={previewActions}>
             <div className="mx-auto max-w-3xl px-3 py-4 md:px-4 md:py-6">
               {!sessionId && events.length === 0 && streamItems.length === 0 && (
                 <div className="flex flex-col items-center justify-center py-20">
@@ -4197,6 +4483,7 @@ export function SessionView({
 
               <div ref={bottomRef} />
             </div>
+            </PreviewContext.Provider>
             </OpenSourceReferenceContext.Provider>
             </ProjectRootContext.Provider>
           </div>
@@ -4667,13 +4954,13 @@ export function SessionView({
           />
         )}
 
-        {/* Right panel — desktop: side panel with Terminal/Changes/Files tabs; mobile: full screen when a panel tab is active */}
-        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files") && (() => {
+        {/* Right panel — desktop: side panel with Terminal/Changes/Files/Preview tabs; mobile: full screen when a panel tab is active */}
+        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview") && (() => {
           const { added: changesAdded, deleted: changesDeleted } = summarizeDiffFiles(gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles);
           const hasChanges = gitDiffFiles.length > 0 || branchDiffFiles.length > 0;
           return (
           <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${
-            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" ? "flex-1 md:w-1/2" : "hidden md:flex"
+            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" ? "flex-1 md:w-1/2" : "hidden md:flex"
           }`}
           style={terminalOpen && mobilePanel === "agent" ? { width: `${rightPanelResize.width}px`, minWidth: `${rightPanelResize.width}px` } : undefined}
           >
@@ -4725,6 +5012,25 @@ export function SessionView({
                   </span>
                 ) : null}
               </button>
+              {previewAvailable && (
+                <button
+                  onClick={() => { setRightTab("preview"); if (mobilePanel !== "agent") setMobilePanel("preview"); }}
+                  className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    rightTab === "preview"
+                      ? "bg-accent/30 text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={previewState.url ?? "Preview"}
+                >
+                  <Globe2 className="h-3 w-3 shrink-0" />
+                  <span className="shrink-0">Preview</span>
+                  {previewState.url ? (
+                    <span className="max-w-36 truncate font-mono text-[10px] text-muted-foreground/70">
+                      {previewState.url}
+                    </span>
+                  ) : null}
+                </button>
+              )}
             </div>
             {rightTab === "terminal" && (
               <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-[#1c1c1e] px-2">
@@ -4828,6 +5134,17 @@ export function SessionView({
                     preview={sourcePreview}
                     projectId={projectId}
                     worktreeId={worktreeId}
+                  />
+                </div>
+              )}
+              {rightTab === "preview" && previewAvailable && (
+                <div className="absolute inset-0 overflow-hidden bg-background">
+                  <PreviewPanel
+                    projectRoot={previewProjectRoot}
+                    state={previewState}
+                    onClear={clearPreview}
+                    onOpenUrl={openPreviewUrl}
+                    onStateChange={updatePreviewState}
                   />
                 </div>
               )}
