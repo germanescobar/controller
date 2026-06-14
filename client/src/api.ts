@@ -171,6 +171,14 @@ export type AdaStreamEvent =
       questions: UserInputQuestion[];
     }
   | {
+      type: "tool.approval_requested";
+      id: string;
+      toolUseId: string;
+      toolName: string;
+      input: Record<string, unknown>;
+      suggestions: Record<string, unknown>[];
+    }
+  | {
       type: "thread.status";
       threadId: string;
       status: string;
@@ -512,6 +520,44 @@ export async function submitSessionUserInput(
   }
 
   return (await res.json()) as { resumeMessage?: string; resumeMode?: "default" | "plan" };
+}
+
+export type ToolApprovalDecision = "allow_once" | "always_allow" | "deny";
+
+/**
+ * Answer a pending Claude tool-approval prompt. The decision is written to the
+ * still-running process's control channel; the run continues on the same SSE
+ * stream rather than resuming a new turn.
+ */
+export async function submitToolApproval(
+  projectId: string,
+  sessionId: string,
+  requestId: string,
+  decision: ToolApprovalDecision,
+  worktreeId?: string
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/tool-approval${withWorktree(worktreeId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, decision }),
+    }
+  );
+
+  if (!res.ok) {
+    let message = "Failed to submit approval";
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) {
+        message = body.error;
+      }
+    } catch {
+      // Ignore JSON parsing errors and use the default message.
+    }
+
+    throw new Error(message);
+  }
 }
 
 export async function dismissSessionUserInput(

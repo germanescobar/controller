@@ -73,6 +73,8 @@ import {
   type SessionStreamEvent,
   type SessionAttachment,
   type UserInputQuestion,
+  submitToolApproval,
+  type ToolApprovalDecision,
 } from "../api.ts";
 
 interface SessionViewProps {
@@ -117,6 +119,12 @@ type StreamItem = (
   | { type: "plan_updated"; explanation: string | null; plan: PlanStep[] }
   | { type: "plan_delta"; id: string; delta: string }
   | { type: "user_input_requested"; id: string; questions: UserInputQuestion[] }
+  | {
+      type: "tool_approval_requested";
+      id: string;
+      toolName: string;
+      input: Record<string, unknown>;
+    }
   | { type: "thread_status"; status: string; activeFlags: string[] }
   | { type: "error"; text: unknown }
   | { type: "run_cancelled"; reason: string }
@@ -960,6 +968,28 @@ function getLatestPendingUserInputRequest(
   return null;
 }
 
+function getLatestPendingToolApproval(
+  events: AgentEvent[]
+): { requestId: string; toolName: string; input: Record<string, unknown> } | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    // A response settles every earlier request, so the most recent terminal
+    // marker wins: a response means nothing is pending.
+    if (event.type === "tool_approval_response") return null;
+    if (event.type === "tool_approval_requested") {
+      const requestId = event.data.requestId as string | undefined;
+      if (!requestId) return null;
+      return {
+        requestId,
+        toolName: (event.data.toolName as string | undefined) ?? "tool",
+        input: (event.data.input as Record<string, unknown> | undefined) ?? {},
+      };
+    }
+  }
+
+  return null;
+}
+
 function hasMatchingPersistedUserMessage(
   events: AgentEvent[],
   pendingMessage: string | null
@@ -1253,6 +1283,29 @@ const EventBlock = memo(function EventBlock({
     const questions = ((data.questions as UserInputQuestion[] | undefined) ?? []).filter(Boolean);
     if (questions.length === 0) return null;
     return <UserInputRequestedBlock questions={questions} />;
+  }
+
+  // A pending approval renders interactively from the bottom action area (see
+  // `pendingToolApproval`); the persisted request itself is not shown inline.
+  if (event.type === "tool_approval_requested") {
+    return null;
+  }
+
+  if (event.type === "tool_approval_response") {
+    const decision = data.decision as ToolApprovalDecision | undefined;
+    const label =
+      decision === "deny"
+        ? "Denied"
+        : decision === "always_allow"
+          ? "Approved (always allow)"
+          : "Approved";
+    return (
+      <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
+        <div className="h-px flex-1 bg-border" />
+        <span>{label}</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    );
   }
 
   // session_start / session_end: compact
@@ -1837,6 +1890,106 @@ function UserInputRequestedBlock({
       ) : null}
     </div>
   );
+}
+
+function ToolApprovalBlock({
+  toolName,
+  input,
+  onDecision,
+  submitting = false,
+}: {
+  toolName: string;
+  input: Record<string, unknown>;
+  onDecision?: (decision: ToolApprovalDecision) => void;
+  submitting?: boolean;
+}) {
+  // ExitPlanMode is an approve-the-plan gate, not a per-tool permission. Its
+  // plan text already renders as an assistant message above, so the block only
+  // carries the decision buttons.
+  const isPlanApproval = toolName === "ExitPlanMode";
+  const summary = isPlanApproval ? "" : describeApprovalInput(toolName, input);
+  const disabled = !onDecision || submitting;
+
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+      <div className="flex items-center gap-2">
+        <Badge variant="secondary" className="text-[10px]">
+          <span className="text-amber-400">approval</span>
+        </Badge>
+        <span className="text-sm text-foreground">
+          {isPlanApproval
+            ? "Claude is ready to exit plan mode and implement"
+            : `Claude wants to use ${toolName}`}
+        </span>
+      </div>
+      {summary ? (
+        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-md border border-border/70 bg-background/70 p-3 text-xs text-foreground">
+          {summary}
+        </pre>
+      ) : null}
+      <div className="mt-4 flex flex-wrap gap-2">
+        {isPlanApproval ? (
+          <>
+            <Button size="sm" disabled={disabled} onClick={() => onDecision?.("allow_once")}>
+              Approve &amp; implement
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={disabled}
+              onClick={() => onDecision?.("deny")}
+            >
+              Keep planning
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button size="sm" disabled={disabled} onClick={() => onDecision?.("allow_once")}>
+              Allow once
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={disabled}
+              onClick={() => onDecision?.("always_allow")}
+            >
+              Always allow
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={disabled}
+              onClick={() => onDecision?.("deny")}
+            >
+              Deny
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Best-effort one-line/-block summary of the action awaiting approval. */
+function describeApprovalInput(
+  toolName: string,
+  input: Record<string, unknown>
+): string {
+  if (toolName === "Bash" && typeof input.command === "string") {
+    return input.command;
+  }
+  if (
+    (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") &&
+    typeof input.file_path === "string"
+  ) {
+    return input.file_path;
+  }
+  try {
+    const json = JSON.stringify(input, null, 2);
+    return json && json !== "{}" ? json : "";
+  } catch {
+    return "";
+  }
 }
 
 function ThreadStatusBlock({
@@ -2477,6 +2630,7 @@ export function SessionView({
   const [branchDiffFiles, setBranchDiffFiles] = useState<DiffFile[]>([]);
   const [userInputDraft, setUserInputDraft] = useState<Record<string, string>>({});
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
+  const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
   const [previewState, setPreviewState] = useState<PreviewState>({
@@ -3726,6 +3880,19 @@ export function SessionView({
               },
             ]);
           }
+        } else if (adaEvent.type === "tool.approval_requested") {
+          if (isVisible()) {
+            setStreamItems((prev) => [
+              ...prev,
+              {
+                type: "tool_approval_requested",
+                id: adaEvent.id,
+                toolName: adaEvent.toolName,
+                input: adaEvent.input,
+                at: Date.now(),
+              },
+            ]);
+          }
         } else if (adaEvent.type === "thread.status") {
           // Thread status changes are useful internally, but they're noisy in
           // the visible transcript when there's no actionable information.
@@ -4374,6 +4541,40 @@ export function SessionView({
     }
   };
 
+  const handleToolApproval = async (
+    requestId: string,
+    decision: ToolApprovalDecision
+  ) => {
+    const targetSessionId = activeStreamSessionId ?? sessionId;
+    if (!targetSessionId) return;
+
+    setSubmittingApprovalId(requestId);
+    // Drop the prompt immediately; the run continues on the live SSE stream
+    // with the decision applied.
+    setStreamItems((prev) =>
+      prev.filter(
+        (item) => item.type !== "tool_approval_requested" || item.id !== requestId
+      )
+    );
+    try {
+      await submitToolApproval(projectId, targetSessionId, requestId, decision, worktreeId);
+      fetchEvents(projectId, targetSessionId, worktreeId)
+        .then(setEvents)
+        .catch(() => {});
+    } catch (error) {
+      setStreamItems((prev) => [
+        ...prev,
+        {
+          type: "error",
+          text: error instanceof Error ? error.message : "Failed to submit approval",
+          at: Date.now(),
+        },
+      ]);
+    } finally {
+      setSubmittingApprovalId(null);
+    }
+  };
+
   const selectedModelName =
     models.find((m) => m.id === selectedModel)?.name ?? selectedModel;
   const selectedReasoningEffortLabel =
@@ -4411,6 +4612,16 @@ export function SessionView({
     pendingMessage
   );
   const waitingForStructuredInput = Boolean(latestStructuredInputRequest);
+  // Live approvals render inline as stream items; this covers the reload case
+  // where only persisted events exist and an approval is still pending.
+  const pendingToolApprovalFromStream = visibleStreamItems.some(
+    (item) => item.type === "tool_approval_requested"
+  );
+  const pendingToolApproval = pendingToolApprovalFromStream
+    ? null
+    : getLatestPendingToolApproval(events);
+  const waitingForToolApproval =
+    pendingToolApprovalFromStream || Boolean(pendingToolApproval);
   const eventRenderItems = useMemo(() => groupEventsForRender(events), [events]);
   const streamRenderItems = useMemo(
     () => groupStreamItemsForRender(visibleStreamItems),
@@ -4789,6 +5000,20 @@ export function SessionView({
                       );
                     }
 
+                    if (item.type === "tool_approval_requested") {
+                      return (
+                        <ToolApprovalBlock
+                          key={render.key}
+                          toolName={item.toolName}
+                          input={item.input}
+                          submitting={submittingApprovalId === item.id}
+                          onDecision={(decision) =>
+                            handleToolApproval(item.id, decision)
+                          }
+                        />
+                      );
+                    }
+
                     if (item.type === "thread_status") {
                       return null;
                     }
@@ -4831,7 +5056,20 @@ export function SessionView({
                 </div>
               )}
 
-              {streaming && !waitingForStructuredInput && (
+              {pendingToolApproval && (
+                <div className="mt-4">
+                  <ToolApprovalBlock
+                    toolName={pendingToolApproval.toolName}
+                    input={pendingToolApproval.input}
+                    submitting={submittingApprovalId === pendingToolApproval.requestId}
+                    onDecision={(decision) =>
+                      handleToolApproval(pendingToolApproval.requestId, decision)
+                    }
+                  />
+                </div>
+              )}
+
+              {streaming && !waitingForStructuredInput && !waitingForToolApproval && (
                 <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   <span>Working...</span>

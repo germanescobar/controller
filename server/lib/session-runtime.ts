@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import type { ClaudeApprovalRequest } from "./agents.js";
 
 export interface SessionRuntimeMetadata {
   projectId: string;
@@ -10,6 +11,12 @@ export interface SessionRuntimeState {
   provider?: string;
   child?: ChildProcess;
   metadata?: SessionRuntimeMetadata;
+  /**
+   * Tool approvals awaiting the user's decision on the live process, keyed by
+   * control-request id. Tracked in memory so the decision route can answer
+   * immediately without racing the async persistence of the request event.
+   */
+  pendingApprovals?: Map<string, ClaudeApprovalRequest>;
 }
 
 const runtimes = new Map<string, SessionRuntimeState>();
@@ -24,7 +31,14 @@ export function markSessionActive(
 export function markSessionInactive(sessionId: string) {
   const runtime = runtimes.get(sessionId);
   if (runtime) {
-    runtimes.set(sessionId, { ...runtime, active: false, child: undefined });
+    // The process is gone, so any approvals it was blocked on can no longer be
+    // answered — drop them so a stale decision can't target a dead child.
+    runtimes.set(sessionId, {
+      ...runtime,
+      active: false,
+      child: undefined,
+      pendingApprovals: undefined,
+    });
     return;
   }
   runtimes.set(sessionId, { active: false });
@@ -32,6 +46,32 @@ export function markSessionInactive(sessionId: string) {
 
 export function getSessionRuntime(sessionId: string): SessionRuntimeState {
   return runtimes.get(sessionId) ?? { active: false };
+}
+
+/** Record an approval the live process is blocked on, awaiting a decision. */
+export function recordPendingApproval(
+  sessionId: string,
+  request: ClaudeApprovalRequest
+) {
+  const runtime = runtimes.get(sessionId);
+  if (!runtime) return;
+  if (!runtime.pendingApprovals) {
+    runtime.pendingApprovals = new Map();
+  }
+  runtime.pendingApprovals.set(request.requestId, request);
+}
+
+/** Remove and return a pending approval once the user has decided. */
+export function consumePendingApproval(
+  sessionId: string,
+  requestId: string
+): ClaudeApprovalRequest | undefined {
+  const runtime = runtimes.get(sessionId);
+  const request = runtime?.pendingApprovals?.get(requestId);
+  if (request) {
+    runtime?.pendingApprovals?.delete(requestId);
+  }
+  return request;
 }
 
 export interface SessionRuntimeSummary {
