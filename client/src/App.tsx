@@ -1,7 +1,15 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { ArrowRight, Menu, X } from "lucide-react";
+import { Archive, ArrowRight, Menu, Pin, PinOff, X } from "lucide-react";
 import { toast } from "sonner";
-import { fetchProjects, markSessionFocusDone, type Project, type Worktree } from "./api.ts";
+import {
+  archiveSession,
+  fetchProjects,
+  markSessionFocusDone,
+  pinSessionFocus,
+  unpinSessionFocus,
+  type Project,
+  type Worktree,
+} from "./api.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
 import { SettingsDialog } from "./components/settings-dialog.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -383,6 +391,48 @@ export function App() {
     openFocusItem(focusQueue[nextIndex]);
   };
 
+  const handleToggleCurrentSessionPin = async () => {
+    if (activeView.page !== "session" || !activeView.sessionId) return;
+    const { projectId, worktreeId, sessionId } = activeView;
+    const pinned = currentFocusIndex >= 0;
+
+    try {
+      if (pinned) {
+        await unpinSessionFocus(projectId, sessionId, worktreeId);
+      } else {
+        await pinSessionFocus(projectId, sessionId, worktreeId);
+      }
+      setFocusRefreshKey((key) => key + 1);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+    }
+  };
+
+  const handleArchiveCurrentSession = async () => {
+    if (activeView.page !== "session" || !activeView.sessionId) return;
+    const { projectId, worktreeId, sessionId } = activeView;
+
+    try {
+      await archiveSession(projectId, sessionId, worktreeId);
+      setFocusQueue((prev) =>
+        prev.filter(
+          (item) =>
+            !(
+              item.projectId === projectId &&
+              item.worktreeId === (worktreeId ?? item.worktreeId) &&
+              item.session.id === sessionId
+            )
+        )
+      );
+      setFocusRefreshKey((key) => key + 1);
+      loadProjects();
+      setView({ page: "session", projectId, worktreeId });
+      toast.success("Session archived");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to archive session");
+    }
+  };
+
   const handleFocusDone = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
     const projectId = activeView.projectId;
@@ -573,6 +623,32 @@ export function App() {
           <span className="ml-3 min-w-0 flex-1 truncate text-sm font-medium">
             {mobileHeaderTitle}
           </span>
+          {activeView.page === "session" && activeView.sessionId && (
+            <button
+              onClick={handleToggleCurrentSessionPin}
+              className={`ml-2 shrink-0 rounded-md p-1.5 transition-colors ${
+                currentFocusIndex >= 0
+                  ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+              title={currentFocusIndex >= 0 ? "Remove from focus" : "Add to focus"}
+            >
+              {currentFocusIndex >= 0 ? (
+                <PinOff className="h-4 w-4" />
+              ) : (
+                <Pin className="h-4 w-4" />
+              )}
+            </button>
+          )}
+          {activeView.page === "session" && activeView.sessionId && (
+            <button
+              onClick={handleArchiveCurrentSession}
+              className="ml-2 shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+              title="Archive session"
+            >
+              <Archive className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         <AppErrorBoundary resetKey={JSON.stringify(activeView)}>
