@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   resolveCommand,
   getCommandVersion,
@@ -21,6 +22,15 @@ export interface AgentUserInputQuestion {
   question: string;
   options: AgentUserInputOption[];
 }
+
+/**
+ * A single permission update suggested by the Claude CLI alongside a
+ * `can_use_tool` request (e.g. `addRules`, `setMode`, `addDirectories`). The
+ * orchestrator never interprets these; it echoes the full set back as
+ * `updatedPermissions` when the user picks "always allow", matching the CLI's
+ * native behavior. Kept as an open record because the variants differ by type.
+ */
+export type ClaudePermissionSuggestion = Record<string, unknown>;
 
 /**
  * Normalized stream event format used across all agent providers.
@@ -63,6 +73,22 @@ export type AgentStreamEvent =
       type: "user.input_requested";
       id: string;
       questions: AgentUserInputQuestion[];
+    }
+  | {
+      // A tool the agent wants to run requires the user's approval before it
+      // can proceed. Unlike `user.input_requested` (a turn boundary that is
+      // answered by resuming a new process), an approval is answered live on
+      // the still-running process via its control channel. `id` is the
+      // provider's control-request id used to send the decision back.
+      type: "tool.approval_requested";
+      id: string;
+      toolUseId: string;
+      toolName: string;
+      input: Record<string, unknown>;
+      // Provider-supplied permission updates that, when echoed back, stop the
+      // user being prompted again for this tool ("always allow"). Shape is
+      // provider-defined; passed through verbatim.
+      suggestions: ClaudePermissionSuggestion[];
     }
   | {
       type: "thread.status";
@@ -552,13 +578,18 @@ const claudeProvider: AgentProvider = {
   command: "claude",
 
   spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, mode }) {
+    const planMode = mode === "plan";
+    const prompt = withAttachmentContext(message, attachments, "claude");
+
     const args = [
       "-p",
       "--output-format",
       "stream-json",
       "--verbose",
       "--permission-mode",
-      mode === "plan" ? "plan" : "bypassPermissions",
+      // Plan mode drives an interactive approval loop, so it cannot bypass
+      // permissions; default runs stay fully autonomous as before.
+      planMode ? "plan" : "bypassPermissions",
       // Turn off Claude Code's built-in slash commands so the orchestrator
       // is the only path. The orchestrator's skill catalog is the single
       // source of truth for `/<name>` invocations; the CLI's `/help`,
@@ -566,6 +597,13 @@ const claudeProvider: AgentProvider = {
       // scope for v1 (see issue #98).
       "--disable-slash-commands",
     ];
+
+    if (planMode) {
+      // Stream prompts and permission decisions over stdin/stdout so the CLI
+      // routes `can_use_tool` requests to us (the `stdio` sentinel) instead of
+      // silently denying them — the root cause of plan-mode tool failures.
+      args.push("--input-format", "stream-json", "--permission-prompt-tool", "stdio");
+    }
 
     if (model) {
       args.push("--model", model);
@@ -577,16 +615,36 @@ const claudeProvider: AgentProvider = {
       args.push("--resume", resumeSessionId);
     }
 
-    args.push(withAttachmentContext(message, attachments, "claude"));
+    // Default mode passes the prompt as an argv argument; plan mode sends it
+    // over the stream-json control channel after the initialize handshake.
+    if (!planMode) {
+      args.push(prompt);
+    }
 
     const fullCmd = `claude ${args.join(" ")}`;
     console.log(`[claude] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn(command ?? "claude", args, {
+    const child = spawn(command ?? "claude", args, {
       cwd,
       env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
+      // Plan mode keeps stdin open for the live control channel; default mode
+      // never reads stdin (the caller ends it).
+      stdio: [planMode ? "pipe" : "ignore", "pipe", "pipe"],
     });
+
+    if (planMode) {
+      writeClaudeControlLine(child, {
+        type: "control_request",
+        request_id: randomUUID(),
+        request: { subtype: "initialize", hooks: {} },
+      });
+      writeClaudeControlLine(child, {
+        type: "user",
+        message: { role: "user", content: prompt },
+      });
+    }
+
+    return child;
   },
 
   createParser() {
@@ -620,6 +678,89 @@ function withAttachmentContext(
   return `${message}\n\nAttached files:\n${lines.join("\n")}`;
 }
 
+/** A user's decision on a Claude tool-approval prompt. */
+export type ClaudeApprovalDecision = "allow_once" | "always_allow" | "deny";
+
+/** The persisted details of a pending approval, needed to answer it later. */
+export interface ClaudeApprovalRequest {
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  suggestions: ClaudePermissionSuggestion[];
+}
+
+/**
+ * Write one newline-delimited JSON message to a Claude streaming child's stdin.
+ * The CLI's control protocol is line-based; no-ops if stdin is gone.
+ */
+function writeClaudeControlLine(
+  child: ChildProcess,
+  message: Record<string, unknown>
+): void {
+  if (!child.stdin?.writable) return;
+  child.stdin.write(`${JSON.stringify(message)}\n`);
+}
+
+/**
+ * Answer a pending Claude `can_use_tool` request on the live process. Maps the
+ * user's decision onto the CLI's PermissionResult shape and writes the
+ * control_response to stdin. Returns false if the process is no longer writable.
+ */
+export function sendClaudeApprovalDecision(
+  child: ChildProcess,
+  request: ClaudeApprovalRequest,
+  decision: ClaudeApprovalDecision
+): boolean {
+  if (!child.stdin?.writable) return false;
+  writeClaudeControlLine(child, {
+    type: "control_response",
+    response: {
+      subtype: "success",
+      request_id: request.requestId,
+      response: buildClaudeApprovalResponse(request, decision),
+    },
+  });
+  return true;
+}
+
+function buildClaudeApprovalResponse(
+  request: ClaudeApprovalRequest,
+  decision: ClaudeApprovalDecision
+): Record<string, unknown> {
+  if (decision === "deny") {
+    return {
+      behavior: "deny",
+      message:
+        request.toolName === "ExitPlanMode"
+          ? "Stay in plan mode and revise the plan before implementing. Ask any follow-up questions you need."
+          : "The user denied permission to use this tool.",
+    };
+  }
+
+  // Approving ExitPlanMode must also switch the session out of plan mode so the
+  // CLI proceeds with implementation in the same turn; otherwise the turn ends
+  // still in plan mode (verified against the CLI's control protocol).
+  if (request.toolName === "ExitPlanMode") {
+    return {
+      behavior: "allow",
+      updatedInput: request.input,
+      updatedPermissions: [
+        { type: "setMode", mode: "acceptEdits", destination: "session" },
+      ],
+    };
+  }
+
+  if (decision === "always_allow") {
+    return {
+      behavior: "allow",
+      updatedInput: request.input,
+      updatedPermissions: request.suggestions,
+    };
+  }
+
+  return { behavior: "allow", updatedInput: request.input };
+}
+
 function mapClaudeEvent(
   event: Record<string, unknown>,
   state: { sessionId: string; pausedForUserInput: boolean }
@@ -635,6 +776,26 @@ function mapClaudeEvent(
 
   const type = event.type as string | undefined;
   const subtype = event.subtype as string | undefined;
+
+  if (type === "control_request") {
+    const request = event.request as Record<string, unknown> | undefined;
+    if (request?.subtype === "can_use_tool") {
+      const requestId = (event.request_id as string | undefined) ?? "";
+      if (!requestId) return null;
+      const suggestions = Array.isArray(request.permission_suggestions)
+        ? (request.permission_suggestions as ClaudePermissionSuggestion[])
+        : [];
+      return {
+        type: "tool.approval_requested",
+        id: requestId,
+        toolUseId: (request.tool_use_id as string | undefined) ?? "",
+        toolName: (request.tool_name as string | undefined) ?? "tool",
+        input: (request.input as Record<string, unknown> | undefined) ?? {},
+        suggestions,
+      };
+    }
+    return null;
+  }
 
   if (type === "system" && subtype === "init") {
     return {
@@ -753,30 +914,12 @@ function mapClaudeContentPartToEvents(part: unknown): AgentStreamEvent[] {
   if (!part || typeof part !== "object") return [];
   const raw = part as Record<string, unknown>;
   if (raw.type === "tool_use" && raw.name === "ExitPlanMode") {
+    // Surface the plan text only. Approval is driven by the CLI's
+    // `can_use_tool` request for ExitPlanMode, which arrives over the control
+    // channel and is mapped to a `tool.approval_requested` event.
     const input = (raw.input as Record<string, unknown> | undefined) ?? {};
     const plan = typeof input.plan === "string" ? input.plan.trim() : "";
-    const events: AgentStreamEvent[] = [];
-    if (plan) {
-      events.push({ type: "assistant.text", text: plan });
-    }
-    events.push({
-      type: "user.input_requested",
-      id: (raw.id as string | undefined) ?? "",
-      questions: [
-        {
-          id: "claude_exit_plan_mode",
-          header: "Plan approval",
-          question: "Implement this plan, or tell Claude what to do next.",
-          options: [
-            {
-              label: "Implement this plan",
-              description: "Resume Claude and ask it to proceed with this plan.",
-            },
-          ],
-        },
-      ],
-    });
-    return events;
+    return plan ? [{ type: "assistant.text", text: plan }] : [];
   }
 
   const event = mapClaudeContentPart(part);
