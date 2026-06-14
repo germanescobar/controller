@@ -4,6 +4,8 @@ import {
   Menu,
   type MenuItemConstructorOptions,
   ipcMain,
+  session as electronSession,
+  type Session,
   type WebContents,
 } from "electron";
 import path from "node:path";
@@ -14,6 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
+const PREVIEW_PARTITION = "controller-preview";
 
 // Mark the start of the main process so every log line can be prefixed
 // with elapsed time. Helpful for diagnosing slow first-launch flows where
@@ -46,16 +49,41 @@ function getDevUrl(): string {
   return `http://localhost:${port}`;
 }
 
-function normalizePreviewUrl(input: string): string {
+function isLocalhostUrl(input: string): boolean {
+  return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#].*)?$/i.test(input);
+}
+
+function looksLikeRelativeProjectPath(input: string): boolean {
+  return (
+    input.startsWith("./") ||
+    input.startsWith("../") ||
+    input.includes("/") ||
+    input.includes("\\")
+  );
+}
+
+function hasUrlScheme(input: string): boolean {
+  return /^[a-z][a-z\d+.-]*:/i.test(input);
+}
+
+function normalizePreviewUrl(input: string, projectRoot?: string): string {
   const trimmed = input.trim();
   if (!trimmed) throw new Error("Enter a URL to preview");
 
-  if (/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#].*)?$/i.test(trimmed)) {
+  if (isLocalhostUrl(trimmed)) {
     return `http://${trimmed}`;
   }
 
   if (path.isAbsolute(trimmed)) {
     return pathToFileURL(trimmed).toString();
+  }
+
+  if (hasUrlScheme(trimmed)) {
+    return new URL(trimmed).toString();
+  }
+
+  if (projectRoot && looksLikeRelativeProjectPath(trimmed)) {
+    return pathToFileURL(path.resolve(projectRoot, trimmed)).toString();
   }
 
   return new URL(trimmed).toString();
@@ -75,7 +103,7 @@ function validatePreviewUrl(
 ): { allowed: boolean; url?: string; error?: string } {
   let url: URL;
   try {
-    url = new URL(normalizePreviewUrl(input));
+    url = new URL(normalizePreviewUrl(input, projectRoot));
   } catch {
     return { allowed: false, error: "Enter a valid web or project file URL" };
   }
@@ -344,15 +372,26 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
   return win;
 }
 
-function attachPreviewWebviewGuards(contents: WebContents): void {
+function denyPreviewSessionPermissions(session: Session): void {
+  session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    warnWithTime(`blocked preview permission request: ${permission}`);
+    callback(false);
+  });
+}
+
+function attachPreviewPartitionGuards(): void {
+  denyPreviewSessionPermissions(electronSession.fromPartition(PREVIEW_PARTITION));
+}
+
+function blockPreviewPopups(contents: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
     warnWithTime(`blocked preview popup: ${url}`);
     return { action: "deny" };
   });
-  contents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
-    warnWithTime(`blocked preview permission request: ${permission}`);
-    callback(false);
-  });
+}
+
+function attachPreviewWebviewGuards(contents: WebContents): void {
+  blockPreviewPopups(contents);
   contents.on("will-attach-webview", (_event, webPreferences, params) => {
     const src = typeof params.src === "string" ? params.src : "";
     webPreferences.nodeIntegration = false;
@@ -360,6 +399,10 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
     webPreferences.sandbox = true;
     delete webPreferences.preload;
     logWithTime(`preview webview attached: ${src || "(empty)"}`);
+  });
+  contents.on("did-attach-webview", (_event, webContents) => {
+    blockPreviewPopups(webContents);
+    denyPreviewSessionPermissions(webContents.session);
   });
 }
 
@@ -500,6 +543,7 @@ app.whenReady().then(async () => {
   logWithTime("app ready");
   registerIpcHandlers();
   logWithTime("ipc handlers registered");
+  attachPreviewPartitionGuards();
   app.on("web-contents-created", (_event, contents) => {
     if (contents.getType() === "window") {
       attachPreviewWebviewGuards(contents);
