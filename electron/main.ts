@@ -4,6 +4,9 @@ import {
   Menu,
   type MenuItemConstructorOptions,
   ipcMain,
+  session as electronSession,
+  type Session,
+  type WebContents,
 } from "electron";
 import path from "node:path";
 import { createServer } from "node:net";
@@ -13,6 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
+const PREVIEW_PARTITION = "controller-preview";
 
 // Mark the start of the main process so every log line can be prefixed
 // with elapsed time. Helpful for diagnosing slow first-launch flows where
@@ -43,6 +47,88 @@ function parsePort(value: string | undefined, fallback: number): number {
 function getDevUrl(): string {
   const port = parsePort(process.env.VITE_DEV_SERVER_PORT, DEFAULT_CLIENT_PORT);
   return `http://localhost:${port}`;
+}
+
+function isLocalhostUrl(input: string): boolean {
+  return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#].*)?$/i.test(input);
+}
+
+function looksLikeRelativeProjectPath(input: string): boolean {
+  return (
+    input.startsWith("./") ||
+    input.startsWith("../") ||
+    input.includes("/") ||
+    input.includes("\\")
+  );
+}
+
+function hasUrlScheme(input: string): boolean {
+  return /^[a-z][a-z\d+.-]*:/i.test(input);
+}
+
+function normalizePreviewUrl(input: string, projectRoot?: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error("Enter a URL to preview");
+
+  if (isLocalhostUrl(trimmed)) {
+    return `http://${trimmed}`;
+  }
+
+  if (path.isAbsolute(trimmed)) {
+    return pathToFileURL(trimmed).toString();
+  }
+
+  if (hasUrlScheme(trimmed)) {
+    return new URL(trimmed).toString();
+  }
+
+  if (projectRoot && looksLikeRelativeProjectPath(trimmed)) {
+    return pathToFileURL(path.resolve(projectRoot, trimmed)).toString();
+  }
+
+  return new URL(trimmed).toString();
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relative === "" ||
+    (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
+function validatePreviewUrl(
+  input: string,
+  projectRoot?: string
+): { allowed: boolean; url?: string; error?: string } {
+  let url: URL;
+  try {
+    url = new URL(normalizePreviewUrl(input, projectRoot));
+  } catch {
+    return { allowed: false, error: "Enter a valid web or project file URL" };
+  }
+
+  if (url.protocol === "http:" || url.protocol === "https:") {
+    return { allowed: true, url: url.toString() };
+  }
+
+  if (url.protocol === "file:") {
+    if (!projectRoot) {
+      return { allowed: false, error: "Project files can only be previewed after the worktree is loaded" };
+    }
+    let filePath: string;
+    try {
+      filePath = fileURLToPath(url);
+    } catch {
+      return { allowed: false, error: "Invalid file URL" };
+    }
+    if (!isPathInside(projectRoot, filePath)) {
+      return { allowed: false, error: "File previews must stay inside the active project" };
+    }
+    return { allowed: true, url: url.toString() };
+  }
+
+  return { allowed: false, error: "Only web URLs and project file previews are allowed" };
 }
 
 async function waitForServer(url: string): Promise<void> {
@@ -256,6 +342,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       // Sandboxed preloads run in a CommonJS context regardless of the
       // project's "type": "module" setting, so an ESM preload fails to
       // load with "Cannot use import statement outside a module". The
@@ -283,6 +370,40 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
   }
 
   return win;
+}
+
+function denyPreviewSessionPermissions(session: Session): void {
+  session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    warnWithTime(`blocked preview permission request: ${permission}`);
+    callback(false);
+  });
+}
+
+function attachPreviewPartitionGuards(): void {
+  denyPreviewSessionPermissions(electronSession.fromPartition(PREVIEW_PARTITION));
+}
+
+function blockPreviewPopups(contents: WebContents): void {
+  contents.setWindowOpenHandler(({ url }) => {
+    warnWithTime(`blocked preview popup: ${url}`);
+    return { action: "deny" };
+  });
+}
+
+function attachPreviewWebviewGuards(contents: WebContents): void {
+  blockPreviewPopups(contents);
+  contents.on("will-attach-webview", (_event, webPreferences, params) => {
+    const src = typeof params.src === "string" ? params.src : "";
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
+    delete webPreferences.preload;
+    logWithTime(`preview webview attached: ${src || "(empty)"}`);
+  });
+  contents.on("did-attach-webview", (_event, webContents) => {
+    blockPreviewPopups(webContents);
+    denyPreviewSessionPermissions(webContents.session);
+  });
 }
 
 function attachErrorReporting(win: BrowserWindow): void {
@@ -387,6 +508,19 @@ function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.handle(
+    "controller:validate-preview-url",
+    (_event, url: unknown, projectRoot: unknown) => {
+      if (typeof url !== "string") {
+        return { allowed: false, error: "URL must be a string" };
+      }
+      return validatePreviewUrl(
+        url,
+        typeof projectRoot === "string" && projectRoot.trim() ? projectRoot : undefined
+      );
+    }
+  );
+
   ipcMain.on("controller:show-window", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win) win.show();
@@ -409,6 +543,12 @@ app.whenReady().then(async () => {
   logWithTime("app ready");
   registerIpcHandlers();
   logWithTime("ipc handlers registered");
+  attachPreviewPartitionGuards();
+  app.on("web-contents-created", (_event, contents) => {
+    if (contents.getType() === "window") {
+      attachPreviewWebviewGuards(contents);
+    }
+  });
 
   try {
     if (!app.isPackaged) {
