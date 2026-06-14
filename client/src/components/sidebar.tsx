@@ -464,7 +464,7 @@ export function Sidebar({
                     </span>
                   </span>
                   {item.active ? (
-                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground group-hover/focus:hidden" />
+                    <Loader2 className="hidden h-3 w-3 shrink-0 animate-spin text-muted-foreground md:inline md:group-hover/focus:hidden" />
                   ) : null}
                   <span
                     role="button"
@@ -473,7 +473,7 @@ export function Sidebar({
                       e.stopPropagation();
                       handleFocusDone(item);
                     }}
-                    className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/focus:inline-flex"
+                    className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/focus:inline-flex"
                     title="Mark done"
                   >
                     <CheckCircle2 className="h-3.5 w-3.5" />
@@ -527,7 +527,7 @@ export function Sidebar({
                       onNewWorktree(project.id);
                     }}
                     title="New worktree"
-                    className="opacity-0 group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
+                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                   >
                     <GitBranchPlus className="h-3.5 w-3.5" />
                   </button>
@@ -537,7 +537,7 @@ export function Sidebar({
                       onEditProject(project.id);
                     }}
                     title="Edit project"
-                    className="opacity-0 group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
+                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </button>
@@ -547,7 +547,7 @@ export function Sidebar({
                       setConfirmDeleteProjectId(project.id);
                     }}
                     title="Delete project"
-                    className="opacity-0 group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -621,7 +621,7 @@ export function Sidebar({
                                   onNewThread(project.id, worktree.id);
                                 }}
                                 title="New session"
-                                className="opacity-0 group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
+                                className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                               >
                                 <PenSquare className="h-3.5 w-3.5" />
                               </button>
@@ -636,7 +636,7 @@ export function Sidebar({
                                     });
                                   }}
                                   title="Delete worktree"
-                                  className="opacity-0 group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                                  className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
@@ -687,9 +687,9 @@ export function Sidebar({
                                             )}
                                           </span>
                                           {activeSessionIds.has(session.id) ? (
-                                            <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground group-hover/session:hidden" />
+                                            <Loader2 className="hidden h-3 w-3 shrink-0 animate-spin text-muted-foreground md:inline md:group-hover/session:hidden" />
                                           ) : (
-                                            <span className="shrink-0 text-xs text-muted-foreground group-hover/session:hidden">
+                                            <span className="hidden shrink-0 text-xs text-muted-foreground md:inline md:group-hover/session:hidden">
                                               {formatTime(session.lastActiveAt)}
                                             </span>
                                           )}
@@ -705,7 +705,7 @@ export function Sidebar({
                                                 Boolean(session.focusPinnedAt),
                                               );
                                             }}
-                                            className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
+                                            className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
                                             title={
                                               session.focusPinnedAt
                                                 ? "Remove from focus"
@@ -758,7 +758,7 @@ export function Sidebar({
                                                 worktree.id,
                                               );
                                             }}
-                                            className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors group-hover/session:inline-flex"
+                                            className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
                                             title="Archive session"
                                           >
                                             <Archive className="h-3.5 w-3.5" />
