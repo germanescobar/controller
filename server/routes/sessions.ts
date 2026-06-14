@@ -28,7 +28,11 @@ import { getApiKeyEnvVars } from "../lib/api-keys.js";
 import {
   getAgentProvider,
   resolveAgentCommand,
+  sendClaudeApprovalDecision,
   type AgentStreamEvent,
+  type ClaudeApprovalDecision,
+  type ClaudeApprovalRequest,
+  type ClaudePermissionSuggestion,
 } from "../lib/agents.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
 import {
@@ -38,9 +42,11 @@ import {
   getSkillProvider,
 } from "../lib/skills.js";
 import {
+  consumePendingApproval,
   getSessionRuntime,
   markSessionActive,
   markSessionInactive,
+  recordPendingApproval,
   stopSessionRuntime,
 } from "../lib/session-runtime.js";
 
@@ -674,11 +680,22 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   // synthetic banner is the exact bug this flag exists to prevent
   // (see issue #94).
   let runCancelled = false;
+  // True while a plan-mode Claude approval prompt is awaiting the user's
+  // decision. The process is intentionally idle then, so the inactivity
+  // watchdog must stand down until the user answers and Claude resumes.
+  let awaitingApproval = false;
 
   // Close stdin for CLIs that otherwise wait on an open pipe. We pass the
-  // prompt as an argv argument, so none of these providers need stdin; leaving
-  // it open has been observed to make Ada hang silently mid-run.
-  if (providerId === "ada" || providerId === "codex" || providerId === "claude") {
+  // prompt as an argv argument, so these providers don't need stdin; leaving
+  // it open has been observed to make Ada hang silently mid-run. Plan-mode
+  // Claude is the exception: it streams the prompt and live approval decisions
+  // over stdin, so its pipe must stay open for the whole turn.
+  const claudeUsesControlChannel = providerId === "claude" && mode === "plan";
+  if (
+    providerId === "ada" ||
+    providerId === "codex" ||
+    (providerId === "claude" && !claudeUsesControlChannel)
+  ) {
     child.stdin?.end();
   }
 
@@ -794,6 +811,11 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
   function resetWatchdog() {
     if (watchdogFired) return;
     if (watchdog) clearTimeout(watchdog);
+    // A pending approval is a deliberate wait on the user, not a stalled run.
+    if (awaitingApproval) {
+      watchdog = undefined;
+      return;
+    }
     watchdog = setTimeout(onInactivityTimeout, AGENT_INACTIVITY_TIMEOUT_MS);
   }
 
@@ -905,12 +927,36 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
                   runTerminated = true;
                   runCancelled = event.type === "run.cancelled";
                 }
+                // Stash the pending approval in memory before the client sees
+                // it, so a decision can be answered without racing disk I/O.
+                if (event.type === "tool.approval_requested" && streamSessionId) {
+                  recordPendingApproval(streamSessionId, {
+                    requestId: event.id,
+                    toolName: event.toolName,
+                    input: event.input,
+                    suggestions: event.suggestions,
+                  });
+                }
                 sseSend({ type: "ada_event", event });
               })
               .catch(() => {});
             if (providerId === "claude" && event.type === "user.input_requested") {
               pausedForClaudeUserInput = true;
               child.kill("SIGTERM");
+            }
+            // Stand the watchdog down while an approval is pending, and re-arm
+            // it the moment Claude resumes with any other event. Done
+            // synchronously so the timer reacts without waiting on the async
+            // persistence chain.
+            if (event.type === "tool.approval_requested") {
+              awaitingApproval = true;
+              if (watchdog) {
+                clearTimeout(watchdog);
+                watchdog = undefined;
+              }
+            } else if (awaitingApproval) {
+              awaitingApproval = false;
+              resetWatchdog();
             }
           }
         } catch {
@@ -1264,6 +1310,8 @@ function getPersistedEventType(event: AgentStreamEvent): string {
       return "plan_delta";
     case "user.input_requested":
       return "user_input_requested";
+    case "tool.approval_requested":
+      return "tool_approval_requested";
     case "thread.status":
       return "thread_status";
     case "run.cancelled":
@@ -1289,6 +1337,14 @@ function getPersistedEventData(event: AgentStreamEvent): Record<string, unknown>
       return { itemId: event.id, delta: event.delta };
     case "user.input_requested":
       return { itemId: event.id, questions: event.questions };
+    case "tool.approval_requested":
+      return {
+        requestId: event.id,
+        toolUseId: event.toolUseId,
+        toolName: event.toolName,
+        input: event.input,
+        suggestions: event.suggestions,
+      };
     case "thread.status":
       return {
         threadId: event.threadId,
@@ -1492,6 +1548,105 @@ sessionsRouter.post(
   }
 );
 
+/**
+ * Answer a pending Claude tool-approval prompt on the live process. Unlike
+ * `/user-input`, this writes the decision to the still-running child's control
+ * channel rather than resuming a new turn.
+ */
+sessionsRouter.post(
+  "/:projectId/sessions/:sessionId/tool-approval",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const worktree = await resolveWorktree(
+      req.params.projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    const requestId = req.body.requestId as string | undefined;
+    const decision = req.body.decision as unknown;
+    if (!requestId || !isApprovalDecision(decision)) {
+      res
+        .status(400)
+        .json({ error: "requestId and a valid decision are required" });
+      return;
+    }
+
+    const runtime = getSessionRuntime(req.params.sessionId);
+    if (!runtime.active || !runtime.child) {
+      res
+        .status(409)
+        .json({ error: "This session has no running process to approve against." });
+      return;
+    }
+
+    // The decision is built from server-tracked state (tool input + permission
+    // suggestions), never from the client. Prefer the in-memory record; fall
+    // back to the persisted event so an approval survives a page reload.
+    const pending =
+      consumePendingApproval(req.params.sessionId, requestId) ??
+      findPendingApproval(
+        await getEvents(worktree.path, req.params.sessionId),
+        requestId
+      );
+    if (!pending) {
+      res.status(404).json({ error: "No pending approval matches this request." });
+      return;
+    }
+
+    const sent = sendClaudeApprovalDecision(runtime.child, pending, decision);
+    if (!sent) {
+      res
+        .status(409)
+        .json({ error: "The session process is no longer accepting input." });
+      return;
+    }
+
+    await appendEvent(worktree.path, req.params.sessionId, {
+      id: randomUUID(),
+      sessionId: req.params.sessionId,
+      timestamp: new Date().toISOString(),
+      type: "tool_approval_response",
+      data: { requestId, decision },
+    });
+
+    res.json({ ok: true });
+  }
+);
+
+function isApprovalDecision(value: unknown): value is ClaudeApprovalDecision {
+  return value === "allow_once" || value === "always_allow" || value === "deny";
+}
+
+function findPendingApproval(
+  events: AgentEvent[],
+  requestId: string
+): ClaudeApprovalRequest | null {
+  const request = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "tool_approval_requested" &&
+        event.data.requestId === requestId
+    );
+  if (!request) return null;
+  return {
+    requestId,
+    toolName: (request.data.toolName as string | undefined) ?? "tool",
+    input: (request.data.input as Record<string, unknown> | undefined) ?? {},
+    suggestions: Array.isArray(request.data.suggestions)
+      ? (request.data.suggestions as ClaudePermissionSuggestion[])
+      : [],
+  };
+}
+
 function buildClaudeUserInputResume(
   events: AgentEvent[],
   answers: Record<string, string | string[]>
@@ -1503,25 +1658,6 @@ function buildClaudeUserInputResume(
     ((latestRequest?.data.questions as AgentUserInputQuestionForRoute[] | undefined) ?? []).filter(
       Boolean
     );
-
-  if (
-    answers.claude_exit_plan_mode === "Approve plan" ||
-    answers.claude_exit_plan_mode === "Implement this plan"
-  ) {
-    return {
-      resumeMessage:
-        "I approve this plan. You are no longer in plan mode. Proceed with the implementation now.",
-      resumeMode: "default",
-    };
-  }
-
-  if (answers.claude_exit_plan_mode === "Revise plan") {
-    return {
-      resumeMessage:
-        "Please stay in plan mode and revise the plan before implementation. Ask any follow-up questions you need.",
-      resumeMode: "plan",
-    };
-  }
 
   const lines = ["The user answered your AskUserQuestion tool request:"];
   for (const question of questions) {
