@@ -55,3 +55,15 @@ export function worktreesRegistryFile(): string {
 export function terminalTabsRegistryFile(): string {
   return path.join(orchestratorHome(), "terminal-tabs.json");
 }
+
+// --- Session Message Queues ---
+
+/** Directory holding per-session enqueued-message files. */
+export function sessionQueuesDir(): string {
+  return path.join(orchestratorHome(), "queues");
+}
+
+/** Per-session queue file, keyed by the provider-generated session id. */
+export function sessionQueueFile(sessionId: string): string {
+  return path.join(sessionQueuesDir(), `${sessionId}.json`);
+}
