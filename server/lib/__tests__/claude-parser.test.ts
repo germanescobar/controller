@@ -55,6 +55,26 @@ test("can_use_tool control_request maps to a tool.approval_requested event", () 
   assert.equal(event.suggestions.length, 1);
 });
 
+test("an AskUserQuestion can_use_tool is dropped (handled as structured input)", () => {
+  // Guard must hold even if the can_use_tool arrives before the assistant
+  // tool_use that normally pauses the run — so a fresh parser, no prior pause.
+  const parse = createParser();
+  const events = emit(
+    parse(
+      JSON.stringify({
+        type: "control_request",
+        request_id: "req-ask",
+        request: {
+          subtype: "can_use_tool",
+          tool_name: "AskUserQuestion",
+          input: { questions: [] },
+        },
+      })
+    )
+  );
+  assert.deepEqual(events, []);
+});
+
 test("a control_request without a request_id is dropped", () => {
   const parse = createParser();
   const events = emit(

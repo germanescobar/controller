@@ -780,6 +780,14 @@ function mapClaudeEvent(
   if (type === "control_request") {
     const request = event.request as Record<string, unknown> | undefined;
     if (request?.subtype === "can_use_tool") {
+      // AskUserQuestion is a clarification prompt, not a permission gate. The
+      // CLI surfaces it through `can_use_tool` too, but the same assistant turn
+      // already emitted it as a `tool_use` block that we map to a structured
+      // `user.input_requested` (which also pauses the run). Map it to a generic
+      // Allow/Deny approval and the user would lose the question UI. Drop it
+      // explicitly so the structured-input path is the only one — independent
+      // of the order the two events happen to arrive in.
+      if (request.tool_name === "AskUserQuestion") return null;
       const requestId = (event.request_id as string | undefined) ?? "";
       if (!requestId) return null;
       const suggestions = Array.isArray(request.permission_suggestions)
