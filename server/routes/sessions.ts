@@ -49,6 +49,15 @@ import {
   recordPendingApproval,
   stopSessionRuntime,
 } from "../lib/session-runtime.js";
+import {
+  enqueue as enqueueMessage,
+  listQueue,
+  removeFromQueue,
+  dequeueFirst,
+  clearQueue,
+  type QueuedMessage,
+  type QueuedMessageInput,
+} from "../lib/session-queue.js";
 
 // Strip ANSI escape codes (color, cursor, etc.)
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
@@ -534,7 +543,18 @@ sessionsRouter.get("/:projectId/git/branch-diff", async (req, res) => {
 });
 
 // Stream a new session via SSE — must be before /:sessionId routes
-sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
+sessionsRouter.get("/:projectId/sessions/stream", handleSessionStream);
+
+/*
+ * Runs one agent turn and streams it to the client over SSE. Also invoked
+ * headlessly (with discarding req/res shims) by `advanceSessionQueue` to run
+ * the next enqueued message after a turn completes — that path streams to no
+ * one but still persists events and advances the queue (see issue #113).
+ */
+async function handleSessionStream(
+  req: Request<{ projectId: string }>,
+  res: Response
+) {
   const project = await getProject(req.params.projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
@@ -1067,6 +1087,13 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
 
         sseSend({ type: "done", exitCode: effectiveExitCode });
         if (clientConnected) res.end();
+
+        // On a clean completion, run the next enqueued message (if any).
+        // This happens server-side so the queue drains regardless of
+        // whether any client is connected (see issue #113).
+        if (streamSessionId && !pausedForClaudeUserInput && code === 0) {
+          void advanceSessionQueue(req.params.projectId, worktreeId, streamSessionId);
+        }
       });
   });
 
@@ -1092,7 +1119,136 @@ sessionsRouter.get("/:projectId/sessions/stream", async (req, res) => {
       heartbeat = undefined;
     }
   });
-});
+}
+
+/*
+ * After a turn completes cleanly, run the next enqueued message for the
+ * session. Queued runs always resume an existing session, so we have every
+ * parameter we need and replay them through `handleSessionStream` with
+ * discarding req/res shims. Each headless run advances the queue again on
+ * completion, so the whole queue drains one-at-a-time without a client.
+ */
+async function advanceSessionQueue(
+  projectId: string,
+  worktreeId: string,
+  sessionId: string
+): Promise<void> {
+  let next: QueuedMessage | null;
+  try {
+    next = await dequeueFirst(sessionId);
+  } catch {
+    return;
+  }
+  if (!next) return;
+
+  const sink = makeHeadlessStreamResponse();
+  let threw = false;
+  try {
+    await handleSessionStream(
+      makeHeadlessStreamRequest(projectId, worktreeId, sessionId, next),
+      sink.res
+    );
+  } catch (error) {
+    threw = true;
+    console.error(
+      `[session] headless queue run errored (session=${sessionId}):`,
+      error instanceof Error ? error.message : error
+    );
+  }
+
+  // If the replay actually started a run, that run's own completion handler
+  // advances the queue again — nothing more to do here.
+  if (sink.didStart() && !threw) return;
+
+  // The replay never started (failed preflight — e.g. a deleted skill, a
+  // missing attachment, or an unavailable provider — or threw). A single
+  // un-startable item must not stall the rest of the queue, so surface the
+  // failure and drain the next message. We do not re-enqueue the bad item:
+  // a permanently-broken item would otherwise retry forever.
+  markSessionInactive(sessionId);
+  await recordQueueAdvanceFailure(projectId, worktreeId, sessionId, next);
+  await advanceSessionQueue(projectId, worktreeId, sessionId);
+}
+
+/** Persist a visible error for a queued message that could not be started. */
+async function recordQueueAdvanceFailure(
+  projectId: string,
+  worktreeId: string,
+  sessionId: string,
+  message: QueuedMessage
+): Promise<void> {
+  try {
+    const worktree = await resolveWorktree(projectId, worktreeId);
+    if (!worktree) return;
+    const preview =
+      message.visibleText.length > 80
+        ? `${message.visibleText.slice(0, 80)}…`
+        : message.visibleText;
+    await appendEvent(worktree.path, sessionId, {
+      id: randomUUID(),
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: "error",
+      data: {
+        text: `Skipped a queued message that could not be started: "${preview}"`,
+      },
+    });
+  } catch {
+    // Best-effort: the console error above already records the failure.
+  }
+}
+
+/* Minimal Express request carrying a queued message's run params as query. */
+function makeHeadlessStreamRequest(
+  projectId: string,
+  worktreeId: string,
+  sessionId: string,
+  message: QueuedMessage
+): Request<{ projectId: string }> {
+  const query: Record<string, string> = {
+    worktreeId,
+    message: message.text,
+    resumeSessionId: sessionId,
+    provider: message.provider,
+    mode: message.mode,
+  };
+  if (message.model) query.model = message.model;
+  if (message.reasoningEffort) query.reasoningEffort = message.reasoningEffort;
+  if (message.serviceTier) query.serviceTier = message.serviceTier;
+  if (message.attachmentIds.length) {
+    query.attachmentIds = message.attachmentIds.join(",");
+  }
+  if (message.skillName) query.skillName = message.skillName;
+  return {
+    params: { projectId },
+    query,
+    on: () => undefined,
+  } as unknown as Request<{ projectId: string }>;
+}
+
+/*
+ * Minimal Express response that discards all stream output. `didStart`
+ * reports whether the handler reached `writeHead` (i.e. a run actually
+ * started streaming) versus bailing out via an error status — which lets
+ * `advanceSessionQueue` tell a started run from a failed preflight.
+ */
+function makeHeadlessStreamResponse(): {
+  res: Response;
+  didStart: () => boolean;
+} {
+  let started = false;
+  const res = {
+    writeHead: () => {
+      started = true;
+      return res;
+    },
+    write: () => true,
+    end: () => res,
+    status: () => res,
+    json: () => res,
+  } as unknown as Response;
+  return { res, didStart: () => started };
+}
 
 async function streamCodexPlanSession(
   req: Request,
@@ -1160,6 +1316,12 @@ async function streamCodexPlanSession(
     await touchSession();
     sseSend({ type: "done", exitCode });
     if (clientConnected) res.end();
+
+    // Drain the next enqueued message on a clean completion (server-side,
+    // independent of any client; see issue #113).
+    if (streamSessionId && exitCode === 0) {
+      void advanceSessionQueue(projectId, worktreeId, streamSessionId);
+    }
   }
 
   async function persistSessionStart(sessionId: string) {
@@ -1548,6 +1710,114 @@ sessionsRouter.post(
   }
 );
 
+// --- Message queue ---
+//
+// Messages typed while an agent is streaming are enqueued and replayed
+// one-at-a-time once the active run completes cleanly. The queue is keyed by
+// session id and persisted under the orchestrator home (see session-queue.ts
+// and issue #113). Advancement is server-driven (see advanceSessionQueue);
+// these endpoints are plain CRUD over the persisted queue.
+
+sessionsRouter.get(
+  "/:projectId/sessions/:sessionId/queue",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    try {
+      const queue = await listQueue(req.params.sessionId);
+      res.json({ queue });
+    } catch (error) {
+      res.status(400).json({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+);
+
+sessionsRouter.post(
+  "/:projectId/sessions/:sessionId/queue",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const input = parseQueuedMessageInput(req.body);
+    if (!input) {
+      res.status(400).json({ error: "Invalid queued message payload" });
+      return;
+    }
+    try {
+      const message = await enqueueMessage(req.params.sessionId, input);
+      res.json({ message });
+    } catch (error) {
+      res.status(400).json({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+);
+
+sessionsRouter.delete(
+  "/:projectId/sessions/:sessionId/queue/:messageId",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    try {
+      const removed = await removeFromQueue(
+        req.params.sessionId,
+        req.params.messageId
+      );
+      if (!removed) {
+        res.status(404).json({ error: "Queued message not found" });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+);
+
+/** Validate and normalize an enqueue request body into a QueuedMessageInput. */
+function parseQueuedMessageInput(body: unknown): QueuedMessageInput | null {
+  if (!body || typeof body !== "object") return null;
+  const raw = body as Record<string, unknown>;
+  const text = typeof raw.text === "string" ? raw.text : "";
+  if (!text.trim()) return null;
+  if (typeof raw.provider !== "string" || !raw.provider) return null;
+  if (typeof raw.model !== "string" || !raw.model) return null;
+
+  const mode = raw.mode === "plan" ? "plan" : "default";
+  const attachmentIds = Array.isArray(raw.attachmentIds)
+    ? raw.attachmentIds.filter((id): id is string => typeof id === "string")
+    : [];
+  const reasoningEffort =
+    typeof raw.reasoningEffort === "string"
+      ? (raw.reasoningEffort as QueuedMessageInput["reasoningEffort"])
+      : undefined;
+
+  return {
+    text,
+    visibleText: typeof raw.visibleText === "string" ? raw.visibleText : text,
+    provider: raw.provider,
+    model: raw.model,
+    reasoningEffort,
+    serviceTier: raw.serviceTier === "fast" ? "fast" : undefined,
+    mode,
+    attachmentIds,
+    skillName: typeof raw.skillName === "string" ? raw.skillName : undefined,
+  };
+}
+
 /**
  * Answer a pending Claude tool-approval prompt on the live process. Unlike
  * `/user-input`, this writes the decision to the still-running child's control
@@ -1734,6 +2004,9 @@ sessionsRouter.post(
       res.status(404).json({ error: "Session not found" });
       return;
     }
+    // Drop any pending enqueued messages so an archived session leaves no
+    // orphaned queue file behind.
+    await clearQueue(req.params.sessionId);
     res.json({ ok: true });
   }
 );

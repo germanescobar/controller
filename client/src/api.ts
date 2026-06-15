@@ -431,6 +431,65 @@ export async function steerSession(
   }
 }
 
+/** A message enqueued to run after the active turn completes (see issue #113). */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  visibleText: string;
+  provider: string;
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+  serviceTier?: "fast";
+  mode: "default" | "plan";
+  attachmentIds: string[];
+  skillName?: string;
+  createdAt: string;
+}
+
+export type QueuedMessageInput = Omit<QueuedMessage, "id" | "createdAt">;
+
+export async function fetchSessionQueue(
+  projectId: string,
+  sessionId: string
+): Promise<QueuedMessage[]> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/queue`
+  );
+  await throwIfNotOk(res, "Failed to fetch message queue");
+  const body = (await res.json()) as { queue?: QueuedMessage[] };
+  return body.queue ?? [];
+}
+
+export async function enqueueSessionMessage(
+  projectId: string,
+  sessionId: string,
+  input: QueuedMessageInput
+): Promise<QueuedMessage> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/queue`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }
+  );
+  await throwIfNotOk(res, "Failed to enqueue message");
+  const body = (await res.json()) as { message: QueuedMessage };
+  return body.message;
+}
+
+export async function removeSessionQueuedMessage(
+  projectId: string,
+  sessionId: string,
+  messageId: string
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/queue/${messageId}`,
+    { method: "DELETE" }
+  );
+  await throwIfNotOk(res, "Failed to remove queued message");
+}
+
 export async function submitSessionUserInput(
   projectId: string,
   sessionId: string,

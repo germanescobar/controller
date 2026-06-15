@@ -51,6 +51,11 @@ import {
   submitSessionUserInput,
   pinSessionFocus,
   unpinSessionFocus,
+  fetchSessionQueue,
+  enqueueSessionMessage,
+  removeSessionQueuedMessage,
+  type QueuedMessage,
+  type QueuedMessageInput,
   type AgentSkill,
   type Project,
   type SourceDirectoryEntry,
@@ -170,9 +175,20 @@ function supportsServiceTier(provider: string): boolean {
   return provider === "codex";
 }
 
-function supportsLiveSteering(provider: string): boolean {
+/*
+ * Whether the provider can steer a running turn natively (Codex's
+ * `turn/steer`). All providers support steering in the UI; the others
+ * emulate it by stopping the run and resuming with the steer text. See
+ * issue #113.
+ */
+function usesNativeSteering(provider: string): boolean {
   return provider === "codex";
 }
+
+// Label for the steer chord, platform-aware (Cmd on macOS, Ctrl elsewhere).
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+const STEER_KEY_LABEL = IS_MAC ? "⌘+Enter" : "Ctrl+Enter";
 
 function supportsAttachments(provider: string): boolean {
   return provider === "ada" || provider === "codex" || provider === "claude";
@@ -2565,6 +2581,25 @@ export function SessionView({
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  // True while this component has its own live SSE for the viewed session.
+  // Distinct from `streaming`, which stays true across server-driven queue
+  // draining (when there's no own SSE). The event poller keys off this so it
+  // engages once our SSE closes but the run continues server-side (#113).
+  const [ownStreamActive, setOwnStreamActive] = useState(false);
+  // Messages enqueued while a run is streaming (replayed one-at-a-time on
+  // clean completion). The server is the source of truth; this mirrors it
+  // for rendering. See issue #113.
+  const [queue, setQueue] = useState<QueuedMessage[]>([]);
+  // Stable view of `queue` for use inside stream-event closures.
+  const queueRef = useRef<QueuedMessage[]>([]);
+  // True while a Claude/Ada "steer" is stopping the current run and
+  // resuming with the steer text. The composer is disabled during this
+  // transition so a second steer can't race the stop+resume.
+  const [steerInProgress, setSteerInProgress] = useState(false);
+  const steerInProgressRef = useRef(false);
+  // Carries the steer text across the stop -> stream-close -> resume hop
+  // for emulated (Claude/Ada) steering.
+  const pendingSteerRef = useRef<string | null>(null);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -2674,7 +2709,7 @@ export function SessionView({
   const providerSupportsPlanMode = supportsPlanMode(selectedProvider);
   const providerSupportsReasoningEffort = supportsReasoningEffort(selectedProvider);
   const providerSupportsServiceTier = supportsServiceTier(selectedProvider);
-  const providerSupportsLiveSteering = supportsLiveSteering(selectedProvider);
+  const providerUsesNativeSteering = usesNativeSteering(selectedProvider);
   const providerSupportsAttachments = supportsAttachments(selectedProvider);
   const selectedModelEntry = models.find((m) => m.id === selectedModel);
   const modelSupportsAttachments = modelAcceptsAttachments(selectedModelEntry);
@@ -3190,11 +3225,73 @@ export function SessionView({
     };
   }, [projectId, sessionId, worktreeId, focusAdvanceCountdown]);
 
+  // Reload the persisted message queue for whichever session this view is
+  // bound to. The server owns the queue; this keeps the rendered list and
+  // the "promote first enqueued to steer" shortcut in sync.
+  const refreshQueue = useCallback(async () => {
+    const targetSessionId = activeStreamSessionId ?? sessionId;
+    if (!targetSessionId) {
+      setQueue([]);
+      return;
+    }
+    try {
+      setQueue(await fetchSessionQueue(projectId, targetSessionId));
+    } catch {
+      // A missing/unreadable queue is treated as empty — non-fatal.
+    }
+  }, [projectId, activeStreamSessionId, sessionId]);
+
+  useEffect(() => {
+    void refreshQueue();
+  }, [refreshQueue]);
+
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
+
+  // Reflect server-driven runs for the viewed session. The server drains the
+  // queue on its own (issue #113), so when it starts the next run we won't
+  // have an EventSource for it — detect the active runtime here, flip into
+  // the streaming state (the event poller then shows progress), and keep the
+  // queue list fresh as it drains. We never set streaming false here; the
+  // streaming-gated poller owns that.
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (eventSourceRef.current || streamingRef.current) {
+        void refreshQueue();
+        return;
+      }
+      try {
+        const runtimes = await fetchActiveRuntimes();
+        if (cancelled) return;
+        const active = runtimes.some(
+          (entry) => entry.sessionId === sessionId && entry.active
+        );
+        if (active) setStreaming(true);
+        void refreshQueue();
+      } catch {
+        // Ignore transient polling failures.
+      }
+    };
+    const interval = window.setInterval(tick, 2000);
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [sessionId, refreshQueue]);
+
   useEffect(() => {
     if (!sessionId) return;
     if (!streaming) return;
+    // While our own SSE is feeding this view, let it drive updates. Once it
+    // closes (e.g. the live turn ended but the server keeps draining the
+    // queue), `ownStreamActive` flips false and this effect re-runs to poll
+    // events for the server-driven runs (#113).
     if (
-      eventSourceRef.current &&
+      ownStreamActive &&
       targetMatchesStreamContext(sendContextRef.current, {
         projectId,
         worktreeId,
@@ -3217,6 +3314,30 @@ export function SessionView({
           (entry) => entry.sessionId === sessionId && entry.active,
         );
         if (!isActive) {
+          // An emulated steer (Claude/Ada) on a run this component is only
+          // watching via polling — not its own SSE — resumes here once the
+          // stopped process goes inactive.
+          if (
+            steerInProgressRef.current &&
+            pendingSteerRef.current &&
+            sessionId
+          ) {
+            const steerText = pendingSteerRef.current;
+            pendingSteerRef.current = null;
+            steerInProgressRef.current = false;
+            setSteerInProgress(false);
+            streamingRef.current = false;
+            void startAgentStream(
+              steerText,
+              steerText,
+              undefined,
+              sessionId,
+              undefined,
+              undefined,
+              { skillName: undefined }
+            );
+            return;
+          }
           setStreaming(false);
           setPendingMessage(null);
           setPendingAttachments([]);
@@ -3233,7 +3354,7 @@ export function SessionView({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [projectId, sessionId, worktreeId, streaming]);
+  }, [projectId, sessionId, worktreeId, streaming, ownStreamActive]);
 
   // Track current session and manage stream visibility on session switch
   useEffect(() => {
@@ -3487,16 +3608,6 @@ export function SessionView({
     textareaRef.current?.focus();
   }, []);
 
-  // Reset the chip when starting a new conversation in a different provider
-  // or worktree — `useEffect` on `selectedProvider` already runs the catalog
-  // reload, which clears an invalid `activeSkill` on its own. The steer
-  // path keeps the same skill across the turn.
-  useEffect(() => {
-    if (streaming && !providerSupportsLiveSteering) {
-      setActiveSkill(null);
-    }
-  }, [streaming, providerSupportsLiveSteering]);
-
   // Submit-after-chip effect: when the user hits Enter on an exact
   // `/<skill>` match, the keyboard handler applies the chip, sets
   // `pendingSkillSubmit`, and React re-renders. This effect then runs
@@ -3553,7 +3664,18 @@ export function SessionView({
     modeOverride?: "default" | "plan",
     resumeSessionIdOverride?: string,
     attachmentIds?: string[],
-    visibleAttachments?: SessionAttachment[]
+    visibleAttachments?: SessionAttachment[],
+    // Replay overrides for queued/steer continuations. When provided, the
+    // run uses these params (and explicit skill) instead of the composer's
+    // current selection, and skips focus auto-advance — a continuation is
+    // not a fresh user send.
+    runOverrides?: {
+      provider?: string;
+      model?: string;
+      reasoningEffort?: ReasoningEffort;
+      serviceTier?: ServiceTier;
+      skillName?: string;
+    }
   ) => {
     if (!sentMessage.trim() || streamingRef.current) return false;
     if (!providerReady) {
@@ -3570,7 +3692,8 @@ export function SessionView({
     // Only fire for messages sent from a known session — the new-thread
     // composer (no `sessionId` yet) is handled by the server-side
     // auto-pin on creation, and there's nothing to "advance past".
-    if (focusMode && onFocusAdvanceAfterSend && sessionId) {
+    // Continuations (queued replay / emulated steer) never advance focus.
+    if (focusMode && onFocusAdvanceAfterSend && sessionId && !runOverrides) {
       onFocusAdvanceAfterSend(sessionId);
     }
 
@@ -3583,32 +3706,42 @@ export function SessionView({
     let detectedSessionId = streamSessionId;
     let runFailed = false;
 
+    const runProvider = runOverrides?.provider ?? selectedProvider;
+    const runModel = runOverrides?.model ?? selectedModel;
+    const runReasoningEffort =
+      runOverrides?.reasoningEffort ?? selectedReasoningEffort;
+    const runServiceTier = runOverrides?.serviceTier ?? selectedServiceTier;
+    // For continuations the skill is whatever the queued item carried
+    // (possibly none); for fresh sends it's the active composer skill.
+    const runSkillName = runOverrides ? runOverrides.skillName : activeSkill?.name;
+
     // Track which session this stream belongs to
     sendContextRef.current = { projectId, worktreeId, sessionId: streamSessionId };
     debugSessionIsolation("stream.started", {
       projectId,
       worktreeId,
       sessionId,
-      provider: selectedProvider,
+      provider: runProvider,
       mode: selectedMode,
     });
 
     const es = startSession(projectId, sentMessage, {
       resumeSessionId: streamSessionId,
-      model: selectedModel,
+      model: runModel,
       reasoningEffort:
-        providerSupportsReasoningEffort ? selectedReasoningEffort : undefined,
+        supportsReasoningEffort(runProvider) ? runReasoningEffort : undefined,
       serviceTier:
-        providerSupportsServiceTier && selectedServiceTier === "fast"
-          ? selectedServiceTier
+        supportsServiceTier(runProvider) && runServiceTier === "fast"
+          ? runServiceTier
           : undefined,
-      provider: selectedProvider || undefined,
-      mode: providerSupportsPlanMode ? modeOverride ?? selectedMode : "default",
+      provider: runProvider || undefined,
+      mode: supportsPlanMode(runProvider) ? modeOverride ?? selectedMode : "default",
       worktreeId,
       attachmentIds,
-      skillName: activeSkill?.name,
+      skillName: runSkillName,
     });
     eventSourceRef.current = es;
+    setOwnStreamActive(true);
 
     // Check if the user is still viewing the session this stream belongs to
     const isVisible = () => {
@@ -3824,17 +3957,43 @@ export function SessionView({
         });
         es.close();
         eventSourceRef.current = null;
+        setOwnStreamActive(false);
         const wasVisible = isVisible();
         sendContextRef.current = null;
+        const completedSessionId = detectedSessionId;
+
+        // Emulated steer (Claude/Ada): the active run was stopped so we
+        // could steer. Resume immediately with the steer text only,
+        // skipping the normal completion + auto-advance path.
+        if (
+          steerInProgressRef.current &&
+          pendingSteerRef.current &&
+          completedSessionId
+        ) {
+          const steerText = pendingSteerRef.current;
+          pendingSteerRef.current = null;
+          steerInProgressRef.current = false;
+          setSteerInProgress(false);
+          streamingRef.current = false;
+          void startAgentStream(
+            steerText,
+            steerText,
+            undefined,
+            completedSessionId,
+            undefined,
+            undefined,
+            { skillName: undefined }
+          );
+          return;
+        }
 
         if (wasVisible) {
           streamingRef.current = false;
-          setStreaming(false);
           setPendingMessage(null);
           setPendingAttachments([]);
-          setActiveStreamSessionId(detectedSessionId || null);
-          if (detectedSessionId) {
-            fetchEvents(projectId, detectedSessionId, worktreeId)
+          setActiveStreamSessionId(completedSessionId || null);
+          if (completedSessionId) {
+            fetchEvents(projectId, completedSessionId, worktreeId)
               .then((evts) => {
                 setEvents(evts);
                 if (evts.length > 0 && !runFailed && (data.exitCode ?? 1) === 0) {
@@ -3843,10 +4002,21 @@ export function SessionView({
               })
               .catch(() => {});
           }
+          // The server drains the queue (one-at-a-time, on clean completion).
+          // When items remain, stay in the streaming state so the runtime
+          // poller picks up the next server-driven run without a flicker;
+          // otherwise end the run here. Refresh the list either way.
+          void refreshQueue();
+          const cleanCompletion = !runFailed && (data.exitCode ?? 1) === 0;
+          if (cleanCompletion && queueRef.current.length > 0) {
+            setStreaming(true);
+          } else {
+            setStreaming(false);
+          }
         } else {
           // Stream completed while user was viewing another session
-          if (detectedSessionId && onBackgroundComplete) {
-            onBackgroundComplete(detectedSessionId);
+          if (completedSessionId && onBackgroundComplete) {
+            onBackgroundComplete(completedSessionId);
           }
         }
       } else if (data.type === "error") {
@@ -3859,6 +4029,7 @@ export function SessionView({
         });
         es.close();
         eventSourceRef.current = null;
+        setOwnStreamActive(false);
         const wasVisible = isVisible();
         sendContextRef.current = null;
         if (wasVisible) {
@@ -3917,49 +4088,65 @@ export function SessionView({
     })();
   }, [queuedStreamStart, streaming, providerReady]);
 
+  /** Validate composer attachments against provider/model capabilities. */
+  const validateComposerAttachments = (): boolean => {
+    if (composerAttachments.length === 0) return true;
+    if (!providerSupportsAttachments) {
+      setAttachmentError(
+        `Attachments are not supported by the ${selectedProvider} provider`
+      );
+      return false;
+    }
+    if (!modelSupportsAttachments) {
+      setAttachmentError(
+        `The selected model does not support attachments${
+          selectedModelEntry ? ` (${selectedModelEntry.name})` : ""
+        }`
+      );
+      return false;
+    }
+    if (
+      composerAttachments.some((attachment) =>
+        isImageMimeType(getFileMimeType(attachment.file))
+      ) &&
+      !modelSupportsImages
+    ) {
+      setAttachmentError("The selected model does not support image attachments");
+      return false;
+    }
+    if (
+      composerAttachments.some((attachment) =>
+        isFileMimeType(getFileMimeType(attachment.file))
+      ) &&
+      !modelSupportsFiles
+    ) {
+      setAttachmentError("The selected model does not support file attachments");
+      return false;
+    }
+    return true;
+  };
+
+  /** Reset the composer (text, skill chip, attachments) after a submit. */
+  const clearComposer = () => {
+    composerAttachments.forEach((attachment) => {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    });
+    setComposerAttachments([]);
+    setMessage("");
+    setActiveSkill(null);
+    setSkillPopoverOpen(false);
+  };
+
+  /** Local history mirror of `[/skill: name] <text>` for the transcript. */
+  const buildVisibleMessage = (text: string): string =>
+    activeSkill ? `[/skill: ${activeSkill.name}] ${text}` : text;
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!message.trim() && composerAttachments.length === 0) return;
-    if (composerAttachments.length > 0) {
-      if (!providerSupportsAttachments) {
-        setAttachmentError(
-          `Attachments are not supported by the ${selectedProvider} provider`
-        );
-        return;
-      }
-      if (!modelSupportsAttachments) {
-        setAttachmentError(
-          `The selected model does not support attachments${
-            selectedModelEntry ? ` (${selectedModelEntry.name})` : ""
-          }`
-        );
-        return;
-      }
-      if (
-        composerAttachments.some((attachment) =>
-          isImageMimeType(getFileMimeType(attachment.file))
-        ) &&
-        !modelSupportsImages
-      ) {
-        setAttachmentError("The selected model does not support image attachments");
-        return;
-      }
-      if (
-        composerAttachments.some((attachment) =>
-          isFileMimeType(getFileMimeType(attachment.file))
-        ) &&
-        !modelSupportsFiles
-      ) {
-        setAttachmentError("The selected model does not support file attachments");
-        return;
-      }
-    }
+    if (!validateComposerAttachments()) return;
     const sentMessage = message.trim() || "Please use the attached files as context.";
-    // Local history mirror of `[/skill: name] <text>` so the in-flight
-    // message reads the same as the persisted event the server writes.
-    const visibleMessage = activeSkill
-      ? `[/skill: ${activeSkill.name}] ${sentMessage}`
-      : sentMessage;
+    const visibleMessage = buildVisibleMessage(sentMessage);
     setAttachmentError(null);
     try {
       const uploadedAttachments = await uploadComposerAttachments();
@@ -3973,13 +4160,7 @@ export function SessionView({
           uploadedAttachments
         )
       ) {
-        composerAttachments.forEach((attachment) => {
-          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-        });
-        setComposerAttachments([]);
-        setMessage("");
-        setActiveSkill(null);
-        setSkillPopoverOpen(false);
+        clearComposer();
       }
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : "Failed to upload attachments");
@@ -3987,6 +4168,59 @@ export function SessionView({
       setStreaming(false);
       setPendingMessage(null);
       setPendingAttachments([]);
+    }
+  };
+
+  // Enqueue the current composer contents to run after the active turn
+  // completes (the default action for Enter while streaming). Requires a
+  // known session to attach to.
+  const handleEnqueue = async () => {
+    if (!message.trim() && composerAttachments.length === 0) return;
+    const targetSessionId = activeStreamSessionId ?? sessionId;
+    if (!targetSessionId) return;
+    if (!validateComposerAttachments()) return;
+    setAttachmentError(null);
+    const sentMessage = message.trim() || "Please use the attached files as context.";
+    const visibleMessage = buildVisibleMessage(sentMessage);
+    try {
+      const uploadedAttachments = await uploadComposerAttachments();
+      const input: QueuedMessageInput = {
+        text: sentMessage,
+        visibleText: visibleMessage,
+        provider: selectedProvider,
+        model: selectedModel,
+        reasoningEffort: providerSupportsReasoningEffort
+          ? selectedReasoningEffort
+          : undefined,
+        serviceTier:
+          providerSupportsServiceTier && selectedServiceTier === "fast"
+            ? "fast"
+            : undefined,
+        mode: providerSupportsPlanMode ? selectedMode : "default",
+        attachmentIds: uploadedAttachments.map((attachment) => attachment.id),
+        skillName: activeSkill?.name,
+      };
+      const queued = await enqueueSessionMessage(projectId, targetSessionId, input);
+      setQueue((prev) => [...prev, queued]);
+      clearComposer();
+    } catch (error) {
+      setAttachmentError(
+        error instanceof Error ? error.message : "Failed to enqueue message"
+      );
+    }
+  };
+
+  // Remove an enqueued message from the queue (the only queue management
+  // action in v1).
+  const handleRemoveQueued = async (messageId: string) => {
+    const targetSessionId = activeStreamSessionId ?? sessionId;
+    if (!targetSessionId) return;
+    setQueue((prev) => prev.filter((m) => m.id !== messageId));
+    try {
+      await removeSessionQueuedMessage(projectId, targetSessionId, messageId);
+    } catch {
+      // Re-sync from the server if the optimistic removal failed.
+      void refreshQueue();
     }
   };
 
@@ -4003,17 +4237,61 @@ export function SessionView({
     }
   };
 
-  const handleSteer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!message.trim()) return;
+  // Steer the running turn (Shift+Enter while streaming). Uses the composer
+  // text, or the first enqueued message when the composer is empty
+  // ("promote queued to steer"). Codex steers natively; Claude/Ada stop the
+  // run and resume with the steer text via the stream's `done` handler.
+  const handleSteer = async () => {
     const targetSessionId = activeStreamSessionId ?? sessionId;
     if (!targetSessionId) return;
-    const steerText = message;
+    if (steerInProgressRef.current) return;
+
+    let steerText = message.trim();
+    let promotedId: string | null = null;
+    if (!steerText) {
+      const first = queue[0];
+      if (!first) return;
+      steerText = first.text;
+      promotedId = first.id;
+    }
+
+    if (promotedId) {
+      try {
+        await removeSessionQueuedMessage(projectId, targetSessionId, promotedId);
+        setQueue((prev) => prev.filter((m) => m.id !== promotedId));
+      } catch {
+        // Fall through and still steer with the promoted text.
+      }
+    }
+
     setMessage("");
     setStreamItems((prev) => [...prev, { type: "user_message", text: steerText, at: Date.now() }]);
+
+    if (providerUsesNativeSteering) {
+      try {
+        await steerSession(projectId, targetSessionId, steerText, worktreeId);
+      } catch (err) {
+        setStreamItems((prev) => [
+          ...prev,
+          { type: "error", text: err instanceof Error ? err.message : "Failed to steer session", at: Date.now() },
+        ]);
+      }
+      return;
+    }
+
+    // Emulated steer (Claude/Ada): stop the current run; the stream's
+    // `done` handler resumes with the steer text once the process exits.
+    // The composer stays disabled until the resumed run starts so a second
+    // steer can't race the stop+resume.
+    steerInProgressRef.current = true;
+    setSteerInProgress(true);
+    pendingSteerRef.current = steerText;
     try {
-      await steerSession(projectId, targetSessionId, steerText, worktreeId);
+      await stopSession(projectId, targetSessionId, worktreeId);
     } catch (err) {
+      steerInProgressRef.current = false;
+      setSteerInProgress(false);
+      pendingSteerRef.current = null;
       setStreamItems((prev) => [
         ...prev,
         { type: "error", text: err instanceof Error ? err.message : "Failed to steer session", at: Date.now() },
@@ -4075,13 +4353,34 @@ export function SessionView({
       }
       return;
     }
+    // Unified keymap (issue #113). Shift+Enter always inserts a newline.
+    // Cmd/Ctrl+Enter steers the running turn (using the composer text, or
+    // the first enqueued message when empty). Plain Enter enqueues while a
+    // run is streaming and sends when idle.
+    if (steerInProgress) {
+      // Composer is locked during a stop->resume steer transition.
+      if (e.key === "Enter") e.preventDefault();
+      return;
+    }
+    const isSteerChord =
+      e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey;
+    if (streaming) {
+      if (isSteerChord) {
+        e.preventDefault();
+        void handleSteer();
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        void handleEnqueue();
+        return;
+      }
+      // Shift+Enter falls through to the default newline behavior.
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (streaming && providerSupportsLiveSteering) {
-        handleSteer(e as unknown as React.FormEvent);
-      } else {
-        handleSend(e);
-      }
+      handleSend(e);
     }
   };
 
@@ -4807,7 +5106,41 @@ export function SessionView({
           {/* Input */}
           <div className="shrink-0 border-t border-border bg-background px-3 pb-3 pt-2 md:px-4 md:pb-4 md:pt-3">
             <div className="mx-auto max-w-3xl">
-              <form onSubmit={streaming && providerSupportsLiveSteering ? handleSteer : handleSend}>
+              {queue.length > 0 && (
+                <div className="mb-2 space-y-1">
+                  <div className="flex items-center gap-1.5 px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    <StepForward className="h-3 w-3" />
+                    <span>Queued ({queue.length})</span>
+                  </div>
+                  {queue.map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center gap-2 rounded-md border border-border bg-background/60 px-2 py-1.5 text-sm"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-foreground">
+                        {item.visibleText}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveQueued(item.id)}
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                        aria-label="Remove queued message"
+                        title="Remove from queue"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (steerInProgress) return;
+                  if (streaming) void handleEnqueue();
+                  else void handleSend(e);
+                }}
+              >
                 <div
                   className="rounded-xl border border-border bg-input p-3"
                   onDragOver={(event) => {
@@ -4877,8 +5210,10 @@ export function SessionView({
                       }}
                       onKeyDown={handleKeyDown}
                       placeholder={
-                        streaming && providerSupportsLiveSteering
-                          ? "Steer the agent..."
+                        steerInProgress
+                          ? "Steering…"
+                          : streaming
+                          ? `Enter to queue · ${STEER_KEY_LABEL} to steer`
                           : availableSkills.length > 0
                           ? "Describe what you want to build… type / to use a skill"
                           : sessionId
@@ -4886,7 +5221,7 @@ export function SessionView({
                           : "Describe what you want to build..."
                       }
                       rows={1}
-                      disabled={streaming && !providerSupportsLiveSteering}
+                      disabled={steerInProgress}
                       className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                       style={{ maxHeight: "calc(1.25rem * 5)" }}
                     />
@@ -5000,8 +5335,8 @@ export function SessionView({
                   )}
                   <div className="mt-2 flex items-center gap-2 sm:justify-between">
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 sm:gap-2">
-                      {/* Agent provider picker — hidden while the active provider supports steering */}
-                      {streaming && providerSupportsLiveSteering ? null : (<>
+                      {/* Agent provider + run-option pickers. */}
+                      {(<>
                       <div className="relative" ref={providerPickerRef}>
                         <button
                           type="button"
@@ -5256,17 +5591,17 @@ export function SessionView({
                       <Button
                         type="submit"
                         size="icon"
+                        title={streaming ? "Queue for next run" : "Send"}
                         disabled={
-                          streaming && providerSupportsLiveSteering
-                            ? !message.trim() || !providerReady
-                            : (!message.trim() && composerAttachments.length === 0) ||
-                              streaming ||
-                              !providerReady
+                          steerInProgress ||
+                          (!message.trim() && composerAttachments.length === 0) ||
+                          !providerReady ||
+                          (streaming && !(activeStreamSessionId ?? sessionId))
                         }
                         className="h-8 w-8 rounded-full"
                       >
-                        {streaming && providerSupportsLiveSteering ? (
-                          <MessageSquare className="h-4 w-4" />
+                        {streaming ? (
+                          <Plus className="h-4 w-4" />
                         ) : (
                           <ArrowUp className="h-4 w-4" />
                         )}
