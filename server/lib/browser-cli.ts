@@ -9,8 +9,9 @@
  * by that path. The server URL is published to a runtime file the CLI reads,
  * since `CONTROLLER_SERVER_URL` wouldn't survive either.
  *
- * Env injection (CONTROLLER_SERVER_URL + PATH) is still applied as a
- * best-effort fast path for agents that do inherit the environment.
+ * `CONTROLLER_SERVER_URL` is still injected as a best-effort fast path for
+ * agents that do inherit the environment (Claude, Ada); the CLI checks it
+ * before falling back to the runtime file.
  */
 
 import fs from "node:fs/promises";
@@ -39,7 +40,7 @@ export function browserCliInstalledPath(): string {
 }
 
 /** Runtime file the CLI reads to find this server. */
-export function browserRuntimeFile(): string {
+function browserRuntimeFile(): string {
   return path.join(orchestratorHome(), "browser-runtime.json");
 }
 
@@ -70,15 +71,11 @@ export async function installBrowserCli(): Promise<void> {
 
 /**
  * Best-effort environment for agents that inherit it (Claude, Ada). Codex
- * sanitizes these away, which is why the absolute install path is the real
- * contract.
+ * sanitizes this away, which is why the absolute install path + runtime file
+ * are the real contract; this only saves the CLI a file read when it survives.
  */
 export function browserAgentEnv(): Record<string, string> {
-  const binDir = path.dirname(browserCliInstalledPath());
-  const currentPath = process.env.PATH ?? "";
-  const PATH = currentPath ? `${binDir}${path.delimiter}${currentPath}` : binDir;
   return {
     CONTROLLER_SERVER_URL: serverUrl(),
-    PATH,
   };
 }

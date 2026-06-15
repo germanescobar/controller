@@ -5,40 +5,15 @@
  * `controller-browser` CLI. The CLI calls the Express server over HTTP, the
  * server forwards the command to the renderer that owns the pane over a
  * WebSocket, and the renderer executes it against the `<webview>` element and
- * replies. These types are shared by all three hops so the contract stays
- * consistent.
+ * replies.
  *
- * A pane is addressed by a `BrowserKey` (`projectId:worktreeId`), which is the
- * one identifier known on every hop: injected into the agent's environment at
- * spawn time and held by the renderer that renders the session.
+ * A pane is addressed by a `projectId:worktreeId` key: the renderer registers
+ * under it, and the server resolves the same key from the agent's working
+ * directory when a command arrives.
  */
 
 /** Actions supported by the v1 vertical slice. */
 export type BrowserAction = "open" | "snapshot" | "click" | "type";
-
-export interface BrowserOpenParams {
-  /** Web URL, localhost address, or project-relative/absolute file path. */
-  url: string;
-}
-
-export interface BrowserSnapshotParams {
-  /** Optional CSS selector to scope the snapshot. Defaults to the document. */
-  selector?: string;
-}
-
-export interface BrowserClickParams {
-  /** CSS selector of the element to click. */
-  selector: string;
-}
-
-export interface BrowserTypeParams {
-  /** CSS selector of the field to type into. */
-  selector: string;
-  /** Text to set as the field value. */
-  text: string;
-  /** When true, submit the field's form after typing. */
-  submit?: boolean;
-}
 
 /** Result payload returned for a successful command. */
 export interface BrowserCommandResultData {
@@ -57,14 +32,13 @@ export type BrowserCommandResult =
   | { ok: false; error: string };
 
 // ---------------------------------------------------------------------------
-// WebSocket framing (server <-> renderer)
+// WebSocket framing (server -> renderer)
 // ---------------------------------------------------------------------------
-
-/** Renderer announces which pane it owns. */
-export interface BrowserRegisterMessage {
-  kind: "register";
-  key: string;
-}
+//
+// The renderer's outbound frames (`{ kind: "register", key }` and
+// `{ kind: "result", requestId, result }`) are written inline; only the
+// inbound command frame is consumed as a type, so that's the only one modeled
+// here.
 
 /** Server asks the renderer to run a command against its `<webview>`. */
 export interface BrowserCommandMessage {
@@ -74,12 +48,4 @@ export interface BrowserCommandMessage {
   params: Record<string, unknown>;
 }
 
-/** Renderer reports the outcome of a command. */
-export interface BrowserResultMessage {
-  kind: "result";
-  requestId: string;
-  result: BrowserCommandResult;
-}
-
 export type BrowserServerMessage = BrowserCommandMessage;
-export type BrowserClientMessage = BrowserRegisterMessage | BrowserResultMessage;
