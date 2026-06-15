@@ -159,8 +159,12 @@ async function handleOpen(
   openUrl: (url: string) => void
 ): Promise<BrowserCommandResult> {
   if (!url) return { ok: false, error: "Missing url" };
+  // Capture the current URL before navigating so we can tell when the *new*
+  // page has actually loaded — otherwise an already-open idle pane would report
+  // success against the old page and a follow-up snapshot would read it.
+  const beforeUrl = safeCall(() => getWebview()?.getURL()) ?? null;
   openUrl(url);
-  const webview = await waitForLoadedWebview(getWebview);
+  const webview = await waitForOpenComplete(getWebview, beforeUrl);
   if (!webview) {
     return { ok: true, url, summary: `Opened ${url}` };
   }
@@ -230,8 +234,16 @@ async function handleType(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function waitForLoadedWebview(
-  getWebview: () => PreviewWebview | null
+/**
+ * Wait for an `open` to settle on the newly requested page. Resolves when a
+ * fresh load cycle completes (`did-stop-loading`) or the webview has finished
+ * loading a URL different from `beforeUrl`, whichever comes first. Falls back to
+ * a timeout so a non-navigating `open` (e.g. re-opening the current URL) still
+ * returns. Returns null only if the webview never appears.
+ */
+async function waitForOpenComplete(
+  getWebview: () => PreviewWebview | null,
+  beforeUrl: string | null
 ): Promise<PreviewWebview | null> {
   const start = Date.now();
   let webview = getWebview();
@@ -242,19 +254,30 @@ async function waitForLoadedWebview(
   if (!webview) return null;
 
   const el = webview;
-  if (el.isLoading && !el.isLoading()) return el;
-
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
-      el.removeEventListener("did-stop-loading", finish);
+      el.removeEventListener("did-stop-loading", onStop);
+      window.clearInterval(interval);
       window.clearTimeout(timer);
       resolve();
     };
+    // A completed load cycle since we started waiting is the new navigation —
+    // the old page was idle, so it has no pending load to confuse us.
+    const onStop = () => finish();
+    // Also poll, in case the new load finished before listeners attached
+    // (common on the very first open, where the webview mounts mid-navigation).
+    const poll = () => {
+      const current = safeCall(() => el.getURL());
+      const loading = el.isLoading ? el.isLoading() : false;
+      if (!loading && current && current !== beforeUrl) finish();
+    };
+    const interval = window.setInterval(poll, 120);
     const timer = window.setTimeout(finish, LOAD_TIMEOUT_MS - (Date.now() - start));
-    el.addEventListener("did-stop-loading", finish);
+    el.addEventListener("did-stop-loading", onStop);
+    poll();
   });
   return el;
 }

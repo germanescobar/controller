@@ -35,22 +35,38 @@ async function getServerUrl() {
     return process.env.CONTROLLER_SERVER_URL;
   }
   // Env vars don't survive sanitized agent shells, so fall back to the runtime
-  // file the server publishes under the orchestrator home.
+  // file the server publishes. The CLI is installed at `<home>/bin/controller-browser`,
+  // so the most reliable location is `<home>/browser-runtime.json` derived from
+  // this script's own path — that works even when CODING_ORCHESTRATOR_HOME is
+  // customized (and therefore dropped from the agent's environment). The
+  // home-based paths are secondary fallbacks for non-installed invocations.
   const os = await import("node:os");
   const path = await import("node:path");
   const fs = await import("node:fs/promises");
-  const home =
-    process.env.CODING_ORCHESTRATOR_HOME ||
-    path.join(os.homedir(), "coding-orchestrator");
+
+  const candidates = [];
   try {
-    const raw = await fs.readFile(
-      path.join(home, "browser-runtime.json"),
-      "utf-8"
-    );
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.serverUrl === "string") return parsed.serverUrl;
+    const scriptPath = await fs.realpath(process.argv[1]);
+    candidates.push(path.join(path.dirname(scriptPath), "..", "browser-runtime.json"));
   } catch {
-    // fall through to the error below
+    // argv[1] may be unavailable in unusual invocations; skip.
+  }
+  if (process.env.CODING_ORCHESTRATOR_HOME) {
+    candidates.push(
+      path.join(process.env.CODING_ORCHESTRATOR_HOME, "browser-runtime.json")
+    );
+  }
+  candidates.push(
+    path.join(os.homedir(), "coding-orchestrator", "browser-runtime.json")
+  );
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(candidate, "utf-8"));
+      if (parsed && typeof parsed.serverUrl === "string") return parsed.serverUrl;
+    } catch {
+      // try the next candidate
+    }
   }
   fail(
     "Could not determine the Controller server URL. Is the Controller app running?"
