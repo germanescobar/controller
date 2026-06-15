@@ -1,0 +1,152 @@
+#!/usr/bin/env node
+/*
+ * controller-browser (issue #109)
+ *
+ * Lets an agent drive the visible Electron preview pane for its session. Agents
+ * run it by its absolute install path (`~/coding-orchestrator/bin/controller-browser`)
+ * because sanitized/login shells drop injected env vars and PATH entries. The
+ * server URL comes from CONTROLLER_SERVER_URL when present, otherwise from the
+ * runtime file the server publishes next to this script's install dir. The
+ * target pane is resolved server-side from the current working directory.
+ *
+ * Commands:
+ *   open <url>                 Open a URL in the preview pane.
+ *   snapshot [selector]        Print a text snapshot of the page (or a subtree).
+ *   click <selector>           Click the element matching a CSS selector.
+ *   type <selector> <text>     Type text into a field. Pass --submit to submit.
+ *
+ * This is a dependency-free Node script (no build step) so it runs identically
+ * in dev and in packaged builds.
+ */
+
+const USAGE = `Usage:
+  controller-browser open <url>
+  controller-browser snapshot [selector]
+  controller-browser click <selector>
+  controller-browser type <selector> <text> [--submit]`;
+
+function fail(message) {
+  process.stderr.write(`Error: ${message}\n`);
+  process.exit(1);
+}
+
+async function getServerUrl() {
+  if (process.env.CONTROLLER_SERVER_URL) {
+    return process.env.CONTROLLER_SERVER_URL;
+  }
+  // Env vars don't survive sanitized agent shells, so fall back to the runtime
+  // file the server publishes. The CLI is installed at `<home>/bin/controller-browser`,
+  // so the most reliable location is `<home>/browser-runtime.json` derived from
+  // this script's own path — that works even when CODING_ORCHESTRATOR_HOME is
+  // customized (and therefore dropped from the agent's environment). The
+  // home-based paths are secondary fallbacks for non-installed invocations.
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fs = await import("node:fs/promises");
+
+  const candidates = [];
+  try {
+    const scriptPath = await fs.realpath(process.argv[1]);
+    candidates.push(path.join(path.dirname(scriptPath), "..", "browser-runtime.json"));
+  } catch {
+    // argv[1] may be unavailable in unusual invocations; skip.
+  }
+  if (process.env.CODING_ORCHESTRATOR_HOME) {
+    candidates.push(
+      path.join(process.env.CODING_ORCHESTRATOR_HOME, "browser-runtime.json")
+    );
+  }
+  candidates.push(
+    path.join(os.homedir(), "coding-orchestrator", "browser-runtime.json")
+  );
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(candidate, "utf-8"));
+      if (parsed && typeof parsed.serverUrl === "string") return parsed.serverUrl;
+    } catch {
+      // try the next candidate
+    }
+  }
+  fail(
+    "Could not determine the Controller server URL. Is the Controller app running?"
+  );
+}
+
+function parseArgs(argv) {
+  const [command, ...rest] = argv;
+  if (!command || command === "-h" || command === "--help") {
+    process.stdout.write(`${USAGE}\n`);
+    process.exit(command ? 0 : 1);
+  }
+
+  switch (command) {
+    case "open": {
+      const url = rest[0];
+      if (!url) fail("open requires a <url>");
+      return { action: "open", params: { url } };
+    }
+    case "snapshot": {
+      const selector = rest[0];
+      return { action: "snapshot", params: selector ? { selector } : {} };
+    }
+    case "click": {
+      const selector = rest[0];
+      if (!selector) fail("click requires a <selector>");
+      return { action: "click", params: { selector } };
+    }
+    case "type": {
+      const submit = rest.includes("--submit");
+      const positional = rest.filter((arg) => arg !== "--submit");
+      const selector = positional[0];
+      const text = positional.slice(1).join(" ");
+      if (!selector) fail("type requires a <selector>");
+      return { action: "type", params: { selector, text, submit } };
+    }
+    default:
+      fail(`Unknown command: ${command}\n${USAGE}`);
+  }
+}
+
+async function main() {
+  const { action, params } = parseArgs(process.argv.slice(2));
+  const serverUrl = await getServerUrl();
+
+  let response;
+  try {
+    response = await fetch(`${serverUrl.replace(/\/$/, "")}/api/browser/command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: process.cwd(), action, params }),
+    });
+  } catch (error) {
+    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+  }
+
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    fail(`Unexpected response (HTTP ${response.status})`);
+  }
+
+  if (!result || result.ok === false) {
+    fail((result && result.error) || `Browser command failed (HTTP ${response.status})`);
+  }
+
+  // Snapshots are consumed by the agent, so the page text is the payload.
+  if (action === "snapshot") {
+    const header = [result.title, result.url].filter(Boolean).join(" — ");
+    if (header) process.stdout.write(`${header}\n\n`);
+    process.stdout.write(`${result.text ?? ""}\n`);
+    return;
+  }
+
+  const lines = [];
+  if (result.summary) lines.push(result.summary);
+  if (result.title) lines.push(`Title: ${result.title}`);
+  if (result.url) lines.push(`URL: ${result.url}`);
+  process.stdout.write(`${lines.join("\n") || "OK"}\n`);
+}
+
+main().catch((error) => fail(error?.message ?? String(error)));

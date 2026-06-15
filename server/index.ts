@@ -18,6 +18,10 @@ import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
 import { buildScriptEnv } from "./lib/project-scripts.js";
 import { restoreLoginShellPath } from "./lib/shell-env.js";
+import { previewBrowserBridge } from "./lib/preview-browser.js";
+import { browserRouter } from "./routes/browser.js";
+import { installBrowserSkills } from "./lib/browser-skills.js";
+import { installBrowserCli, browserCliInstalledPath } from "./lib/browser-cli.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -38,6 +42,7 @@ app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/agents", skillsRouter);
+app.use("/api/browser", browserRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session
 // picker and the Electron health check; richer status lives at /api/agents.
@@ -61,15 +66,43 @@ const clientIndexPath = path.join(clientDistDir, "index.html");
 
 if (shouldServeClient && fs.existsSync(clientIndexPath)) {
   app.use(express.static(clientDistDir));
-  app.get(/^(?!\/api\/|\/ws\/terminal).*/, (_req, res) => {
+  app.get(/^(?!\/api\/|\/ws\/).*/, (_req, res) => {
     res.sendFile(clientIndexPath);
   });
 }
 
 const server = http.createServer(app);
 
-// WebSocket server for terminal connections
-const wss = new WebSocketServer({ server, path: "/ws/terminal" });
+// Route WebSocket upgrades explicitly. Multiple `WebSocketServer({ server, path })`
+// instances attach independent upgrade listeners to the same HTTP server; a
+// non-matching listener can still write a 400 after the matching one accepts,
+// corrupting the stream with an invalid frame.
+const terminalWss = new WebSocketServer({ noServer: true });
+
+// WebSocket server that lets the renderer register the preview pane it owns so
+// the browser bridge can forward agent commands to the visible `<webview>`.
+const previewBrowserWss = new WebSocketServer({ noServer: true });
+previewBrowserWss.on("connection", (ws: WebSocket) => {
+  previewBrowserBridge.handleConnection(ws);
+});
+
+server.on("upgrade", (req, socket, head) => {
+  const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+  if (pathname === "/ws/terminal") {
+    terminalWss.handleUpgrade(req, socket, head, (ws) => {
+      terminalWss.emit("connection", ws, req);
+    });
+    return;
+  }
+  if (pathname === "/ws/preview-browser") {
+    previewBrowserWss.handleUpgrade(req, socket, head, (ws) => {
+      previewBrowserWss.emit("connection", ws, req);
+    });
+    return;
+  }
+  socket.destroy();
+});
+
 const DEFAULT_TERMINAL_ID = "default";
 
 function normalizeTerminalId(value: unknown): string {
@@ -79,7 +112,7 @@ function normalizeTerminalId(value: unknown): string {
   return /^[a-zA-Z0-9._-]+$/.test(trimmed) ? trimmed : DEFAULT_TERMINAL_ID;
 }
 
-wss.on("connection", (ws: WebSocket) => {
+terminalWss.on("connection", (ws: WebSocket) => {
   let ptyKey: string | null = null;
   let unsubscribe: (() => void) | null = null;
 
@@ -166,6 +199,19 @@ const PORT = parsePort(process.env.PORT, 3100);
 async function start(): Promise<void> {
   if (process.env.NODE_ENV === "production") {
     await restoreLoginShellPath();
+  }
+  // Sync the browser-control skill into each agent's user skills home so the
+  // `/browser` skill is available across Ada, Codex, and Claude.
+  await installBrowserSkills().catch((error: unknown) => {
+    console.error("Failed to install browser skills:", error);
+  });
+  // Install the CLI to a stable absolute path and publish the server URL, so
+  // agents can reach it without depending on PATH or inherited env vars.
+  try {
+    await installBrowserCli();
+    console.log(`controller-browser CLI ready at ${browserCliInstalledPath()}`);
+  } catch (error) {
+    console.error("Failed to install controller-browser CLI:", error);
   }
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

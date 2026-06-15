@@ -25,6 +25,12 @@ import {
   type AttachmentMetadata,
 } from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
+import { browserAgentEnv, browserCliInstalledPath } from "../lib/browser-cli.js";
+import { previewBrowserBridge } from "../lib/preview-browser.js";
+import {
+  buildControllerPreamble,
+  framePreambleForPrompt,
+} from "../lib/agent-preamble.js";
 import {
   getAgentProvider,
   resolveAgentCommand,
@@ -626,7 +632,22 @@ async function handleSessionStream(
     res.status(400).json({ error: skillResolution.error });
     return;
   }
-  const agentMessage = skillResolution.agentMessage;
+  // Always tell the agent it's running inside Controller; advertise the visible
+  // browser only when an Electron pane currently hosts this session (checked per
+  // turn, so it tracks whether the user has the session open in the desktop app).
+  // Delivered by prepending to the turn message — the one channel that reaches
+  // every provider reliably (Codex ignores collaboration-mode developer
+  // instructions in default mode). The skill prefix, if any, stays after it.
+  const browserAvailable = previewBrowserBridge.hasHost(
+    `${req.params.projectId}:${worktree.id}`
+  );
+  const controllerPreamble = framePreambleForPrompt(
+    buildControllerPreamble({
+      browserAvailable,
+      cliPath: browserCliInstalledPath(),
+    })
+  );
+  const agentMessage = controllerPreamble + skillResolution.agentMessage;
   const historyText = skillResolution.historyText;
 
   const runStartTree = await createWorktreeSnapshot(worktree.path);
@@ -673,7 +694,7 @@ async function handleSessionStream(
   const child = provider.spawn({
     message: agentMessage,
     cwd: worktree.path,
-    env: apiKeyEnv,
+    env: { ...apiKeyEnv, ...browserAgentEnv() },
     command: resolvedCommand,
     attachments,
     resumeSessionId,
@@ -1431,7 +1452,7 @@ async function streamCodexPlanSession(
       {
         message,
         cwd: worktreePath,
-        env: await getApiKeyEnvVars(),
+        env: { ...(await getApiKeyEnvVars()), ...browserAgentEnv() },
         resumeSessionId,
         model,
         reasoningEffort,

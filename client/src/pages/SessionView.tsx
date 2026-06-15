@@ -30,6 +30,7 @@ import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import { getController, isControllerAvailable } from "@/lib/controller";
+import { usePreviewBrowserHost, type PreviewWebview } from "@/lib/usePreviewBrowserHost";
 import {
   fetchActiveRuntimes,
   fetchEvents,
@@ -497,6 +498,41 @@ function parseFileChangeDiff(input: Record<string, unknown>): DiffFile[] {
       const op = c.kind?.type === "add" ? "add" : c.kind?.type === "delete" ? "delete" : "update";
       return c.diff ? parseUnifiedDiff(c.diff, c.path, op) : { path: c.path, op, lines: [] };
     });
+}
+
+interface BrowserToolCall {
+  action: string;
+  /** Short, human-readable summary, e.g. `open localhost:5173`. */
+  summary: string;
+  /** Full shell command, shown when expanded. */
+  raw: string;
+}
+
+function extractShellCommand(input?: Record<string, unknown>): string | null {
+  if (!input) return null;
+  const value = input.command ?? input.cmd;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((part) => (typeof part === "string" ? part : "")).join(" ");
+  }
+  return null;
+}
+
+// Detect agent shell calls that drive the preview browser CLI so the timeline
+// can label them clearly (issue #109). Agents invoke it by absolute path, e.g.
+// `"/Users/x/coding-orchestrator/bin/controller-browser" open localhost:5173`.
+function parseBrowserToolCall(input?: Record<string, unknown>): BrowserToolCall | null {
+  const command = extractShellCommand(input);
+  if (!command || !command.includes("controller-browser")) return null;
+  const match = command.match(
+    /controller-browser["']?\s+([A-Za-z-]+)(?:\s+([^\n]*))?/
+  );
+  const action = match?.[1] ?? "";
+  const rest = (match?.[2] ?? "").trim();
+  const summary = action
+    ? `${action}${rest ? ` ${truncateInlineText(rest, 60)}` : ""}`
+    : "browser";
+  return { action, summary, raw: command };
 }
 
 function parseDiffFromToolCall(tool: string, input?: Record<string, unknown>): DiffFile[] {
@@ -1492,6 +1528,34 @@ const ReasoningBlock = memo(function ReasoningBlock({ text }: { text: unknown })
   );
 });
 
+const BrowserToolRow = memo(function BrowserToolRow({ call }: { call: BrowserToolCall }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left min-w-0 hover:bg-muted/50 transition-colors"
+      >
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+        )}
+        <Globe2 className="h-3 w-3 shrink-0 text-primary/80" />
+        <span className="shrink-0 font-mono text-xs text-muted-foreground/80">Browser</span>
+        <span className="min-w-0 truncate text-xs text-muted-foreground/60">
+          {call.summary}
+        </span>
+      </button>
+      {expanded && (
+        <pre className="px-4 py-2 text-[11px] text-muted-foreground/80 font-mono whitespace-pre-wrap overflow-x-auto bg-background/30">
+          {call.raw}
+        </pre>
+      )}
+    </div>
+  );
+});
+
 const ToolCallRow = memo(function ToolCallRow({
   input,
   inputPreview,
@@ -1503,8 +1567,13 @@ const ToolCallRow = memo(function ToolCallRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const toolLabel = truncateInlineText(tool, 80);
+  const browserCall = parseBrowserToolCall(input);
   const diffFiles = parseDiffFromToolCall(tool, input);
   const hasDiff = diffFiles.length > 0;
+
+  if (browserCall) {
+    return <BrowserToolRow call={browserCall} />;
+  }
 
   if (hasDiff) {
     return <DiffBlock files={diffFiles} />;
@@ -2323,12 +2392,16 @@ function PreviewPanel({
   onClear,
   onOpenUrl,
   onStateChange,
+  externalWebviewRef,
 }: {
   projectRoot?: string;
   state: PreviewState;
   onClear: () => void;
   onOpenUrl: (url: string) => void;
   onStateChange: (state: Partial<PreviewState>) => void;
+  // Mirrors the live `<webview>` element so the preview browser host can drive
+  // it from SessionView. Set alongside the internal ref in the ref callback.
+  externalWebviewRef?: React.MutableRefObject<PreviewWebview | null>;
 }) {
   const webviewRef = useRef<PreviewWebviewElement | null>(null);
 
@@ -2432,6 +2505,9 @@ function PreviewPanel({
         createElement("webview", {
           ref: (element: PreviewWebviewElement | null) => {
             webviewRef.current = element;
+            if (externalWebviewRef) {
+              externalWebviewRef.current = element as unknown as PreviewWebview | null;
+            }
           },
           src: state.url,
           partition: "controller-preview",
@@ -3096,12 +3172,17 @@ export function SessionView({
   }, [sessionId]);
 
   useEffect(() => {
-    if (!worktreeId) {
-      setActiveWorktree(null);
-      return;
-    }
+    // Resolve the worktree for this view. When no worktreeId is passed we fall
+    // back to the project's main worktree so downstream consumers (preview
+    // browser key, project root) always have a concrete worktree id/path.
     fetchWorktrees(projectId)
-      .then((wts) => setActiveWorktree(wts.find((w) => w.id === worktreeId) ?? null))
+      .then((wts) =>
+        setActiveWorktree(
+          worktreeId
+            ? wts.find((w) => w.id === worktreeId) ?? null
+            : wts.find((w) => w.isMain) ?? null
+        )
+      )
       .catch(() => {});
   }, [projectId, worktreeId]);
 
@@ -4467,6 +4548,18 @@ export function SessionView({
     open: openPreviewUrl,
   }), [openPreviewUrl, previewAvailable]);
 
+  // Register this session's preview pane with the server so agents can drive it
+  // through the `controller-browser` CLI. Keyed by `projectId:worktreeId` to
+  // match the worktree the server resolves from the agent's cwd.
+  const previewWebviewRef = useRef<PreviewWebview | null>(null);
+  const browserKey = activeWorktree ? `${projectId}:${activeWorktree.id}` : null;
+  usePreviewBrowserHost({
+    enabled: previewAvailable,
+    browserKey,
+    getWebview: useCallback(() => previewWebviewRef.current, []),
+    openUrl: openPreviewUrl,
+  });
+
   const handleStructuredUserInputSubmit = async (
     requestId: string,
     questions: UserInputQuestion[]
@@ -5815,6 +5908,7 @@ export function SessionView({
                     onClear={clearPreview}
                     onOpenUrl={openPreviewUrl}
                     onStateChange={updatePreviewState}
+                    externalWebviewRef={previewWebviewRef}
                   />
                 </div>
               )}

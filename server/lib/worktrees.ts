@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
-import { getProject, type Project } from "./projects.js";
+import { getProject, getProjects, type Project } from "./projects.js";
 import { orchestratorHome, worktreesRegistryFile } from "./paths.js";
 
 export interface Worktree {
@@ -96,6 +96,33 @@ export async function getWorktree(
     return worktrees.find((w) => w.isMain) ?? null;
   }
   return worktrees.find((w) => w.id === worktreeId) ?? null;
+}
+
+/**
+ * Find the worktree that contains the given filesystem path, matching the
+ * longest path prefix across every project. Used by the preview browser route
+ * to map an agent's shell cwd to the pane it should drive.
+ */
+export async function findWorktreeByPath(
+  targetPath: string
+): Promise<Worktree | null> {
+  const resolved = path.resolve(targetPath);
+  const projects = await getProjects();
+  let best: Worktree | null = null;
+  let bestLen = -1;
+  for (const project of projects) {
+    for (const worktree of await getProjectWorktrees(project.id)) {
+      const worktreePath = path.resolve(worktree.path);
+      const inside =
+        resolved === worktreePath ||
+        resolved.startsWith(worktreePath + path.sep);
+      if (inside && worktreePath.length > bestLen) {
+        best = worktree;
+        bestLen = worktreePath.length;
+      }
+    }
+  }
+  return best;
 }
 
 /**
