@@ -2576,6 +2576,11 @@ export function SessionView({
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  // True while this component has its own live SSE for the viewed session.
+  // Distinct from `streaming`, which stays true across server-driven queue
+  // draining (when there's no own SSE). The event poller keys off this so it
+  // engages once our SSE closes but the run continues server-side (#113).
+  const [ownStreamActive, setOwnStreamActive] = useState(false);
   // Messages enqueued while a run is streaming (replayed one-at-a-time on
   // clean completion). The server is the source of truth; this mirrors it
   // for rendering. See issue #113.
@@ -3276,8 +3281,12 @@ export function SessionView({
   useEffect(() => {
     if (!sessionId) return;
     if (!streaming) return;
+    // While our own SSE is feeding this view, let it drive updates. Once it
+    // closes (e.g. the live turn ended but the server keeps draining the
+    // queue), `ownStreamActive` flips false and this effect re-runs to poll
+    // events for the server-driven runs (#113).
     if (
-      eventSourceRef.current &&
+      ownStreamActive &&
       targetMatchesStreamContext(sendContextRef.current, {
         projectId,
         worktreeId,
@@ -3340,7 +3349,7 @@ export function SessionView({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [projectId, sessionId, worktreeId, streaming]);
+  }, [projectId, sessionId, worktreeId, streaming, ownStreamActive]);
 
   // Track current session and manage stream visibility on session switch
   useEffect(() => {
@@ -3727,6 +3736,7 @@ export function SessionView({
       skillName: runSkillName,
     });
     eventSourceRef.current = es;
+    setOwnStreamActive(true);
 
     // Check if the user is still viewing the session this stream belongs to
     const isVisible = () => {
@@ -3942,6 +3952,7 @@ export function SessionView({
         });
         es.close();
         eventSourceRef.current = null;
+        setOwnStreamActive(false);
         const wasVisible = isVisible();
         sendContextRef.current = null;
         const completedSessionId = detectedSessionId;
@@ -4013,6 +4024,7 @@ export function SessionView({
         });
         es.close();
         eventSourceRef.current = null;
+        setOwnStreamActive(false);
         const wasVisible = isVisible();
         sendContextRef.current = null;
         if (wasVisible) {
