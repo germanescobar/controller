@@ -267,19 +267,8 @@ export class CodexAppServerManager {
   private getCollaborationModePayload(
     options: StartPlanTurnOptions
   ): CollaborationModePayload {
-    if (options.mode === "plan") {
-      return {
-        mode: "plan",
-        settings: {
-          model: options.model ?? "",
-          reasoning_effort: options.reasoningEffort ?? null,
-          developer_instructions: null,
-        },
-      };
-    }
-
     return {
-      mode: "default",
+      mode: options.mode === "plan" ? "plan" : "default",
       settings: {
         model: options.model ?? "",
         reasoning_effort: options.reasoningEffort ?? null,
