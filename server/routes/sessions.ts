@@ -1141,17 +1141,60 @@ async function advanceSessionQueue(
   }
   if (!next) return;
 
+  const sink = makeHeadlessStreamResponse();
+  let threw = false;
   try {
     await handleSessionStream(
       makeHeadlessStreamRequest(projectId, worktreeId, sessionId, next),
-      makeHeadlessStreamResponse()
+      sink.res
     );
   } catch (error) {
+    threw = true;
     console.error(
-      `[session] headless queue run failed (session=${sessionId}):`,
+      `[session] headless queue run errored (session=${sessionId}):`,
       error instanceof Error ? error.message : error
     );
-    markSessionInactive(sessionId);
+  }
+
+  // If the replay actually started a run, that run's own completion handler
+  // advances the queue again — nothing more to do here.
+  if (sink.didStart() && !threw) return;
+
+  // The replay never started (failed preflight — e.g. a deleted skill, a
+  // missing attachment, or an unavailable provider — or threw). A single
+  // un-startable item must not stall the rest of the queue, so surface the
+  // failure and drain the next message. We do not re-enqueue the bad item:
+  // a permanently-broken item would otherwise retry forever.
+  markSessionInactive(sessionId);
+  await recordQueueAdvanceFailure(projectId, worktreeId, sessionId, next);
+  await advanceSessionQueue(projectId, worktreeId, sessionId);
+}
+
+/** Persist a visible error for a queued message that could not be started. */
+async function recordQueueAdvanceFailure(
+  projectId: string,
+  worktreeId: string,
+  sessionId: string,
+  message: QueuedMessage
+): Promise<void> {
+  try {
+    const worktree = await resolveWorktree(projectId, worktreeId);
+    if (!worktree) return;
+    const preview =
+      message.visibleText.length > 80
+        ? `${message.visibleText.slice(0, 80)}…`
+        : message.visibleText;
+    await appendEvent(worktree.path, sessionId, {
+      id: randomUUID(),
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: "error",
+      data: {
+        text: `Skipped a queued message that could not be started: "${preview}"`,
+      },
+    });
+  } catch {
+    // Best-effort: the console error above already records the failure.
   }
 }
 
@@ -1183,16 +1226,28 @@ function makeHeadlessStreamRequest(
   } as unknown as Request<{ projectId: string }>;
 }
 
-/* Minimal Express response that discards all stream output. */
-function makeHeadlessStreamResponse(): Response {
+/*
+ * Minimal Express response that discards all stream output. `didStart`
+ * reports whether the handler reached `writeHead` (i.e. a run actually
+ * started streaming) versus bailing out via an error status — which lets
+ * `advanceSessionQueue` tell a started run from a failed preflight.
+ */
+function makeHeadlessStreamResponse(): {
+  res: Response;
+  didStart: () => boolean;
+} {
+  let started = false;
   const res = {
-    writeHead: () => res,
+    writeHead: () => {
+      started = true;
+      return res;
+    },
     write: () => true,
     end: () => res,
     status: () => res,
     json: () => res,
   } as unknown as Response;
-  return res;
+  return { res, didStart: () => started };
 }
 
 async function streamCodexPlanSession(
