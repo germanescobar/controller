@@ -185,6 +185,11 @@ function usesNativeSteering(provider: string): boolean {
   return provider === "codex";
 }
 
+// Label for the steer chord, platform-aware (Cmd on macOS, Ctrl elsewhere).
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+const STEER_KEY_LABEL = IS_MAC ? "⌘+Enter" : "Ctrl+Enter";
+
 function supportsAttachments(provider: string): boolean {
   return provider === "ada" || provider === "codex" || provider === "claude";
 }
@@ -4348,17 +4353,19 @@ export function SessionView({
       }
       return;
     }
-    // Unified keymap (issue #113). While a run is streaming, Enter enqueues
-    // the message for the next run and Shift+Enter steers (using the
-    // composer text, or the first enqueued message when empty). When idle,
-    // Enter sends and Shift+Enter inserts a newline (default).
+    // Unified keymap (issue #113). Shift+Enter always inserts a newline.
+    // Cmd/Ctrl+Enter steers the running turn (using the composer text, or
+    // the first enqueued message when empty). Plain Enter enqueues while a
+    // run is streaming and sends when idle.
     if (steerInProgress) {
       // Composer is locked during a stop->resume steer transition.
       if (e.key === "Enter") e.preventDefault();
       return;
     }
+    const isSteerChord =
+      e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey;
     if (streaming) {
-      if (e.key === "Enter" && e.shiftKey) {
+      if (isSteerChord) {
         e.preventDefault();
         void handleSteer();
         return;
@@ -4368,6 +4375,7 @@ export function SessionView({
         void handleEnqueue();
         return;
       }
+      // Shift+Enter falls through to the default newline behavior.
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -5205,7 +5213,7 @@ export function SessionView({
                         steerInProgress
                           ? "Steering…"
                           : streaming
-                          ? "Enter to queue · Shift+Enter to steer"
+                          ? `Enter to queue · ${STEER_KEY_LABEL} to steer`
                           : availableSkills.length > 0
                           ? "Describe what you want to build… type / to use a skill"
                           : sessionId
