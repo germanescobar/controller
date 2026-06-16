@@ -74,6 +74,7 @@ function FocusAdvanceToast({
             <div className="mt-0.5 text-xs text-slate-400">
               <span className="hidden md:inline">
                 Press <span className="font-medium text-slate-200">S</span> to stay ·{" "}
+                <span className="font-medium text-slate-200">N</span> to continue ·{" "}
               </span>
               <span>{secondsRemaining}s</span>
             </div>
@@ -527,9 +528,10 @@ export function App() {
     maxWidth: 480,
   });
 
-  // Focus mode keyboard shortcuts (N / D / F / E). Esc also cancels
-  // a pending advance when focus is not in an editable element
-  // (issue #104).
+  // Focus mode keyboard shortcuts (N / D / F / E). While an advance is
+  // pending, S (or Esc) stays and N continues immediately (even while the
+  // composer is focused). Esc only cancels when focus is not in an editable
+  // element (issue #104).
   useFocusModeShortcuts({
     focusMode,
     onSkip: handleFocusSkip,
@@ -537,6 +539,7 @@ export function App() {
     onEnter: handleFocusModeEnter,
     onExit: handleFocusModeExit,
     onCancelAdvance: pendingFocusAdvance ? cancelPendingAdvance : undefined,
+    onCommitAdvance: pendingFocusAdvance ? commitPendingAdvance : undefined,
   });
 
   const sessionViewKey =
