@@ -4,8 +4,9 @@ import { useEffect, useRef } from "react";
  * Global keyboard shortcuts that drive the focus-mode loop from the keyboard.
  *
  * - `N` advances to the next pinned session (only while focus mode is active).
- *   If a focus-advance countdown is pending, `N` commits it immediately
- *   (see issue #104).
+ *   If a focus-advance countdown is pending, `N` commits it immediately to
+ *   continue to the next session. The commit path fires even while the
+ *   composer is focused (see issue #104).
  * - `S` cancels a pending focus-advance countdown and stays on the current
  *   session (only while focus mode is active).
  * - `D` marks the current session done (only while focus mode is active).
@@ -34,6 +35,14 @@ export interface UseFocusModeShortcutsOptions {
    * pending. Issue #104.
    */
   onCancelAdvance?: () => void;
+  /**
+   * Optional. Called when the user presses `N` while a focus-advance
+   * countdown is pending, committing it immediately to continue to the
+   * next session. Set only when a countdown is pending so the early
+   * `N` path (which fires even while the composer is focused) is a no-op
+   * otherwise.
+   */
+  onCommitAdvance?: () => void;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -64,6 +73,7 @@ export function useFocusModeShortcuts({
   onEnter,
   onExit,
   onCancelAdvance,
+  onCommitAdvance,
 }: UseFocusModeShortcutsOptions): void {
   // Keep handler refs in sync so the keydown listener doesn't have to
   // re-attach on every render of the host component.
@@ -73,6 +83,7 @@ export function useFocusModeShortcuts({
   const onEnterRef = useRef(onEnter);
   const onExitRef = useRef(onExit);
   const onCancelAdvanceRef = useRef(onCancelAdvance);
+  const onCommitAdvanceRef = useRef(onCommitAdvance);
 
   useEffect(() => {
     focusModeRef.current = focusMode;
@@ -81,7 +92,8 @@ export function useFocusModeShortcuts({
     onEnterRef.current = onEnter;
     onExitRef.current = onExit;
     onCancelAdvanceRef.current = onCancelAdvance;
-  }, [focusMode, onSkip, onDone, onEnter, onExit, onCancelAdvance]);
+    onCommitAdvanceRef.current = onCommitAdvance;
+  }, [focusMode, onSkip, onDone, onEnter, onExit, onCancelAdvance, onCommitAdvance]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -120,6 +132,19 @@ export function useFocusModeShortcuts({
       if (inFocusMode && key === "s" && onCancelAdvanceRef.current) {
         event.preventDefault();
         onCancelAdvanceRef.current();
+        return;
+      }
+
+      // Mirror the "stay" path for "next": when a countdown is pending, `N`
+      // commits it immediately to continue to the next session. Runs before
+      // editable-target suppression so it works while the composer is focused
+      // (the advance is usually scheduled right after sending a message), and
+      // preventDefault keeps the literal "n" out of the textarea. When no
+      // countdown is pending, onCommitAdvance is undefined and the regular `N`
+      // handler below takes over.
+      if (inFocusMode && key === "n" && onCommitAdvanceRef.current) {
+        event.preventDefault();
+        onCommitAdvanceRef.current();
         return;
       }
 
