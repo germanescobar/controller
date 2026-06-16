@@ -2748,6 +2748,10 @@ export function SessionView({
   const eventSourceRef = useRef<EventSource | null>(null);
   const streamingRef = useRef(streaming);
   const pendingAttachedSessionIdRef = useRef<string | null>(null);
+  // Set when a focus-mode send originates from the new-thread composer
+  // (no `sessionId` yet). The advance can't be scheduled until the stream
+  // attaches and the brand-new session id is known (issue #120).
+  const focusAdvanceOnAttachRef = useRef(false);
   const currentViewRef = useRef({
     projectId,
     worktreeId,
@@ -3104,6 +3108,13 @@ export function SessionView({
       // re-pin a session the user has previously removed.
       setIsFocusPinned(true);
       onFocusPinnedChange?.();
+      // A focus-mode send from the new-thread composer couldn't schedule
+      // the advance at send time (no session id yet). Now that the brand-new
+      // session is pinned and identified, schedule it (issue #120).
+      if (focusAdvanceOnAttachRef.current) {
+        focusAdvanceOnAttachRef.current = false;
+        onFocusAdvanceAfterSend?.(nextSessionId);
+      }
     }
   };
 
@@ -3770,12 +3781,16 @@ export function SessionView({
     // item as soon as the user commits to a message. The parent owns
     // the navigation logic and the "stay put if the only pinned item
     // is the one we just sent to" rule (issue #81 follow-up).
-    // Only fire for messages sent from a known session — the new-thread
-    // composer (no `sessionId` yet) is handled by the server-side
-    // auto-pin on creation, and there's nothing to "advance past".
     // Continuations (queued replay / emulated steer) never advance focus.
-    if (focusMode && onFocusAdvanceAfterSend && sessionId && !runOverrides) {
-      onFocusAdvanceAfterSend(sessionId);
+    // For an existing session we can advance immediately; for a send from
+    // the new-thread composer (no `sessionId` yet) we defer until the
+    // stream attaches and the new session id is known (issue #120).
+    if (focusMode && onFocusAdvanceAfterSend && !runOverrides) {
+      if (sessionId) {
+        onFocusAdvanceAfterSend(sessionId);
+      } else {
+        focusAdvanceOnAttachRef.current = true;
+      }
     }
 
     const streamSessionId = resumeSessionIdOverride ?? sessionId;
@@ -4113,6 +4128,9 @@ export function SessionView({
         setOwnStreamActive(false);
         const wasVisible = isVisible();
         sendContextRef.current = null;
+        // Stream failed before attaching — drop the pending focus advance
+        // so it can't fire against an unrelated later attach (issue #120).
+        focusAdvanceOnAttachRef.current = false;
         if (wasVisible) {
           setStreamItems((prev) => [...prev, { type: "error", text, at: Date.now() }]);
           streamingRef.current = false;
@@ -4134,6 +4152,9 @@ export function SessionView({
       es.close();
       eventSourceRef.current = null;
       sendContextRef.current = null;
+      // Stream failed before attaching — drop the pending focus advance
+      // so it can't fire against an unrelated later attach (issue #120).
+      focusAdvanceOnAttachRef.current = false;
       if (wasVisible) {
         streamingRef.current = false;
         setStreaming(false);
