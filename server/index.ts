@@ -20,7 +20,7 @@ import { buildScriptEnv } from "./lib/project-scripts.js";
 import { restoreLoginShellPath } from "./lib/shell-env.js";
 import { previewBrowserBridge } from "./lib/preview-browser.js";
 import { browserRouter } from "./routes/browser.js";
-import { installBrowserSkills } from "./lib/browser-skills.js";
+import { installManagedSkills } from "./lib/managed-skills.js";
 import { installBrowserCli, browserCliInstalledPath } from "./lib/browser-cli.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -200,10 +200,10 @@ async function start(): Promise<void> {
   if (process.env.NODE_ENV === "production") {
     await restoreLoginShellPath();
   }
-  // Sync the browser-control skill into each agent's user skills home so the
-  // `/browser` skill is available across Ada, Codex, and Claude.
-  await installBrowserSkills().catch((error: unknown) => {
-    console.error("Failed to install browser skills:", error);
+  // Sync managed skills (browser, controller-scripts, etc.) into each agent's
+  // user skills home so they are available across Ada, Codex, and Claude.
+  await installManagedSkills().catch((error: unknown) => {
+    console.error("Failed to install managed skills:", error);
   });
   // Install the CLI to a stable absolute path and publish the server URL, so
   // agents can reach it without depending on PATH or inherited env vars.

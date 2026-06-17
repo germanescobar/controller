@@ -1,0 +1,301 @@
+/*
+ * Installs app-managed skills for each agent.
+ *
+ * We write the bundled `SKILL.md` files into each provider's user skills home
+ * on startup. Files we don't own (no managed marker) are left untouched so
+ * user edits are never clobbered.
+ */
+
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #109) -->";
+
+const BROWSER_SKILL_BODY = `---
+name: browser
+description: Drive the visible in-app preview browser to open pages, read the rendered DOM, and click or type — use it to verify UI/web work instead of guessing.
+---
+
+${MANAGED_MARKER}
+
+# Browser
+
+You can control the visible preview pane in the orchestrator with the preview
+browser CLI. Use it to verify front-end and web work: open a localhost dev
+server or a project HTML file, read what actually rendered, and interact with
+the page. The user sees everything you do in the Preview tab.
+
+Invoke the CLI by its absolute install path — it is not on your PATH. The path
+is \`~/coding-orchestrator/bin/controller-browser\` (expand \`~\` to your home
+directory):
+
+## Commands
+
+- \`~/coding-orchestrator/bin/controller-browser open <url>\` — open a URL in the
+  preview pane. Accepts \`localhost:PORT\`, a full \`http(s)://\` URL, or a
+  project-relative file path (e.g. \`./dist/index.html\`).
+- \`~/coding-orchestrator/bin/controller-browser snapshot [selector]\` — print a
+  text snapshot of the current page (title, URL, and visible text). Pass a CSS
+  selector to scope it to a subtree. Read this to confirm what rendered.
+- \`~/coding-orchestrator/bin/controller-browser click <selector>\` — click the
+  element matching a CSS selector.
+- \`~/coding-orchestrator/bin/controller-browser type <selector> <text> [--submit]\`
+  — type text into a field. Add \`--submit\` to submit its form.
+
+## How to use it
+
+1. \`open\` the page you want to inspect.
+2. \`snapshot\` to read the rendered result.
+3. \`click\` / \`type\` to interact, then \`snapshot\` again to confirm the effect.
+
+## Notes
+
+- Run the commands from your normal shell; the pane is selected automatically
+  from your working directory.
+- Allowed targets: localhost and project-local files by default, plus web URLs.
+- If a command reports that no preview pane is connected, ask the user to open
+  the Preview tab for this session, then retry.
+`;
+
+const CONTROLLER_SCRIPTS_SKILL_BODY = `---
+name: controller-scripts
+description: Create and update the Controller coding orchestrator's per-project .coding-orchestrator/setup.sh and .coding-orchestrator/run.sh scripts. Use whenever a project needs to configure how worktrees install dependencies, set up ports or environment variables, and start local development services. Also use when the user asks for setup/run scripts, dev server configuration per worktree, PORT_OFFSET handling, or migrating conductor.json/.superset script configs into native Controller scripts.
+---
+
+${MANAGED_MARKER}
+
+# Controller Scripts
+
+Controller runs two native scripts per project from the \`.coding-orchestrator/\`
+directory inside each worktree:
+
+- \`setup.sh\` — runs once when a new worktree is created. Install dependencies,
+  generate config files, run migrations, or copy secrets here.
+- \`run.sh\` — runs when the user clicks **Run**. Start dev servers,
+  background workers, or any process needed for the project.
+
+Controller also supports \`archive.sh\` (run before a worktree is deleted) and
+fallback configs such as \`conductor.json\` or \`.superset/config.json\`, but
+prefer native \`.coding-orchestrator\` scripts.
+
+## When this skill applies
+
+- A project needs a \`setup.sh\` or \`run.sh\`.
+- Existing scripts are broken, missing, or use wrong ports/env vars.
+- The user asks to migrate from \`conductor.json\` or \`.superset\` configs.
+- The user asks how to configure dev servers per worktree (port offsets,
+  env files, etc.).
+
+## Environment available to scripts
+
+Controller exports these variables before running the scripts:
+
+| Variable | Meaning |
+| --- | --- |
+| \`WORKTREE_PATH\` | Absolute path to the worktree where the script runs |
+| \`SOURCE_PATH\` | Absolute path to the project's main/source directory |
+| \`WORKTREE_NAME\` | Name of the worktree (e.g., \`main\`, \`issue-123\`) |
+| \`BRANCH\` | Git branch checked out in the worktree |
+| \`PROJECT_ID\` | Controller project UUID |
+| \`PORT_OFFSET\` | Numeric offset for this worktree (0 for main, then 3, 6, ...) |
+| \`CLIENT_BASE_PORT\` | Base port for the client/Vite dev server (default 4500) |
+| \`API_BASE_PORT\` | Base port for the API/backend server (default 3100) |
+
+Use \`PORT_OFFSET\` to give each worktree isolated ports. Controller uses a
+stride of 3 to avoid collisions when a project needs consecutive ports.
+
+## Writing setup.sh
+
+- Start with \`#!/bin/bash\` and \`set -e\`.
+- Keep the script idempotent where possible: it may be re-run manually.
+- Install dependencies (\`npm install\`, \`pnpm install\`,
+  \`pip install -r requirements.txt\`, etc.).
+- Generate local config files (\`.env.local\`, \`config/local.json\`, etc.)
+  if the app needs them.
+- Copy secrets from \`SOURCE_PATH\` only when necessary; prefer references to
+  Controller-managed env vars.
+- Avoid starting long-running services; \`setup.sh\` must finish and exit.
+
+## Writing run.sh
+
+- Start with \`#!/bin/bash\` and \`set -e\`.
+- Export any environment variables that child processes need (dev servers read
+  env, not just shell variables).
+- Compute final ports from \`CLIENT_BASE_PORT\`, \`API_BASE_PORT\`, and
+  \`PORT_OFFSET\`.
+- Launch the command that starts the project (e.g., \`npm run dev\`,
+  \`pnpm dev\`, \`python manage.py runserver\`).
+- \`run.sh\` is expected to stay running while the user is working.
+
+## Port pattern
+
+Use this snippet when the project has separate client and API ports:
+
+\`\`\`bash
+#!/bin/bash
+set -e
+
+CLIENT_BASE_PORT="\${CLIENT_BASE_PORT:-4500}"
+API_BASE_PORT="\${API_BASE_PORT:-3100}"
+OFFSET="\${PORT_OFFSET:-0}"
+
+if ! [[ "\$CLIENT_BASE_PORT" =~ ^[0-9]+$ ]]; then
+  echo "CLIENT_BASE_PORT must be a number" >&2
+  exit 1
+fi
+if ! [[ "\$API_BASE_PORT" =~ ^[0-9]+$ ]]; then
+  echo "API_BASE_PORT must be a number" >&2
+  exit 1
+fi
+if ! [[ "\$OFFSET" =~ ^[0-9]+$ ]]; then
+  echo "PORT_OFFSET must be a number" >&2
+  exit 1
+fi
+
+CLIENT_PORT=$((CLIENT_BASE_PORT + OFFSET))
+API_PORT=$((API_BASE_PORT + OFFSET))
+\`\`\`
+
+In \`setup.sh\`, write these values to the local env file:
+
+\`\`\`bash
+cat > .env.local <<EOF
+# Generated by .coding-orchestrator/setup.sh for this worktree.
+PORT=\$API_PORT
+API_PORT=\$API_PORT
+VITE_API_PORT=\$API_PORT
+VITE_DEV_SERVER_PORT=\$CLIENT_PORT
+EOF
+\`\`\`
+
+In \`run.sh\`, export them before starting the app:
+
+\`\`\`bash
+export PORT="\$API_PORT"
+export API_PORT="\$API_PORT"
+export VITE_API_PORT="\$API_PORT"
+export VITE_DEV_SERVER_PORT="\$CLIENT_PORT"
+
+npm run dev
+\`\`\`
+
+## File paths and permissions
+
+- Scripts live at \`.coding-orchestrator/setup.sh\` and
+  \`.coding-orchestrator/run.sh\`.
+- Make scripts executable:
+  \`chmod +x .coding-orchestrator/setup.sh .coding-orchestrator/run.sh\`.
+- \`setup.sh\` and \`run.sh\` run from the worktree root (\`\$WORKTREE_PATH\`).
+
+## Simple project template
+
+For a Node/Vite + API project:
+
+\`.coding-orchestrator/setup.sh\`:
+
+\`\`\`bash
+#!/bin/bash
+set -e
+
+npm install
+\`\`\`
+
+\`.coding-orchestrator/run.sh\`:
+
+\`\`\`bash
+#!/bin/bash
+set -e
+
+npm run dev
+\`\`\`
+
+## How to update existing scripts
+
+1. Read the current scripts and the project's \`package.json\` / startup
+   commands.
+2. Identify what env vars and ports the project actually needs.
+3. Edit or recreate \`setup.sh\` and \`run.sh\`.
+4. Validate bash syntax:
+   \`bash -n .coding-orchestrator/setup.sh\` and
+   \`bash -n .coding-orchestrator/run.sh\`.
+5. Run \`setup.sh\` manually in the worktree to confirm it finishes
+   successfully.
+6. Run \`run.sh\` via Controller's Run button or terminal to confirm services
+   start.
+
+## Fallback formats
+
+If \`.coding-orchestrator/setup.sh\` or \`run.sh\` are missing, Controller reads,
+in order:
+
+1. \`conductor.json\` (\`scripts.setup\`, \`scripts.run\`, \`runScriptMode\`)
+2. \`.superset/config.json\` (\`setup\`, \`run\`, \`teardown\`)
+
+When migrating, translate those JSON commands into native shell scripts and
+delete the fallback config files.
+`;
+
+interface ManagedSkill {
+  name: string;
+  body: string;
+}
+
+interface ProviderSkillHome {
+  id: string;
+  dir: string;
+}
+
+const MANAGED_SKILLS: ManagedSkill[] = [
+  { name: "browser", body: BROWSER_SKILL_BODY },
+  { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
+];
+
+function codexSkillsHome(): string {
+  const override = process.env.CODEX_HOME?.trim();
+  const home = override
+    ? override.replace(/^~(?=$|\/)/, os.homedir())
+    : path.join(os.homedir(), ".codex");
+  return path.join(home, "skills");
+}
+
+function providerHomes(): ProviderSkillHome[] {
+  return [
+    { id: "ada", dir: path.join(os.homedir(), ".ada", "skills") },
+    { id: "codex", dir: codexSkillsHome() },
+    { id: "claude", dir: path.join(os.homedir(), ".claude", "skills") },
+  ];
+}
+
+/**
+ * Write the managed skills into each provider's user skills home.
+ * Idempotent: skips files that exist but aren't ours, and avoids rewriting
+ * identical content.
+ */
+export async function installManagedSkills(): Promise<void> {
+  for (const { dir } of providerHomes()) {
+    for (const skill of MANAGED_SKILLS) {
+      const skillFile = path.join(dir, skill.name, "SKILL.md");
+      let existing: string | null = null;
+      try {
+        existing = await fs.readFile(skillFile, "utf-8");
+      } catch {
+        existing = null;
+      }
+
+      if (existing !== null && !existing.includes(MANAGED_MARKER)) {
+        // A user-authored skill with the same name takes precedence.
+        continue;
+      }
+      if (existing === skill.body) continue;
+
+      await fs.mkdir(path.dirname(skillFile), { recursive: true });
+      await fs.writeFile(skillFile, skill.body, "utf-8");
+    }
+  }
+}
+
+/** @deprecated Use {@link installManagedSkills} instead. */
+export async function installBrowserSkills(): Promise<void> {
+  return installManagedSkills();
+}
