@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { getApiKey, getApiKeyEnvVars, PROVIDERS } from "../lib/api-keys.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
 import { resolveAgentCommand } from "../lib/agents.js";
+import { childProcessEnv } from "../lib/shell-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,7 +100,7 @@ async function fetchAdaCliModels(): Promise<Model[]> {
     const adaCommand = await resolveAgentCommand("ada");
     const apiKeyEnv = await getApiKeyEnvVars();
     const { stdout } = await execFileAsync(adaCommand, ["models", "--json"], {
-      env: { ...process.env, ...apiKeyEnv },
+      env: childProcessEnv(apiKeyEnv),
       timeout: 5000,
     });
     return parseAdaModelsJson(stdout);

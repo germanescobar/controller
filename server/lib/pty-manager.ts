@@ -1,6 +1,7 @@
 import * as pty from "node-pty";
 import crypto from "node:crypto";
 import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
+import { CONTROLLER_INTERNAL_ENV, childProcessEnv } from "./shell-env.js";
 
 interface PtySession {
   pty: pty.IPty;
@@ -61,9 +62,16 @@ function formatEnvAssignments(env: Record<string, string>): string {
     .join(" ");
 }
 
-function buildTmuxShellCommand(env: Record<string, string>): string {
+function buildTmuxShellCommand(env?: Record<string, string>): string {
   const shell = process.env.SHELL || "/bin/sh";
-  return `exec env ${formatEnvAssignments(env)} ${shellQuote(shell)} -i`;
+  // Strip Controller's own runtime vars (e.g. NODE_ENV=production, our PORT) so
+  // the user's interactive shell — and anything launched from it — never
+  // inherits them. `-u` removes them even if the tmux server's environment
+  // passed them in, and runs before any per-worktree assignments in `env`.
+  const parts = ["exec", "env", ...CONTROLLER_INTERNAL_ENV.map((key) => `-u ${key}`)];
+  if (env) parts.push(formatEnvAssignments(env));
+  parts.push(shellQuote(shell), "-i");
+  return parts.join(" ");
 }
 
 function runTmux(args: string[], options?: ExecFileSyncOptions): void {
@@ -104,8 +112,9 @@ function ensureTmuxSession(sessionName: string, cwd: string, env?: Record<string
   })();
 
   if (!exists) {
-    const args = ["new-session", "-d", "-s", sessionName, "-c", cwd];
-    if (env) args.push(buildTmuxShellCommand(env));
+    // Always launch through the shell wrapper, even without per-worktree env,
+    // so Controller's internal vars are stripped from every tmux session.
+    const args = ["new-session", "-d", "-s", sessionName, "-c", cwd, buildTmuxShellCommand(env)];
     execFileSync("tmux", args, { stdio: "ignore" });
   }
 
@@ -145,15 +154,10 @@ class PtyManager {
       return { isNew: false, buffer: existing.buffer };
     }
 
-    // Build a clean env — copy process.env then layer on worktree vars
-    const env: Record<string, string> = {};
-    for (const [key, val] of Object.entries(process.env)) {
-      if (val === undefined) continue;
-      env[key] = val;
-    }
-    if (extraEnv) {
-      Object.assign(env, extraEnv);
-    }
+    // Clean env for the attaching tmux client: drop Controller's internal vars,
+    // then layer on worktree vars. The session shell's own env is stripped
+    // separately via buildTmuxShellCommand.
+    const env = childProcessEnv(extraEnv);
 
     let ptyProcess: pty.IPty;
     const sessionName = tmuxSessionName(sessionId);

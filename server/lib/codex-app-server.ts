@@ -7,6 +7,7 @@ import {
   type AgentAttachment,
   type AgentUserInputQuestion,
 } from "./agents.js";
+import { childProcessEnv } from "./shell-env.js";
 
 type JsonRpcId = string | number;
 
@@ -395,7 +396,7 @@ export class CodexAppServerManager {
         codexCommand,
         ["app-server", "--listen", "stdio://", "--enable", "default_mode_request_user_input"],
         {
-          env: { ...process.env, ...env },
+          env: childProcessEnv(env),
           stdio: ["pipe", "pipe", "pipe"],
         }
       );

@@ -4,6 +4,38 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 /**
+ * Vars owned by Controller's own server runtime. The packaged Electron main
+ * process mutates the global `process.env` with these so the in-process server
+ * can read them (see `electron/main.ts`). They must never leak into processes
+ * spawned on behalf of a user project, where e.g. `NODE_ENV=production` or a
+ * colliding `PORT` silently breaks the project's tooling.
+ */
+export const CONTROLLER_INTERNAL_ENV = [
+  "PORT",
+  "NODE_ENV",
+  "SERVE_CLIENT_DIST",
+  "CLIENT_DIST_DIR",
+] as const;
+
+const CONTROLLER_INTERNAL_ENV_SET = new Set<string>(CONTROLLER_INTERNAL_ENV);
+
+/**
+ * Build an environment for a child process spawned on behalf of a user
+ * project. Starts from the current `process.env`, drops Controller's own
+ * runtime vars (see {@link CONTROLLER_INTERNAL_ENV}), then layers `extra` on
+ * top. Use this instead of `{ ...process.env, ...extra }` for any project-
+ * facing spawn so the project's own tooling defaults apply.
+ */
+export function childProcessEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || CONTROLLER_INTERNAL_ENV_SET.has(key)) continue;
+    env[key] = value;
+  }
+  return extra ? { ...env, ...extra } : env;
+}
+
+/**
  * Merge a freshly-captured PATH into the current one, keeping existing
  * entries first and appending only new directories. The result never drops
  * a directory the process already had, so restoration is purely additive.

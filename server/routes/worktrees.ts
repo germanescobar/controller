@@ -31,6 +31,7 @@ import {
   resolveProjectScripts,
   type ProjectScriptCommand,
 } from "../lib/project-scripts.js";
+import { childProcessEnv } from "../lib/shell-env.js";
 
 export const worktreesRouter = Router();
 
@@ -675,7 +676,7 @@ function runOneScriptCommand(
   return new Promise((resolve) => {
     const child = spawn("bash", ["-lc", command], {
       cwd,
-      env: { ...process.env, ...env },
+      env: childProcessEnv(env),
     });
     let timedOut = false;
     const timer = setTimeout(() => {
