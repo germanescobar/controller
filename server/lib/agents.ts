@@ -128,6 +128,14 @@ export interface SpawnOptions {
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   serviceTier?: "fast" | "flex";
   mode?: "default" | "plan";
+  /**
+   * Stable identity/environment context to deliver as a real system message
+   * instead of prepending it to the user message. Only honored by providers
+   * whose CLI exposes a `--system-prompt` flag today (Ada). Other providers
+   * continue to receive context via the prepended user message — see
+   * `server/lib/agent-preamble.ts` for the per-provider wiring.
+   */
+  systemPrompt?: string;
 }
 
 export interface AgentAttachment {
@@ -466,13 +474,21 @@ const adaProvider: AgentProvider = {
   name: "Ada",
   command: "ada",
 
-  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier }) {
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, systemPrompt }) {
     const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
     if (reasoningEffort) {
       cmdArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
     }
     if (serviceTier === "fast") {
       cmdArgs.push("-c", `service_tier="${serviceTier}"`);
+    }
+    // Deliver stable identity/environment context (e.g. the Controller
+    // preamble) as a real system message so it never reaches the chat
+    // transcript. Ada labels it `Additional system prompt from
+    // --system-prompt:` in its system prompt section. Flags must come
+    // before the `chat` subcommand.
+    if (systemPrompt && systemPrompt.trim()) {
+      cmdArgs.push("--system-prompt", systemPrompt);
     }
 
     const args = ["chat"];

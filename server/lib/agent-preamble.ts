@@ -7,6 +7,13 @@
  * browsing flows through the visible pane. The browser section is gated per turn
  * on whether a pane host is currently registered, which is a precise proxy for
  * "the user has this session open in the desktop app."
+ *
+ * Delivery is provider-aware (see `server/routes/sessions.ts`):
+ *   - Ada: passed to the CLI via `--system-prompt`, so it lands in Ada's system
+ *     prompt section and is never part of the chat transcript.
+ *   - Codex / Claude: prepended to the user message (framed with
+ *     `framePreambleForPrompt`), since those providers have no reliable
+ *     system-prompt channel in their default modes today.
  */
 
 export interface ControllerPreambleOptions {
@@ -42,8 +49,10 @@ export function buildControllerPreamble({
 
 /**
  * Frame the preamble as a non-echoed context block for providers that have no
- * system-prompt flag (Ada, Codex's exec path), so it can be prepended to the
- * prompt without the agent repeating it back. Mirrors the skill-prefix framing.
+ * system-prompt flag today (Codex in default mode, Claude in default mode),
+ * so it can be prepended to the user message without the agent repeating it
+ * back. Ada receives the preamble via `--system-prompt` instead and does not
+ * need this wrapper — see the call site in `server/routes/sessions.ts`.
  */
 export function framePreambleForPrompt(preamble: string): string {
   return [
