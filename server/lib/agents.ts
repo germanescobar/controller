@@ -5,6 +5,7 @@ import {
   getCommandVersion,
 } from "./command-resolver.js";
 import { getAgentSetting, getAgentSettings } from "./agent-settings.js";
+import { childProcessEnv } from "./shell-env.js";
 
 export interface AgentPlanStep {
   step: string;
@@ -487,7 +488,7 @@ const adaProvider: AgentProvider = {
 
     return spawn(command ?? "ada", [...cmdArgs, ...args], {
       cwd,
-      env: { ...process.env, ...env },
+      env: childProcessEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
     });
   },
@@ -546,7 +547,7 @@ const codexProvider: AgentProvider = {
 
     return spawn(command ?? "codex", args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: childProcessEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
     });
   },
@@ -626,7 +627,7 @@ const claudeProvider: AgentProvider = {
 
     const child = spawn(command ?? "claude", args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: childProcessEnv(env),
       // Plan mode keeps stdin open for the live control channel; default mode
       // never reads stdin (the caller ends it).
       stdio: [planMode ? "pipe" : "ignore", "pipe", "pipe"],

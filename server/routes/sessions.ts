@@ -25,6 +25,7 @@ import {
   type AttachmentMetadata,
 } from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
+import { childProcessEnv } from "../lib/shell-env.js";
 import { browserAgentEnv, browserCliInstalledPath } from "../lib/browser-cli.js";
 import { previewBrowserBridge } from "../lib/preview-browser.js";
 import {
@@ -216,11 +217,10 @@ async function createWorktreeSnapshot(worktreePath: string): Promise<string | nu
   const execOpts = {
     cwd: worktreePath,
     maxBuffer: 10 * 1024 * 1024,
-    env: {
-      ...process.env,
+    env: childProcessEnv({
       GIT_TERMINAL_PROMPT: "0",
       GIT_INDEX_FILE: indexPath,
-    },
+    }),
   };
 
   try {
@@ -263,7 +263,7 @@ async function getRunDiff(
       {
         cwd: worktreePath,
         maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
       }
     );
     if (!diff.trim()) return null;
@@ -458,7 +458,7 @@ sessionsRouter.get("/:projectId/git/diff", async (req, res) => {
   const execOpts = {
     cwd: worktree.path,
     maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
   };
 
   let diff = "";
@@ -526,7 +526,7 @@ sessionsRouter.get("/:projectId/git/branch-diff", async (req, res) => {
   const execOpts = {
     cwd: worktree.path,
     maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
   };
 
   let diff = "";
