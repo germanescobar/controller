@@ -19,6 +19,7 @@ import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useFocusModeShortcuts } from "./lib/useFocusModeShortcuts.ts";
+import { useApprovalNotifications } from "./lib/useApprovalNotifications.ts";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
@@ -519,6 +520,21 @@ export function App() {
     },
     [focusMode, focusQueue, commitPendingAdvance, cancelPendingAdvance],
   );
+
+  // Raise an OS notification when any agent blocks on an approval while the
+  // user is on another session or has the app backgrounded. Clicking the
+  // notification focuses the window and opens that session.
+  useApprovalNotifications({
+    activeSessionId:
+      activeView.page === "session" ? activeView.sessionId : undefined,
+    onActivate: (notification) => {
+      handleSelectSession(
+        notification.projectId ?? activeProjectId ?? "",
+        notification.sessionId,
+        notification.worktreeId
+      );
+    },
+  });
 
   // Sidebar resizing
   const sidebarResize = useResizablePanel({

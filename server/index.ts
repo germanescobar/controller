@@ -12,7 +12,10 @@ import { apiKeysRouter } from "./routes/api-keys.js";
 import { agentsRouter } from "./routes/agents.js";
 import { skillsRouter } from "./routes/skills.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
-import { listSessionRuntimes } from "./lib/session-runtime.js";
+import {
+  listSessionRuntimes,
+  onRuntimeNotification,
+} from "./lib/session-runtime.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
@@ -56,6 +59,34 @@ app.get("/api/agent-providers", async (_req, res) => {
 // state for every session currently known to the runtime map.
 app.get("/api/runtimes", (_req, res) => {
   res.json({ sessions: listSessionRuntimes() });
+});
+
+// App-wide event stream for cross-session UI signals (e.g. an agent that
+// blocks on an approval while the user is viewing another session or has the
+// app in the background). One persistent connection per renderer; the client
+// shell raises an OS notification from it. Distinct from the per-turn SSE in
+// the sessions route, which only reaches the client watching that session.
+app.get("/api/events", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+  res.write(": connected\n\n");
+
+  const unsubscribe = onRuntimeNotification((event) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+
+  // Comment-line ping so idle proxies don't drop the quiet connection.
+  const heartbeat = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 15 * 1000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
 });
 
 const shouldServeClient =

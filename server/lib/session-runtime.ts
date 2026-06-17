@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import type { ClaudeApprovalRequest } from "./agents.js";
 
@@ -20,6 +21,34 @@ export interface SessionRuntimeState {
 }
 
 const runtimes = new Map<string, SessionRuntimeState>();
+
+/**
+ * App-wide notifications about runtime transitions that the user may want to
+ * know about while looking at a different session (or with the app in the
+ * background). Distinct from the per-turn SSE in the sessions route, which
+ * only reaches the client currently watching that specific session.
+ */
+export interface RuntimeNotification {
+  kind: "needs_input";
+  sessionId: string;
+  projectId?: string;
+  worktreeId?: string;
+  provider?: string;
+  toolName: string;
+  requestId: string;
+}
+
+const runtimeEvents = new EventEmitter();
+
+/** Subscribe to runtime notifications. Returns an unsubscribe function. */
+export function onRuntimeNotification(
+  listener: (event: RuntimeNotification) => void
+): () => void {
+  runtimeEvents.on("notification", listener);
+  return () => {
+    runtimeEvents.off("notification", listener);
+  };
+}
 
 export function markSessionActive(
   sessionId: string,
@@ -59,6 +88,15 @@ export function recordPendingApproval(
     runtime.pendingApprovals = new Map();
   }
   runtime.pendingApprovals.set(request.requestId, request);
+  runtimeEvents.emit("notification", {
+    kind: "needs_input",
+    sessionId,
+    projectId: runtime.metadata?.projectId,
+    worktreeId: runtime.metadata?.worktreeId,
+    provider: runtime.provider,
+    toolName: request.toolName,
+    requestId: request.requestId,
+  } satisfies RuntimeNotification);
 }
 
 /** Remove and return a pending approval once the user has decided. */
