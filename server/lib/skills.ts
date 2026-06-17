@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { resolveCommand } from "./command-resolver.js";
+import { childProcessEnv } from "./shell-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -209,7 +210,7 @@ async function isInsideGitWorkTree(cwd: string): Promise<boolean> {
     const { stdout } = await execFileAsync(
       "git",
       ["rev-parse", "--is-inside-work-tree"],
-      { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }
+      { cwd, env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }) }
     );
     return stdout.trim() === "true";
   } catch {

@@ -25,6 +25,7 @@ import {
   type AttachmentMetadata,
 } from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
+import { childProcessEnv } from "../lib/shell-env.js";
 import { browserAgentEnv } from "../lib/browser-cli.js";
 import {
   buildControllerPreamble,
@@ -215,11 +216,10 @@ async function createWorktreeSnapshot(worktreePath: string): Promise<string | nu
   const execOpts = {
     cwd: worktreePath,
     maxBuffer: 10 * 1024 * 1024,
-    env: {
-      ...process.env,
+    env: childProcessEnv({
       GIT_TERMINAL_PROMPT: "0",
       GIT_INDEX_FILE: indexPath,
-    },
+    }),
   };
 
   try {
@@ -262,7 +262,7 @@ async function getRunDiff(
       {
         cwd: worktreePath,
         maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
       }
     );
     if (!diff.trim()) return null;
@@ -457,7 +457,7 @@ sessionsRouter.get("/:projectId/git/diff", async (req, res) => {
   const execOpts = {
     cwd: worktree.path,
     maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
   };
 
   let diff = "";
@@ -525,7 +525,7 @@ sessionsRouter.get("/:projectId/git/branch-diff", async (req, res) => {
   const execOpts = {
     cwd: worktree.path,
     maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: childProcessEnv({ GIT_TERMINAL_PROMPT: "0" }),
   };
 
   let diff = "";
@@ -631,13 +631,22 @@ async function handleSessionStream(
     res.status(400).json({ error: skillResolution.error });
     return;
   }
-  // Always tell the agent it's running inside Controller. Browser tooling is
-  // covered by the managed `browser` skill installed on startup. Delivered by
-  // prepending to the turn message — the one channel that reaches every
-  // provider reliably (Codex ignores collaboration-mode developer instructions
-  // in default mode). The skill prefix, if any, stays after it.
-  const controllerPreamble = framePreambleForPrompt(buildControllerPreamble());
-  const agentMessage = controllerPreamble + skillResolution.agentMessage;
+// Always tell the agent it's running inside Controller. Browser tooling is
+  // covered by the managed `browser` skill installed on startup.
+  //
+  // Delivery channel depends on the provider:
+  //   - Ada: pass the preamble via `--system-prompt` (real system message, never
+  //     echoed in the chat transcript). The skill prefix stays in the user
+  //     message because it is per-turn and request-scoped.
+  //   - Codex / Claude: prepend to the user message — the only reliable channel
+  //     today (Codex ignores collaboration-mode developer instructions in default
+  //     mode; Claude's plan mode flows through the stream-json control channel).
+  //     The skill prefix, if any, stays after the preamble.
+  const controllerPreamble = buildControllerPreamble();
+  const usesSystemPrompt = providerId === "ada";
+  const agentMessage = usesSystemPrompt
+    ? skillResolution.agentMessage
+    : framePreambleForPrompt(controllerPreamble) + skillResolution.agentMessage;
   const historyText = skillResolution.historyText;
 
   const runStartTree = await createWorktreeSnapshot(worktree.path);
@@ -692,6 +701,7 @@ async function handleSessionStream(
     reasoningEffort,
     serviceTier,
     mode,
+    systemPrompt: usesSystemPrompt ? controllerPreamble : undefined,
   });
   const parseProviderEvent = provider.createParser?.() ?? provider.parseEvent.bind(provider);
 
