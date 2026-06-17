@@ -635,19 +635,26 @@ async function handleSessionStream(
   // Always tell the agent it's running inside Controller; advertise the visible
   // browser only when an Electron pane currently hosts this session (checked per
   // turn, so it tracks whether the user has the session open in the desktop app).
-  // Delivered by prepending to the turn message — the one channel that reaches
-  // every provider reliably (Codex ignores collaboration-mode developer
-  // instructions in default mode). The skill prefix, if any, stays after it.
+  //
+  // Delivery channel depends on the provider:
+  //   - Ada: pass the preamble via `--system-prompt` (real system message, never
+  //     echoed in the chat transcript). The skill prefix stays in the user
+  //     message because it is per-turn and request-scoped.
+  //   - Codex / Claude: prepend to the user message — the only reliable channel
+  //     today (Codex ignores collaboration-mode developer instructions in default
+  //     mode; Claude's plan mode flows through the stream-json control channel).
+  //     The skill prefix, if any, stays after the preamble.
   const browserAvailable = previewBrowserBridge.hasHost(
     `${req.params.projectId}:${worktree.id}`
   );
-  const controllerPreamble = framePreambleForPrompt(
-    buildControllerPreamble({
-      browserAvailable,
-      cliPath: browserCliInstalledPath(),
-    })
-  );
-  const agentMessage = controllerPreamble + skillResolution.agentMessage;
+  const controllerPreamble = buildControllerPreamble({
+    browserAvailable,
+    cliPath: browserCliInstalledPath(),
+  });
+  const usesSystemPrompt = providerId === "ada";
+  const agentMessage = usesSystemPrompt
+    ? skillResolution.agentMessage
+    : framePreambleForPrompt(controllerPreamble) + skillResolution.agentMessage;
   const historyText = skillResolution.historyText;
 
   const runStartTree = await createWorktreeSnapshot(worktree.path);
@@ -702,6 +709,7 @@ async function handleSessionStream(
     reasoningEffort,
     serviceTier,
     mode,
+    systemPrompt: usesSystemPrompt ? controllerPreamble : undefined,
   });
   const parseProviderEvent = provider.createParser?.() ?? provider.parseEvent.bind(provider);
 
