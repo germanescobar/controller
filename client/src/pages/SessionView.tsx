@@ -52,6 +52,7 @@ import {
   submitSessionUserInput,
   pinSessionFocus,
   unpinSessionFocus,
+  updateSessionTitle,
   fetchSessionQueue,
   enqueueSessionMessage,
   removeSessionQueuedMessage,
@@ -2688,6 +2689,9 @@ export function SessionView({
     useState<ServiceTier>("flex");
   const [selectedMode, setSelectedMode] = useState<"default" | "plan">("default");
   const [isFocusPinned, setIsFocusPinned] = useState(false);
+  const [sessionTitle, setSessionTitle] = useState<string | undefined>();
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
@@ -3280,6 +3284,8 @@ export function SessionView({
             setSelectedReasoningEffort(session.reasoningEffort || "medium");
             setSelectedServiceTier(session.serviceTier || "flex");
             setIsFocusPinned(Boolean(session.focusPinnedAt));
+            setSessionTitle(session.title);
+            setEditingTitle(false);
           }
 
           if (eventsResult.status === "fulfilled") {
@@ -3302,6 +3308,8 @@ export function SessionView({
         });
     } else {
       setIsFocusPinned(false);
+      setSessionTitle(undefined);
+      setEditingTitle(false);
       setEvents([]);
       setStreamItems([]);
       setStreaming(false);
@@ -3316,6 +3324,32 @@ export function SessionView({
       cancelled = true;
     };
   }, [projectId, sessionId, worktreeId, focusAdvanceCountdown]);
+
+  // Open the inline title editor, seeding the draft with the current title.
+  const startEditingTitle = useCallback(() => {
+    if (!sessionId) return;
+    setTitleDraft(sessionTitle ?? "");
+    setEditingTitle(true);
+  }, [sessionId, sessionTitle]);
+
+  // Persist the edited title. Optimistically updates local state and rolls
+  // back if the request fails.
+  const commitTitle = useCallback(async () => {
+    if (!sessionId) return;
+    const next = titleDraft.trim();
+    setEditingTitle(false);
+    if (next === (sessionTitle ?? "")) return;
+    const previous = sessionTitle;
+    setSessionTitle(next || undefined);
+    try {
+      await updateSessionTitle(projectId, sessionId, next, worktreeId);
+    } catch (err) {
+      setSessionTitle(previous);
+      toast.error(
+        err instanceof Error ? err.message : "Failed to rename conversation",
+      );
+    }
+  }, [projectId, sessionId, worktreeId, titleDraft, sessionTitle]);
 
   // Reload the persisted message queue for whichever session this view is
   // bound to. The server owns the queue; this keeps the rendered list and
@@ -4830,10 +4864,47 @@ export function SessionView({
 
       {/* Header */}
       <header className={`${sessionId ? "flex" : "hidden md:flex"} h-12 md:h-14 shrink-0 items-center justify-end md:justify-between border-b border-border bg-background px-3 md:px-4`}>
-        <div className="hidden md:flex items-center gap-2 md:gap-3 min-w-0">
-          <h1 className="text-sm font-medium truncate">
-            {project?.name ?? "Project"}
-          </h1>
+        <div className="hidden md:flex flex-col justify-center min-w-0">
+          {sessionId ? (
+            editingTitle ? (
+              <input
+                autoFocus
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={() => void commitTitle()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void commitTitle();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setEditingTitle(false);
+                  }
+                }}
+                placeholder="Untitled conversation"
+                className="w-64 max-w-full rounded-sm bg-transparent text-sm font-medium outline-none ring-1 ring-border focus:ring-ring px-1 -mx-1"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={startEditingTitle}
+                title="Rename conversation"
+                className="block truncate text-left text-sm font-medium hover:text-foreground/80 transition-colors"
+              >
+                {sessionTitle || "Untitled conversation"}
+              </button>
+            )
+          ) : (
+            <h1 className="text-sm font-medium truncate">
+              {project?.name ?? "Project"}
+            </h1>
+          )}
+          {sessionId && (project?.name || activeWorktree?.name) && (
+            <span className="block truncate text-[11px] text-muted-foreground">
+              {project?.name ?? "Project"}
+              {activeWorktree?.name ? ` / ${activeWorktree.name}` : ""}
+            </span>
+          )}
         </div>
 
         {/* Mobile: Agent/Terminal/Changes tabs in header */}
