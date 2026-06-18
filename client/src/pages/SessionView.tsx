@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext, createElement } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw, Pencil } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -24,6 +24,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
@@ -2690,8 +2699,9 @@ export function SessionView({
   const [selectedMode, setSelectedMode] = useState<"default" | "plan">("default");
   const [isFocusPinned, setIsFocusPinned] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string | undefined>();
-  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDialogOpen, setTitleDialogOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
@@ -3285,7 +3295,7 @@ export function SessionView({
             setSelectedServiceTier(session.serviceTier || "flex");
             setIsFocusPinned(Boolean(session.focusPinnedAt));
             setSessionTitle(session.title);
-            setEditingTitle(false);
+            setTitleDialogOpen(false);
           }
 
           if (eventsResult.status === "fulfilled") {
@@ -3309,7 +3319,7 @@ export function SessionView({
     } else {
       setIsFocusPinned(false);
       setSessionTitle(undefined);
-      setEditingTitle(false);
+      setTitleDialogOpen(false);
       setEvents([]);
       setStreamItems([]);
       setStreaming(false);
@@ -3325,29 +3335,35 @@ export function SessionView({
     };
   }, [projectId, sessionId, worktreeId, focusAdvanceCountdown]);
 
-  // Open the inline title editor, seeding the draft with the current title.
-  const startEditingTitle = useCallback(() => {
+  // Open the rename dialog, seeding the draft with the current title.
+  const openTitleDialog = useCallback(() => {
     if (!sessionId) return;
     setTitleDraft(sessionTitle ?? "");
-    setEditingTitle(true);
+    setTitleDialogOpen(true);
   }, [sessionId, sessionTitle]);
 
-  // Persist the edited title. Optimistically updates local state and rolls
-  // back if the request fails.
+  // Persist the edited title from the rename dialog. Optimistically updates
+  // local state and rolls back if the request fails.
   const commitTitle = useCallback(async () => {
     if (!sessionId) return;
     const next = titleDraft.trim();
-    setEditingTitle(false);
-    if (next === (sessionTitle ?? "")) return;
+    if (next === (sessionTitle ?? "")) {
+      setTitleDialogOpen(false);
+      return;
+    }
     const previous = sessionTitle;
+    setSavingTitle(true);
     setSessionTitle(next || undefined);
     try {
       await updateSessionTitle(projectId, sessionId, next, worktreeId);
+      setTitleDialogOpen(false);
     } catch (err) {
       setSessionTitle(previous);
       toast.error(
         err instanceof Error ? err.message : "Failed to rename conversation",
       );
+    } finally {
+      setSavingTitle(false);
     }
   }, [projectId, sessionId, worktreeId, titleDraft, sessionTitle]);
 
@@ -4866,34 +4882,20 @@ export function SessionView({
       <header className={`${sessionId ? "flex" : "hidden md:flex"} h-12 md:h-14 shrink-0 items-center justify-end md:justify-between border-b border-border bg-background px-3 md:px-4`}>
         <div className="hidden md:flex flex-col justify-center min-w-0">
           {sessionId ? (
-            editingTitle ? (
-              <input
-                autoFocus
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onBlur={() => void commitTitle()}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void commitTitle();
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    setEditingTitle(false);
-                  }
-                }}
-                placeholder="Untitled conversation"
-                className="w-64 max-w-full rounded-sm bg-transparent text-sm font-medium outline-none ring-1 ring-border focus:ring-ring px-1 -mx-1"
-              />
-            ) : (
+            <div className="group/title flex items-center gap-1.5 min-w-0">
+              <h1 className="truncate text-sm font-medium">
+                {sessionTitle || "Untitled conversation"}
+              </h1>
               <button
                 type="button"
-                onClick={startEditingTitle}
+                onClick={openTitleDialog}
                 title="Rename conversation"
-                className="block truncate text-left text-sm font-medium hover:text-foreground/80 transition-colors"
+                aria-label="Rename conversation"
+                className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/title:opacity-100 focus-visible:opacity-100"
               >
-                {sessionTitle || "Untitled conversation"}
+                <Pencil className="h-3.5 w-3.5" />
               </button>
-            )
+            </div>
           ) : (
             <h1 className="text-sm font-medium truncate">
               {project?.name ?? "Project"}
@@ -5017,6 +5019,45 @@ export function SessionView({
           </button>
         </div>
       </header>
+
+      {/* Rename conversation dialog */}
+      <Dialog
+        open={titleDialogOpen}
+        onOpenChange={(open) => {
+          if (!savingTitle) setTitleDialogOpen(open);
+        }}
+      >
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Rename conversation</DialogTitle>
+            <DialogDescription>
+              Give this conversation a title to help you find it later.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void commitTitle();
+            }}
+          >
+            <input
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              placeholder="Untitled conversation"
+              className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+            />
+            <DialogFooter className="mt-4">
+              <DialogClose render={<Button type="button" variant="outline" />}>
+                Cancel
+              </DialogClose>
+              <Button type="submit" disabled={savingTitle}>
+                {savingTitle ? "Saving…" : "Save"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* Main content area: chat + terminal side by side on desktop, tabbed on mobile */}
       <div className="flex flex-1 min-h-0">
