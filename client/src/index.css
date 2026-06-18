@@ -166,6 +166,15 @@
   .terminal-mobile-controls {
     display: block;
   }
+
+  /* iOS Safari auto-zooms when a focused field has a font-size below 16px.
+     Enforcing a 16px minimum suppresses that zoom without disabling the
+     viewport's pinch-to-zoom (we deliberately keep maximum-scale unset). */
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 /* Terminal key buttons: compact touch targets for the toolbar */

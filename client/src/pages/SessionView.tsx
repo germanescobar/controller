@@ -204,6 +204,16 @@ const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 const STEER_KEY_LABEL = IS_MAC ? "⌘+Enter" : "Ctrl+Enter";
 
+// Touch devices use an on-screen keyboard whose Return key should insert a
+// newline rather than submit — there's no Shift+Enter affordance, and the
+// composer has a dedicated Send button. Detected via a coarse pointer so a
+// narrow desktop window (which still has a physical keyboard) keeps the
+// Enter-to-send keymap.
+const IS_TOUCH_DEVICE =
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(pointer: coarse)").matches;
+
 function supportsAttachments(provider: string): boolean {
   return provider === "ada" || provider === "codex" || provider === "claude";
 }
@@ -4512,6 +4522,11 @@ export function SessionView({
       }
       return;
     }
+    // On touch devices the Return key always inserts a newline; submitting
+    // is done via the Send button. Fall through to the textarea default.
+    if (IS_TOUCH_DEVICE && e.key === "Enter" && !(e.metaKey || e.ctrlKey)) {
+      return;
+    }
     // Unified keymap (issue #113). Shift+Enter always inserts a newline.
     // Cmd/Ctrl+Enter steers the running turn (using the composer text, or
     // the first enqueued message when empty). Plain Enter enqueues while a
@@ -5446,7 +5461,9 @@ export function SessionView({
                         steerInProgress
                           ? "Steering…"
                           : streaming
-                          ? `Enter to queue · ${STEER_KEY_LABEL} to steer`
+                          ? IS_TOUCH_DEVICE
+                            ? "Send to queue"
+                            : `Enter to queue · ${STEER_KEY_LABEL} to steer`
                           : availableSkills.length > 0
                           ? "Describe what you want to build… type / to use a skill"
                           : sessionId
