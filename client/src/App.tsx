@@ -730,6 +730,7 @@ export function App() {
             onFocusSkip={handleFocusSkip}
             onFocusExit={handleFocusModeExit}
             onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
+            onTitleChange={() => setFocusRefreshKey((key) => key + 1)}
             onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
             focusAdvanceCountdown={
               pendingFocusAdvance

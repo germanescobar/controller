@@ -773,9 +773,15 @@ async function handleSessionStream(
         },
       });
     }
-    // Merge with existing session file (preserve title/createdAt from earlier messages)
+    // Merge with existing session file (preserve title/createdAt from earlier messages).
+    // Only auto-generate a title for brand-new sessions; for existing ones we keep
+    // whatever the title is — including an intentional absence the user cleared.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing?.title || (historyText.length > 60 ? historyText.slice(0, 60) + "..." : historyText);
+    const title = existing
+      ? existing.title
+      : historyText.length > 60
+        ? historyText.slice(0, 60) + "..."
+        : historyText;
     const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
@@ -1370,8 +1376,14 @@ async function streamCodexPlanSession(
       });
     }
 
+    // Only auto-generate a title for brand-new sessions; for existing ones we keep
+    // whatever the title is — including an intentional absence the user cleared.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing?.title || (historyText.length > 60 ? `${historyText.slice(0, 60)}...` : historyText);
+    const title = existing
+      ? existing.title
+      : historyText.length > 60
+        ? `${historyText.slice(0, 60)}...`
+        : historyText;
     const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,

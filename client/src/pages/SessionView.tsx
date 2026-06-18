@@ -101,6 +101,9 @@ interface SessionViewProps {
   onFocusSkip?: () => void;
   onFocusExit?: () => void;
   onFocusPinnedChange?: () => void;
+  // Fires after the session title is renamed so the parent can refresh
+  // other views (sidebar, focus queue) that cache the title separately.
+  onTitleChange?: () => void;
   // Fires right after the user sends a message (or answers an agent
   // prompt) in focus mode, with the id of the session the message was
   // sent from. The parent can use this to advance to the next focus
@@ -2658,6 +2661,7 @@ export function SessionView({
   onFocusSkip,
   onFocusExit,
   onFocusPinnedChange,
+  onTitleChange,
   onFocusAdvanceAfterSend,
   focusAdvanceCountdown = null,
 }: SessionViewProps) {
@@ -3357,6 +3361,9 @@ export function SessionView({
     try {
       await updateSessionTitle(projectId, sessionId, next, worktreeId);
       setTitleDialogOpen(false);
+      // Let the parent refresh views (sidebar, focus queue) that cache the
+      // title separately from this component.
+      onTitleChange?.();
     } catch (err) {
       setSessionTitle(previous);
       toast.error(
@@ -3365,7 +3372,7 @@ export function SessionView({
     } finally {
       setSavingTitle(false);
     }
-  }, [projectId, sessionId, worktreeId, titleDraft, sessionTitle]);
+  }, [projectId, sessionId, worktreeId, titleDraft, sessionTitle, onTitleChange]);
 
   // Reload the persisted message queue for whichever session this view is
   // bound to. The server owns the queue; this keeps the rendered list and
