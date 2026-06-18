@@ -9,10 +9,12 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { browserCliInstalledPath } from "./browser-cli.js";
 
 const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #109) -->";
 
-const BROWSER_SKILL_BODY = `---
+function buildBrowserSkillBody(cliPath: string): string {
+  return `---
 name: browser
 description: Drive the visible in-app preview browser to open pages, read the rendered DOM, and click or type — use it to verify UI/web work instead of guessing.
 ---
@@ -27,21 +29,19 @@ server or a project HTML file, read what actually rendered, and interact with
 the page. The user sees everything you do in the Preview tab.
 
 Invoke the CLI by its absolute install path — it is not on your PATH. The path
-is \`~/coding-orchestrator/bin/controller-browser\` (expand \`~\` to your home
-directory):
+is \`${cliPath}\`:
 
 ## Commands
 
-- \`~/coding-orchestrator/bin/controller-browser open <url>\` — open a URL in the
-  preview pane. Accepts \`localhost:PORT\`, a full \`http(s)://\` URL, or a
-  project-relative file path (e.g. \`./dist/index.html\`).
-- \`~/coding-orchestrator/bin/controller-browser snapshot [selector]\` — print a
-  text snapshot of the current page (title, URL, and visible text). Pass a CSS
-  selector to scope it to a subtree. Read this to confirm what rendered.
-- \`~/coding-orchestrator/bin/controller-browser click <selector>\` — click the
-  element matching a CSS selector.
-- \`~/coding-orchestrator/bin/controller-browser type <selector> <text> [--submit]\`
-  — type text into a field. Add \`--submit\` to submit its form.
+- \`${cliPath} open <url>\` — open a URL in the preview pane. Accepts
+  \`localhost:PORT\`, a full \`http(s)://\` URL, or a project-relative file path
+  (e.g. \`./dist/index.html\`).
+- \`${cliPath} snapshot [selector]\` — print a text snapshot of the current page
+  (title, URL, and visible text). Pass a CSS selector to scope it to a subtree.
+  Read this to confirm what rendered.
+- \`${cliPath} click <selector>\` — click the element matching a CSS selector.
+- \`${cliPath} type <selector> <text> [--submit]\` — type text into a field. Add
+  \`--submit\` to submit its form.
 
 ## How to use it
 
@@ -57,6 +57,7 @@ directory):
 - If a command reports that no preview pane is connected, ask the user to open
   the Preview tab for this session, then retry.
 `;
+}
 
 const CONTROLLER_SCRIPTS_SKILL_BODY = `---
 name: controller-scripts
@@ -67,13 +68,17 @@ ${MANAGED_MARKER}
 
 # Controller Scripts
 
-Controller runs two native scripts per project from the \`.coding-orchestrator/\`
-directory inside each worktree:
+Controller resolves native scripts from the project's root
+\`.coding-orchestrator/\` directory:
 
 - \`setup.sh\` — runs once when a new worktree is created. Install dependencies,
   generate config files, run migrations, or copy secrets here.
 - \`run.sh\` — runs when the user clicks **Run**. Start dev servers,
   background workers, or any process needed for the project.
+
+Controller copies that script directory into each worktree on creation, so edits
+must be made at the project/source path (\`$SOURCE_PATH/.coding-orchestrator/\`),
+not inside an individual worktree.
 
 Controller also supports \`archive.sh\` (run before a worktree is deleted) and
 fallback configs such as \`conductor.json\` or \`.superset/config.json\`, but
@@ -182,17 +187,18 @@ npm run dev
 
 ## File paths and permissions
 
-- Scripts live at \`.coding-orchestrator/setup.sh\` and
-  \`.coding-orchestrator/run.sh\`.
+- Scripts live at \`$SOURCE_PATH/.coding-orchestrator/setup.sh\` and
+  \`$SOURCE_PATH/.coding-orchestrator/run.sh\`. Controller copies them into each
+  worktree on creation.
 - Make scripts executable:
-  \`chmod +x .coding-orchestrator/setup.sh .coding-orchestrator/run.sh\`.
+  \`chmod +x $SOURCE_PATH/.coding-orchestrator/setup.sh $SOURCE_PATH/.coding-orchestrator/run.sh\`.
 - \`setup.sh\` and \`run.sh\` run from the worktree root (\`\$WORKTREE_PATH\`).
 
 ## Simple project template
 
-For a Node/Vite + API project:
+For a Node/Vite + API project, in \`$SOURCE_PATH/.coding-orchestrator/\`:
 
-\`.coding-orchestrator/setup.sh\`:
+\`setup.sh\`:
 
 \`\`\`bash
 #!/bin/bash
@@ -201,7 +207,7 @@ set -e
 npm install
 \`\`\`
 
-\`.coding-orchestrator/run.sh\`:
+\`run.sh\`:
 
 \`\`\`bash
 #!/bin/bash
@@ -212,13 +218,13 @@ npm run dev
 
 ## How to update existing scripts
 
-1. Read the current scripts and the project's \`package.json\` / startup
-   commands.
+1. Read the current scripts at \`$SOURCE_PATH/.coding-orchestrator/\` and the
+   project's \`package.json\` / startup commands.
 2. Identify what env vars and ports the project actually needs.
-3. Edit or recreate \`setup.sh\` and \`run.sh\`.
+3. Edit or recreate \`setup.sh\` and \`run.sh\` in the source project path.
 4. Validate bash syntax:
-   \`bash -n .coding-orchestrator/setup.sh\` and
-   \`bash -n .coding-orchestrator/run.sh\`.
+   \`bash -n $SOURCE_PATH/.coding-orchestrator/setup.sh\` and
+   \`bash -n $SOURCE_PATH/.coding-orchestrator/run.sh\`.
 5. Run \`setup.sh\` manually in the worktree to confirm it finishes
    successfully.
 6. Run \`run.sh\` via Controller's Run button or terminal to confirm services
@@ -232,8 +238,8 @@ in order:
 1. \`conductor.json\` (\`scripts.setup\`, \`scripts.run\`, \`runScriptMode\`)
 2. \`.superset/config.json\` (\`setup\`, \`run\`, \`teardown\`)
 
-When migrating, translate those JSON commands into native shell scripts and
-delete the fallback config files.
+When migrating, translate those JSON commands into native shell scripts at
+\`$SOURCE_PATH/.coding-orchestrator/\` and delete the fallback config files.
 `;
 
 interface ManagedSkill {
@@ -245,11 +251,6 @@ interface ProviderSkillHome {
   id: string;
   dir: string;
 }
-
-const MANAGED_SKILLS: ManagedSkill[] = [
-  { name: "browser", body: BROWSER_SKILL_BODY },
-  { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
-];
 
 function codexSkillsHome(): string {
   const override = process.env.CODEX_HOME?.trim();
@@ -273,8 +274,14 @@ function providerHomes(): ProviderSkillHome[] {
  * identical content.
  */
 export async function installManagedSkills(): Promise<void> {
+  const cliPath = browserCliInstalledPath();
+  const skills: ManagedSkill[] = [
+    { name: "browser", body: buildBrowserSkillBody(cliPath) },
+    { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
+  ];
+
   for (const { dir } of providerHomes()) {
-    for (const skill of MANAGED_SKILLS) {
+    for (const skill of skills) {
       const skillFile = path.join(dir, skill.name, "SKILL.md");
       let existing: string | null = null;
       try {
