@@ -15,6 +15,7 @@ import {
   getEvents,
   archiveSession,
   updateSessionFocus,
+  updateSessionTitle,
   saveSession,
   resolveSessionFocusState,
   appendEvent,
@@ -772,9 +773,15 @@ async function handleSessionStream(
         },
       });
     }
-    // Merge with existing session file (preserve title/createdAt from earlier messages)
+    // Merge with existing session file (preserve title/createdAt from earlier messages).
+    // Only auto-generate a title for brand-new sessions; for existing ones we keep
+    // whatever the title is — including an intentional absence the user cleared.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing?.title || (historyText.length > 60 ? historyText.slice(0, 60) + "..." : historyText);
+    const title = existing
+      ? existing.title
+      : historyText.length > 60
+        ? historyText.slice(0, 60) + "..."
+        : historyText;
     const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
@@ -1369,8 +1376,14 @@ async function streamCodexPlanSession(
       });
     }
 
+    // Only auto-generate a title for brand-new sessions; for existing ones we keep
+    // whatever the title is — including an intentional absence the user cleared.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing?.title || (historyText.length > 60 ? `${historyText.slice(0, 60)}...` : historyText);
+    const title = existing
+      ? existing.title
+      : historyText.length > 60
+        ? `${historyText.slice(0, 60)}...`
+        : historyText;
     const focus = resolveSessionFocusState(existing);
     await saveSession(worktreePath, {
       id: sessionId,
@@ -2067,6 +2080,38 @@ sessionsRouter.get("/:projectId/sessions/:sessionId", async (req, res) => {
     return;
   }
   const session = await getSession(worktree.path, req.params.sessionId);
+  if (!session) {
+    res.status(404).json({ error: "Session not found" });
+    return;
+  }
+  res.json(session);
+});
+
+// Update a session's editable fields (currently just the title).
+sessionsRouter.patch("/:projectId/sessions/:sessionId", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const worktree = await resolveWorktree(
+    req.params.projectId,
+    req.query.worktreeId as string | undefined
+  );
+  if (!worktree) {
+    res.status(404).json({ error: "Worktree not found" });
+    return;
+  }
+  const { title } = req.body as { title?: unknown };
+  if (typeof title !== "string") {
+    res.status(400).json({ error: "title must be a string" });
+    return;
+  }
+  const session = await updateSessionTitle(
+    worktree.path,
+    req.params.sessionId,
+    title
+  );
   if (!session) {
     res.status(404).json({ error: "Session not found" });
     return;

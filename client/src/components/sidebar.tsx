@@ -13,8 +13,6 @@ import {
   MessageSquare,
   Archive,
   Loader2,
-  Pin,
-  PinOff,
   CheckCircle2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -25,9 +23,8 @@ import {
   deleteProject,
   deleteWorktree,
   archiveSession,
-  pinSessionFocus,
-  unpinSessionFocus,
   markSessionFocusDone,
+  updateSessionTitle,
   type Project,
   type Session,
   type Worktree,
@@ -197,6 +194,13 @@ export function Sidebar({
     worktreeId: string;
     name: string;
   } | null>(null);
+  const [renameSession, setRenameSession] = useState<{
+    projectId: string;
+    worktreeId: string;
+    sessionId: string;
+  } | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [savingRename, setSavingRename] = useState(false);
 
   const focusQueue = useMemo<FocusQueueItem[]>(() => {
     return projectData
@@ -339,25 +343,57 @@ export function Sidebar({
     }
   };
 
-  const handleFocusPin = async (
+  const openRenameDialog = (
     projectId: string,
-    sessionId: string,
     worktreeId: string,
-    pinned: boolean,
+    session: Session,
   ) => {
+    setRenameSession({ projectId, worktreeId, sessionId: session.id });
+    setRenameDraft(session.title ?? "");
+  };
+
+  // Persist a renamed session title, updating local state optimistically so
+  // the new title shows immediately without a full reload.
+  const handleRename = async () => {
+    if (!renameSession) return;
+    const { projectId, worktreeId, sessionId } = renameSession;
+    const next = renameDraft.trim();
+    setSavingRename(true);
     try {
-      if (pinned) {
-        await unpinSessionFocus(projectId, sessionId, worktreeId);
-        toast.success("Session removed from focus");
-      } else {
-        await pinSessionFocus(projectId, sessionId, worktreeId);
-        toast.success("Session added to focus");
-      }
-      await loadAll();
+      const updated = await updateSessionTitle(
+        projectId,
+        sessionId,
+        next,
+        worktreeId,
+      );
+      setProjectData((prev) =>
+        prev.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                worktrees: p.worktrees.map((w) =>
+                  w.id === worktreeId
+                    ? {
+                        ...w,
+                        sessions: w.sessions.map((s) =>
+                          s.id === sessionId
+                            ? { ...s, title: updated.title }
+                            : s,
+                        ),
+                      }
+                    : w,
+                ),
+              }
+            : p,
+        ),
+      );
+      setRenameSession(null);
     } catch (err) {
       toast.error(
-        err instanceof Error ? err.message : "Failed to update focus queue",
+        err instanceof Error ? err.message : "Failed to rename conversation",
       );
+    } finally {
+      setSavingRename(false);
     }
   };
 
@@ -698,25 +734,16 @@ export function Sidebar({
                                             tabIndex={0}
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              handleFocusPin(
+                                              openRenameDialog(
                                                 project.id,
-                                                session.id,
                                                 worktree.id,
-                                                Boolean(session.focusPinnedAt),
+                                                session,
                                               );
                                             }}
                                             className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
-                                            title={
-                                              session.focusPinnedAt
-                                                ? "Remove from focus"
-                                                : "Add to focus"
-                                            }
+                                            title="Rename conversation"
                                           >
-                                            {session.focusPinnedAt ? (
-                                              <PinOff className="h-3.5 w-3.5" />
-                                            ) : (
-                                              <Pin className="h-3.5 w-3.5" />
-                                            )}
+                                            <Pencil className="h-3.5 w-3.5" />
                                           </span>
                                           <span
                                             role="button"
@@ -860,6 +887,44 @@ export function Sidebar({
               Delete
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!renameSession}
+        onOpenChange={(open) => {
+          if (!open && !savingRename) setRenameSession(null);
+        }}
+      >
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Rename conversation</DialogTitle>
+            <DialogDescription>
+              Give this conversation a title to help you find it later.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleRename();
+            }}
+          >
+            <input
+              autoFocus
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              placeholder="Untitled conversation"
+              className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+            />
+            <DialogFooter className="mt-4">
+              <DialogClose render={<Button type="button" variant="outline" />}>
+                Cancel
+              </DialogClose>
+              <Button type="submit" disabled={savingRename}>
+                {savingRename ? "Saving…" : "Save"}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </aside>

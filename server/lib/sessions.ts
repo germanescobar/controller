@@ -189,6 +189,31 @@ export async function updateSessionFocus(
 }
 
 /**
+ * Persist a user-supplied title for a session, overriding the title that
+ * was auto-generated from the first user message. An empty/whitespace
+ * title clears the field so the UI falls back to its placeholder. Returns
+ * the updated session, or `null` if the session does not exist.
+ */
+export async function updateSessionTitle(
+  projectPath: string,
+  sessionId: string,
+  title: string
+): Promise<SessionState | null> {
+  const session = await getSession(projectPath, sessionId);
+  if (!session) return null;
+
+  const trimmed = title.trim();
+  if (trimmed) {
+    session.title = trimmed;
+  } else {
+    delete session.title;
+  }
+
+  await saveSession(projectPath, session);
+  return session;
+}
+
+/**
  * Pin a session to the focus queue if it is not already pinned, not
  * archived, and not previously explicitly unpinned by the user. Returns
  * the (possibly updated) session, or `null` if the session does not

@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext, createElement } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw, Pencil } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -24,6 +24,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
@@ -52,6 +61,7 @@ import {
   submitSessionUserInput,
   pinSessionFocus,
   unpinSessionFocus,
+  updateSessionTitle,
   fetchSessionQueue,
   enqueueSessionMessage,
   removeSessionQueuedMessage,
@@ -91,6 +101,9 @@ interface SessionViewProps {
   onFocusSkip?: () => void;
   onFocusExit?: () => void;
   onFocusPinnedChange?: () => void;
+  // Fires after the session title is renamed so the parent can refresh
+  // other views (sidebar, focus queue) that cache the title separately.
+  onTitleChange?: () => void;
   // Fires right after the user sends a message (or answers an agent
   // prompt) in focus mode, with the id of the session the message was
   // sent from. The parent can use this to advance to the next focus
@@ -2648,6 +2661,7 @@ export function SessionView({
   onFocusSkip,
   onFocusExit,
   onFocusPinnedChange,
+  onTitleChange,
   onFocusAdvanceAfterSend,
   focusAdvanceCountdown = null,
 }: SessionViewProps) {
@@ -2688,6 +2702,10 @@ export function SessionView({
     useState<ServiceTier>("flex");
   const [selectedMode, setSelectedMode] = useState<"default" | "plan">("default");
   const [isFocusPinned, setIsFocusPinned] = useState(false);
+  const [sessionTitle, setSessionTitle] = useState<string | undefined>();
+  const [titleDialogOpen, setTitleDialogOpen] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
@@ -3280,6 +3298,8 @@ export function SessionView({
             setSelectedReasoningEffort(session.reasoningEffort || "medium");
             setSelectedServiceTier(session.serviceTier || "flex");
             setIsFocusPinned(Boolean(session.focusPinnedAt));
+            setSessionTitle(session.title);
+            setTitleDialogOpen(false);
           }
 
           if (eventsResult.status === "fulfilled") {
@@ -3302,6 +3322,8 @@ export function SessionView({
         });
     } else {
       setIsFocusPinned(false);
+      setSessionTitle(undefined);
+      setTitleDialogOpen(false);
       setEvents([]);
       setStreamItems([]);
       setStreaming(false);
@@ -3316,6 +3338,41 @@ export function SessionView({
       cancelled = true;
     };
   }, [projectId, sessionId, worktreeId, focusAdvanceCountdown]);
+
+  // Open the rename dialog, seeding the draft with the current title.
+  const openTitleDialog = useCallback(() => {
+    if (!sessionId) return;
+    setTitleDraft(sessionTitle ?? "");
+    setTitleDialogOpen(true);
+  }, [sessionId, sessionTitle]);
+
+  // Persist the edited title from the rename dialog. Optimistically updates
+  // local state and rolls back if the request fails.
+  const commitTitle = useCallback(async () => {
+    if (!sessionId) return;
+    const next = titleDraft.trim();
+    if (next === (sessionTitle ?? "")) {
+      setTitleDialogOpen(false);
+      return;
+    }
+    const previous = sessionTitle;
+    setSavingTitle(true);
+    setSessionTitle(next || undefined);
+    try {
+      await updateSessionTitle(projectId, sessionId, next, worktreeId);
+      setTitleDialogOpen(false);
+      // Let the parent refresh views (sidebar, focus queue) that cache the
+      // title separately from this component.
+      onTitleChange?.();
+    } catch (err) {
+      setSessionTitle(previous);
+      toast.error(
+        err instanceof Error ? err.message : "Failed to rename conversation",
+      );
+    } finally {
+      setSavingTitle(false);
+    }
+  }, [projectId, sessionId, worktreeId, titleDraft, sessionTitle, onTitleChange]);
 
   // Reload the persisted message queue for whichever session this view is
   // bound to. The server owns the queue; this keeps the rendered list and
@@ -4830,10 +4887,33 @@ export function SessionView({
 
       {/* Header */}
       <header className={`${sessionId ? "flex" : "hidden md:flex"} h-12 md:h-14 shrink-0 items-center justify-end md:justify-between border-b border-border bg-background px-3 md:px-4`}>
-        <div className="hidden md:flex items-center gap-2 md:gap-3 min-w-0">
-          <h1 className="text-sm font-medium truncate">
-            {project?.name ?? "Project"}
-          </h1>
+        <div className="hidden md:flex flex-col justify-center min-w-0">
+          {sessionId ? (
+            <div className="group/title flex items-center gap-1.5 min-w-0">
+              <h1 className="truncate text-sm font-medium">
+                {sessionTitle || "Untitled conversation"}
+              </h1>
+              <button
+                type="button"
+                onClick={openTitleDialog}
+                title="Rename conversation"
+                aria-label="Rename conversation"
+                className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/title:opacity-100 focus-visible:opacity-100"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <h1 className="text-sm font-medium truncate">
+              {project?.name ?? "Project"}
+            </h1>
+          )}
+          {sessionId && (project?.name || activeWorktree?.name) && (
+            <span className="block truncate text-[11px] text-muted-foreground">
+              {project?.name ?? "Project"}
+              {activeWorktree?.name ? ` / ${activeWorktree.name}` : ""}
+            </span>
+          )}
         </div>
 
         {/* Mobile: Agent/Terminal/Changes tabs in header */}
@@ -4946,6 +5026,45 @@ export function SessionView({
           </button>
         </div>
       </header>
+
+      {/* Rename conversation dialog */}
+      <Dialog
+        open={titleDialogOpen}
+        onOpenChange={(open) => {
+          if (!savingTitle) setTitleDialogOpen(open);
+        }}
+      >
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Rename conversation</DialogTitle>
+            <DialogDescription>
+              Give this conversation a title to help you find it later.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void commitTitle();
+            }}
+          >
+            <input
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              placeholder="Untitled conversation"
+              className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+            />
+            <DialogFooter className="mt-4">
+              <DialogClose render={<Button type="button" variant="outline" />}>
+                Cancel
+              </DialogClose>
+              <Button type="submit" disabled={savingTitle}>
+                {savingTitle ? "Saving…" : "Save"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* Main content area: chat + terminal side by side on desktop, tabbed on mobile */}
       <div className="flex flex-1 min-h-0">

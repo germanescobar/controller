@@ -10,6 +10,7 @@ import {
   resolveSessionFocusState,
   saveSession,
   updateSessionFocus,
+  updateSessionTitle,
   type SessionState,
 } from "../sessions.js";
 
@@ -85,6 +86,31 @@ test("updateSessionFocus done clears focusPinnedAt, sets focusDoneAt, and drops 
 test("updateSessionFocus returns null for unknown session", async () => {
   await withTempProject(async (projectPath) => {
     const updated = await updateSessionFocus(projectPath, "does-not-exist", "pin");
+    assert.equal(updated, null);
+  });
+});
+
+test("updateSessionTitle sets a trimmed title", async () => {
+  await withTempProject(async (projectPath) => {
+    await saveSession(projectPath, makeSession());
+    const updated = await updateSessionTitle(projectPath, "session-1", "  My title  ");
+    assert.equal(updated?.title, "My title");
+    const persisted = await getSession(projectPath, "session-1");
+    assert.equal(persisted?.title, "My title");
+  });
+});
+
+test("updateSessionTitle clears the title when given a blank string", async () => {
+  await withTempProject(async (projectPath) => {
+    await saveSession(projectPath, makeSession({ title: "Existing" }));
+    const updated = await updateSessionTitle(projectPath, "session-1", "   ");
+    assert.equal(updated?.title, undefined);
+  });
+});
+
+test("updateSessionTitle returns null for unknown session", async () => {
+  await withTempProject(async (projectPath) => {
+    const updated = await updateSessionTitle(projectPath, "does-not-exist", "x");
     assert.equal(updated, null);
   });
 });

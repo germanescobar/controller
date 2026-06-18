@@ -301,6 +301,24 @@ export async function fetchSession(
   return res.json();
 }
 
+export async function updateSessionTitle(
+  projectId: string,
+  sessionId: string,
+  title: string,
+  worktreeId?: string
+): Promise<Session> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}${withWorktree(worktreeId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }
+  );
+  await throwIfNotOk(res, "Failed to update session title");
+  return res.json();
+}
+
 export async function fetchSessionRuntime(
   projectId: string,
   sessionId: string,
