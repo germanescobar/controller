@@ -26,8 +26,7 @@ import {
 } from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
 import { childProcessEnv } from "../lib/shell-env.js";
-import { browserAgentEnv, browserCliInstalledPath } from "../lib/browser-cli.js";
-import { previewBrowserBridge } from "../lib/preview-browser.js";
+import { browserAgentEnv } from "../lib/browser-cli.js";
 import {
   buildControllerPreamble,
   framePreambleForPrompt,
@@ -632,9 +631,8 @@ async function handleSessionStream(
     res.status(400).json({ error: skillResolution.error });
     return;
   }
-  // Always tell the agent it's running inside Controller; advertise the visible
-  // browser only when an Electron pane currently hosts this session (checked per
-  // turn, so it tracks whether the user has the session open in the desktop app).
+// Always tell the agent it's running inside Controller. Browser tooling is
+  // covered by the managed `browser` skill installed on startup.
   //
   // Delivery channel depends on the provider:
   //   - Ada: pass the preamble via `--system-prompt` (real system message, never
@@ -644,13 +642,7 @@ async function handleSessionStream(
   //     today (Codex ignores collaboration-mode developer instructions in default
   //     mode; Claude's plan mode flows through the stream-json control channel).
   //     The skill prefix, if any, stays after the preamble.
-  const browserAvailable = previewBrowserBridge.hasHost(
-    `${req.params.projectId}:${worktree.id}`
-  );
-  const controllerPreamble = buildControllerPreamble({
-    browserAvailable,
-    cliPath: browserCliInstalledPath(),
-  });
+  const controllerPreamble = buildControllerPreamble();
   const usesSystemPrompt = providerId === "ada";
   const agentMessage = usesSystemPrompt
     ? skillResolution.agentMessage

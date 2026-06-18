@@ -63,6 +63,8 @@ export function buildScriptEnv(context: ScriptContext): Record<string, string> {
     BRANCH: branch,
     PROJECT_ID: context.project.id,
     PORT_OFFSET: port,
+    CLIENT_BASE_PORT: "4500",
+    API_BASE_PORT: "3100",
     CONDUCTOR_WORKSPACE_PATH: context.worktree.path,
     CONDUCTOR_ROOT_PATH: context.project.path,
     CONDUCTOR_WORKSPACE_NAME: context.worktree.name,
