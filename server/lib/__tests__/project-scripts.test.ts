@@ -26,11 +26,11 @@ function makeContext(overrides: {
   };
 }
 
-test("buildScriptEnv exports base ports and port offset", () => {
+test("buildScriptEnv exports port offset without project port defaults", () => {
   const env = buildScriptEnv(makeContext());
-  assert.equal(env.CLIENT_BASE_PORT, "4500");
-  assert.equal(env.API_BASE_PORT, "3100");
   assert.equal(env.PORT_OFFSET, "6");
+  assert.equal(env.CLIENT_BASE_PORT, undefined);
+  assert.equal(env.API_BASE_PORT, undefined);
 });
 
 test("buildScriptEnv uses zero port offset for main worktree", () => {
