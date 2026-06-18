@@ -104,11 +104,11 @@ Controller exports these variables before running the scripts:
 | \`BRANCH\` | Git branch checked out in the worktree |
 | \`PROJECT_ID\` | Controller project UUID |
 | \`PORT_OFFSET\` | Numeric offset for this worktree (0 for main, then 3, 6, ...) |
-| \`CLIENT_BASE_PORT\` | Base port for the client/Vite dev server (default 4500) |
-| \`API_BASE_PORT\` | Base port for the API/backend server (default 3100) |
 
 Use \`PORT_OFFSET\` to give each worktree isolated ports. Controller uses a
-stride of 3 to avoid collisions when a project needs consecutive ports.
+stride of 3 to avoid collisions when a project needs consecutive ports. Each
+project script must define its own base ports; Controller does not provide or
+guess project-specific port defaults.
 
 ## Writing setup.sh
 
@@ -127,8 +127,7 @@ stride of 3 to avoid collisions when a project needs consecutive ports.
 - Start with \`#!/bin/bash\` and \`set -e\`.
 - Export any environment variables that child processes need (dev servers read
   env, not just shell variables).
-- Compute final ports from \`CLIENT_BASE_PORT\`, \`API_BASE_PORT\`, and
-  \`PORT_OFFSET\`.
+- Compute final ports from project-owned base ports and \`PORT_OFFSET\`.
 - Launch the command that starts the project (e.g., \`npm run dev\`,
   \`pnpm dev\`, \`python manage.py runserver\`).
 - \`run.sh\` is expected to stay running while the user is working.
@@ -141,8 +140,8 @@ Use this snippet when the project has separate client and API ports:
 #!/bin/bash
 set -e
 
-CLIENT_BASE_PORT="\${CLIENT_BASE_PORT:-4500}"
-API_BASE_PORT="\${API_BASE_PORT:-3100}"
+CLIENT_BASE_PORT=5173
+API_BASE_PORT=3000
 OFFSET="\${PORT_OFFSET:-0}"
 
 if ! [[ "\$CLIENT_BASE_PORT" =~ ^[0-9]+$ ]]; then
