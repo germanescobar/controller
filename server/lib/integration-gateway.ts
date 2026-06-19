@@ -24,8 +24,11 @@ const CLI_VERIFY_TIMEOUT_MS = 15_000;
 export interface ListedConnection {
   name: string;
   mode: ConnectionMode;
-  /** How the agent uses it: proxied API, MCP tools, or a native CLI. */
-  kind: "api" | "mcp" | "cli";
+  /**
+   * How the agent should use it: `tools` (discover via tools/describe, then
+   * call), `request` (raw HTTP escape hatch), or `cli` (invoke the binary).
+   */
+  kind: "tools" | "request" | "cli";
   summary: string;
 }
 
@@ -74,7 +77,7 @@ export async function gatewayTools(name: string): Promise<{ tools: ToolSummary[]
         "'{\"query\":\"...\"}'`. To explore the schema, POST a GraphQL introspection query the same way.",
     };
   }
-  if (kindOf(connection.transport.mode) === "api" && connection.transport.mode !== "openapi") {
+  if (connection.transport.mode === "rest") {
     return { tools: [], note: "No schema for this connection — use `request` to call it directly." };
   }
   const tools = await toolsFor(connection);
@@ -117,7 +120,7 @@ export async function gatewayCall(
 
 export async function gatewayRequest(name: string, input: RequestInput): Promise<ExecResult> {
   const connection = await resolve(name);
-  if (kindOf(connection.transport.mode) !== "api") {
+  if (!isHttp(connection.transport.mode)) {
     throw new Error(`\`request\` only works for HTTP connections; "${connection.name}" is ${connection.transport.mode}.`);
   }
   return executeRequest(connection, input);
@@ -149,19 +152,32 @@ async function resolve(name: string): Promise<IntegrationConnection> {
   return matches[0];
 }
 
-function kindOf(mode: ConnectionMode): "api" | "mcp" | "cli" {
-  if (mode === "mcp") return "mcp";
+/** What action the agent uses for a mode: discover-and-call, raw request, or native. */
+function kindOf(mode: ConnectionMode): "tools" | "request" | "cli" {
+  if (mode === "openapi" || mode === "mcp") return "tools";
   if (mode === "cli") return "cli";
-  return "api";
+  return "request"; // graphql, rest
+}
+
+/** HTTP-family transports the `request` escape hatch can drive. */
+function isHttp(mode: ConnectionMode): boolean {
+  return mode === "rest" || mode === "graphql" || mode === "openapi";
 }
 
 function summaryOf(c: IntegrationConnection): string {
-  if (c.transport.mode === "cli") {
-    return `Native CLI \`${c.transport.config.binary ?? ""}\` — invoke directly.`;
-  }
-  if (c.transport.mode === "mcp") return "MCP server with structured tools.";
   const base = c.transport.config.baseUrl ?? c.transport.config.endpoint ?? "";
-  return base ? `HTTP API at ${base}.` : "HTTP API.";
+  switch (c.transport.mode) {
+    case "openapi":
+      return `OpenAPI${base ? ` (${base})` : ""} — run \`tools\`/\`describe\` to discover operations, then \`call\`.`;
+    case "mcp":
+      return "MCP server — run `tools` to list its tools, then `call`.";
+    case "graphql":
+      return `GraphQL${base ? ` (${base})` : ""} — send queries with \`request\`.`;
+    case "cli":
+      return `Native CLI \`${c.transport.config.binary ?? ""}\` — run \`status\`, then invoke it directly.`;
+    case "rest":
+      return `Generic HTTP${base ? ` (${base})` : ""} — call it with \`request\`.`;
+  }
 }
 
 function specUrlOf(c: IntegrationConnection): string {

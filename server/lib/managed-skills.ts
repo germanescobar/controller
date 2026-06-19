@@ -34,8 +34,9 @@ paste one into the chat. Authentication is set up in the UI.
 ## Discovery flow (work from broad to specific)
 
 1. \`${cliPath} list\` — the integrations enabled for this session, each tagged
-   with its kind: \`api\` (proxied HTTP), \`mcp\` (structured tools), or \`cli\`
-   (a native binary you invoke directly).
+   with how to use it: \`tools\` (schema-backed — OpenAPI/MCP; discover with
+   \`tools\`/\`describe\`, then \`call\`), \`request\` (raw HTTP — use \`request\`),
+   or \`cli\` (a native binary you invoke directly).
 2. \`${cliPath} search <query>\` — fuzzy-search tools across all connected
    integrations. Start here when you know the capability but not the service.
 3. \`${cliPath} tools <integration>\` — list one integration's tools.
@@ -54,8 +55,10 @@ everything.
   schema. Controller only injects auth; you choose the method, path, and body.
 - \`${cliPath} status <integration>\` — whoami / health check.
 
-Rule of thumb: if \`tools\`/\`describe\` show the operation, use \`call\`; if the
-integration is generic HTTP with no schema, use \`request\`.
+Rule of thumb by \`kind\` (from \`list\`): a **\`tools\`** integration (OpenAPI or
+MCP) is schema-backed — run \`tools\`/\`describe\` and \`call\`; don't hand-build
+URLs. A **\`request\`** integration (GraphQL or raw HTTP) has no tool list — use
+\`request\`. Always try discovery before falling back to \`request\`.
 
 ## GraphQL integrations
 

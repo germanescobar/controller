@@ -41,7 +41,26 @@ test("gatewayList shows only enabled connections", async () => {
 
     const listed = await gateway.gatewayList();
     assert.deepEqual(listed.map((c) => c.name), ["Visible"]);
-    assert.equal(listed[0].kind, "api");
+    assert.equal(listed[0].kind, "request");
+  });
+});
+
+test("list tags OpenAPI as `tools` and GraphQL as `request`", async () => {
+  await withTempHome(async ({ integrations, gateway }) => {
+    await integrations.createConnection({
+      name: "Specced",
+      transport: { mode: "openapi", config: { specUrl: "https://x/spec.json" }, headers: {}, query: {} },
+      auth: { schemes: [] },
+    });
+    await integrations.createConnection({
+      name: "Graph",
+      transport: { mode: "graphql", config: { endpoint: "https://x/graphql" }, headers: {}, query: {} },
+      auth: { schemes: [] },
+    });
+
+    const byName = new Map((await gateway.gatewayList()).map((c) => [c.name, c.kind]));
+    assert.equal(byName.get("Specced"), "tools");
+    assert.equal(byName.get("Graph"), "request");
   });
 });
 
