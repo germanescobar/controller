@@ -27,7 +27,7 @@ import {
 } from "../lib/sessions.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
 import { childProcessEnv } from "../lib/shell-env.js";
-import { browserAgentEnv } from "../lib/browser-cli.js";
+import { controllerAgentEnv } from "../lib/controller-cli.js";
 import {
   buildControllerPreamble,
   framePreambleForPrompt,
@@ -694,7 +694,7 @@ async function handleSessionStream(
   const child = provider.spawn({
     message: agentMessage,
     cwd: worktree.path,
-    env: { ...apiKeyEnv, ...browserAgentEnv() },
+    env: { ...apiKeyEnv, ...controllerAgentEnv() },
     command: resolvedCommand,
     attachments,
     resumeSessionId,
@@ -1465,7 +1465,7 @@ async function streamCodexPlanSession(
       {
         message,
         cwd: worktreePath,
-        env: { ...(await getApiKeyEnvVars()), ...browserAgentEnv() },
+        env: { ...(await getApiKeyEnvVars()), ...controllerAgentEnv() },
         resumeSessionId,
         model,
         reasoningEffort,

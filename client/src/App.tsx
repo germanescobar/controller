@@ -11,12 +11,12 @@ import {
   type Worktree,
 } from "./api.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
-import { SettingsDialog } from "./components/settings-dialog.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
 import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
+import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useFocusModeShortcuts } from "./lib/useFocusModeShortcuts.ts";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
@@ -105,7 +105,8 @@ export type View =
   | { page: "new-project" }
   | { page: "edit-project"; projectId: string }
   | { page: "new-worktree"; projectId: string }
-  | { page: "session"; projectId: string; worktreeId?: string; sessionId?: string };
+  | { page: "session"; projectId: string; worktreeId?: string; sessionId?: string }
+  | { page: "settings"; section: SettingsSection };
 
 class AppErrorBoundary extends Component<
   { children: ReactNode; resetKey: string },
@@ -163,7 +164,6 @@ export function App() {
     return saved.page === "session" ? saved.projectId : null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set());
   const [focusMode, setFocusMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
@@ -178,6 +178,8 @@ export function App() {
   const pendingFocusAdvanceRef = useRef<PendingFocusAdvance | null>(null);
   const advanceTimerRef = useRef<number | null>(null);
   const advanceToastIdRef = useRef<string | number | null>(null);
+  // The view to return to when settings is closed (the last non-settings view).
+  const preSettingsViewRef = useRef<View>({ page: "empty" });
 
   const dismissAdvanceToast = () => {
     if (advanceToastIdRef.current === null) return;
@@ -186,6 +188,10 @@ export function App() {
   };
 
   const setView = (v: View) => {
+    // Entering settings: remember the view we're leaving so closing returns there.
+    if (v.page === "settings" && view.page !== "settings") {
+      preSettingsViewRef.current = view;
+    }
     setViewState(v);
     localStorage.setItem("activeView", JSON.stringify(v));
     // Any user-initiated navigation cancels a scheduled focus
@@ -593,7 +599,7 @@ export function App() {
           }}
           onProjectsChanged={loadProjects}
           onSettings={() => {
-            setSettingsOpen(true);
+            setView({ page: "settings", section: "agents" });
             closeSidebar();
           }}
           onFocusQueueChange={handleFocusQueueChange}
@@ -746,12 +752,18 @@ export function App() {
             }
           />
         )}
+
+        {activeView.page === "settings" && (
+          <SettingsPage
+            section={activeView.section}
+            onSectionChange={(section) => setView({ page: "settings", section })}
+            onClose={() => setView(preSettingsViewRef.current)}
+          />
+        )}
         </AppErrorBoundary>
 
         <StatusBar />
       </main>
-
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );
 }

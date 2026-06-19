@@ -11,7 +11,7 @@ const repoRoot = resolve(here, "..");
 const outDir = resolve(repoRoot, "dist/cli");
 mkdirSync(outDir, { recursive: true });
 
-const scripts = ["controller-browser"];
+const scripts = ["controller", "controller-browser"];
 for (const name of scripts) {
   const from = resolve(here, name);
   const to = resolve(outDir, name);

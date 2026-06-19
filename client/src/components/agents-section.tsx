@@ -4,13 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import {
   fetchProviders,
   setProviderKey,
   deleteProviderKey,
@@ -20,16 +13,16 @@ import {
   type AgentStatus,
 } from "../api.ts";
 
-interface SettingsDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
-
 // API-key providers are model backends consumed by the Ada agent, so they are
 // rendered nested under the Ada row rather than as a top-level section.
 const ADA_AGENT_ID = "ada";
 
-export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
+/*
+ * Settings section for enabling agents, setting their CLI paths, and
+ * configuring the model-provider API keys the Ada agent uses. Self-loading so
+ * it can drop into the settings page without the page wiring its data.
+ */
+export function AgentsSection() {
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
 
@@ -38,9 +31,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     fetchProviders().then(setProviders).catch(() => {});
   };
 
-  useEffect(() => {
-    if (open) load();
-  }, [open]);
+  useEffect(load, []);
 
   const handleToggleAgent = async (agent: AgentStatus) => {
     // Optimistic toggle; reconcile with the server response.
@@ -57,34 +48,20 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>
-            Enable agents and configure the model providers they use.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="min-w-0 max-h-[70vh] space-y-3 overflow-y-auto pr-1">
-          <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Agents
-          </h3>
-          {agents.map((agent) => (
-            <AgentRow
-              key={agent.id}
-              agent={agent}
-              onToggle={() => handleToggleAgent(agent)}
-              onSavePath={(path) => handleSaveAgentPath(agent.id, path)}
-            >
-              {agent.id === ADA_AGENT_ID && (
-                <ApiKeysSection providers={providers} onChange={load} />
-              )}
-            </AgentRow>
-          ))}
-        </div>
-      </DialogContent>
-    </Dialog>
+    <div className="space-y-3">
+      {agents.map((agent) => (
+        <AgentRow
+          key={agent.id}
+          agent={agent}
+          onToggle={() => handleToggleAgent(agent)}
+          onSavePath={(path) => handleSaveAgentPath(agent.id, path)}
+        >
+          {agent.id === ADA_AGENT_ID && (
+            <ApiKeysSection providers={providers} onChange={load} />
+          )}
+        </AgentRow>
+      ))}
+    </div>
   );
 }
 
@@ -134,12 +111,7 @@ function AgentRow({ agent, onToggle, onSavePath, children }: AgentRowProps) {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            onClick={openPathEditor}
-            title="Set CLI path"
-          >
+          <Button size="icon-sm" variant="ghost" onClick={openPathEditor} title="Set CLI path">
             <Settings2 className="h-3.5 w-3.5" />
           </Button>
           <Switch
@@ -219,18 +191,13 @@ function ApiKeysSection({ providers, onChange }: ApiKeysSectionProps) {
         API Keys
       </h4>
       {providers.map((provider) => (
-        <div
-          key={provider.id}
-          className="flex items-center justify-between gap-3"
-        >
+        <div key={provider.id} className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
             <Key className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <div className="min-w-0">
               <div className="text-sm">{provider.name}</div>
               {provider.configured && provider.hint && (
-                <div className="text-xs text-muted-foreground font-mono">
-                  {provider.hint}
-                </div>
+                <div className="text-xs text-muted-foreground font-mono">{provider.hint}</div>
               )}
             </div>
           </div>
@@ -252,12 +219,7 @@ function ApiKeysSection({ providers, onChange }: ApiKeysSectionProps) {
                   autoFocus
                   className="w-32 rounded-md border border-border bg-transparent px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                 />
-                <Button
-                  type="submit"
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={saving || !keyInput.trim()}
-                >
+                <Button type="submit" size="icon-sm" variant="ghost" disabled={saving || !keyInput.trim()}>
                   {saving ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
