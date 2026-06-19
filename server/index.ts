@@ -22,8 +22,7 @@ import { previewBrowserBridge } from "./lib/preview-browser.js";
 import { browserRouter } from "./routes/browser.js";
 import { integrationsRouter } from "./routes/integrations.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
-import { installBrowserCli, browserCliInstalledPath } from "./lib/browser-cli.js";
-import { installIntegrationCli, integrationCliInstalledPath } from "./lib/integration-cli.js";
+import { installControllerCli, controllerCliInstalledPath } from "./lib/controller-cli.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -211,16 +210,10 @@ async function start(): Promise<void> {
   // Install the CLI to a stable absolute path and publish the server URL, so
   // agents can reach it without depending on PATH or inherited env vars.
   try {
-    await installBrowserCli();
-    console.log(`controller-browser CLI ready at ${browserCliInstalledPath()}`);
+    await installControllerCli();
+    console.log(`controller CLI ready at ${controllerCliInstalledPath()}`);
   } catch (error) {
-    console.error("Failed to install controller-browser CLI:", error);
-  }
-  try {
-    await installIntegrationCli();
-    console.log(`integrations CLI ready at ${integrationCliInstalledPath()}`);
-  } catch (error) {
-    console.error("Failed to install integrations CLI:", error);
+    console.error("Failed to install controller CLI:", error);
   }
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

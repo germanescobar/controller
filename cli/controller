@@ -1,0 +1,263 @@
+#!/usr/bin/env node
+/*
+ * controller — unified Controller CLI for agents (issues #109, #130).
+ *
+ * One entry point with per-surface subcommands:
+ *   controller browser <action> ...        Drive the in-app preview browser.
+ *   controller integrations <action> ...    Use configured third-party services.
+ *
+ * Invoked by its absolute install path (`~/coding-orchestrator/bin/controller`)
+ * because sanitized/login shells drop injected env vars and PATH entries. The
+ * server URL comes from CONTROLLER_SERVER_URL when present, otherwise from the
+ * runtime file the server publishes next to this script. Dependency-free (no
+ * build step) so it runs identically in dev and packaged builds.
+ */
+
+const USAGE = `Usage:
+  controller browser open <url>
+  controller browser snapshot [selector]
+  controller browser click <selector>
+  controller browser type <selector> <text> [--submit]
+
+  controller integrations list
+  controller integrations search <query>
+  controller integrations tools <integration>
+  controller integrations describe <integration> <tool>
+  controller integrations call <integration> <tool> [--json '{"key":"value"}']
+  controller integrations request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']
+  controller integrations status <integration>`;
+
+function fail(message) {
+  process.stderr.write(`Error: ${message}\n`);
+  process.exit(1);
+}
+
+async function getServerUrl() {
+  if (process.env.CONTROLLER_SERVER_URL) return process.env.CONTROLLER_SERVER_URL;
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fs = await import("node:fs/promises");
+
+  const candidates = [];
+  try {
+    const scriptPath = await fs.realpath(process.argv[1]);
+    candidates.push(path.join(path.dirname(scriptPath), "..", "controller-runtime.json"));
+  } catch {}
+  if (process.env.CODING_ORCHESTRATOR_HOME) {
+    candidates.push(path.join(process.env.CODING_ORCHESTRATOR_HOME, "controller-runtime.json"));
+  }
+  candidates.push(path.join(os.homedir(), "coding-orchestrator", "controller-runtime.json"));
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(candidate, "utf-8"));
+      if (parsed && typeof parsed.serverUrl === "string") return parsed.serverUrl;
+    } catch {}
+  }
+  fail("Could not determine the Controller server URL. Is the Controller app running?");
+}
+
+async function postJson(serverUrl, route, body) {
+  let response;
+  try {
+    response = await fetch(`${serverUrl.replace(/\/$/, "")}${route}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, cwd: process.cwd() }),
+    });
+  } catch (error) {
+    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+  }
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    fail(`Unexpected response (HTTP ${response.status})`);
+  }
+  return { response, result };
+}
+
+// --- browser surface (issue #109) ---
+
+function parseBrowser(argv) {
+  const [command, ...rest] = argv;
+  switch (command) {
+    case "open": {
+      if (!rest[0]) fail("browser open requires a <url>");
+      return { action: "open", params: { url: rest[0] } };
+    }
+    case "snapshot":
+      return { action: "snapshot", params: rest[0] ? { selector: rest[0] } : {} };
+    case "click": {
+      if (!rest[0]) fail("browser click requires a <selector>");
+      return { action: "click", params: { selector: rest[0] } };
+    }
+    case "type": {
+      const submit = rest.includes("--submit");
+      const positional = rest.filter((a) => a !== "--submit");
+      if (!positional[0]) fail("browser type requires a <selector>");
+      return { action: "type", params: { selector: positional[0], text: positional.slice(1).join(" "), submit } };
+    }
+    default:
+      fail(`Unknown browser command: ${command ?? ""}\n${USAGE}`);
+  }
+}
+
+async function runBrowser(argv, serverUrl) {
+  const { action, params } = parseBrowser(argv);
+  const { response, result } = await postJson(serverUrl, "/api/browser/command", { action, params });
+  if (!result || result.ok === false) {
+    fail((result && result.error) || `Browser command failed (HTTP ${response.status})`);
+  }
+  if (action === "snapshot") {
+    const header = [result.title, result.url].filter(Boolean).join(" — ");
+    if (header) process.stdout.write(`${header}\n\n`);
+    process.stdout.write(`${result.text ?? ""}\n`);
+    return;
+  }
+  const lines = [];
+  if (result.summary) lines.push(result.summary);
+  if (result.title) lines.push(`Title: ${result.title}`);
+  if (result.url) lines.push(`URL: ${result.url}`);
+  process.stdout.write(`${lines.join("\n") || "OK"}\n`);
+}
+
+// --- integrations surface (issue #130) ---
+
+function parsePairs(rest, flag) {
+  const out = {};
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === flag && rest[i + 1]) {
+      const eq = rest[i + 1].indexOf("=");
+      if (eq > 0) out[rest[i + 1].slice(0, eq)] = rest[i + 1].slice(eq + 1);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function flagValue(rest, flag) {
+  const idx = rest.indexOf(flag);
+  return idx >= 0 ? rest[idx + 1] : undefined;
+}
+
+function parseIntegrations(argv) {
+  const [command, ...rest] = argv;
+  switch (command) {
+    case "list":
+      return { endpoint: "list", body: {} };
+    case "search": {
+      const query = rest.join(" ").trim();
+      if (!query) fail("integrations search requires a <query>");
+      return { endpoint: "search", body: { query } };
+    }
+    case "tools":
+      if (!rest[0]) fail("integrations tools requires an <integration>");
+      return { endpoint: "tools", body: { integration: rest[0] } };
+    case "describe":
+      if (!rest[0] || !rest[1]) fail("integrations describe requires <integration> <tool>");
+      return { endpoint: "describe", body: { integration: rest[0], tool: rest[1] } };
+    case "call": {
+      if (!rest[0] || !rest[1]) fail("integrations call requires <integration> <tool>");
+      const json = flagValue(rest, "--json");
+      let args = {};
+      if (json) {
+        try {
+          args = JSON.parse(json);
+        } catch {
+          fail("--json must be valid JSON");
+        }
+      }
+      return { endpoint: "call", body: { integration: rest[0], tool: rest[1], args } };
+    }
+    case "request": {
+      if (!rest[0] || !rest[1] || !rest[2]) fail("integrations request requires <integration> <METHOD> <path>");
+      const data = flagValue(rest, "--data");
+      let body = null;
+      if (data !== undefined) {
+        try {
+          body = JSON.parse(data);
+        } catch {
+          body = data;
+        }
+      }
+      return {
+        endpoint: "request",
+        body: {
+          integration: rest[0],
+          method: rest[1],
+          path: rest[2],
+          query: parsePairs(rest, "--query"),
+          headers: parsePairs(rest, "--header"),
+          body,
+        },
+      };
+    }
+    case "status":
+      if (!rest[0]) fail("integrations status requires an <integration>");
+      return { endpoint: "status", body: { integration: rest[0] } };
+    default:
+      fail(`Unknown integrations command: ${command ?? ""}\n${USAGE}`);
+  }
+}
+
+function printIntegrations(command, result) {
+  if (command === "list") {
+    const conns = result.connections ?? [];
+    if (conns.length === 0) return process.stdout.write("No integrations are enabled for this session.\n");
+    for (const c of conns) process.stdout.write(`${c.name}  [${c.mode}/${c.kind}]  ${c.summary}\n`);
+    return;
+  }
+  if (command === "search") {
+    const matches = result.matches ?? [];
+    if (matches.length === 0) return process.stdout.write("No matching tools.\n");
+    for (const m of matches) process.stdout.write(`${m.integration}  ${m.tool} — ${m.summary}\n`);
+    return;
+  }
+  if (command === "tools") {
+    if (result.note) process.stdout.write(`${result.note}\n`);
+    for (const t of result.tools ?? []) process.stdout.write(`${t.tool} — ${t.summary}\n`);
+    return;
+  }
+  if (command === "describe") return process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (command === "status") {
+    process.stdout.write(`${result.message}\n`);
+    if (result.ok === false) process.exit(2);
+    return;
+  }
+  // call / request
+  if (result.ok === false) {
+    if (result.reauth) {
+      process.stdout.write(`Re-authentication needed: ${result.reauth.message}\n`);
+      process.exit(3);
+    }
+    fail(result.error || "Request failed");
+  }
+  if (result.result !== undefined) return process.stdout.write(`${JSON.stringify(result.result, null, 2)}\n`);
+  process.stdout.write(`HTTP ${result.status} ${result.statusText}\n`);
+  if (result.body) process.stdout.write(`${result.body}\n`);
+  if (result.truncated) process.stdout.write("\n[output truncated]\n");
+}
+
+async function runIntegrations(argv, serverUrl) {
+  const { endpoint, body } = parseIntegrations(argv);
+  const { response, result } = await postJson(serverUrl, `/api/integrations/gateway/${endpoint}`, body);
+  if (response.status >= 400 && result && result.error) fail(result.error);
+  printIntegrations(argv[0], result);
+}
+
+async function main() {
+  const [surface, ...rest] = process.argv.slice(2);
+  if (!surface || surface === "-h" || surface === "--help") {
+    process.stdout.write(`${USAGE}\n`);
+    process.exit(surface ? 0 : 1);
+  }
+  if (surface !== "browser" && surface !== "integrations") {
+    fail(`Unknown surface: ${surface}\n${USAGE}`);
+  }
+  const serverUrl = await getServerUrl();
+  if (surface === "browser") await runBrowser(rest, serverUrl);
+  else await runIntegrations(rest, serverUrl);
+}
+
+main().catch((error) => fail(error?.message ?? String(error)));

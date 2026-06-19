@@ -9,8 +9,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { browserCliInstalledPath } from "./browser-cli.js";
-import { integrationCliInstalledPath } from "./integration-cli.js";
+import { controllerCliInstalledPath } from "./controller-cli.js";
 
 const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #109) -->";
 
@@ -25,8 +24,8 @@ ${MANAGED_MARKER}
 # Integrations
 
 The user configures third-party connections in Controller's Settings →
-Integrations. You reach them through one gateway CLI, invoked by its absolute
-install path (it is not on your PATH): \`${cliPath}\`.
+Integrations. You reach them through the Controller CLI, invoked by its absolute
+path (it is not on your PATH). Every command below is run as \`${cliPath} <command>\`.
 
 Controller holds the credentials and injects them server-side when making the
 call — there is no token for you to read, and you must never ask the user to
@@ -100,8 +99,8 @@ browser CLI. Use it to verify front-end and web work: open a localhost dev
 server or a project HTML file, read what actually rendered, and interact with
 the page. The user sees everything you do in the Preview tab.
 
-Invoke the CLI by its absolute install path — it is not on your PATH. The path
-is \`${cliPath}\`:
+Invoke the CLI by its absolute path — it is not on your PATH. Every command
+below is run as \`${cliPath} <command>\`:
 
 ## Commands
 
@@ -346,10 +345,12 @@ function providerHomes(): ProviderSkillHome[] {
  * identical content.
  */
 export async function installManagedSkills(): Promise<void> {
-  const cliPath = browserCliInstalledPath();
+  // The unified CLI is invoked as `<path> <surface> <command>`; each skill gets
+  // its surface-prefixed invocation so the documented commands are runnable.
+  const cli = controllerCliInstalledPath();
   const skills: ManagedSkill[] = [
-    { name: "browser", body: buildBrowserSkillBody(cliPath) },
-    { name: "integrations", body: buildIntegrationsSkillBody(integrationCliInstalledPath()) },
+    { name: "browser", body: buildBrowserSkillBody(`${cli} browser`) },
+    { name: "integrations", body: buildIntegrationsSkillBody(`${cli} integrations`) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
   ];
 
