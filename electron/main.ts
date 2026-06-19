@@ -3,6 +3,8 @@ import {
   BrowserWindow,
   Menu,
   type MenuItemConstructorOptions,
+  type OpenDialogOptions,
+  dialog,
   ipcMain,
   session as electronSession,
   type Session,
@@ -520,6 +522,22 @@ function registerIpcHandlers(): void {
       );
     }
   );
+
+  ipcMain.handle("controller:pick-directory", async (event) => {
+    // Modal to the renderer that asked, so the picker feels attached
+    // to the right window when the user has multiple windows open.
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const options: OpenDialogOptions = {
+      title: "Select project directory",
+      properties: ["openDirectory", "createDirectory"],
+    };
+    const result = win
+      ? await dialog.showOpenDialog(win, options)
+      : await dialog.showOpenDialog(options);
+    if (result.canceled) return null;
+    const [first] = result.filePaths;
+    return first ?? null;
+  });
 
   ipcMain.on("controller:show-window", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);

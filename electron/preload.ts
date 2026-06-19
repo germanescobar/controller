@@ -59,6 +59,10 @@ const bridge: ControllerBridge = {
       url,
       projectRoot
     ) as Promise<PreviewUrlCheckResult>,
+  pickDirectory: () =>
+    ipcRenderer.invoke(
+      "controller:pick-directory"
+    ) as Promise<string | null>,
   navigateToApp: (url) => {
     window.location.href = url;
   },
