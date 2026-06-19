@@ -23,6 +23,22 @@ export function ProjectSetup({ onCreated, onCancel }: ProjectSetupProps) {
     onCreated();
   };
 
+  const handleBrowse = async () => {
+    // Only available when running inside the Electron wrapper; in a
+    // plain browser the bridge isn't exposed and the button isn't
+    // rendered (see the `controllerBridge` check below).
+    const bridge = (window as { controller?: { pickDirectory?: () => Promise<string | null> } })
+      .controller;
+    if (!bridge?.pickDirectory) return;
+    const picked = await bridge.pickDirectory();
+    if (picked) setPath(picked);
+  };
+
+  const showBrowseButton = Boolean(
+    (window as { controller?: { pickDirectory?: () => Promise<string | null> } }).controller
+      ?.pickDirectory,
+  );
+
   return (
     <div className="flex flex-1 items-center justify-center">
       <div className="w-full max-w-md">
@@ -52,12 +68,24 @@ export function ProjectSetup({ onCreated, onCancel }: ProjectSetupProps) {
             <label className="mb-1.5 block text-sm text-muted-foreground">
               Directory path
             </label>
-            <input
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              placeholder="/Users/me/projects/my-project"
-              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-            />
+            <div className="flex gap-2">
+              <input
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                placeholder="/Users/me/projects/my-project"
+                className="flex-1 rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              />
+              {showBrowseButton && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleBrowse}
+                  title="Pick a folder"
+                >
+                  Browse…
+                </Button>
+              )}
+            </div>
           </div>
           <div>
             <label className="mb-1.5 block text-sm text-muted-foreground">

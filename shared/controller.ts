@@ -29,6 +29,12 @@ export interface ControllerBridge {
     url: string,
     projectRoot?: string
   ) => Promise<PreviewUrlCheckResult>;
+  /**
+   * Open a native folder picker. Returns the absolute path the user
+   * selected, or null if they cancelled. The picker is window-modal
+   * to the renderer that initiated the call.
+   */
+  pickDirectory: () => Promise<string | null>;
   navigateToApp: (url: string) => void;
   showWindow: () => void;
   quit: () => void;
