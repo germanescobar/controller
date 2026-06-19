@@ -180,6 +180,8 @@ export const AUTH_PRESETS: AuthPreset[] = [
       { key: "tokenUrl", label: "Token URL", placeholder: "https://example.com/oauth/token" },
       { key: "scopes", label: "Scopes", placeholder: "read write", optional: true },
     ],
+    // Deferred: needs the interactive browser-redirect acquisition flow.
+    hidden: true,
   },
   {
     id: "oauth_client_credentials",
@@ -210,6 +212,8 @@ export const AUTH_PRESETS: AuthPreset[] = [
       note: "Controller discovers the authorization server, registers dynamically, and signs you in via the browser. The agent never performs this step.",
     },
     fields: [{ key: "scopes", label: "Scopes", placeholder: "read write", optional: true }],
+    // Deferred: relies on the same browser-redirect acquisition flow.
+    hidden: true,
   },
   {
     id: "cloud",
