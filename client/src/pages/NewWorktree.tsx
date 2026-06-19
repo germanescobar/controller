@@ -13,6 +13,7 @@ export function NewWorktree({ project, onCreated, onCancel }: NewWorktreeProps) 
   const [name, setName] = useState("");
   const [branch, setBranch] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
+  const [defaultBranch, setDefaultBranch] = useState<string | null>(null);
   const [branches, setBranches] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
@@ -20,9 +21,12 @@ export function NewWorktree({ project, onCreated, onCancel }: NewWorktreeProps) 
   const [done, setDone] = useState(false);
 
   useEffect(() => {
-    fetchBranches(project.id).then(({ branches, head }) => {
+    fetchBranches(project.id).then(({ branches, defaultBranch }) => {
       setBranches(branches);
-      if (head) setBaseBranch(head);
+      setDefaultBranch(defaultBranch);
+      if (defaultBranch && branches.includes(defaultBranch)) {
+        setBaseBranch(defaultBranch);
+      }
     }).catch(() => {});
   }, [project.id]);
 
@@ -112,7 +116,10 @@ export function NewWorktree({ project, onCreated, onCancel }: NewWorktreeProps) 
                 className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
                 {branches.map((b) => (
-                  <option key={b} value={b}>{b}</option>
+                  <option key={b} value={b}>
+                    {b}
+                    {b === defaultBranch ? " (default)" : ""}
+                  </option>
                 ))}
               </select>
             ) : (

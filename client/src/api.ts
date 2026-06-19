@@ -784,7 +784,7 @@ export async function uploadSessionAttachments(
 
 export async function fetchBranches(
   projectId: string
-): Promise<{ branches: string[]; head: string | null }> {
+): Promise<{ branches: string[]; head: string | null; defaultBranch: string | null }> {
   const res = await fetch(`${BASE}/projects/${projectId}/branches`);
   return res.json();
 }
