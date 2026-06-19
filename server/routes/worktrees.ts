@@ -66,16 +66,47 @@ worktreesRouter.get("/:projectId/branches", async (req, res) => {
     return;
   }
   try {
-    const [branchList, head] = await Promise.all([
+    const [branchList, head, defaultBranch] = await Promise.all([
       runGitCapture(project.path, ["branch", "--format=%(refname:short)"]),
       runGitCapture(project.path, ["symbolic-ref", "--short", "HEAD"]),
+      resolveDefaultBranch(project.path),
     ]);
-    const branches = (branchList ?? "").split("\n").map((b) => b.trim()).filter(Boolean);
-    res.json({ branches, head: head ?? null });
+    const branches = sortBranchesWithDefault(
+      (branchList ?? "").split("\n").map((b) => b.trim()).filter(Boolean),
+      defaultBranch ?? head ?? null
+    );
+    res.json({ branches, head: head ?? null, defaultBranch: defaultBranch ?? null });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
 });
+
+async function resolveDefaultBranch(cwd: string): Promise<string | null> {
+  // Prefer the remote's advertised default branch (origin/HEAD), which most
+  // clones set automatically. Strip the "origin/" prefix if present.
+  const remoteHead = await runGitCapture(cwd, [
+    "symbolic-ref",
+    "--short",
+    "refs/remotes/origin/HEAD",
+  ]);
+  if (remoteHead) {
+    const short = remoteHead.replace(/^origin\//, "");
+    if (short) return short;
+  }
+
+  // Fall back to the locally-configured default branch name.
+  const initDefault = await runGitCapture(cwd, ["config", "--get", "init.defaultBranch"]);
+  if (initDefault) return initDefault;
+
+  return null;
+}
+
+function sortBranchesWithDefault(branches: string[], defaultBranch: string | null): string[] {
+  if (!defaultBranch || !branches.includes(defaultBranch)) {
+    return [...branches].sort((a, b) => a.localeCompare(b));
+  }
+  return [defaultBranch, ...branches.filter((b) => b !== defaultBranch).sort((a, b) => a.localeCompare(b))];
+}
 
 worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   const project = await getProject(req.params.projectId);
