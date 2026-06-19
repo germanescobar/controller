@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Plug, Pencil, Trash2, Plus, Check, Loader2, X, Search, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -56,6 +57,14 @@ export function IntegrationsSection() {
     load();
   };
 
+  const handleToggleEnabled = async (connection: IntegrationConnection) => {
+    setConnections((prev) =>
+      prev.map((c) => (c.id === connection.id ? { ...c, enabled: !c.enabled } : c))
+    );
+    await updateConnection(connection.id, { enabled: !connection.enabled });
+    load();
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
@@ -97,6 +106,11 @@ export function IntegrationsSection() {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
+              <Switch
+                checked={connection.enabled}
+                onCheckedChange={() => handleToggleEnabled(connection)}
+                title={connection.enabled ? "Enabled for agents" : "Hidden from agents"}
+              />
               <Button
                 size="icon-sm"
                 variant="ghost"

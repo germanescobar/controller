@@ -112,6 +112,8 @@ export interface AuthConfig {
 export interface IntegrationConnection {
   id: string;
   name: string;
+  /** When false, the connection is hidden from agents (the gateway skips it). */
+  enabled: boolean;
   transport: TransportConfig;
   auth: AuthConfig;
   createdAt: string;
@@ -141,8 +143,14 @@ export interface AuthInput {
 
 export interface ConnectionInput {
   name: string;
+  enabled?: boolean;
   transport: TransportInput;
   auth: AuthInput;
+}
+
+/** Connections an agent may use: enabled only. */
+export async function listEnabledConnections(): Promise<IntegrationConnection[]> {
+  return (await readRegistry()).filter((c) => c.enabled);
 }
 
 /** Connection id -> { scheme id -> secret value }. */
@@ -175,6 +183,7 @@ export async function createConnection(
   const connection: IntegrationConnection = {
     id,
     name: input.name.trim(),
+    enabled: input.enabled ?? true,
     transport: {
       mode: input.transport.mode,
       config: input.transport.config ?? {},
@@ -201,6 +210,7 @@ export async function updateConnection(
   if (!existing) return null;
 
   if (patch.name !== undefined) existing.name = patch.name.trim();
+  if (patch.enabled !== undefined) existing.enabled = patch.enabled;
 
   if (patch.transport !== undefined) {
     existing.transport = {
@@ -306,7 +316,9 @@ async function readRegistry(): Promise<IntegrationConnection[]> {
   try {
     const content = await fs.readFile(integrationsFile(), "utf-8");
     const parsed = JSON.parse(content) as IntegrationConnection[];
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    // Default `enabled` for records written before the field existed.
+    return parsed.map((c) => ({ ...c, enabled: c.enabled !== false }));
   } catch {
     return [];
   }

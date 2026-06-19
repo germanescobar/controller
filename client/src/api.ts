@@ -792,6 +792,7 @@ export interface AuthConfig {
 export interface IntegrationConnection {
   id: string;
   name: string;
+  enabled: boolean;
   transport: TransportConfig;
   auth: AuthConfig;
   createdAt: string;
@@ -809,6 +810,7 @@ export interface AuthSchemeInput {
 
 export interface ConnectionInput {
   name: string;
+  enabled?: boolean;
   transport: {
     mode: ConnectionMode;
     config?: Record<string, string>;

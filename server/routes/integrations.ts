@@ -26,6 +26,15 @@ import {
   type AuthSchemeInput,
 } from "../lib/integrations.js";
 import { fetchOpenApiAuth } from "../lib/openapi-auth.js";
+import {
+  gatewayList,
+  gatewaySearch,
+  gatewayTools,
+  gatewayDescribe,
+  gatewayCall,
+  gatewayRequest,
+  gatewayStatus,
+} from "../lib/integration-gateway.js";
 
 export const integrationsRouter = Router();
 
@@ -95,6 +104,73 @@ integrationsRouter.post("/openapi/inspect", async (req, res) => {
 });
 
 /*
+ * Agent-facing gateway. The `integrations` CLI POSTs here; only enabled
+ * connections are visible and secrets are injected server-side. Thrown errors
+ * (unknown connection, missing args) become 400s; execution results — including
+ * the structured re-auth signal — are returned as-is for the CLI to render.
+ */
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+integrationsRouter.post("/gateway/list", async (_req, res) => {
+  res.json({ connections: await gatewayList() });
+});
+
+integrationsRouter.post("/gateway/search", async (req, res) => {
+  const query = str((req.body as { query?: unknown })?.query).trim();
+  if (!query) {
+    res.status(400).json({ error: "query is required" });
+    return;
+  }
+  res.json({ matches: await gatewaySearch(query) });
+});
+
+integrationsRouter.post("/gateway/tools", gatewayHandler((body) => gatewayTools(str(body.integration))));
+
+integrationsRouter.post(
+  "/gateway/describe",
+  gatewayHandler((body) => gatewayDescribe(str(body.integration), str(body.tool)))
+);
+
+integrationsRouter.post(
+  "/gateway/call",
+  gatewayHandler((body) => {
+    const args = body.args && typeof body.args === "object" ? (body.args as Record<string, unknown>) : {};
+    return gatewayCall(str(body.integration), str(body.tool), args);
+  })
+);
+
+integrationsRouter.post(
+  "/gateway/request",
+  gatewayHandler((body) =>
+    gatewayRequest(str(body.integration), {
+      method: str(body.method) || "GET",
+      path: str(body.path),
+      query: (body.query as Record<string, string> | undefined) ?? undefined,
+      headers: (body.headers as Record<string, string> | undefined) ?? undefined,
+      body: (body.body as never) ?? null,
+    })
+  )
+);
+
+integrationsRouter.post(
+  "/gateway/status",
+  gatewayHandler((body) => gatewayStatus(str(body.integration)))
+);
+
+/* Wrap a gateway action: parse the body, run it, and map thrown errors to 400. */
+function gatewayHandler(action: (body: Record<string, unknown>) => Promise<unknown>) {
+  return async (req: import("express").Request, res: import("express").Response) => {
+    try {
+      res.json(await action((req.body ?? {}) as Record<string, unknown>));
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+}
+
+/*
  * Validate and normalize a create/update body. With `requireAll` we enforce the
  * fields needed to create a connection; without it (update) every field is
  * optional and only present fields are validated.
@@ -111,6 +187,11 @@ function parseInput(
       return { error: "name is required" };
     }
     value.name = data.name;
+  }
+
+  if (data.enabled !== undefined) {
+    if (typeof data.enabled !== "boolean") return { error: "enabled must be a boolean" };
+    value.enabled = data.enabled;
   }
 
   if (requireAll || data.transport !== undefined) {

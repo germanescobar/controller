@@ -10,8 +10,68 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { browserCliInstalledPath } from "./browser-cli.js";
+import { integrationCliInstalledPath } from "./integration-cli.js";
 
 const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #109) -->";
+
+function buildIntegrationsSkillBody(cliPath: string): string {
+  return `---
+name: integrations
+description: Discover and use the third-party services the user connected in Controller (APIs, MCP servers, native CLIs) through a uniform gateway. Use whenever a task needs an external service — search for a capability, then call it. Credentials are injected by Controller; you never see or handle secrets.
+---
+
+${MANAGED_MARKER}
+
+# Integrations
+
+The user configures third-party connections in Controller's Settings →
+Integrations. You reach them through one gateway CLI, invoked by its absolute
+install path (it is not on your PATH): \`${cliPath}\`.
+
+Controller holds the credentials and injects them server-side when making the
+call — there is no token for you to read, and you must never ask the user to
+paste one into the chat. Authentication is set up in the UI.
+
+## Discovery flow (work from broad to specific)
+
+1. \`${cliPath} list\` — the integrations enabled for this session, each tagged
+   with its kind: \`api\` (proxied HTTP), \`mcp\` (structured tools), or \`cli\`
+   (a native binary you invoke directly).
+2. \`${cliPath} search <query>\` — fuzzy-search tools across all connected
+   integrations. Start here when you know the capability but not the service.
+3. \`${cliPath} tools <integration>\` — list one integration's tools.
+4. \`${cliPath} describe <integration> <tool>\` — one tool's parameters/schema.
+
+Nothing loads until you ask, so prefer \`search\`/\`describe\` over dumping
+everything.
+
+## Using an integration
+
+- \`${cliPath} call <integration> <tool> --json '{"arg":"value"}'\` — for
+  **schema-backed** backends (MCP tools, OpenAPI operations). Controller
+  validates the arguments and makes the call.
+- \`${cliPath} request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']\`
+  — the **raw escape hatch** for generic REST/HTTP connections that have no
+  schema. Controller only injects auth; you choose the method, path, and body.
+- \`${cliPath} status <integration>\` — whoami / health check.
+
+Rule of thumb: if \`tools\`/\`describe\` show the operation, use \`call\`; if the
+integration is generic HTTP with no schema, use \`request\`.
+
+## CLI-native integrations
+
+An integration tagged \`cli\` (e.g. \`gh\`, \`aws\`, \`gcloud\`) is **not** proxied.
+Run \`status\` to confirm it is installed and authenticated, then invoke the real
+binary directly in your shell — the gateway just points you at it.
+
+## When authentication is missing or expired
+
+\`call\`, \`request\`, and \`status\` may report **"Re-authentication needed"**.
+That means the connection isn't authorized (or its token expired). You cannot
+fix this yourself — tell the user to open Controller → Integrations and connect
+the integration, then retry.
+`;
+}
 
 function buildBrowserSkillBody(cliPath: string): string {
   return `---
@@ -277,6 +337,7 @@ export async function installManagedSkills(): Promise<void> {
   const cliPath = browserCliInstalledPath();
   const skills: ManagedSkill[] = [
     { name: "browser", body: buildBrowserSkillBody(cliPath) },
+    { name: "integrations", body: buildIntegrationsSkillBody(integrationCliInstalledPath()) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
   ];
 

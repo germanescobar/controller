@@ -23,6 +23,7 @@ import { browserRouter } from "./routes/browser.js";
 import { integrationsRouter } from "./routes/integrations.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
 import { installBrowserCli, browserCliInstalledPath } from "./lib/browser-cli.js";
+import { installIntegrationCli, integrationCliInstalledPath } from "./lib/integration-cli.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -214,6 +215,12 @@ async function start(): Promise<void> {
     console.log(`controller-browser CLI ready at ${browserCliInstalledPath()}`);
   } catch (error) {
     console.error("Failed to install controller-browser CLI:", error);
+  }
+  try {
+    await installIntegrationCli();
+    console.log(`integrations CLI ready at ${integrationCliInstalledPath()}`);
+  } catch (error) {
+    console.error("Failed to install integrations CLI:", error);
   }
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);

@@ -38,8 +38,8 @@ export interface OpenApiAuthInfo {
 const MAX_SPEC_BYTES = 8 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
 
-/** Fetch an OpenAPI spec by URL and derive its auth info. */
-export async function fetchOpenApiAuth(specUrl: string): Promise<OpenApiAuthInfo> {
+/** Fetch and parse an OpenAPI spec by URL (bounded + timed out). */
+export async function fetchSpecJson(specUrl: string): Promise<unknown> {
   let url: URL;
   try {
     url = new URL(specUrl);
@@ -66,13 +66,16 @@ export async function fetchOpenApiAuth(specUrl: string): Promise<OpenApiAuthInfo
     clearTimeout(timeout);
   }
 
-  let spec: unknown;
   try {
-    spec = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
     throw new Error("Spec is not valid JSON (YAML specs aren't supported yet).");
   }
-  return parseOpenApiAuth(spec);
+}
+
+/** Fetch an OpenAPI spec by URL and derive its auth info. */
+export async function fetchOpenApiAuth(specUrl: string): Promise<OpenApiAuthInfo> {
+  return parseOpenApiAuth(await fetchSpecJson(specUrl));
 }
 
 /** Pure: extract base URL and the auth scheme alternatives from a spec object. */
