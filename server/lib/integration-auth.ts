@@ -83,9 +83,15 @@ function produceValue(
       return { status: "ok", value: Buffer.from(`${username}:${secret}`).toString("base64") };
     }
 
-    case "oauth":
     case "oauth_client_credentials":
+      // The access token is fetched upstream (resolveConnectionAuth) into the
+      // scheme's secret; attach it like a bearer. No token → needs connecting.
+      if (!secret) return fail(acquire("This integration needs to be connected."));
+      return { status: "ok", value: secret };
+
+    case "oauth":
     case "oauth_dynamic":
+      // Interactive acquisition isn't implemented yet.
       return fail({
         status: "reauth_needed",
         reason: "acquire",

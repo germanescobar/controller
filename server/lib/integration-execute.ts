@@ -47,8 +47,12 @@ export async function resolveConnectionAuth(
   // Fill in tokens Controller can acquire without user interaction.
   for (const scheme of connection.auth.schemes) {
     if (scheme.acquisition === "oauth_client_credentials") {
+      // Replace the stored client secret with a freshly fetched access token.
+      // If the fetch fails, drop the secret so the scheme reports "needs
+      // connecting" rather than attaching the client secret as a bearer.
       const token = await acquireOAuthToken(connection.id, scheme, secrets[scheme.id]);
       if (token) secrets[scheme.id] = token;
+      else delete secrets[scheme.id];
     }
   }
   return resolveAuth(connection.auth.schemes, secrets);

@@ -116,6 +116,38 @@ test("executeRequest refuses cross-origin URLs and never sends the credential", 
   );
 });
 
+test("resolveConnectionAuth fetches a client-credentials token and attaches it", async () => {
+  await withTempHomeAndServer(
+    (_req, reqBody) => {
+      // Token endpoint: confirm it's a client-credentials grant, return a token.
+      assert.match(reqBody, /grant_type=client_credentials/);
+      return { status: 200, body: JSON.stringify({ access_token: "AT123", expires_in: 3600 }) };
+    },
+    async ({ integrations, execute, baseUrl }) => {
+      const connection = await integrations.createConnection({
+        name: "M2M",
+        transport: { mode: "rest", config: { baseUrl }, headers: {}, query: {} },
+        auth: {
+          schemes: [
+            {
+              acquisition: "oauth_client_credentials",
+              attachment: { kind: "header", name: "Authorization", prefix: "Bearer " },
+              config: { clientId: "cid", tokenUrl: `${baseUrl}/token` },
+              secret: "csecret",
+            },
+          ],
+        },
+      });
+
+      const auth = await execute.resolveConnectionAuth(connection);
+      assert.equal(auth.status, "ready");
+      if (auth.status === "ready") {
+        assert.equal(auth.resolved.headers.Authorization, "Bearer AT123");
+      }
+    }
+  );
+});
+
 test("executeRequest surfaces a re-auth signal when a credential is missing", async () => {
   await withTempHomeAndServer(
     () => ({ status: 200, body: "{}" }),
