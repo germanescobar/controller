@@ -136,7 +136,7 @@ export const AUTH_PRESETS: AuthPreset[] = [
   },
   {
     id: "header_key",
-    label: "API key (header)",
+    label: "Custom Header",
     description: "A secret value sent in a named request header.",
     acquisition: "static",
     attachment: { kind: "header", name: "", prefix: "" },
@@ -146,7 +146,7 @@ export const AUTH_PRESETS: AuthPreset[] = [
   },
   {
     id: "query_key",
-    label: "API key (query)",
+    label: "Custom Query Param",
     description: "A secret value attached to the URL as a query parameter (e.g. Trello key/token).",
     acquisition: "static",
     attachment: { kind: "query", name: "" },
