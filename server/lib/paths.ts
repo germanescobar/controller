@@ -32,6 +32,18 @@ export function agentSettingsFile(): string {
   return path.join(orchestratorHome(), "agents.json");
 }
 
+// --- Integrations ---
+
+/** Non-secret connection registry (names, modes, config). */
+export function integrationsFile(): string {
+  return path.join(orchestratorHome(), "integrations.json");
+}
+
+/** Encrypted-at-rest store for connection secrets (tokens, passwords, keys). */
+export function integrationSecretsFile(): string {
+  return path.join(orchestratorHome(), "integration-secrets.json");
+}
+
 // --- Worktrees ---
 
 export function worktreesRoot(): string {

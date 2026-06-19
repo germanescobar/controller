@@ -20,6 +20,7 @@ import { buildScriptEnv } from "./lib/project-scripts.js";
 import { restoreLoginShellPath } from "./lib/shell-env.js";
 import { previewBrowserBridge } from "./lib/preview-browser.js";
 import { browserRouter } from "./routes/browser.js";
+import { integrationsRouter } from "./routes/integrations.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
 import { installBrowserCli, browserCliInstalledPath } from "./lib/browser-cli.js";
 
@@ -43,6 +44,7 @@ app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/agents", skillsRouter);
 app.use("/api/browser", browserRouter);
+app.use("/api/integrations", integrationsRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session
 // picker and the Electron health check; richer status lives at /api/agents.

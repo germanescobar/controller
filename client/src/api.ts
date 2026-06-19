@@ -732,6 +732,157 @@ export async function deleteProviderKey(providerId: string): Promise<void> {
   await fetch(`${BASE}/api-keys/${providerId}`, { method: "DELETE" });
 }
 
+// --- Integrations (issue #130) ---
+
+// A connection is two orthogonal axes: a transport (how we reach the backend)
+// and an auth mode (how a credential is acquired and attached). They compose,
+// so any transport works with any auth mode.
+export type ConnectionMode = "mcp" | "openapi" | "rest" | "graphql" | "cli";
+
+// Auth is an AND-set of scheme instances. Each scheme is two orthogonal pieces:
+// an acquisition (how the credential value is produced) and an attachment
+// (where the value is placed). An API token, a Trello query key, and an OAuth
+// access token differ only in acquisition; most attach the same way.
+export type Acquisition =
+  | "static"
+  | "basic"
+  | "oauth"
+  | "oauth_client_credentials"
+  | "oauth_dynamic"
+  | "cloud"
+  | "hmac"
+  | "mtls";
+
+export interface Attachment {
+  kind: "header" | "query";
+  name: string;
+  prefix?: string;
+}
+
+export interface TransportConfig {
+  mode: ConnectionMode;
+  config: Record<string, string>;
+  // Constant non-secret headers applied to every request (e.g. Notion-Version).
+  headers: Record<string, string>;
+  // Constant non-secret query params applied to every request (e.g. api-version).
+  query: Record<string, string>;
+}
+
+// State of a credential Controller acquires on the user's behalf (OAuth, STS).
+// Acquisition is not implemented yet, so schemes start "none".
+export interface AcquiredState {
+  status: "none" | "connected" | "expired";
+  expiresAt?: string;
+}
+
+export interface AuthScheme {
+  id: string;
+  acquisition: Acquisition;
+  attachment?: Attachment;
+  config: Record<string, string>;
+  // Whether a secret value is stored; the value itself never leaves the server.
+  hasSecret: boolean;
+  acquired?: AcquiredState;
+}
+
+export interface AuthConfig {
+  schemes: AuthScheme[];
+}
+
+export interface IntegrationConnection {
+  id: string;
+  name: string;
+  transport: TransportConfig;
+  auth: AuthConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuthSchemeInput {
+  id?: string;
+  acquisition: Acquisition;
+  attachment?: Attachment;
+  config?: Record<string, string>;
+  // undefined = keep stored secret; "" = clear it; non-empty = set it.
+  secret?: string;
+}
+
+export interface ConnectionInput {
+  name: string;
+  transport: {
+    mode: ConnectionMode;
+    config?: Record<string, string>;
+    headers?: Record<string, string>;
+    query?: Record<string, string>;
+  };
+  auth: { schemes: AuthSchemeInput[] };
+}
+
+// Auth scheme set derived from an OpenAPI spec's securitySchemes/security.
+export interface DerivedScheme {
+  acquisition: Acquisition;
+  attachment?: Attachment;
+  config: Record<string, string>;
+  label: string;
+}
+
+export interface SchemeAlternative {
+  schemes: DerivedScheme[];
+}
+
+export interface OpenApiAuthInfo {
+  title?: string;
+  baseUrl?: string;
+  alternatives: SchemeAlternative[];
+  unsupported: string[];
+}
+
+export async function fetchConnections(): Promise<IntegrationConnection[]> {
+  const res = await fetch(`${BASE}/integrations`);
+  await throwIfNotOk(res, "Failed to fetch integrations");
+  return res.json();
+}
+
+export async function createConnection(
+  input: ConnectionInput
+): Promise<IntegrationConnection> {
+  const res = await fetch(`${BASE}/integrations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  await throwIfNotOk(res, "Failed to create integration");
+  return res.json();
+}
+
+export async function updateConnection(
+  id: string,
+  patch: Partial<ConnectionInput>
+): Promise<IntegrationConnection> {
+  const res = await fetch(`${BASE}/integrations/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  await throwIfNotOk(res, "Failed to update integration");
+  return res.json();
+}
+
+export async function deleteConnection(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/integrations/${id}`, { method: "DELETE" });
+  await throwIfNotOk(res, "Failed to delete integration");
+}
+
+export async function inspectOpenApiSpec(specUrl: string): Promise<OpenApiAuthInfo> {
+  const res = await fetch(`${BASE}/integrations/openapi/inspect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ specUrl }),
+  });
+  await throwIfNotOk(res, "Failed to inspect spec");
+  return res.json();
+}
+
 export function startSession(
   projectId: string,
   message: string,
