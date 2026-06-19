@@ -66,6 +66,14 @@ export async function gatewayTools(name: string): Promise<{ tools: ToolSummary[]
   if (connection.transport.mode === "cli") {
     return { tools: [], note: "CLI-native integration — invoke the binary directly (see status)." };
   }
+  if (connection.transport.mode === "graphql") {
+    return {
+      tools: [],
+      note:
+        'GraphQL has no fixed tool list. Send an operation with `request <name> POST "" --data ' +
+        "'{\"query\":\"...\"}'`. To explore the schema, POST a GraphQL introspection query the same way.",
+    };
+  }
   if (kindOf(connection.transport.mode) === "api" && connection.transport.mode !== "openapi") {
     return { tools: [], note: "No schema for this connection — use `request` to call it directly." };
   }

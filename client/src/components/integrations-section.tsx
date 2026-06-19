@@ -183,7 +183,7 @@ interface ConnectionFormProps {
 function ConnectionForm({ connection, onCancel, onSaved }: ConnectionFormProps) {
   const [name, setName] = useState(connection?.name ?? "");
   const [transportMode, setTransportMode] = useState<ConnectionMode>(
-    connection?.transport.mode ?? "rest"
+    connection?.transport.mode ?? "openapi"
   );
   const [transportConfig, setTransportConfig] = useState<Record<string, string>>(
     connection?.transport.config ?? {}
@@ -348,7 +348,7 @@ function ConnectionForm({ connection, onCancel, onSaved }: ConnectionFormProps) 
             onChange={(e) => changeMode(e.target.value as ConnectionMode)}
             className={INPUT_CLASS}
           >
-            {CONNECTION_MODES.map((m) => (
+            {CONNECTION_MODES.filter((m) => !m.hidden || m.id === transportMode).map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
               </option>

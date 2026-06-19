@@ -41,6 +41,11 @@ export interface ConnectionModeSpec {
    * sign-in). The auth axis does not apply.
    */
   managesOwnAuth?: boolean;
+  /**
+   * Hidden from the connection-mode picker. Kept in the list so existing
+   * connections of this mode still classify and render correctly.
+   */
+  hidden?: boolean;
 }
 
 /**
@@ -74,29 +79,22 @@ export interface AuthPreset {
 
 export const CONNECTION_MODES: ConnectionModeSpec[] = [
   {
-    id: "rest",
-    label: "REST",
-    description: "Generic REST/HTTP backend reached via the request escape hatch.",
-    fields: [{ key: "baseUrl", label: "Base URL", placeholder: "https://api.example.com" }],
-    supportsHeaders: true,
-  },
-  {
-    id: "graphql",
-    label: "GraphQL",
-    description: "GraphQL endpoint queried via the request escape hatch.",
-    fields: [{ key: "endpoint", label: "Endpoint URL", placeholder: "https://api.example.com/graphql" }],
-    supportsHeaders: true,
-  },
-  {
     id: "openapi",
     label: "OpenAPI",
-    description: "Schema-backed backend; tools and auth are derived from an OpenAPI spec.",
+    description: "Schema-backed HTTP API; tools and auth are derived from an OpenAPI spec.",
     fields: [
       { key: "specUrl", label: "Spec URL", placeholder: "https://api.example.com/openapi.json" },
       { key: "baseUrl", label: "Base URL", placeholder: "Derived from the spec", optional: true },
     ],
     supportsHeaders: true,
     derivesAuth: true,
+  },
+  {
+    id: "graphql",
+    label: "GraphQL",
+    description: "GraphQL endpoint; the agent sends queries via the request escape hatch.",
+    fields: [{ key: "endpoint", label: "Endpoint URL", placeholder: "https://api.example.com/graphql" }],
+    supportsHeaders: true,
   },
   {
     id: "mcp",
@@ -119,6 +117,16 @@ export const CONNECTION_MODES: ConnectionModeSpec[] = [
       { key: "loginCommand", label: "Login command", placeholder: "ntn login", optional: true },
       { key: "checkCommand", label: "Verify command", placeholder: "ntn whoami", optional: true },
     ],
+  },
+  {
+    // Generic REST has no schema (no discovery). Hidden for now — use OpenAPI
+    // for HTTP APIs. Kept so any existing REST connection still renders.
+    id: "rest",
+    label: "REST",
+    description: "Generic REST/HTTP backend reached via the request escape hatch.",
+    fields: [{ key: "baseUrl", label: "Base URL", placeholder: "https://api.example.com" }],
+    supportsHeaders: true,
+    hidden: true,
   },
 ];
 

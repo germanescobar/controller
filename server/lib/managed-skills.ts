@@ -58,6 +58,18 @@ everything.
 Rule of thumb: if \`tools\`/\`describe\` show the operation, use \`call\`; if the
 integration is generic HTTP with no schema, use \`request\`.
 
+## GraphQL integrations
+
+A \`graphql\` integration has no fixed tool list, so \`tools\`/\`call\` don't apply.
+Send operations with \`request\`, POSTing to the endpoint (use an empty path):
+
+\`\`\`
+${cliPath} request <integration> POST "" --data '{"query":"{ viewer { login } }"}'
+\`\`\`
+
+To learn the schema, POST a GraphQL introspection query the same way, then build
+your real query from the result.
+
 ## CLI-native integrations
 
 An integration tagged \`cli\` (e.g. \`gh\`, \`aws\`, \`gcloud\`) is **not** proxied.
