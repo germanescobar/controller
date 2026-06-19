@@ -60,8 +60,24 @@ export async function executeRequest(
   input: RequestInput
 ): Promise<ExecResult> {
   const base = baseUrlFor(connection);
+  if (!base) return { ok: false, error: "This connection has no base URL configured." };
+  const baseOrigin = safeOrigin(base);
+  if (!baseOrigin) return { ok: false, error: "This connection's base URL is invalid." };
+
   const url = buildUrl(base, input.path);
-  if (!url) return { ok: false, error: "This connection has no base URL configured." };
+  if (!url) return { ok: false, error: "Invalid request path." };
+
+  // Credentials are pinned to the connection's host: never attach this
+  // connection's auth to a different origin (e.g. a prompt-injected absolute
+  // URL to an attacker host). Same-origin absolute URLs are fine.
+  if (url.origin !== baseOrigin) {
+    return {
+      ok: false,
+      error:
+        `Refusing to send credentials to ${url.origin}: it is not this connection's host ` +
+        `(${baseOrigin}). Use a path relative to the base URL.`,
+    };
+  }
 
   const auth = await resolveConnectionAuth(connection);
   if (auth.status !== "ready") {
@@ -130,6 +146,17 @@ function baseUrlFor(connection: IntegrationConnection): string | null {
   const { mode, config } = connection.transport;
   if (mode === "graphql") return config.endpoint?.trim() || null;
   return config.baseUrl?.trim() || null; // rest, openapi
+}
+
+/** scheme+host+port of a URL string, or null if it isn't a valid http(s) URL. */
+function safeOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
 /* Join a base URL and a path, tolerating absolute paths and full URLs. */

