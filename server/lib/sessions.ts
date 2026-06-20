@@ -1,5 +1,15 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  buildSessionFocus,
+  deleteSessionFocus,
+  listSessionFocuses,
+  readSessionFocus,
+  resolveSessionFocusState,
+  writeSessionFocus,
+  type ResolvedFocusState,
+  type SessionFocus,
+} from "./focus-state.js";
 
 export interface SessionState {
   id: string;
@@ -15,6 +25,13 @@ export interface SessionState {
   createdAt: string;
   lastActiveAt: string;
   status: string;
+  // The three focus-queue fields below are populated by `getSession`
+  // and `getSessions` by merging in the Controller-owned sidecar at
+  // `<projectPath>/.coding-orchestrator/focus/<sessionId>.json`.
+  // They are *not* persisted on the agent-owned session file:
+  // `saveSession` strips them before writing, since the agent
+  // (e.g. Ada) owns `.coding-agent/sessions/` and silently drops
+  // unknown top-level fields on every save (issue #139).
   focusPinnedAt?: string;
   focusDoneAt?: string;
   // Set when the user explicitly unpins the session. Auto-pin on
@@ -49,6 +66,32 @@ function storagePaths(projectPath: string) {
     events: path.join(base, "events"),
     attachments: path.join(base, "attachments"),
   };
+}
+
+/**
+ * Merge a sidecar focus record into a session-state object. The
+ * session-state fields are the public API; the sidecar is internal
+ * storage. When the sidecar is missing (default state) the focus
+ * fields are dropped from the session so existing clients see the
+ * expected absence of pin.
+ */
+function applyFocus(
+  session: SessionState,
+  focus: SessionFocus | null
+): SessionState {
+  if (!focus) {
+    delete session.focusPinnedAt;
+    delete session.focusDoneAt;
+    delete session.userUnpinned;
+    return session;
+  }
+  if (focus.focusPinnedAt) session.focusPinnedAt = focus.focusPinnedAt;
+  else delete session.focusPinnedAt;
+  if (focus.focusDoneAt) session.focusDoneAt = focus.focusDoneAt;
+  else delete session.focusDoneAt;
+  if (focus.userUnpinned) session.userUnpinned = focus.userUnpinned;
+  else delete session.userUnpinned;
+  return session;
 }
 
 export async function saveAttachment(
@@ -99,22 +142,36 @@ export async function getSessions(
   projectPath: string
 ): Promise<SessionState[]> {
   const dir = storagePaths(projectPath).sessions;
+  // Read the focus sidecars in a single pass so we can merge them
+  // into the agent-session list without a per-session round trip.
+  const focusById = await listSessionFocuses(projectPath);
+  let files: string[];
   try {
-    const files = await fs.readdir(dir);
-    const sessions: SessionState[] = [];
-    for (const file of files) {
-      if (!file.endsWith(".json")) continue;
-      const content = await fs.readFile(path.join(dir, file), "utf-8");
-      sessions.push(JSON.parse(content) as SessionState);
-    }
-    sessions.sort(
-      (a, b) =>
-        new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
-    );
-    return sessions.filter((s) => s.status !== "archived");
+    files = await fs.readdir(dir);
   } catch {
     return [];
   }
+  const sessions: SessionState[] = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const filePath = path.join(dir, file);
+    let session: SessionState;
+    try {
+      const content = await fs.readFile(filePath, "utf-8");
+      session = JSON.parse(content) as SessionState;
+    } catch {
+      // Skip unreadable / malformed agent session files so one
+      // broken file doesn't take down the whole list.
+      continue;
+    }
+    applyFocus(session, focusById.get(session.id) ?? null);
+    sessions.push(session);
+  }
+  sessions.sort(
+    (a, b) =>
+      new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
+  );
+  return sessions.filter((s) => s.status !== "archived");
 }
 
 export async function getSession(
@@ -125,12 +182,22 @@ export async function getSession(
     storagePaths(projectPath).sessions,
     `${sessionId}.json`
   );
+  let content: string;
   try {
-    const content = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(content) as SessionState;
+    content = await fs.readFile(filePath, "utf-8");
   } catch {
     return null;
   }
+  const session = JSON.parse(content) as SessionState;
+  // Strip any legacy focus fields that may still be on the agent
+  // file from before issue #139 — the sidecar is the source of
+  // truth now. We do this even before merging so a stale on-disk
+  // value can't leak into the response.
+  delete session.focusPinnedAt;
+  delete session.focusDoneAt;
+  delete session.userUnpinned;
+  const focus = await readSessionFocus(projectPath, sessionId);
+  return applyFocus(session, focus);
 }
 
 export async function archiveSession(
@@ -146,9 +213,13 @@ export async function archiveSession(
     const session = JSON.parse(content) as SessionState;
     session.status = "archived";
     // Archiving drops any prior explicit-unpin signal: a rehydrated
-    // session starts with a clean focus-queue slate.
+    // session starts with a clean focus-queue slate. The sidecar is
+    // deleted entirely so the focus state is fully reset.
+    delete session.focusPinnedAt;
+    delete session.focusDoneAt;
     delete session.userUnpinned;
     await fs.writeFile(filePath, JSON.stringify(session, null, 2));
+    await deleteSessionFocus(projectPath, sessionId);
     return true;
   } catch {
     return false;
@@ -160,32 +231,52 @@ export async function updateSessionFocus(
   sessionId: string,
   action: "pin" | "unpin" | "done"
 ): Promise<SessionState | null> {
-  const session = await getSession(projectPath, sessionId);
-  if (!session) return null;
+  // Read the focus sidecar and the agent session in parallel: the
+  // former holds the prior focus state we may need to preserve
+  // (e.g. an existing pin timestamp), and the latter confirms the
+  // session exists so the routes can return 404 otherwise.
+  const [existingFocus, sessionExists] = await Promise.all([
+    readSessionFocus(projectPath, sessionId),
+    getSession(projectPath, sessionId),
+  ]);
+  if (!sessionExists) return null;
+
+  let next: ResolvedFocusState;
 
   if (action === "pin") {
-    session.focusPinnedAt = session.focusPinnedAt ?? new Date().toISOString();
-    delete session.focusDoneAt;
-    // An explicit pin always overrides a previous unpin: the user is
-    // telling us they want this session in the focus queue right now.
-    delete session.userUnpinned;
+    next = {
+      focusPinnedAt: existingFocus?.focusPinnedAt ?? new Date().toISOString(),
+      focusDoneAt: undefined,
+      // An explicit pin always overrides a previous unpin: the user
+      // is telling us they want this session in the focus queue
+      // right now.
+      userUnpinned: undefined,
+    };
   } else if (action === "unpin") {
-    delete session.focusPinnedAt;
-    delete session.focusDoneAt;
-    // Record that the user explicitly removed this session from the
-    // focus queue. Future auto-pin attempts will no-op until the
-    // session is archived (or the user pins it explicitly).
-    session.userUnpinned = true;
+    next = {
+      focusPinnedAt: undefined,
+      focusDoneAt: undefined,
+      // Record that the user explicitly removed this session from
+      // the focus queue. Future auto-pin attempts will no-op until
+      // the session is archived (or the user pins it explicitly).
+      userUnpinned: true,
+    };
   } else {
-    delete session.focusPinnedAt;
-    session.focusDoneAt = new Date().toISOString();
-    // "Done" is a workflow state, not a user opt-out of the focus
-    // queue — clear any prior explicit-unpin signal.
-    delete session.userUnpinned;
+    next = {
+      focusPinnedAt: undefined,
+      focusDoneAt: new Date().toISOString(),
+      // "Done" is a workflow state, not a user opt-out of the focus
+      // queue — clear any prior explicit-unpin signal.
+      userUnpinned: undefined,
+    };
   }
 
-  await saveSession(projectPath, session);
-  return session;
+  const focus = buildSessionFocus(sessionId, next);
+  await writeSessionFocus(projectPath, focus);
+
+  // Return the merged session so callers (the focus-action routes)
+  // see the new state immediately without a third read.
+  return getSession(projectPath, sessionId);
 }
 
 /**
@@ -199,8 +290,17 @@ export async function updateSessionTitle(
   sessionId: string,
   title: string
 ): Promise<SessionState | null> {
-  const session = await getSession(projectPath, sessionId);
-  if (!session) return null;
+  const filePath = path.join(
+    storagePaths(projectPath).sessions,
+    `${sessionId}.json`
+  );
+  let content: string;
+  try {
+    content = await fs.readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+  const session = JSON.parse(content) as SessionState;
 
   const trimmed = title.trim();
   if (trimmed) {
@@ -209,68 +309,46 @@ export async function updateSessionTitle(
     delete session.title;
   }
 
-  await saveSession(projectPath, session);
-  return session;
+  // `updateSessionTitle` must not touch the focus sidecar, but the
+  // session file we just edited is the agent-owned one and should
+  // not gain Controller-managed fields. Strip them defensively in
+  // case a future change accidentally re-introduces them.
+  delete session.focusPinnedAt;
+  delete session.focusDoneAt;
+  delete session.userUnpinned;
+
+  await fs.writeFile(filePath, JSON.stringify(session, null, 2));
+  return getSession(projectPath, sessionId);
 }
 
 /**
- * Pin a session to the focus queue if it is not already pinned, not
- * archived, and not previously explicitly unpinned by the user. Returns
- * the (possibly updated) session, or `null` if the session does not
- * exist. If the session is already pinned (or blocked by `userUnpinned`)
- * the file is left untouched and the existing session is returned.
+ * Pin a session to the focus queue if it is not already pinned and
+ * not previously explicitly unpinned by the user. Returns the
+ * (possibly updated) session, or `null` if the session does not
+ * exist. If the session is already pinned (or blocked by
+ * `userUnpinned`) the sidecar is left untouched and the existing
+ * session is returned.
  */
 export async function pinSessionIfNeeded(
   projectPath: string,
   sessionId: string
 ): Promise<SessionState | null> {
+  // Read the agent session to confirm the session exists and is
+  // not archived. The focus sidecar is read separately.
   const session = await getSession(projectPath, sessionId);
   if (!session) return null;
   if (session.status === "archived") return session;
-  if (session.focusPinnedAt) return session;
-  if (session.userUnpinned) return session;
 
-  session.focusPinnedAt = new Date().toISOString();
-  delete session.focusDoneAt;
-  await saveSession(projectPath, session);
-  return session;
-}
+  const existing = await readSessionFocus(projectPath, sessionId);
+  if (existing?.focusPinnedAt) return session;
+  if (existing?.userUnpinned) return session;
 
-/**
- * Returns the focus-queue fields a session should be persisted with at
- * first-write time. Brand-new sessions are always auto-pinned. Existing
- * sessions are also auto-pinned on reply unless the user has explicitly
- * unpinned them (`userUnpinned` flag), so replying to an untracked session
- * surfaces it in the focus queue automatically.
- *
- * The route handlers use this when calling `saveSession` so the
- * auto-pin rule (and the "respect prior unpin" carve-out) lives in
- * one testable place rather than being inlined into two `saveSession`
- * call sites.
- */
-export function resolveSessionFocusState(
-  existing: SessionState | null
-): {
-  focusPinnedAt: string | undefined;
-  focusDoneAt: string | undefined;
-  userUnpinned: boolean | undefined;
-} {
-  if (!existing) {
-    return {
-      focusPinnedAt: new Date().toISOString(),
-      focusDoneAt: undefined,
-      userUnpinned: undefined,
-    };
-  }
-  // Auto-pin on reply if not already pinned and not manually unpinned.
-  const shouldAutoPin = !existing.focusPinnedAt && !existing.userUnpinned;
-  return {
-    focusPinnedAt: shouldAutoPin
-      ? new Date().toISOString()
-      : existing.focusPinnedAt,
-    focusDoneAt: shouldAutoPin ? undefined : existing.focusDoneAt,
-    userUnpinned: existing.userUnpinned,
-  };
+  const focus = buildSessionFocus(
+    sessionId,
+    resolveSessionFocusState(existing)
+  );
+  await writeSessionFocus(projectPath, focus);
+  return getSession(projectPath, sessionId);
 }
 
 export async function getEvents(
@@ -293,7 +371,16 @@ export async function getEvents(
   }
 }
 
-/** Ensure session and event directories exist, then save/update a session file. */
+/**
+ * Ensure session and event directories exist, then save/update a
+ * session file. Controller-managed focus fields are stripped from
+ * the payload before writing because this file is shared with the
+ * agent process (e.g. Ada's `SessionStore.save()`) and we must not
+ * pollute it with fields the agent doesn't know about (issue #139).
+ * Focus state is persisted separately in
+ * `<projectPath>/.coding-orchestrator/focus/<sessionId>.json` via
+ * `writeSessionFocus`.
+ */
 export async function saveSession(
   projectPath: string,
   session: SessionState
@@ -301,7 +388,17 @@ export async function saveSession(
   const { sessions } = storagePaths(projectPath);
   await fs.mkdir(sessions, { recursive: true });
   const filePath = path.join(sessions, `${session.id}.json`);
-  await fs.writeFile(filePath, JSON.stringify(session, null, 2));
+  // Strip Controller-managed focus fields before writing: this file
+  // is shared with the agent (e.g. Ada's `SessionStore.save()`) and
+  // the agent drops any top-level field it doesn't know about on
+  // every save, which would silently erase our pin/done/unpin
+  // signal (issue #139). Focus state lives separately in
+  // `<projectPath>/.coding-orchestrator/focus/<sessionId>.json`.
+  const persisted: SessionState = { ...session };
+  delete persisted.focusPinnedAt;
+  delete persisted.focusDoneAt;
+  delete persisted.userUnpinned;
+  await fs.writeFile(filePath, JSON.stringify(persisted, null, 2));
 }
 
 /** Append a single event to the JSONL events file. */

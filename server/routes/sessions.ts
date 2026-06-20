@@ -17,7 +17,6 @@ import {
   updateSessionFocus,
   updateSessionTitle,
   saveSession,
-  resolveSessionFocusState,
   appendEvent,
   saveAttachment,
   getAttachment,
@@ -25,6 +24,12 @@ import {
   type AgentEvent,
   type AttachmentMetadata,
 } from "../lib/sessions.js";
+import {
+  buildSessionFocus,
+  readSessionFocus,
+  resolveSessionFocusState,
+  writeSessionFocus,
+} from "../lib/focus-state.js";
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
 import { childProcessEnv } from "../lib/shell-env.js";
 import { controllerAgentEnv } from "../lib/controller-cli.js";
@@ -782,7 +787,17 @@ async function handleSessionStream(
       : historyText.length > 60
         ? historyText.slice(0, 60) + "..."
         : historyText;
-    const focus = resolveSessionFocusState(existing);
+    // Focus state lives in a Controller-owned sidecar, not on the
+    // agent session file: Ada's `SessionStore.save()` (and similar
+    // writers) would silently drop our fields on every save, so a
+    // brand-new session's auto-pin would vanish within ~1s. See
+    // issue #139 / #140.
+    const existingFocus = await readSessionFocus(worktreePath, sessionId);
+    const focus = resolveSessionFocusState(existingFocus);
+    await writeSessionFocus(
+      worktreePath,
+      buildSessionFocus(sessionId, focus)
+    );
     await saveSession(worktreePath, {
       id: sessionId,
       title,
@@ -797,16 +812,10 @@ async function handleSessionStream(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
-      // Focus-queue state is resolved by `resolveSessionFocusState` so
-      // the auto-pin-on-create + respect-prior-unpin rules live in one
-      // tested helper rather than being inlined here (issue #81).
-      focusPinnedAt: focus.focusPinnedAt,
-      focusDoneAt: focus.focusDoneAt,
-      userUnpinned: focus.userUnpinned,
     });
     // Notify the client if the session was auto-pinned so it can update
     // the focus-queue indicator without a full page reload.
-    if (focus.focusPinnedAt && !existing?.focusPinnedAt) {
+    if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
       sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
     }
   }
@@ -1384,7 +1393,14 @@ async function streamCodexPlanSession(
       : historyText.length > 60
         ? `${historyText.slice(0, 60)}...`
         : historyText;
-    const focus = resolveSessionFocusState(existing);
+    // Focus state lives in a Controller-owned sidecar; see the
+    // SSE-stream persistSessionStart for the rationale (issue #139).
+    const existingFocus = await readSessionFocus(worktreePath, sessionId);
+    const focus = resolveSessionFocusState(existingFocus);
+    await writeSessionFocus(
+      worktreePath,
+      buildSessionFocus(sessionId, focus)
+    );
     await saveSession(worktreePath, {
       id: sessionId,
       title,
@@ -1399,12 +1415,8 @@ async function streamCodexPlanSession(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
-      // See the SSE-stream persistSessionStart for the rationale.
-      focusPinnedAt: focus.focusPinnedAt,
-      focusDoneAt: focus.focusDoneAt,
-      userUnpinned: focus.userUnpinned,
     });
-    if (focus.focusPinnedAt && !existing?.focusPinnedAt) {
+    if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
       sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
     }
   }
