@@ -38,6 +38,11 @@ export const worktreesRouter = Router();
 const SETUP_TIMEOUT_MS = 5 * 60 * 1000;
 const RUN_TERMINAL_ID = "run";
 
+// Track worktrees that currently have an in-flight setup run so we can refuse
+// overlapping requests instead of racing two `setup.sh` invocations against
+// each other.
+const activeSetupRuns = new Set<string>();
+
 function sseHeaders(res: Response) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -386,6 +391,118 @@ worktreesRouter.get(
     } catch {
       res.json({ log: null });
     }
+  }
+);
+
+worktreesRouter.post(
+  "/:projectId/worktrees/:worktreeId/run-setup",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const worktree = await getWorktree(project.id, req.params.worktreeId);
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    const runKey = `${project.id}:${worktree.id}`;
+    if (activeSetupRuns.has(runKey)) {
+      res.status(409).json({ error: "setup is already running for this worktree" });
+      return;
+    }
+
+    let scripts;
+    try {
+      scripts = await resolveProjectScripts(project.path);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+      return;
+    }
+    if (scripts.setup.length === 0) {
+      res.status(404).json({ error: "No setup script configured" });
+      return;
+    }
+
+    activeSetupRuns.add(runKey);
+    sseHeaders(res);
+    let clientConnected = true;
+    req.on("close", () => {
+      clientConnected = false;
+    });
+
+    function emit(obj: Record<string,unknown>) {
+      if (clientConnected) sseSend(res, obj);
+    }
+
+    emit({ type: "started", worktreeId: worktree.id });
+
+    const codingAgentDir = path.join(worktree.path, ".coding-agent");
+    await fs.mkdir(codingAgentDir, { recursive: true });
+    const setupLogPath = path.join(codingAgentDir, "setup.log");
+
+    emit({
+      type: "log",
+      stream: "stdout",
+      text: `Running ${formatScriptLabels(scripts.setup)}\n`,
+    });
+
+    let exitCode = 0;
+    let timedOut = false;
+    try {
+      const result = await runScriptCommands(
+        scripts.setup,
+        worktree.path,
+        buildScriptEnv({ project, worktree }),
+        setupLogPath,
+        (chunk, stream) => emit({ type: "log", stream, text: chunk })
+      );
+      exitCode = result.exitCode;
+      timedOut = result.timedOut;
+    } catch (err) {
+      emit({
+        type: "error",
+        text: `setup run failed: ${(err as Error).message}`,
+      });
+    } finally {
+      activeSetupRuns.delete(runKey);
+    }
+
+    let finalWorktree;
+    try {
+      await updateWorktree(worktree.id, {
+        setupRanAt: new Date().toISOString(),
+        setupExitCode: timedOut ? -1 : exitCode,
+        setupLogPath,
+      });
+      finalWorktree = await getWorktree(project.id, worktree.id);
+    } catch (err) {
+      emit({
+        type: "error",
+        text: `failed to persist setup result: ${(err as Error).message}`,
+      });
+    }
+
+    if (timedOut) {
+      emit({
+        type: "error",
+        text: `setup timed out after ${SETUP_TIMEOUT_MS / 1000}s`,
+      });
+    } else if (exitCode !== 0) {
+      emit({
+        type: "error",
+        text: `setup exited with ${exitCode}`,
+      });
+    }
+
+    emit({
+      type: "done",
+      exitCode: timedOut ? -1 : exitCode,
+      worktree: finalWorktree,
+    });
+    if (clientConnected) res.end();
   }
 );
 

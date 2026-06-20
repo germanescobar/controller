@@ -69,6 +69,18 @@ export type WorktreeCreateEvent =
   | { type: "error"; text: string }
   | { type: "done"; exitCode: number; worktree?: Worktree };
 
+export interface WorktreeSetupLogResponse {
+  log: string | null;
+  exitCode: number | null;
+  ranAt: string | null;
+}
+
+export type WorktreeSetupEvent =
+  | { type: "started"; worktreeId: string }
+  | { type: "log"; stream: "stdout" | "stderr"; text: string }
+  | { type: "error"; text: string }
+  | { type: "done"; exitCode: number; worktree?: Worktree };
+
 export interface SessionRuntime {
   active: boolean;
 }
@@ -1058,6 +1070,26 @@ export async function deleteWorktree(
   }
 }
 
+export async function fetchWorktreeSetupLog(
+  projectId: string,
+  worktreeId: string
+): Promise<WorktreeSetupLogResponse> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/worktrees/${worktreeId}/setup-log`
+  );
+  await throwIfNotOk(res, "Failed to fetch setup log");
+  const body = (await res.json()) as {
+    log?: unknown;
+    exitCode?: unknown;
+    ranAt?: unknown;
+  };
+  return {
+    log: typeof body.log === "string" ? body.log : null,
+    exitCode: typeof body.exitCode === "number" ? body.exitCode : null,
+    ranAt: typeof body.ranAt === "string" ? body.ranAt : null,
+  };
+}
+
 /**
  * Stream worktree creation via SSE. The returned object exposes the
  * underlying EventSource (so callers can `.close()`) plus a `subscribe`
@@ -1176,6 +1208,144 @@ export function createWorktree(
           if (done) {
             if (error) return Promise.reject(error);
             return Promise.resolve({ value: undefined as unknown as WorktreeCreateEvent, done: true });
+          }
+          return new Promise((resolve) => {
+            resolveNext = resolve;
+          });
+        },
+      };
+    },
+  };
+
+  return {
+    events,
+    cancel: () => controller.abort(),
+    result,
+  };
+}
+
+/**
+ * Stream a setup re-run for an existing worktree. Mirrors `createWorktree`'s
+ * SSE shape so callers can render live output in the same dialog. The result
+ * promise resolves with the updated Worktree record once the server emits
+ * `done`.
+ */
+export function runWorktreeSetup(
+  projectId: string,
+  worktreeId: string
+): {
+  events: AsyncIterable<WorktreeSetupEvent>;
+  cancel: () => void;
+  result: Promise<Worktree>;
+} {
+  const controller = new AbortController();
+
+  const queue: WorktreeSetupEvent[] = [];
+  let resolveNext: ((v: IteratorResult<WorktreeSetupEvent>) => void) | null = null;
+  let done = false;
+  let error: Error | null = null;
+
+  function push(event: WorktreeSetupEvent) {
+    if (resolveNext) {
+      const r = resolveNext;
+      resolveNext = null;
+      r({ value: event, done: false });
+    } else {
+      queue.push(event);
+    }
+  }
+
+  function finish(err?: Error) {
+    done = true;
+    if (err) error = err;
+    if (resolveNext) {
+      const r = resolveNext;
+      resolveNext = null;
+      r({ value: undefined as unknown as WorktreeSetupEvent, done: true });
+    }
+  }
+
+  let resolveResult: (w: Worktree) => void = () => {};
+  let rejectResult: (e: Error) => void = () => {};
+  const result = new Promise<Worktree>((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+
+  (async () => {
+    try {
+      const res = await fetch(
+        `${BASE}/projects/${projectId}/worktrees/${worktreeId}/run-setup`,
+        {
+          method: "POST",
+          headers: { Accept: "text/event-stream" },
+          signal: controller.signal,
+        }
+      );
+      if (!res.ok || !res.body) {
+        let message = `Failed to run setup (${res.status})`;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j.error) message = j.error;
+        } catch {
+          // ignore
+        }
+        throw new Error(message);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let lastWorktree: Worktree | null = null;
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx = buffer.indexOf("\n\n");
+        while (idx !== -1) {
+          const block = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          for (const line of block.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            const json = line.slice(6);
+            try {
+              const event = JSON.parse(json) as WorktreeSetupEvent;
+              push(event);
+              if (event.type === "done") {
+                if (event.worktree) {
+                  lastWorktree = event.worktree;
+                  resolveResult(event.worktree);
+                } else {
+                  rejectResult(new Error("setup finished without a worktree record"));
+                }
+              }
+            } catch {
+              // ignore parse errors
+            }
+          }
+          idx = buffer.indexOf("\n\n");
+        }
+      }
+      if (!lastWorktree) {
+        rejectResult(new Error("setup stream ended before completion"));
+      }
+      finish();
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      rejectResult(e);
+      finish(e);
+    }
+  })();
+
+  const events: AsyncIterable<WorktreeSetupEvent> = {
+    [Symbol.asyncIterator]() {
+      return {
+        next(): Promise<IteratorResult<WorktreeSetupEvent>> {
+          if (queue.length > 0) {
+            return Promise.resolve({ value: queue.shift()!, done: false });
+          }
+          if (done) {
+            if (error) return Promise.reject(error);
+            return Promise.resolve({ value: undefined as unknown as WorktreeSetupEvent, done: true });
           }
           return new Promise((resolve) => {
             resolveNext = resolve;
