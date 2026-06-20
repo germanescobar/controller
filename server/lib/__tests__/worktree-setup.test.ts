@@ -244,3 +244,39 @@ test("POST /run-setup surfaces a non-zero exit code in the done event", async ()
     assert.match(String(errors[0].text), /exited with 42/);
   });
 });
+
+test("POST /run-setup rejects overlapping requests with 409", async () => {
+  await withSetupEnv(async ({ projectPath }) => {
+    await fs.mkdir(path.join(projectPath, ".coding-orchestrator"), { recursive: true });
+    // A script that sleeps long enough for the second request to land
+    // mid-run. Both requests fire before either setup.sh completes.
+    await fs.writeFile(
+      path.join(projectPath, ".coding-orchestrator", "setup.sh"),
+      "sleep 1\n"
+    );
+  }, async ({ baseUrl }) => {
+    const first = fetch(`${baseUrl}/run-setup`, { method: "POST" });
+    // Yield once so the first handler enters its reservation before the
+    // second request reaches the same handler.
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = fetch(`${baseUrl}/run-setup`, { method: "POST" });
+
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+
+    // Exactly one of the two requests must be rejected with 409. The other
+    // runs to completion (200 + SSE) or fails naturally — what we care about
+    // is that the run slot is reserved before the first await, so neither
+    // request can race past the presence check.
+    const statuses = [firstRes.status, secondRes.status].sort();
+    assert.deepEqual(statuses, [200, 409], `unexpected statuses: ${statuses.join(", ")}`);
+
+    // Drain both bodies so the underlying connection can close cleanly.
+    await Promise.all([firstRes.arrayBuffer(), secondRes.arrayBuffer()]);
+
+    // The run key must be released once the first run finishes, so a fresh
+    // request can acquire the slot again.
+    const followUp = await fetch(`${baseUrl}/run-setup`, { method: "POST" });
+    assert.equal(followUp.status, 200);
+    await followUp.arrayBuffer();
+  });
+});
