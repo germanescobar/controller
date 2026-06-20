@@ -51,6 +51,17 @@ interface SidebarProps {
   activeWorktreeId?: string;
   activeSessionId?: string;
   completedSessions?: Set<string>;
+  /**
+   * Whether the sidebar is actually visible to the user. On mobile the
+   * sidebar lives off-canvas and is hidden by default; while it is
+   * closed we MUST skip the project/worktree/session loading waterfall
+   * and the active-runtimes polling — the data is wasted and on a small
+   * screen it's blocking first paint (issue #126).
+   *
+   * The desktop layout always passes `true` (the sidebar is always
+   * visible in that view). Mobile passes the actual `sidebarOpen` flag.
+   */
+  isVisible: boolean;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (
     projectId: string,
@@ -164,6 +175,7 @@ export function Sidebar({
   activeProjectId,
   activeWorktreeId,
   activeSessionId,
+  isVisible,
   onSelectProject,
   onSelectSession,
   onNewThread,
@@ -186,6 +198,13 @@ export function Sidebar({
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<
     Record<string, number>
   >({});
+  // While the sidebar is visible, `loadAll` is the source of truth.
+  // When it is hidden on mobile we show this lightweight skeleton so
+  // the user gets immediate feedback the panel is empty until they
+  // reopen it (and `loadAll` fires) — without that, the closed sidebar
+  // is just a black box while we still drive all the fetches in the
+  // background.
+  const [projectsLoading, setProjectsLoading] = useState(false);
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<
     string | null
   >(null);
@@ -276,21 +295,48 @@ export function Sidebar({
       }),
     );
     setProjectData(next);
+    setProjectsLoading(false);
     await refreshActiveSessions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
 
+  // Issue #126: defer the worktree + session waterfall while the
+  // sidebar is off-canvas on mobile. We still mount the sidebar (it
+  // has to be in the DOM so the slide-in transition works), but we
+  // skip the `loadAll` fetch and the active-runtimes polling until
+  // the user actually opens the panel. The first time the user opens
+  // it (or whenever the sidebar visibility flips back on) we kick off
+  // a load — `focusRefreshKey` still re-triggers a load when focus
+  // queue state changes elsewhere.
   useEffect(() => {
-    loadAll().catch(() => {});
-  }, [loadAll, focusRefreshKey]);
+    if (!isVisible) {
+      setProjectsLoading(false);
+      return;
+    }
+    // While the load is in flight we show a lightweight skeleton so
+    // the user gets immediate feedback when they open the sidebar
+    // (the load itself runs `Promise.all` over every project's
+    // worktree + session list, which can take a moment on a cold
+    // cache — issue #126).
+    setProjectsLoading(true);
+    loadAll().catch(() => {
+      // Even on failure we want to clear the spinner so the user
+      // sees the empty state rather than a stuck "Loading…".
+      setProjectsLoading(false);
+    });
+  }, [loadAll, focusRefreshKey, isVisible]);
 
   useEffect(() => {
+    // Polling for active runtimes is only useful while the sidebar
+    // is visible — the indicators aren't rendered otherwise and the
+    // requests just burn bandwidth. Skip on hidden mobile panels.
+    if (!isVisible) return;
     if (activeSessionIds.size === 0) return;
     const interval = window.setInterval(() => {
       refreshActiveSessions().catch(() => {});
     }, 2000);
     return () => window.clearInterval(interval);
-  }, [activeSessionIds, refreshActiveSessions]);
+  }, [activeSessionIds, refreshActiveSessions, isVisible]);
 
   const toggleProject = (id: string) => {
     setProjectData((prev) =>
@@ -529,7 +575,12 @@ export function Sidebar({
         </div>
 
         <div className="flex flex-col gap-1 pb-3">
-          {projectData.length === 0 ? (
+          {projectsLoading ? (
+            <span className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Loading projects…
+            </span>
+          ) : projectData.length === 0 ? (
             <span className="px-3 py-2 text-xs text-muted-foreground">
               No projects yet
             </span>

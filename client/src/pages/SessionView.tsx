@@ -2729,11 +2729,18 @@ export function SessionView({
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(initialTerminalState.tabs);
   const [activeTerminalId, setActiveTerminalId] = useState<string>(initialTerminalState.activeId);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  // The right panel is hidden on mobile (it lives inside a tabbed
+  // overlay), so its width is only meaningful on desktop. We pass a
+  // fixed default to avoid a synchronous `window.innerWidth` read on
+  // the very first render of a mobile session view — that read forces
+  // a layout and is what the issue flags. If the user has a saved
+  // value from a previous desktop session, the hook still applies it
+  // (see `useResizablePanel`).
   const rightPanelResize = useResizablePanel({
     storageKey: "rightPanelWidth",
-    defaultWidth: Math.round(window.innerWidth / 2),
+    defaultWidth: 480,
     minWidth: 280,
-    maxWidth: Math.round(window.innerWidth * 0.75),
+    maxWidth: 800,
     invert: true,
   });
   const [runScriptPending, setRunScriptPending] = useState(false);

@@ -7,7 +7,13 @@ function clamp(value: number, min: number, max: number): number {
 interface UseResizablePanelOptions {
   /** Key used to persist the width in localStorage. */
   storageKey: string;
-  /** Default width in pixels when no saved value exists. */
+  /**
+   * Default width in pixels when no saved value exists. Callers that
+   * need a viewport-derived default should pass a static fallback
+   * here: reading `window.innerWidth` during the first render forces a
+   * synchronous layout, which is the problem this hook is designed to
+   * help with (see issue #126 — mobile right-panel defaults).
+   */
   defaultWidth: number;
   /** Minimum width in pixels. */
   minWidth: number;

@@ -20,6 +20,10 @@ import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useFocusModeShortcuts } from "./lib/useFocusModeShortcuts.ts";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
+import {
+  isSidebarDataVisible,
+  SIDEBAR_DESKTOP_MIN_WIDTH,
+} from "./lib/sidebar-visibility.ts";
 
 /**
  * Time the focus-advance toast shows a "Moving to next..." countdown
@@ -164,6 +168,33 @@ export function App() {
     return saved.page === "session" ? saved.projectId : null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Mirror the `md` Tailwind breakpoint so we can tell the Sidebar
+  // whether it's actually on-screen. On desktop the sidebar is always
+  // rendered (CSS pins it via `md:translate-x-0`), so the Sidebar
+  // should fetch its data even when `sidebarOpen` is false. On mobile
+  // the sidebar is off-canvas until the user taps the hamburger, so
+  // we tell the Sidebar to skip the worktree + session waterfall
+  // while it's closed (issue #126).
+  const [isDesktopViewport, setIsDesktopViewport] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(`(min-width: ${SIDEBAR_DESKTOP_MIN_WIDTH}px)`).matches;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(`(min-width: ${SIDEBAR_DESKTOP_MIN_WIDTH}px)`);
+    const update = () => setIsDesktopViewport(media.matches);
+    update();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", update);
+      return () => media.removeEventListener("change", update);
+    }
+    media.addListener(update);
+    return () => media.removeListener(update);
+  }, []);
+  const sidebarVisible = isSidebarDataVisible(
+    isDesktopViewport ? SIDEBAR_DESKTOP_MIN_WIDTH : 0,
+    sidebarOpen,
+  );
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set());
   const [focusMode, setFocusMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
@@ -582,6 +613,11 @@ export function App() {
           activeWorktreeId={activeView.page === "session" ? activeView.worktreeId : undefined}
           activeSessionId={activeView.page === "session" ? activeView.sessionId : undefined}
           completedSessions={completedSessions}
+          // On desktop the sidebar is always on-screen; on mobile it
+          // follows the `sidebarOpen` flag. The sidebar uses this to
+          // gate its heavy worktree + session fetch waterfall — see
+          // issue #126.
+          isVisible={sidebarVisible}
           onSelectProject={handleSelectProject}
           onSelectSession={handleSelectSession}
           onNewThread={handleNewThread}
