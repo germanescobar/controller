@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -492,5 +492,54 @@ test("regression: a second writer overwriting the agent session file cannot fake
       undefined,
       "focusPinnedAt written by the agent must be ignored — the sidecar is the source of truth"
     );
+  });
+});
+
+// Regression tests for the PR #142 review comment: `getSession`,
+// `archiveSession`, and `updateSessionTitle` must keep treating a
+// malformed (or transiently empty/partial) agent session file as a
+// missing session, not as an unhandled exception. Ada rewrites
+// `.coding-agent/sessions/<id>.json` multiple times per run (see
+// issue #140) and a reader can race the writer.
+
+function writeAgentSessionFile(
+  projectPath: string,
+  sessionId: string,
+  body: string
+): void {
+  const sessionsDir = path.join(projectPath, ".coding-agent", "sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  writeFileSync(path.join(sessionsDir, `${sessionId}.json`), body);
+}
+
+test("getSession returns null for a malformed agent session file (PR #142 review)", async () => {
+  await withTempProject(async (projectPath) => {
+    writeAgentSessionFile(projectPath, "session-1", "{ not valid json");
+    const session = await getSession(projectPath, "session-1");
+    assert.equal(session, null, "malformed file must be treated as a missing session");
+  });
+});
+
+test("getSession returns null for a transiently empty agent session file (PR #142 review)", async () => {
+  await withTempProject(async (projectPath) => {
+    writeAgentSessionFile(projectPath, "session-1", "");
+    const session = await getSession(projectPath, "session-1");
+    assert.equal(session, null, "empty file must be treated as a missing session");
+  });
+});
+
+test("archiveSession returns false for a malformed agent session file (PR #142 review)", async () => {
+  await withTempProject(async (projectPath) => {
+    writeAgentSessionFile(projectPath, "session-1", "{ not valid json");
+    const ok = await archiveSession(projectPath, "session-1");
+    assert.equal(ok, false, "archiving a malformed file must report failure, not throw");
+  });
+});
+
+test("updateSessionTitle returns null for a malformed agent session file (PR #142 review)", async () => {
+  await withTempProject(async (projectPath) => {
+    writeAgentSessionFile(projectPath, "session-1", "{ not valid json");
+    const updated = await updateSessionTitle(projectPath, "session-1", "new title");
+    assert.equal(updated, null, "title update on a malformed file must report failure, not throw");
   });
 });

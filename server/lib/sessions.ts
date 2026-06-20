@@ -182,13 +182,20 @@ export async function getSession(
     storagePaths(projectPath).sessions,
     `${sessionId}.json`
   );
-  let content: string;
+  // Read and parse in the same try block. The agent (Ada) rewrites
+  // this file multiple times per run, so a request can race the
+  // writer and observe an empty or partially written file; both
+  // the read and the parse must be non-fatal so the routes
+  // (e.g. `GET /sessions/:sessionId`, `GET .../runtime`) keep
+  // returning a clean 404 instead of turning a transient bad
+  // read into a 500.
+  let session: SessionState;
   try {
-    content = await fs.readFile(filePath, "utf-8");
+    const content = await fs.readFile(filePath, "utf-8");
+    session = JSON.parse(content) as SessionState;
   } catch {
     return null;
   }
-  const session = JSON.parse(content) as SessionState;
   // Strip any legacy focus fields that may still be on the agent
   // file from before issue #139 — the sidecar is the source of
   // truth now. We do this even before merging so a stale on-disk
@@ -294,13 +301,18 @@ export async function updateSessionTitle(
     storagePaths(projectPath).sessions,
     `${sessionId}.json`
   );
-  let content: string;
+  // Read and parse in the same try block: the agent rewrites this
+  // file mid-run, so a transient empty or partial file must not
+  // surface as an unhandled exception to the route. Returning
+  // `null` matches the pre-PR behavior (when this function went
+  // through `getSession`, which had the same read+parse envelope).
+  let session: SessionState;
   try {
-    content = await fs.readFile(filePath, "utf-8");
+    const content = await fs.readFile(filePath, "utf-8");
+    session = JSON.parse(content) as SessionState;
   } catch {
     return null;
   }
-  const session = JSON.parse(content) as SessionState;
 
   const trimmed = title.trim();
   if (trimmed) {
