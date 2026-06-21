@@ -495,6 +495,43 @@ test("importSkills returns an error for a missing source file", async () => {
   }
 });
 
+test("importSkills refuses a source path outside the known skill roots", async () => {
+  // A valid SKILL.md that lives nowhere discovery would scan must not be
+  // importable, otherwise a caller could copy an arbitrary file into the
+  // unified catalog and read it back through the API.
+  const home = makeTempDir("import-outside-");
+  const outside = makeTempDir("import-arbitrary-");
+  const orchestratorHome = makeTempDir("orch-outside-");
+  const original = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  try {
+    const sourcePath = writeSkillFile(
+      outside,
+      "secret",
+      { name: "secret", description: "leaked" },
+      "sensitive contents"
+    );
+
+    const result = await importSkills(
+      {
+        selections: [{ providerId: "anita", sourcePath, scope: "user" }],
+      },
+      makeEnv(home)
+    );
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /known per-agent skill location/);
+
+    const { listUnifiedSkills } = await import("../unified-skills.js");
+    assert.equal((await listUnifiedSkills()).length, 0);
+  } finally {
+    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
 test("importSkills processes multiple selections in one call", async () => {
   const home = makeTempDir("import-multi-");
   const orchestratorHome = makeTempDir("orch-multi-");

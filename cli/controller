@@ -324,6 +324,9 @@ function printSkills(command, result) {
     for (const s of skills) {
       const project = s.projectPath ? `  (project: ${s.projectPath})` : "";
       process.stdout.write(`${s.providerId}/${s.scope}  ${s.name} — ${s.description}${project}\n`);
+      // Print the source path so the single-skill import flow
+      // (`import --provider <id> --source <path>`) has the value it needs.
+      process.stdout.write(`  source: ${s.sourcePath}\n`);
     }
     return;
   }

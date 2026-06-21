@@ -282,12 +282,22 @@ export async function importSkills(
   // selections in the same request don't race past each other on collisions.
   let unified = await listUnifiedSkills();
 
+  // Accept the canonical provider ids and the legacy `ada` id so callers
+  // created before the Ada→Anita rename (issue #151) keep working.
+  const acceptedIds = new Set(
+    providerConfigs(env).flatMap((c) => [c.providerId, "ada"])
+  );
+
+  // Re-run discovery and index by source path. A selection may only import a
+  // file that discovery actually surfaced from a known per-agent skill root.
+  // Without this, a caller could pass an arbitrary `sourcePath` to any
+  // frontmatter-shaped file on disk, copy it into the unified catalog, and
+  // read its contents back through the unified-skill API — an arbitrary file
+  // read, since the server enables CORS globally.
+  const discovered = await discoverImportableSkills(env);
+  const discoveredBySource = new Map(discovered.map((s) => [s.sourcePath, s]));
+
   for (const selection of request.selections) {
-    // Accept the canonical provider ids and the legacy `ada` id so callers
-    // created before the Ada→Anita rename (issue #151) keep working.
-    const acceptedIds = new Set(
-      providerConfigs(env).flatMap((c) => [c.providerId, "ada"])
-    );
     if (!acceptedIds.has(selection.providerId)) {
       results.push({
         providerId: selection.providerId,
@@ -295,6 +305,17 @@ export async function importSkills(
         name: "",
         status: "error",
         reason: `Unknown agent provider: ${selection.providerId}`,
+      });
+      continue;
+    }
+
+    if (!discoveredBySource.has(selection.sourcePath)) {
+      results.push({
+        providerId: selection.providerId,
+        scope: selection.scope,
+        name: "",
+        status: "error",
+        reason: `Skill file not found in any known per-agent skill location: ${selection.sourcePath}`,
       });
       continue;
     }
