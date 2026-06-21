@@ -717,9 +717,6 @@ async function handleSessionStream(
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
-  // For non-Anita providers, we persist events ourselves since they don't
-  // write to .coding-agent/events/ like Anita does.
-  const shouldPersist = providerId !== "anita";
   let streamSessionId = resumeSessionId ?? "";
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
@@ -919,7 +916,7 @@ async function handleSessionStream(
   }, SSE_HEARTBEAT_INTERVAL_MS);
   resetWatchdog();
 
-  if (resumeSessionId && shouldPersist) {
+  if (resumeSessionId) {
     persistSessionStart(resumeSessionId).catch(() => {});
   }
 
@@ -964,13 +961,13 @@ async function handleSessionStream(
             if (pausedForClaudeUserInput) break;
             eventProcessing = eventProcessing
               .then(async () => {
-                // Always persist session metadata on run.started so
-                // provider/model are available when loading any session.
-                // Only persist individual events for non-Anita providers.
+                // Persist session metadata on run.started so
+                // provider/model are available when loading any session,
+                // then persist each transcript event to
+                // .coding-agent/events/ so it can be read back on reload.
                 if (event.type === "run.started") {
                   await persistSessionStart(event.sessionId);
                 } else if (
-                  shouldPersist &&
                   event.type !== "run.completed" &&
                   event.type !== "run.failed" &&
                   event.type !== "run.cancelled"
@@ -1043,7 +1040,6 @@ async function handleSessionStream(
             for (const event of events) {
               if (pausedForClaudeUserInput) break;
               if (
-                shouldPersist &&
                 event.type !== "run.completed" &&
                 event.type !== "run.failed" &&
                 event.type !== "run.cancelled"
@@ -1500,7 +1496,7 @@ async function streamCodexPlanSession(
   }
 }
 
-function getPersistedEventType(event: AgentStreamEvent): string {
+export function getPersistedEventType(event: AgentStreamEvent): string {
   switch (event.type) {
     case "assistant.text":
       return "assistant_response";
@@ -1527,7 +1523,7 @@ function getPersistedEventType(event: AgentStreamEvent): string {
   }
 }
 
-function getPersistedEventData(event: AgentStreamEvent): Record<string, unknown> {
+export function getPersistedEventData(event: AgentStreamEvent): Record<string, unknown> {
   switch (event.type) {
     case "assistant.text":
       return { content: [{ type: "text", text: event.text }] };

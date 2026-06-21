@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Anita multi-turn transcripts now render in full** (#163). The orchestrator
+  was skipping its own transcript persistence for Anita and relying on the
+  `anita` CLI to write events into `.coding-agent/events/`. After the Ada→Anita
+  rename the CLI's data dir moved to `.anita/`, so the orchestrator read back
+  only its own `user_message`/`run_diff` events and the assistant text and tool
+  calls never reached the UI on follow-up turns. The orchestrator now persists
+  every provider's parsed transcript events itself — the same path already used
+  for Codex and Claude — so Anita is no longer coupled to the CLI's on-disk
+  storage location.
+
 ### Changed
 
 - **Renamed the default agent from "Ada" to "Anita"** (#151) to match the
