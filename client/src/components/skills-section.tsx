@@ -273,6 +273,7 @@ export function SkillsSection() {
               <Button
                 size="icon-sm"
                 variant="ghost"
+                data-testid={`skill-view-${skill.name}`}
                 onClick={() => openView(skill)}
                 title="View skill"
               >
@@ -281,6 +282,7 @@ export function SkillsSection() {
               <Button
                 size="icon-sm"
                 variant="ghost"
+                data-testid={`skill-edit-${skill.name}`}
                 onClick={() => openEdit(skill)}
                 title="Edit skill"
               >
@@ -289,6 +291,7 @@ export function SkillsSection() {
               <Button
                 size="icon-sm"
                 variant="ghost"
+                data-testid={`skill-delete-${skill.name}`}
                 onClick={() => void handleDelete(skill.name)}
                 disabled={deletingName === skill.name}
                 className="text-muted-foreground hover:text-destructive"
@@ -391,6 +394,7 @@ export function SkillsSection() {
             <Button
               type="button"
               variant="outline"
+              data-testid="skill-dialog-cancel"
               onClick={() => {
                 setDialogOpen(false);
                 resetForm();
@@ -399,7 +403,11 @@ export function SkillsSection() {
             >
               Cancel
             </Button>
-            <Button onClick={() => void handleSave()} disabled={!canSave || saving}>
+            <Button
+              data-testid="skill-dialog-save"
+              onClick={() => void handleSave()}
+              disabled={!canSave || saving}
+            >
               {saving ? (
                 <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
               ) : (
