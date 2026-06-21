@@ -792,12 +792,9 @@ async function handleSessionStream(
     // writers) would silently drop our fields on every save, so a
     // brand-new session's auto-pin would vanish within ~1s. See
     // issue #139 / #140.
-    const existingFocus = await readSessionFocus(worktreePath, sessionId);
+    const existingFocus = await readSessionFocus(sessionId);
     const focus = resolveSessionFocusState(existingFocus);
-    await writeSessionFocus(
-      worktreePath,
-      buildSessionFocus(sessionId, focus)
-    );
+    await writeSessionFocus(buildSessionFocus(sessionId, focus));
     await saveSession(worktreePath, {
       id: sessionId,
       title,
@@ -1395,12 +1392,9 @@ async function streamCodexPlanSession(
         : historyText;
     // Focus state lives in a Controller-owned sidecar; see the
     // SSE-stream persistSessionStart for the rationale (issue #139).
-    const existingFocus = await readSessionFocus(worktreePath, sessionId);
+    const existingFocus = await readSessionFocus(sessionId);
     const focus = resolveSessionFocusState(existingFocus);
-    await writeSessionFocus(
-      worktreePath,
-      buildSessionFocus(sessionId, focus)
-    );
+    await writeSessionFocus(buildSessionFocus(sessionId, focus));
     await saveSession(worktreePath, {
       id: sessionId,
       title,

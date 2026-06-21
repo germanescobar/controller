@@ -1,15 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { sessionFocusDir, sessionFocusFile } from "./paths.js";
 
 /**
  * Controller-owned focus-queue state for a session.
  *
- * Lives in a sidecar file at `<projectPath>/.coding-orchestrator/focus/<sessionId>.json`
- * rather than on the agent-owned `.coding-agent/sessions/<sessionId>.json`,
- * because that file is shared with the agent process (e.g. Ada writes it
- * eight times per run) and the agent's `SessionStore.save()` only knows
+ * Lives in a sidecar file under the Controller home at
+ * `~/coding-orchestrator/focus/<sessionId>.json` rather than on the
+ * agent-owned `.coding-agent/sessions/<sessionId>.json`, because that
+ * file is shared with the agent process (e.g. Ada writes it eight
+ * times per run) and the agent's `SessionStore.save()` only knows
  * about its own fields — anything the Controller adds gets silently
- * dropped on the next save (issue #139).
+ * dropped on the next save (issue #139). Session ids are globally
+ * unique, so a single flat focus directory (keyed by session id) is
+ * unambiguous without a per-project namespace.
  *
  * Keeping focus state in a Controller-owned file decouples it from the
  * agent's session format and ensures the auto-pin survives every
@@ -32,14 +36,6 @@ export interface ResolvedFocusState {
   userUnpinned: boolean | undefined;
 }
 
-function focusDir(projectPath: string): string {
-  return path.join(projectPath, ".coding-orchestrator", "focus");
-}
-
-function focusFilePath(projectPath: string, sessionId: string): string {
-  return path.join(focusDir(projectPath), `${sessionId}.json`);
-}
-
 /**
  * Read the focus state for a session. Returns `null` if no sidecar
  * exists (which is the default for any session the Controller has
@@ -47,10 +43,9 @@ function focusFilePath(projectPath: string, sessionId: string): string {
  * the user).
  */
 export async function readSessionFocus(
-  projectPath: string,
   sessionId: string
 ): Promise<SessionFocus | null> {
-  const filePath = focusFilePath(projectPath, sessionId);
+  const filePath = sessionFocusFile(sessionId);
   try {
     const content = await fs.readFile(filePath, "utf-8");
     return JSON.parse(content) as SessionFocus;
@@ -65,13 +60,9 @@ export async function readSessionFocus(
  * should pass a record built by `buildSessionFocus` so `sessionId`
  * and `updatedAt` are stamped correctly.
  */
-export async function writeSessionFocus(
-  projectPath: string,
-  focus: SessionFocus
-): Promise<void> {
-  const dir = focusDir(projectPath);
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = focusFilePath(projectPath, focus.sessionId);
+export async function writeSessionFocus(focus: SessionFocus): Promise<void> {
+  await fs.mkdir(sessionFocusDir(), { recursive: true });
+  const filePath = sessionFocusFile(focus.sessionId);
   await fs.writeFile(filePath, JSON.stringify(focus, null, 2));
 }
 
@@ -79,11 +70,8 @@ export async function writeSessionFocus(
  * Remove the focus sidecar for a session. Idempotent: returns silently
  * if no sidecar exists.
  */
-export async function deleteSessionFocus(
-  projectPath: string,
-  sessionId: string
-): Promise<void> {
-  const filePath = focusFilePath(projectPath, sessionId);
+export async function deleteSessionFocus(sessionId: string): Promise<void> {
+  const filePath = sessionFocusFile(sessionId);
   try {
     await fs.unlink(filePath);
   } catch (error) {
@@ -97,10 +85,10 @@ export async function deleteSessionFocus(
  * return them keyed by `sessionId`. Used by `getSessions` to merge
  * focus state into the agent-session list in a single readdir pass.
  */
-export async function listSessionFocuses(
-  projectPath: string
-): Promise<Map<string, SessionFocus>> {
-  const dir = focusDir(projectPath);
+export async function listSessionFocuses(): Promise<
+  Map<string, SessionFocus>
+> {
+  const dir = sessionFocusDir();
   const result = new Map<string, SessionFocus>();
   let files: string[];
   try {

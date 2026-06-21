@@ -27,7 +27,7 @@ export interface SessionState {
   status: string;
   // The three focus-queue fields below are populated by `getSession`
   // and `getSessions` by merging in the Controller-owned sidecar at
-  // `<projectPath>/.coding-orchestrator/focus/<sessionId>.json`.
+  // `~/coding-orchestrator/focus/<sessionId>.json`.
   // They are *not* persisted on the agent-owned session file:
   // `saveSession` strips them before writing, since the agent
   // (e.g. Ada) owns `.coding-agent/sessions/` and silently drops
@@ -144,7 +144,7 @@ export async function getSessions(
   const dir = storagePaths(projectPath).sessions;
   // Read the focus sidecars in a single pass so we can merge them
   // into the agent-session list without a per-session round trip.
-  const focusById = await listSessionFocuses(projectPath);
+  const focusById = await listSessionFocuses();
   let files: string[];
   try {
     files = await fs.readdir(dir);
@@ -203,7 +203,7 @@ export async function getSession(
   delete session.focusPinnedAt;
   delete session.focusDoneAt;
   delete session.userUnpinned;
-  const focus = await readSessionFocus(projectPath, sessionId);
+  const focus = await readSessionFocus(sessionId);
   return applyFocus(session, focus);
 }
 
@@ -226,7 +226,7 @@ export async function archiveSession(
     delete session.focusDoneAt;
     delete session.userUnpinned;
     await fs.writeFile(filePath, JSON.stringify(session, null, 2));
-    await deleteSessionFocus(projectPath, sessionId);
+    await deleteSessionFocus(sessionId);
     return true;
   } catch {
     return false;
@@ -243,7 +243,7 @@ export async function updateSessionFocus(
   // (e.g. an existing pin timestamp), and the latter confirms the
   // session exists so the routes can return 404 otherwise.
   const [existingFocus, sessionExists] = await Promise.all([
-    readSessionFocus(projectPath, sessionId),
+    readSessionFocus(sessionId),
     getSession(projectPath, sessionId),
   ]);
   if (!sessionExists) return null;
@@ -279,7 +279,7 @@ export async function updateSessionFocus(
   }
 
   const focus = buildSessionFocus(sessionId, next);
-  await writeSessionFocus(projectPath, focus);
+  await writeSessionFocus(focus);
 
   // Return the merged session so callers (the focus-action routes)
   // see the new state immediately without a third read.
@@ -351,7 +351,7 @@ export async function pinSessionIfNeeded(
   if (!session) return null;
   if (session.status === "archived") return session;
 
-  const existing = await readSessionFocus(projectPath, sessionId);
+  const existing = await readSessionFocus(sessionId);
   if (existing?.focusPinnedAt) return session;
   if (existing?.userUnpinned) return session;
 
@@ -359,7 +359,7 @@ export async function pinSessionIfNeeded(
     sessionId,
     resolveSessionFocusState(existing)
   );
-  await writeSessionFocus(projectPath, focus);
+  await writeSessionFocus(focus);
   return getSession(projectPath, sessionId);
 }
 
@@ -390,7 +390,7 @@ export async function getEvents(
  * agent process (e.g. Ada's `SessionStore.save()`) and we must not
  * pollute it with fields the agent doesn't know about (issue #139).
  * Focus state is persisted separately in
- * `<projectPath>/.coding-orchestrator/focus/<sessionId>.json` via
+ * `~/coding-orchestrator/focus/<sessionId>.json` via
  * `writeSessionFocus`.
  */
 export async function saveSession(
@@ -405,7 +405,7 @@ export async function saveSession(
   // the agent drops any top-level field it doesn't know about on
   // every save, which would silently erase our pin/done/unpin
   // signal (issue #139). Focus state lives separately in
-  // `<projectPath>/.coding-orchestrator/focus/<sessionId>.json`.
+  // `~/coding-orchestrator/focus/<sessionId>.json`.
   const persisted: SessionState = { ...session };
   delete persisted.focusPinnedAt;
   delete persisted.focusDoneAt;
