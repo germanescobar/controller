@@ -13,7 +13,7 @@
     "build:electron-runtime": "tsc -p electron/tsconfig.json && npm run build:electron-assets",
     "build:electron-assets": "node electron/copy-assets.mjs",
     "package:electron": "npm run build && electron-builder --dir",
-    "test": "node --import tsx --test 'server/lib/__tests__/**/*.test.ts' 'client/src/lib/**/*.test.ts'"
+    "test": "node --import tsx --test 'server/lib/__tests__/**/*.test.ts' 'client/src/lib/**/*.test.ts' 'client/src/components/__tests__/**/*.test.tsx'"
   },
   "build": {
     "appId": "com.germanescobar.controller",
