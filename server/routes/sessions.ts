@@ -11,6 +11,7 @@ import { getProjectWorktrees, resolveWorktree } from "../lib/worktrees.js";
 const execAsync = promisify(exec);
 import {
   getSessions,
+  getSessionSummaries,
   getSession,
   getEvents,
   archiveSession,
@@ -2066,7 +2067,10 @@ sessionsRouter.get("/:projectId/sessions", async (req, res) => {
     res.status(404).json({ error: "Worktree not found" });
     return;
   }
-  const sessions = await getSessions(worktree.path);
+  // The sidebar only needs session metadata to render its tree and focus
+  // queue, so return summaries without the (potentially multi-megabyte)
+  // message history. The full session is fetched on demand when opened.
+  const sessions = await getSessionSummaries(worktree.path);
   res.json(sessions);
 });
 

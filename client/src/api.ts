@@ -30,6 +30,14 @@ export interface Session {
   userUnpinned?: boolean;
 }
 
+/**
+ * A session without its `messages` history. The session-list endpoint returns
+ * these so the sidebar/focus queue avoids downloading every transcript (which
+ * can total tens of megabytes). The full `Session` is fetched on demand when a
+ * session is opened.
+ */
+export type SessionSummary = Omit<Session, "messages">;
+
 export interface Worktree {
   id: string;
   projectId: string;
@@ -294,7 +302,7 @@ async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<voi
 export async function fetchSessions(
   projectId: string,
   worktreeId?: string
-): Promise<Session[]> {
+): Promise<SessionSummary[]> {
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions${withWorktree(worktreeId)}`
   );

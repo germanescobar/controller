@@ -30,7 +30,7 @@ import {
   fetchWorktreeSetupLog,
   runWorktreeSetup,
   type Project,
-  type Session,
+  type SessionSummary,
   type Worktree,
   type WorktreeSetupEvent,
 } from "../api.ts";
@@ -75,7 +75,7 @@ interface SidebarProps {
 }
 
 interface WorktreeWithSessions extends Worktree {
-  sessions: Session[];
+  sessions: SessionSummary[];
   isExpanded: boolean;
 }
 
@@ -89,7 +89,7 @@ export interface FocusQueueItem {
   projectName: string;
   worktreeId: string;
   worktreeName: string;
-  session: Session;
+  session: SessionSummary;
   active: boolean;
 }
 
@@ -369,7 +369,7 @@ export function Sidebar({
   const openRenameDialog = (
     projectId: string,
     worktreeId: string,
-    session: Session,
+    session: SessionSummary,
   ) => {
     setRenameSession({ projectId, worktreeId, sessionId: session.id });
     setRenameDraft(session.title ?? "");
