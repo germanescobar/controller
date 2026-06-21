@@ -660,7 +660,7 @@ export async function fetchAgentProviders(): Promise<AgentProviderInfo[]> {
   return res.json();
 }
 
-export type SkillScope = "user" | "system" | "repo";
+export type SkillScope = "unified" | "user" | "system" | "repo";
 
 export interface AgentSkill {
   name: string;
@@ -690,6 +690,67 @@ export async function fetchAgentSkills(
       typeof (entry as AgentSkill).path === "string" &&
       typeof (entry as AgentSkill).scope === "string"
   );
+}
+
+export interface UnifiedSkillInput {
+  name: string;
+  description: string;
+  body: string;
+}
+
+export type UnifiedSkill = AgentSkill & { scope: "unified" };
+
+export async function fetchUnifiedSkills(): Promise<UnifiedSkill[]> {
+  const res = await fetch(`${BASE}/unified-skills`);
+  await throwIfNotOk(res, "Failed to fetch unified skills");
+  const body = (await res.json()) as { skills?: unknown };
+  if (!body || !Array.isArray(body.skills)) return [];
+  return body.skills.filter(
+    (entry): entry is UnifiedSkill =>
+      Boolean(entry) &&
+      typeof (entry as UnifiedSkill).name === "string" &&
+      typeof (entry as UnifiedSkill).description === "string" &&
+      typeof (entry as UnifiedSkill).path === "string" &&
+      (entry as UnifiedSkill).scope === "unified"
+  );
+}
+
+export async function fetchUnifiedSkill(name: string): Promise<{ metadata: UnifiedSkill; body: string }> {
+  const res = await fetch(`${BASE}/unified-skills/${encodeURIComponent(name)}`);
+  await throwIfNotOk(res, "Failed to fetch unified skill");
+  return res.json();
+}
+
+export async function createUnifiedSkill(
+  input: UnifiedSkillInput
+): Promise<UnifiedSkill> {
+  const res = await fetch(`${BASE}/unified-skills`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  await throwIfNotOk(res, "Failed to create unified skill");
+  return res.json();
+}
+
+export async function updateUnifiedSkill(
+  name: string,
+  input: UnifiedSkillInput
+): Promise<UnifiedSkill> {
+  const res = await fetch(`${BASE}/unified-skills/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  await throwIfNotOk(res, "Failed to update unified skill");
+  return res.json();
+}
+
+export async function deleteUnifiedSkill(name: string): Promise<void> {
+  const res = await fetch(`${BASE}/unified-skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  await throwIfNotOk(res, "Failed to delete unified skill");
 }
 
 export interface AgentStatus {

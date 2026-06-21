@@ -26,10 +26,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { resolveCommand } from "./command-resolver.js";
 import { childProcessEnv } from "./shell-env.js";
+import { listUnifiedSkills, readUnifiedSkill } from "./unified-skills.js";
 
 const execFileAsync = promisify(execFile);
 
-export type SkillScope = "user" | "system" | "repo";
+export type SkillScope = "unified" | "user" | "system" | "repo";
 
 export interface SkillMetadata {
   /** Skill name as declared in the frontmatter (trimmed, original case). */
@@ -38,7 +39,7 @@ export interface SkillMetadata {
   description: string;
   /** Absolute path to the `SKILL.md` file on disk. */
   path: string;
-  /** Whether the skill came from the user's home, the Codex system bundle, or a repo. */
+  /** Whether the skill came from the app-owned catalog, the user's home, the Codex system bundle, or a repo. */
   scope: SkillScope;
 }
 
@@ -371,12 +372,21 @@ function createDiskProvider(
     id,
     name,
     async listMetadata(cwd: string): Promise<SkillMetadata[]> {
-      const dirs = await collectDirs(config, cwd);
-      return listMetadataForScopes(dirs);
+      const [unified, perAgent] = await Promise.all([
+        listUnifiedSkills(),
+        collectDirs(config, cwd).then(listMetadataForScopes),
+      ]);
+
+      return mergeSkillMetadata(unified, perAgent);
     },
     async readBody(skillName: string, cwd: string): Promise<SkillBody | null> {
       const normalized = skillName.trim().toLowerCase();
       if (!normalized) return null;
+
+      // Unified catalog wins over per-provider matches for the same name.
+      const unified = await readUnifiedSkill(normalized);
+      if (unified) return unified;
+
       const metadataList = await this.listMetadata(cwd);
       const match = metadataList.find(
         (entry) => entry.name.toLowerCase() === normalized
@@ -419,6 +429,22 @@ export function getSkillProvider(providerId: string): SkillProvider | undefined 
 
 export function getSkillProviders(): SkillProvider[] {
   return Object.values(providers);
+}
+
+/**
+ * Merge unified and per-provider skill metadata lists. Unified skills render
+ * first; per-provider skills with a matching name (case-insensitive) are
+ * hidden so the app-owned catalog wins.
+ */
+export function mergeSkillMetadata(
+  unified: SkillMetadata[],
+  perAgent: SkillMetadata[]
+): SkillMetadata[] {
+  const seen = new Set(unified.map((entry) => entry.name.toLowerCase()));
+  const dedupedPerAgent = perAgent.filter(
+    (entry) => !seen.has(entry.name.toLowerCase())
+  );
+  return [...unified, ...dedupedPerAgent];
 }
 
 // ---------------------------------------------------------------------------

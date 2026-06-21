@@ -14,8 +14,10 @@ import {
   buildSkillPrefix,
   extractSkillInvocation,
   getSkillProvider,
+  mergeSkillMetadata,
   parseSkillFile,
   type SkillProvider,
+  type SkillMetadata,
 } from "../skills.js";
 
 function makeTempDir(prefix: string): string {
@@ -352,5 +354,86 @@ test("codex provider expands ~ in $CODEX_HOME", async () => {
       delete process.env.CODEX_HOME;
       rmSync(codexHome, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unified skills + merge behavior
+// ---------------------------------------------------------------------------
+
+function skillMeta(
+  name: string,
+  scope: SkillMetadata["scope"],
+  description = ""
+): SkillMetadata {
+  return {
+    name,
+    description,
+    path: `/skills/${name}/SKILL.md`,
+    scope,
+  };
+}
+
+test("mergeSkillMetadata puts unified first and dedupes per-agent matches", () => {
+  const unified = [skillMeta("browser", "unified", "managed")];
+  const perAgent = [
+    skillMeta("browser", "user"),
+    skillMeta("imagegen", "system"),
+  ];
+  const merged = mergeSkillMetadata(unified, perAgent);
+  assert.deepEqual(merged.map((entry) => [entry.name, entry.scope]), [
+    ["browser", "unified"],
+    ["imagegen", "system"],
+  ]);
+});
+
+test("mergeSkillMetadata dedupe is case-insensitive", () => {
+  const unified = [skillMeta("Browser", "unified")];
+  const perAgent = [skillMeta("browser", "user")];
+  const merged = mergeSkillMetadata(unified, perAgent);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].name, "Browser");
+  assert.equal(merged[0].scope, "unified");
+});
+
+test("readBody resolves unified skill body over per-provider match", async () => {
+  await withProviderHome("ada", async (home, provider) => {
+    const orchestratorHome = path.join(home, "coding-orchestrator");
+    const skillsDir = path.join(orchestratorHome, "skills");
+
+    // Per-agent skill named "shared"
+    makeSkillFile(
+      path.join(home, ".ada/skills"),
+      "shared",
+      { name: "shared", description: "agent" },
+      "per-agent body"
+    );
+
+    // Unified skill with the same name
+    makeSkillFile(skillsDir, "shared", { name: "shared", description: "unified" }, "unified body");
+
+    const body = await provider.readBody("shared", os.tmpdir());
+    assert.ok(body);
+    assert.equal(body.metadata.scope, "unified");
+    assert.equal(body.body, "unified body");
+
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  });
+});
+
+test("unified skills appear in listMetadata above per-agent skills", async () => {
+  await withProviderHome("ada", async (home, provider) => {
+    const orchestratorHome = path.join(home, "coding-orchestrator");
+    const skillsDir = path.join(orchestratorHome, "skills");
+
+    makeSkillFile(skillsDir, "shared", { name: "shared", description: "u" }, "body");
+    makeSkillFile(path.join(home, ".ada/skills"), "ada-only", { name: "ada-only", description: "a" }, "body");
+
+    const metadata = await provider.listMetadata(os.tmpdir());
+    assert.equal(metadata[0].name, "shared");
+    assert.equal(metadata[0].scope, "unified");
+    assert.ok(metadata.some((entry) => entry.name === "ada-only"));
+
+    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
