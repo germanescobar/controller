@@ -504,14 +504,16 @@ function providerHomes(): ProviderSkillHome[] {
  * identical content.
  */
 export async function installManagedSkills(): Promise<void> {
-  // The unified CLI is invoked as `<path> <surface> <command>`; each skill gets
-  // its surface-prefixed invocation so the documented commands are runnable.
+  // The unified CLI is invoked as `<path> <surface> <command>`. The browser
+  // and integrations bodies render only the subcommand (so we pass the
+  // surface-prefixed path); the search-skills and skill-creator bodies
+  // embed the surface themselves, so we pass the bare CLI path there.
   const cli = controllerCliInstalledPath();
   const skills: ManagedSkill[] = [
     { name: "browser", body: buildBrowserSkillBody(`${cli} browser`) },
     { name: "integrations", body: buildIntegrationsSkillBody(`${cli} integrations`) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
-    { name: "search-skills", body: buildSearchSkillsBody(`${cli} skills`) },
+    { name: "search-skills", body: buildSearchSkillsBody(cli) },
     { name: "skill-creator", body: buildSkillCreatorSkillBody(cli) },
   ];
 
