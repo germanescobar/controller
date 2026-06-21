@@ -14,7 +14,11 @@ All notable changes to this project are documented here.
   calls never reached the UI on follow-up turns. The orchestrator now persists
   every provider's parsed transcript events itself — the same path already used
   for Codex and Claude — so Anita is no longer coupled to the CLI's on-disk
-  storage location.
+  storage location. Transcript writes are now serialized through the stream's
+  processing chain so the persisted `.coding-agent/events/` JSONL always records
+  events in stream order; previously fire-and-forget appends could let the OS
+  reorder them and a reloaded transcript could show an assistant response ahead
+  of the user turn that prompted it.
 
 ### Changed
 

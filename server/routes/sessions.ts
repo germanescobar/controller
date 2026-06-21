@@ -818,8 +818,15 @@ async function handleSessionStream(
     }
   }
 
-  /** Convert a normalized agent event to a persisted AgentEvent and append it. */
-  function persistAgentEvent(event: AgentStreamEvent) {
+  /**
+   * Convert a normalized agent event to a persisted AgentEvent and append it.
+   * Always invoked through the `eventProcessing` chain and awaited so the
+   * `.coding-agent/events/` JSONL records events in stream order: each append
+   * completes before the next is issued. Issuing these as concurrent
+   * fire-and-forget writes let the OS reorder them, so a reloaded transcript
+   * could render an assistant response ahead of the user turn that prompted it.
+   */
+  async function persistAgentEvent(event: AgentStreamEvent): Promise<void> {
     if (!streamSessionId) return;
     if (event.type === "thread.status" || event.type === "plan.delta") return;
     const agentEvent: AgentEvent = {
@@ -829,7 +836,7 @@ async function handleSessionStream(
       type: getPersistedEventType(event),
       data: getPersistedEventData(event),
     };
-    appendEvent(worktreePath, streamSessionId, agentEvent).catch(() => {});
+    await appendEvent(worktreePath, streamSessionId, agentEvent);
   }
 
   // Track whether the SSE client is still connected so we avoid writing
@@ -901,8 +908,11 @@ async function handleSessionStream(
       timestamp: new Date().toISOString(),
     };
     sseSend({ type: "anita_event", event: failureEvent });
-    // Persist to disk so the failure is visible after reconnects.
-    persistAgentEvent(failureEvent);
+    // Persist to disk so the failure is visible after reconnects. Route it
+    // through the serialization chain so it lands after any pending writes.
+    eventProcessing = eventProcessing
+      .then(() => persistAgentEvent(failureEvent))
+      .catch(() => {});
     if (child.exitCode === null && !child.killed) {
       child.kill("SIGTERM");
       setTimeout(() => {
@@ -917,7 +927,12 @@ async function handleSessionStream(
   resetWatchdog();
 
   if (resumeSessionId) {
-    persistSessionStart(resumeSessionId).catch(() => {});
+    // Serialize the resumed session-start (which appends the controller's
+    // user_message) onto the same chain the stream events use, so the user
+    // turn is written before any assistant/tool event that follows it.
+    eventProcessing = eventProcessing
+      .then(() => persistSessionStart(resumeSessionId))
+      .catch(() => {});
   }
 
   // Forward stderr text and keep fallback approval handling for older prompts.
@@ -972,7 +987,7 @@ async function handleSessionStream(
                   event.type !== "run.failed" &&
                   event.type !== "run.cancelled"
                 ) {
-                  persistAgentEvent(event);
+                  await persistAgentEvent(event);
                 }
                 if (
                   event.type === "run.completed" ||
@@ -1044,7 +1059,7 @@ async function handleSessionStream(
                 event.type !== "run.failed" &&
                 event.type !== "run.cancelled"
               ) {
-                persistAgentEvent(event);
+                await persistAgentEvent(event);
               }
               if (
                 event.type === "run.completed" ||
@@ -1101,7 +1116,7 @@ async function handleSessionStream(
               timestamp: new Date().toISOString(),
             };
             sseSend({ type: "anita_event", event: failureEvent });
-            persistAgentEvent(failureEvent);
+            await persistAgentEvent(failureEvent);
           }
         }
 
@@ -1128,7 +1143,8 @@ async function handleSessionStream(
         if (streamSessionId && !pausedForClaudeUserInput && code === 0) {
           void advanceSessionQueue(req.params.projectId, worktreeId, streamSessionId);
         }
-      });
+      })
+      .catch(() => {});
   });
 
   child.on("error", (err) => {
@@ -1415,7 +1431,8 @@ async function streamCodexPlanSession(
     }
   }
 
-  function persistAgentEvent(event: AgentStreamEvent) {
+  /* Append a persisted event; awaited via the chain to keep file order. */
+  async function persistAgentEvent(event: AgentStreamEvent): Promise<void> {
     if (!streamSessionId) return;
     const agentEvent: AgentEvent = {
       id: randomUUID(),
@@ -1424,7 +1441,7 @@ async function streamCodexPlanSession(
       type: getPersistedEventType(event),
       data: getPersistedEventData(event),
     };
-    appendEvent(worktreePath, streamSessionId, agentEvent).catch(() => {});
+    await appendEvent(worktreePath, streamSessionId, agentEvent);
   }
 
   async function touchSession() {
@@ -1446,7 +1463,7 @@ async function streamCodexPlanSession(
           event.type !== "thread.status" &&
           event.type !== "plan.delta"
         ) {
-          persistAgentEvent(event);
+          await persistAgentEvent(event);
         }
 
         sseSend({ type: "anita_event", event });
