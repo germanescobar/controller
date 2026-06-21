@@ -458,3 +458,71 @@ test("unified skills appear in listMetadata above per-agent skills", async () =>
     rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Controller-managed skills: scope and dedupe behavior (issue #159)
+// ---------------------------------------------------------------------------
+
+const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #159) -->";
+
+test("per-agent SKILL.md with MANAGED_MARKER is surfaced as scope 'managed'", async () => {
+  await withProviderHome("anita", async (home, provider) => {
+    // A managed skill lives in the user home with the marker comment in the
+    // body. The loader should tag its metadata as `scope: "managed"` so the
+    // `/` picker can hide it.
+    makeSkillFile(
+      path.join(home, ".anita/skills"),
+      "controller-browser",
+      { name: "controller-browser", description: "Drive the preview browser" },
+      `${MANAGED_MARKER}\n# controller-browser\nbody`
+    );
+    const metadata = await provider.listMetadata(os.tmpdir());
+    assert.equal(metadata.length, 1);
+    assert.equal(metadata[0].name, "controller-browser");
+    assert.equal(metadata[0].scope, "managed");
+  });
+});
+
+test("a user-authored SKILL.md in the same directory keeps scope 'user'", async () => {
+  await withProviderHome("anita", async (home, provider) => {
+    // No marker → regular user skill. The scope should not be silently
+    // upgraded to "managed" just because the directory looks controlled.
+    makeSkillFile(
+      path.join(home, ".anita/skills"),
+      "my-skill",
+      { name: "my-skill", description: "Mine" },
+      "# my-skill\nbody"
+    );
+    const metadata = await provider.listMetadata(os.tmpdir());
+    assert.equal(metadata.length, 1);
+    assert.equal(metadata[0].scope, "user");
+  });
+});
+
+test("mergeSkillMetadata keeps managed entries for body lookup (unified still wins)", () => {
+  const unified = [skillMeta("imagegen", "unified", "u")];
+  const perAgent = [
+    skillMeta("controller-browser", "managed", "managed browser"),
+    skillMeta("github-issues", "user", "user skill"),
+  ];
+  const merged = mergeSkillMetadata(unified, perAgent);
+  // Unified renders first; managed + user entries follow in their original
+  // order. The managed entry must remain reachable so the agent can
+  // `readBody` it on demand.
+  assert.deepEqual(merged.map((entry) => [entry.name, entry.scope]), [
+    ["imagegen", "unified"],
+    ["controller-browser", "managed"],
+    ["github-issues", "user"],
+  ]);
+});
+
+test("extractSkillInvocation matches the renamed controller- names", () => {
+  assert.deepEqual(extractSkillInvocation("/controller-browser do it"), {
+    skillName: "controller-browser",
+    rest: "do it",
+  });
+  assert.deepEqual(extractSkillInvocation("/controller-search-skills find x"), {
+    skillName: "controller-search-skills",
+    rest: "find x",
+  });
+});

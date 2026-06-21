@@ -668,7 +668,12 @@ export async function fetchAgentProviders(): Promise<AgentProviderInfo[]> {
   return res.json();
 }
 
-export type SkillScope = "unified" | "user" | "system" | "repo";
+export type SkillScope =
+  | "unified"
+  | "user"
+  | "system"
+  | "repo"
+  | "managed";
 
 export interface AgentSkill {
   name: string;

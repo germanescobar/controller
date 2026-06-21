@@ -6,6 +6,33 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **Renamed controller-managed skills to a `controller-` prefix and hid them
+  from the `/` picker** (#159). The five app-managed skills installed into
+  each provider's user home on startup
+  (`browser` → `controller-browser`,
+  `integrations` → `controller-integrations`,
+  `controller-scripts` (grandfathered — no double prefix),
+  `search-skills` → `controller-search-skills`,
+  `skill-creator` → `controller-skill-creator`) now live under
+  `controller-`-prefixed directories, with matching `name:` frontmatter and
+  `MANAGED_MARKER` (now references issue #159 so future renames can detect
+  unowned files). The disk provider tags any `SKILL.md` carrying the
+  marker with `scope: "managed"`, and the chat composer filters
+  `scope: "managed"` entries out of the `/` autocomplete popover so users
+  no longer see agent-facing skills mixed in with their own. The agent
+  still discovers the body through the filesystem location, so a user who
+  types `/controller-browser` manually and submits still gets the body
+  prepended. Existing per-agent and unified skills are unaffected. **Note:**
+  after upgrading, manually remove the old `~/.{anita,codex,claude}/skills/`
+  directories named `browser`, `integrations`, `search-skills`, or
+  `skill-creator` (or simply `rm -rf ~/.anita/skills/browser` etc.); they
+  carry the previous marker comment and would otherwise be re-read as
+  regular user-authored skills.
+
+
+
+### Changed
+
 - **Updated session-file ownership comments to reflect post-#152 / #163
   reality** (#165). The Ada→Anita rename moved the `anita` CLI's session
   store to `.anita/sessions/`, so for new sessions the

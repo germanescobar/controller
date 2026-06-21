@@ -76,10 +76,10 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
     // `<cliPath> <surface> <command>`. Never a bare subcommand, never a
     // double-prefixed surface.
     const cases = [
-      { name: "browser", surface: "browser" },
-      { name: "integrations", surface: "integrations" },
-      { name: "search-skills", surface: "skills" },
-      { name: "skill-creator", surface: "skills" },
+      { name: "controller-browser", surface: "browser" },
+      { name: "controller-integrations", surface: "integrations" },
+      { name: "controller-search-skills", surface: "skills" },
+      { name: "controller-skill-creator", surface: "skills" },
     ] as const;
 
     for (const provider of [".anita", ".codex", ".claude"]) {
@@ -143,7 +143,7 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
 
     const anitaBrowser = readFileSync(
-      path.join(os.homedir(), ".anita", "skills", "browser", "SKILL.md"),
+      path.join(os.homedir(), ".anita", "skills", "controller-browser", "SKILL.md"),
       "utf-8"
     );
     assert.match(
@@ -156,7 +156,13 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
 
     const anitaIntegrations = readFileSync(
-      path.join(os.homedir(), ".anita", "skills", "integrations", "SKILL.md"),
+      path.join(
+        os.homedir(),
+        ".anita",
+        "skills",
+        "controller-integrations",
+        "SKILL.md"
+      ),
       "utf-8"
     );
     assert.match(
@@ -169,7 +175,13 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
 
     const anitaSearchSkills = readFileSync(
-      path.join(os.homedir(), ".anita", "skills", "search-skills", "SKILL.md"),
+      path.join(
+        os.homedir(),
+        ".anita",
+        "skills",
+        "controller-search-skills",
+        "SKILL.md"
+      ),
       "utf-8"
     );
     assert.match(
@@ -182,12 +194,69 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
 
     const anitaSkillCreator = readFileSync(
-      path.join(os.homedir(), ".anita", "skills", "skill-creator", "SKILL.md"),
+      path.join(
+        os.homedir(),
+        ".anita",
+        "skills",
+        "controller-skill-creator",
+        "SKILL.md"
+      ),
       "utf-8"
     );
     assert.match(
       anitaSkillCreator,
       cliCommandRegex(cliPath, "skills create --name <name>")
     );
+  });
+});
+
+test("managed skills install under controller-prefixed directory names", async () => {
+  await withIsolatedHomes(async () => {
+    await installManagedSkills();
+
+    // Each managed skill should land in a `controller-`-prefixed directory
+    // (or stay as the grandfathered `controller-scripts`). The marker comment
+    // references issue #159 so future renames can detect unowned files.
+    const expected: Array<{ dir: string; name: string }> = [
+      { dir: "controller-browser", name: "controller-browser" },
+      { dir: "controller-integrations", name: "controller-integrations" },
+      { dir: "controller-scripts", name: "controller-scripts" },
+      { dir: "controller-search-skills", name: "controller-search-skills" },
+      { dir: "controller-skill-creator", name: "controller-skill-creator" },
+    ];
+
+    for (const provider of [".anita", ".codex", ".claude"]) {
+      for (const { dir, name } of expected) {
+        const skillFile = path.join(
+          os.homedir(),
+          provider,
+          "skills",
+          dir,
+          "SKILL.md"
+        );
+        assert.ok(
+          existsSync(skillFile),
+          `expected ${skillFile} to be installed`
+        );
+        const body = readFileSync(skillFile, "utf-8");
+        // The `name:` frontmatter must match the directory name so
+        // `extractSkillInvocation` and the disk loader see consistent names.
+        const frontmatterMatch = /^---\nname:\s*([^\n]+)\n/m.exec(body);
+        assert.ok(
+          frontmatterMatch,
+          `${skillFile} is missing a 'name:' frontmatter line`
+        );
+        assert.equal(
+          frontmatterMatch[1].trim(),
+          name,
+          `${skillFile} frontmatter name does not match the directory name`
+        );
+        // The body must carry the up-to-date managed marker.
+        assert.ok(
+          body.includes("<!-- managed-by: coding-orchestrator (issue #159) -->"),
+          `${skillFile} is missing the current MANAGED_MARKER`
+        );
+      }
+    }
   });
 });

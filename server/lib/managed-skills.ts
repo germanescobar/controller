@@ -11,11 +11,12 @@ import os from "node:os";
 import path from "node:path";
 import { controllerCliInstalledPath } from "./controller-cli.js";
 
-const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #109) -->";
+export const MANAGED_MARKER =
+  "<!-- managed-by: coding-orchestrator (issue #159) -->";
 
 function buildIntegrationsSkillBody(cliPath: string): string {
   return `---
-name: integrations
+name: controller-integrations
 description: Discover and use the third-party services the user connected in Controller (APIs, MCP servers, native CLIs) through a uniform gateway. Use whenever a task needs an external service — search for a capability, then call it. Credentials are injected by Controller; you never see or handle secrets.
 ---
 
@@ -27,6 +28,11 @@ The user configures third-party connections in Controller's Settings →
 Integrations. You reach them through the Controller CLI, invoked by its absolute
 path (it is not on your PATH). Every command below is run as
 \`${cliPath} integrations <command>\`.
+
+This skill is managed by the Controller app (directory name
+\`controller-integrations\`). It is hidden from the \`/\` picker — the agent
+discovers the body through the filesystem location, not via a user-invoked
+slash command.
 
 Controller holds the credentials and injects them server-side when making the
 call — there is no token for you to read, and you must never ask the user to
@@ -93,7 +99,7 @@ the integration, then retry.
 
 function buildBrowserSkillBody(cliPath: string): string {
   return `---
-name: browser
+name: controller-browser
 description: Drive the visible in-app preview browser to open pages, read the rendered DOM, and click or type — use it to verify UI/web work instead of guessing.
 ---
 
@@ -105,6 +111,11 @@ You can control the visible preview pane in the orchestrator with the preview
 browser CLI. Use it to verify front-end and web work: open a localhost dev
 server or a project HTML file, read what actually rendered, and interact with
 the page. The user sees everything you do in the Preview tab.
+
+This skill is managed by the Controller app (directory name
+\`controller-browser\`). It is hidden from the \`/\` picker — the agent
+discovers the body through the filesystem location, not via a user-invoked
+slash command.
 
 Invoke the CLI by its absolute path — it is not on your PATH. Every command
 below is run as \`${cliPath} browser <command>\`:
@@ -146,6 +157,11 @@ description: Create and update the Controller coding orchestrator's per-project 
 ${MANAGED_MARKER}
 
 # Controller Scripts
+
+This skill is managed by the Controller app (directory name
+\`controller-scripts\`). It is hidden from the \`/\` picker — the agent
+discovers the body through the filesystem location, not via a user-invoked
+slash command.
 
 Controller resolves native scripts from the project's root
 \`.coding-orchestrator/\` directory:
@@ -322,13 +338,18 @@ When migrating, translate those JSON commands into native shell scripts at
 
 function buildSearchSkillsBody(cliPath: string): string {
   return `---
-name: search-skills
+name: controller-search-skills
 description: Search and activate unified skills from the Controller catalog. Use when the user asks for a capability that might already be configured as a unified skill, or when you want to reuse an existing skill for the current turn.
 ---
 
 ${MANAGED_MARKER}
 
 # Search Skills
+
+This skill is managed by the Controller app (directory name
+\`controller-search-skills\`). It is hidden from the \`/\` picker — the agent
+discovers the body through the filesystem location, not via a user-invoked
+slash command.
 
 Controller hosts an app-owned catalog of unified skills in Settings → Skills.
 These skills are available to every agent and take precedence over per-agent
@@ -395,13 +416,18 @@ interface ManagedSkill {
 
 function buildSkillCreatorSkillBody(cliPath: string): string {
   return `---
-name: skill-creator
+name: controller-skill-creator
 description: Create a new unified skill in the Controller catalog by interviewing the user, drafting a SKILL.md, and writing it via the Controller CLI. Use when the user asks to build a new skill, document a recurring workflow, or turn a one-off conversation into a reusable skill.
 ---
 
 ${MANAGED_MARKER}
 
 # Skill Creator
+
+This skill is managed by the Controller app (directory name
+\`controller-skill-creator\`). It is hidden from the \`/\` picker — the agent
+discovers the body through the filesystem location, not via a user-invoked
+slash command.
 
 You help the user create a new unified skill in Controller's app-owned
 catalog at \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Skills created
@@ -493,8 +519,8 @@ fails on duplicate names so it cannot be used as an edit path.
 
 - Unified skills take precedence over per-agent skills with the same name,
   so creating a skill called \`browser\` would shadow the managed
-  \`browser\` skill. Confirm with the user before claiming a name that
-  might collide with a built-in.
+  \`controller-browser\` skill. Confirm with the user before claiming a name
+  that might collide with a built-in.
 - The CLI writes to \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Do
   not try to write the file directly — let the CLI perform validation.
 - Skill activation (\`/name\`) prepends the body to the user's next
@@ -535,11 +561,11 @@ export async function installManagedSkills(): Promise<void> {
   // bare CLI path here.
   const cli = controllerCliInstalledPath();
   const skills: ManagedSkill[] = [
-    { name: "browser", body: buildBrowserSkillBody(cli) },
-    { name: "integrations", body: buildIntegrationsSkillBody(cli) },
+    { name: "controller-browser", body: buildBrowserSkillBody(cli) },
+    { name: "controller-integrations", body: buildIntegrationsSkillBody(cli) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
-    { name: "search-skills", body: buildSearchSkillsBody(cli) },
-    { name: "skill-creator", body: buildSkillCreatorSkillBody(cli) },
+    { name: "controller-search-skills", body: buildSearchSkillsBody(cli) },
+    { name: "controller-skill-creator", body: buildSkillCreatorSkillBody(cli) },
   ];
 
   for (const { dir } of providerHomes()) {
