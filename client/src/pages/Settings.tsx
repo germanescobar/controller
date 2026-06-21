@@ -52,6 +52,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: SettingsPage
           <button
             key={s.id}
             type="button"
+            data-testid={`settings-nav-${s.id}`}
             onClick={() => onSectionChange(s.id)}
             className={`rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
               s.id === active.id
