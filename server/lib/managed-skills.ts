@@ -512,7 +512,7 @@ export async function installManagedSkills(): Promise<void> {
     { name: "integrations", body: buildIntegrationsSkillBody(`${cli} integrations`) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
     { name: "search-skills", body: buildSearchSkillsBody(`${cli} skills`) },
-    { name: "skill-creator", body: buildSkillCreatorSkillBody(`${cli} skills`) },
+    { name: "skill-creator", body: buildSkillCreatorSkillBody(cli) },
   ];
 
   for (const { dir } of providerHomes()) {
