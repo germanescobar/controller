@@ -32,7 +32,9 @@ const USAGE = `Usage:
   controller skills search <query>
   controller skills describe <name>
   controller skills activate <name>
-  controller skills create --name <name> --description <description> [--body <body>] [--body-file <path>]`;
+  controller skills create --name <name> --description <description> [--body <body>] [--body-file <path>]
+  controller skills import-discover
+  controller skills import [--provider <id>] [--source <path>] [--scope <scope>] [--overwrite]... [--all]`;
 
 function fail(message) {
   process.stderr.write(`Error: ${message}\n`);
@@ -264,9 +266,35 @@ function parseSkills(argv) {
     case "activate":
       if (!rest[0]) fail("skills activate requires a <name>");
       return { endpoint: "activate", body: { name: rest[0] } };
+    case "import-discover":
+      return { endpoint: "import-discover", body: {} };
+    case "import":
+      return { endpoint: "import", body: parseImportSelections(rest) };
     default:
       fail(`Unknown skills command: ${command ?? ""}\n${USAGE}`);
   }
+}
+
+function parseImportSelections(rest) {
+  // `--all` is a CLI convenience: the server treats an empty `selections`
+  // array as "nothing to import", so when `--all` is set we return a marker
+  // and let `runSkills` fetch the discover list and build the selections
+  // before hitting the import endpoint. The `--overwrite` flag still
+  // applies in bulk mode, so we record it on the marker and forward it to
+  // every generated selection below.
+  if (rest.includes("--all")) {
+    return { __all: true, overwrite: rest.includes("--overwrite") };
+  }
+  const provider = flagValue(rest, "--provider");
+  const source = flagValue(rest, "--source");
+  const scope = flagValue(rest, "--scope") ?? "user";
+  if (!provider || !source) {
+    fail("skills import requires --provider <id> and --source <path> (or --all)");
+  }
+  const overwrite = rest.includes("--overwrite");
+  return {
+    selections: [{ providerId: provider, sourcePath: source, scope, overwrite }],
+  };
 }
 
 function printSkills(command, result) {
@@ -290,11 +318,51 @@ function printSkills(command, result) {
     process.stdout.write(`${result.message ?? "Skill activated for the next turn."}\n`);
     return;
   }
+  if (command === "import-discover") {
+    const skills = result.skills ?? [];
+    if (skills.length === 0) return process.stdout.write("No importable per-agent skills found.\n");
+    for (const s of skills) {
+      const project = s.projectPath ? `  (project: ${s.projectPath})` : "";
+      process.stdout.write(`${s.providerId}/${s.scope}  ${s.name} — ${s.description}${project}\n`);
+      // Print the source path so the single-skill import flow
+      // (`import --provider <id> --source <path>`) has the value it needs.
+      process.stdout.write(`  source: ${s.sourcePath}\n`);
+    }
+    return;
+  }
+  if (command === "import") {
+    const results = result.results ?? [];
+    if (results.length === 0) return process.stdout.write("Nothing to import.\n");
+    for (const r of results) {
+      const status = r.status.toUpperCase().padEnd(8);
+      const where = `${r.providerId}/${r.scope}`;
+      const name = r.name || "(unknown)";
+      const tail = r.reason ? ` — ${r.reason}` : "";
+      process.stdout.write(`${status} ${where.padEnd(12)} ${name}${tail}\n`);
+    }
+    return;
+  }
 }
 
 async function runSkills(argv, serverUrl) {
   const { endpoint, body } = parseSkills(argv);
-  const { response, result } = await postJson(serverUrl, `/api/skills/${endpoint}`, body);
+  let effectiveBody = body;
+  // `--all` is a CLI convenience: fetch the discover list, then import every
+  // entry. Skips/failures are surfaced per-skill by the server response.
+  if (body && body.__all) {
+    const discover = await postJson(serverUrl, "/api/skills/import-discover", {});
+    if (discover.response.status >= 400) {
+      fail(discover.result?.error ?? `Import discovery failed (HTTP ${discover.response.status})`);
+    }
+    const selections = (discover.result?.skills ?? []).map((s) => ({
+      providerId: s.providerId,
+      sourcePath: s.sourcePath,
+      scope: s.scope,
+      overwrite: body.overwrite === true,
+    }));
+    effectiveBody = { selections };
+  }
+  const { response, result } = await postJson(serverUrl, `/api/skills/${endpoint}`, effectiveBody);
   if (response.status >= 400 && result && result.error) fail(result.error);
   printSkills(argv[0], result);
 }

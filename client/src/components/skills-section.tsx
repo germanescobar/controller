@@ -5,9 +5,10 @@ import {
   Trash2,
   Sparkles,
   Check,
-  X,
   Loader2,
   Search,
+  Download,
+  Eye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,14 +20,18 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   fetchUnifiedSkills,
+  fetchUnifiedSkill,
   createUnifiedSkill,
   updateUnifiedSkill,
   deleteUnifiedSkill,
   type UnifiedSkill,
   type UnifiedSkillInput,
 } from "../api.ts";
+import { ImportSkillsDialog } from "./import-skills-dialog.tsx";
 
 export function SkillsSection() {
   const [skills, setSkills] = useState<UnifiedSkill[]>([]);
@@ -42,6 +47,14 @@ export function SkillsSection() {
   });
   const [saving, setSaving] = useState(false);
   const [deletingName, setDeletingName] = useState<string | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [bodyLoading, setBodyLoading] = useState(false);
+  const [bodyError, setBodyError] = useState<string | null>(null);
+  const [viewingSkill, setViewingSkill] = useState<UnifiedSkill | null>(null);
+  const [viewBody, setViewBody] = useState("");
+  const [viewLoading, setViewLoading] = useState(false);
+  const [viewError, setViewError] = useState<string | null>(null);
+  const [viewRaw, setViewRaw] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -63,6 +76,8 @@ export function SkillsSection() {
   const resetForm = useCallback(() => {
     setForm({ name: "", description: "", body: "" });
     setEditingSkill(null);
+    setBodyError(null);
+    setBodyLoading(false);
   }, []);
 
   const openCreate = useCallback(() => {
@@ -71,20 +86,53 @@ export function SkillsSection() {
   }, [resetForm]);
 
   const openEdit = useCallback((skill: UnifiedSkill) => {
-    // Pre-fill with a small default body so the editor is never empty.
+    // Body is loaded asynchronously below; start empty until the fetch resolves.
     setForm({
       name: skill.name,
       description: skill.description,
-      body: skill.path ? "" : "",
+      body: "",
     });
     setEditingSkill(skill);
     setDialogOpen(true);
   }, []);
 
+  const openView = useCallback((skill: UnifiedSkill) => {
+    setViewBody("");
+    setViewRaw(false);
+    setViewingSkill(skill);
+  }, []);
+
+  useEffect(() => {
+    if (!viewingSkill) return;
+    // Fetch the full body when viewing; the list only carries metadata.
+    let cancelled = false;
+    setViewLoading(true);
+    setViewError(null);
+    void (async () => {
+      try {
+        const full = await fetchUnifiedSkill(viewingSkill.name);
+        if (!cancelled) setViewBody(full.body);
+      } catch (err) {
+        if (!cancelled) {
+          setViewError(
+            err instanceof Error ? err.message : "Failed to load skill body"
+          );
+        }
+      } finally {
+        if (!cancelled) setViewLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [viewingSkill]);
+
   useEffect(() => {
     if (!dialogOpen || !editingSkill) return;
     // Fetch the full body when editing; metadata alone doesn't include it.
     let cancelled = false;
+    setBodyLoading(true);
+    setBodyError(null);
     void (async () => {
       try {
         const full = await fetchUnifiedSkill(editingSkill.name);
@@ -94,8 +142,14 @@ export function SkillsSection() {
             body: full.body,
           }));
         }
-      } catch {
-        // Keep the placeholder body and let the user decide.
+      } catch (err) {
+        if (!cancelled) {
+          setBodyError(
+            err instanceof Error ? err.message : "Failed to load skill body"
+          );
+        }
+      } finally {
+        if (!cancelled) setBodyLoading(false);
       }
     })();
     return () => {
@@ -159,10 +213,22 @@ export function SkillsSection() {
             className="w-full rounded-md border border-border bg-transparent py-1.5 pl-8 pr-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
-        <Button size="sm" onClick={openCreate} className="shrink-0 gap-1">
-          <Plus className="h-3.5 w-3.5" />
-          New skill
-        </Button>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setImportDialogOpen(true)}
+            className="gap-1"
+            title="Import skills from per-agent locations"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Import
+          </Button>
+          <Button size="sm" onClick={openCreate} className="shrink-0 gap-1">
+            <Plus className="h-3.5 w-3.5" />
+            New skill
+          </Button>
+        </div>
       </div>
 
       {loading && skills.length === 0 && (
@@ -184,7 +250,12 @@ export function SkillsSection() {
             key={skill.name}
             className="flex items-start justify-between gap-3 rounded-lg border border-border p-3"
           >
-            <div className="min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => openView(skill)}
+              className="min-w-0 flex-1 text-left"
+              title="View skill"
+            >
               <div className="flex items-center gap-2">
                 <Sparkles className="h-3.5 w-3.5 text-primary" />
                 <span className="text-sm font-medium">/{skill.name}</span>
@@ -197,8 +268,16 @@ export function SkillsSection() {
                   {skill.description}
                 </p>
               )}
-            </div>
+            </button>
             <div className="flex shrink-0 items-center gap-1">
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => openView(skill)}
+                title="View skill"
+              >
+                <Eye className="h-3.5 w-3.5" />
+              </Button>
               <Button
                 size="icon-sm"
                 variant="ghost"
@@ -245,7 +324,7 @@ export function SkillsSection() {
           }
         }}
       >
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl lg:max-w-4xl">
           <DialogHeader>
             <DialogTitle>
               {editingSkill ? "Edit unified skill" : "Create unified skill"}
@@ -256,43 +335,47 @@ export function SkillsSection() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  value={form.name}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, name: e.target.value }))
-                  }
-                  placeholder="e.g. github-issues"
-                  className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                  Description
-                </label>
-                <input
-                  type="text"
-                  value={form.description}
-                  onChange={(e) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      description: e.target.value,
-                    }))
-                  }
-                  placeholder="Short description shown in the picker"
-                  className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                Name
+              </label>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, name: e.target.value }))
+                }
+                placeholder="e.g. github-issues"
+                className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+              />
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                Skill body
+                Description
               </label>
+              <textarea
+                value={form.description}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    description: e.target.value,
+                  }))
+                }
+                rows={3}
+                placeholder="Short description shown in the picker"
+                className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+            </div>
+            <div>
+              <label className="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                Skill body
+                {bodyLoading && <Loader2 className="h-3 w-3 animate-spin" />}
+              </label>
+              {bodyError && (
+                <div className="mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+                  {bodyError}
+                </div>
+              )}
               <textarea
                 value={form.body}
                 onChange={(e) =>
@@ -327,6 +410,86 @@ export function SkillsSection() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={viewingSkill !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setViewingSkill(null);
+            setViewBody("");
+            setViewError(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl lg:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />/
+              {viewingSkill?.name}
+            </DialogTitle>
+            {viewingSkill?.description && (
+              <DialogDescription>{viewingSkill.description}</DialogDescription>
+            )}
+          </DialogHeader>
+          {viewLoading ? (
+            <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading skill...
+            </div>
+          ) : viewError ? (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {viewError}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex justify-end">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setViewRaw((prev) => !prev)}
+                  className="h-7 text-xs text-muted-foreground"
+                >
+                  {viewRaw ? "Preview" : "View source"}
+                </Button>
+              </div>
+              {viewRaw ? (
+                <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 px-3 py-2 font-mono text-xs">
+                  {viewBody}
+                </pre>
+              ) : (
+                <div className="prose prose-invert prose-sm max-h-[60vh] max-w-none overflow-auto break-words rounded-md border border-border bg-muted/30 px-3 py-2">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {viewBody}
+                  </ReactMarkdown>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            {viewingSkill && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  const skill = viewingSkill;
+                  setViewingSkill(null);
+                  openEdit(skill);
+                }}
+              >
+                <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                Edit
+              </Button>
+            )}
+            <Button onClick={() => setViewingSkill(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ImportSkillsDialog
+        open={importDialogOpen}
+        onOpenChange={setImportDialogOpen}
+        existingNames={skills.map((s) => s.name)}
+        onImported={() => void load()}
+      />
     </div>
   );
 }

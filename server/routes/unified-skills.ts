@@ -7,6 +7,11 @@ import {
   updateUnifiedSkill,
   type UnifiedSkillInput,
 } from "../lib/unified-skills.js";
+import {
+  discoverImportableSkills,
+  importSkills,
+  type SkillImportRequest,
+} from "../lib/skill-import.js";
 
 export const unifiedSkillsRouter = Router();
 
@@ -51,6 +56,40 @@ unifiedSkillsRouter.delete("/unified-skills/:name", async (req: Request, res: Re
   await deleteUnifiedSkill(name);
   res.status(204).send();
 });
+
+/**
+ * Discover per-agent skills that are eligible for import into the unified
+ * catalog (issue #145). Scans user/system skill homes for every provider and
+ * the repo skill directories of every registered project.
+ */
+unifiedSkillsRouter.get(
+  "/unified-skills/import/discover",
+  async (_req: Request, res: Response) => {
+    const skills = await discoverImportableSkills();
+    res.json({ skills });
+  }
+);
+
+/**
+ * Import the selected per-agent skills into the unified catalog. Each
+ * selection either imports a new unified skill, is skipped because a
+ * unified skill with the same name already exists, or errored. Pass
+ * `overwrite: true` per-selection to replace an existing unified skill.
+ */
+unifiedSkillsRouter.post(
+  "/unified-skills/import",
+  async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Partial<SkillImportRequest>;
+    if (!Array.isArray(body.selections)) {
+      res
+        .status(400)
+        .json({ error: "Request body must include a `selections` array." });
+      return;
+    }
+    const result = await importSkills({ selections: body.selections });
+    res.json(result);
+  }
+);
 
 unifiedSkillsRouter.post("/skills/list", async (_req: Request, res: Response) => {
   const skills = await listUnifiedSkills();
@@ -122,4 +161,29 @@ unifiedSkillsRouter.post("/skills/create", async (req: Request, res: Response) =
     return;
   }
   res.status(201).json({ ok: true, skill: result });
+});
+
+/**
+ * CLI/gateway counterpart of `GET /unified-skills/import/discover`. Mirrors
+ * the same response shape so the `controller skills import-discover` command
+ * can use the shared `/api/skills/*` gateway.
+ */
+unifiedSkillsRouter.post("/skills/import-discover", async (_req: Request, res: Response) => {
+  const skills = await discoverImportableSkills();
+  res.json({ skills });
+});
+
+/**
+ * CLI/gateway counterpart of `POST /unified-skills/import`.
+ */
+unifiedSkillsRouter.post("/skills/import", async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Partial<SkillImportRequest>;
+  if (!Array.isArray(body.selections)) {
+    res
+      .status(400)
+      .json({ error: "Request body must include a `selections` array." });
+    return;
+  }
+  const result = await importSkills({ selections: body.selections });
+  res.json(result);
 });

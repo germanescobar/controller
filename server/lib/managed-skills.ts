@@ -329,7 +329,9 @@ Controller hosts an app-owned catalog of unified skills in Settings → Skills.
 These skills are available to every agent and take precedence over per-agent
 skills with the same name. You can search the catalog and activate a skill so
 its body is applied to your current turn, exactly as if the user had invoked it
-with the \`/\` picker.
+with the \`/\` picker. You can also import skills the user has installed under a
+per-agent location (e.g. \`~/.codex/skills/...\` or \`<project>/.anita/skills/...\`)
+into the unified catalog so they take precedence by name.
 
 Invoke the CLI by its absolute path — it is not on your PATH. Every command
 below is run as \`${cliPath} <command>\`:
@@ -343,6 +345,13 @@ below is run as \`${cliPath} <command>\`:
 - \`${cliPath} skills activate <name>\` — activate a unified skill for the current
   turn. Controller will prepend the skill body to the user's message the same
   way the \`/\` picker does.
+- \`${cliPath} skills import-discover\` — list per-agent skills that are eligible
+  for import into the unified catalog (one entry per source \`SKILL.md\`, tagged
+  with \`<provider>/<scope>\` and the project path for repo skills).
+- \`${cliPath} skills import --provider <id> --source <path> [--scope <scope>] [--overwrite]\`
+  — copy a single per-agent skill into the unified catalog. Use
+  \`${cliPath} skills import --all\` to import every entry from
+  \`import-discover\` in one go.
 
 ## How to use it
 
@@ -352,11 +361,23 @@ below is run as \`${cliPath} <command>\`:
 3. Use \`activate\` to apply the skill to the current turn. The skill takes
    effect on the *next* user message you send.
 
+## Promoting a per-agent skill to unified
+
+When a per-agent skill is more important than the per-agent location it lives
+in — for example, the user wants it to be available across every agent — run
+\`import-discover\`, then import the entries you care about. Defaults: name
+collisions with an existing unified skill are **skipped**; pass \`--overwrite\`
+to replace. The server returns one status per skill (\`imported\` / \`skipped\` /
+\`error\`) so you can show the user a clear summary.
+
 ## Notes
 
 - Unified skills are managed by the user in Controller Settings → Skills.
 - Activation is scoped to the current turn; it does not permanently change the
   session's behavior.
+- Importing copies a per-agent \`SKILL.md\` into the unified catalog under
+  \`~/coding-orchestrator/skills/\`. The original per-agent file is left in
+  place; the unified copy takes precedence by name.
 - If a command reports that no skill matches, you can still fall back to normal
   prompting.
 `;
