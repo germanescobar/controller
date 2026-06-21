@@ -25,7 +25,8 @@ ${MANAGED_MARKER}
 
 The user configures third-party connections in Controller's Settings →
 Integrations. You reach them through the Controller CLI, invoked by its absolute
-path (it is not on your PATH). Every command below is run as \`${cliPath} <command>\`.
+path (it is not on your PATH). Every command below is run as
+\`${cliPath} integrations <command>\`.
 
 Controller holds the credentials and injects them server-side when making the
 call — there is no token for you to read, and you must never ask the user to
@@ -33,27 +34,30 @@ paste one into the chat. Authentication is set up in the UI.
 
 ## Discovery flow (work from broad to specific)
 
-1. \`${cliPath} list\` — the integrations enabled for this session, each tagged
-   with how to use it: \`tools\` (schema-backed — OpenAPI/MCP; discover with
-   \`tools\`/\`describe\`, then \`call\`), \`request\` (raw HTTP — use \`request\`),
-   or \`cli\` (a native binary you invoke directly).
-2. \`${cliPath} search <query>\` — fuzzy-search tools across all connected
-   integrations. Start here when you know the capability but not the service.
-3. \`${cliPath} tools <integration>\` — list one integration's tools.
-4. \`${cliPath} describe <integration> <tool>\` — one tool's parameters/schema.
+1. \`${cliPath} integrations list\` — the integrations enabled for this session,
+   each tagged with how to use it: \`tools\` (schema-backed — OpenAPI/MCP;
+   discover with \`tools\`/\`describe\`, then \`call\`), \`request\` (raw HTTP — use
+   \`request\`), or \`cli\` (a native binary you invoke directly).
+2. \`${cliPath} integrations search <query>\` — fuzzy-search tools across all
+   connected integrations. Start here when you know the capability but not the
+   service.
+3. \`${cliPath} integrations tools <integration>\` — list one integration's
+   tools.
+4. \`${cliPath} integrations describe <integration> <tool>\` — one tool's
+   parameters/schema.
 
 Nothing loads until you ask, so prefer \`search\`/\`describe\` over dumping
 everything.
 
 ## Using an integration
 
-- \`${cliPath} call <integration> <tool> --json '{"arg":"value"}'\` — for
-  **schema-backed** backends (MCP tools, OpenAPI operations). Controller
+- \`${cliPath} integrations call <integration> <tool> --json '{"arg":"value"}'\`
+  — for **schema-backed** backends (MCP tools, OpenAPI operations). Controller
   validates the arguments and makes the call.
-- \`${cliPath} request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']\`
+- \`${cliPath} integrations request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']\`
   — the **raw escape hatch** for generic REST/HTTP connections that have no
   schema. Controller only injects auth; you choose the method, path, and body.
-- \`${cliPath} status <integration>\` — whoami / health check.
+- \`${cliPath} integrations status <integration>\` — whoami / health check.
 
 Rule of thumb by \`kind\` (from \`list\`): a **\`tools\`** integration (OpenAPI or
 MCP) is schema-backed — run \`tools\`/\`describe\` and \`call\`; don't hand-build
@@ -66,7 +70,7 @@ A \`graphql\` integration has no fixed tool list, so \`tools\`/\`call\` don't ap
 Send operations with \`request\`, POSTing to the endpoint (use an empty path):
 
 \`\`\`
-${cliPath} request <integration> POST "" --data '{"query":"{ viewer { login } }"}'
+${cliPath} integrations request <integration> POST "" --data '{"query":"{ viewer { login } }"}'
 \`\`\`
 
 To learn the schema, POST a GraphQL introspection query the same way, then build
@@ -103,19 +107,20 @@ server or a project HTML file, read what actually rendered, and interact with
 the page. The user sees everything you do in the Preview tab.
 
 Invoke the CLI by its absolute path — it is not on your PATH. Every command
-below is run as \`${cliPath} <command>\`:
+below is run as \`${cliPath} browser <command>\`:
 
 ## Commands
 
-- \`${cliPath} open <url>\` — open a URL in the preview pane. Accepts
+- \`${cliPath} browser open <url>\` — open a URL in the preview pane. Accepts
   \`localhost:PORT\`, a full \`http(s)://\` URL, or a project-relative file path
   (e.g. \`./dist/index.html\`).
-- \`${cliPath} snapshot [selector]\` — print a text snapshot of the current page
-  (title, URL, and visible text). Pass a CSS selector to scope it to a subtree.
-  Read this to confirm what rendered.
-- \`${cliPath} click <selector>\` — click the element matching a CSS selector.
-- \`${cliPath} type <selector> <text> [--submit]\` — type text into a field. Add
-  \`--submit\` to submit its form.
+- \`${cliPath} browser snapshot [selector]\` — print a text snapshot of the
+  current page (title, URL, and visible text). Pass a CSS selector to scope it
+  to a subtree. Read this to confirm what rendered.
+- \`${cliPath} browser click <selector>\` — click the element matching a CSS
+  selector.
+- \`${cliPath} browser type <selector> <text> [--submit]\` — type text into a
+  field. Add \`--submit\` to submit its form.
 
 ## How to use it
 
@@ -334,7 +339,7 @@ per-agent location (e.g. \`~/.codex/skills/...\` or \`<project>/.anita/skills/..
 into the unified catalog so they take precedence by name.
 
 Invoke the CLI by its absolute path — it is not on your PATH. Every command
-below is run as \`${cliPath} <command>\`:
+below is run as \`${cliPath} skills <command>\`:
 
 ## Commands
 
@@ -525,14 +530,13 @@ function providerHomes(): ProviderSkillHome[] {
  * identical content.
  */
 export async function installManagedSkills(): Promise<void> {
-  // The unified CLI is invoked as `<path> <surface> <command>`. The browser
-  // and integrations bodies render only the subcommand (so we pass the
-  // surface-prefixed path); the search-skills and skill-creator bodies
-  // embed the surface themselves, so we pass the bare CLI path there.
+  // The unified CLI is invoked as `<path> <surface> <command>`. Each builder
+  // embeds its own surface in the rendered commands, so we always pass the
+  // bare CLI path here.
   const cli = controllerCliInstalledPath();
   const skills: ManagedSkill[] = [
-    { name: "browser", body: buildBrowserSkillBody(`${cli} browser`) },
-    { name: "integrations", body: buildIntegrationsSkillBody(`${cli} integrations`) },
+    { name: "browser", body: buildBrowserSkillBody(cli) },
+    { name: "integrations", body: buildIntegrationsSkillBody(cli) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
     { name: "search-skills", body: buildSearchSkillsBody(cli) },
     { name: "skill-creator", body: buildSkillCreatorSkillBody(cli) },
