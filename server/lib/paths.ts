@@ -79,3 +79,20 @@ export function sessionQueuesDir(): string {
 export function sessionQueueFile(sessionId: string): string {
   return path.join(sessionQueuesDir(), `${sessionId}.json`);
 }
+
+// --- Unified Skills ---
+
+/** Directory holding the app-owned unified skill catalog. */
+export function unifiedSkillsDir(): string {
+  return path.join(orchestratorHome(), "skills");
+}
+
+/** Per-skill directory under the unified catalog. */
+export function unifiedSkillDir(skillName: string): string {
+  return path.join(unifiedSkillsDir(), skillName);
+}
+
+/** Path to a unified skill's SKILL.md file. */
+export function unifiedSkillFile(skillName: string): string {
+  return path.join(unifiedSkillDir(skillName), "SKILL.md");
+}
