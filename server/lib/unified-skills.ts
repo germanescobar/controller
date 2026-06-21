@@ -93,6 +93,17 @@ function validateInput(input: UnifiedSkillInput): string | null {
   return null;
 }
 
+/**
+ * Validate a candidate unified-skill input. Exported so the import flow can
+ * dry-run the same rules before any destructive operation (e.g. deleting an
+ * existing unified skill to make room for an overwrite).
+ */
+export function validateUnifiedSkillInput(
+  input: UnifiedSkillInput
+): string | null {
+  return validateInput(input);
+}
+
 function buildSkillFile(input: UnifiedSkillInput): string {
   const { name, description, body } = input;
   const trimmedBody = body.trim();

@@ -278,9 +278,11 @@ function parseImportSelections(rest) {
   // `--all` is a CLI convenience: the server treats an empty `selections`
   // array as "nothing to import", so when `--all` is set we return a marker
   // and let `runSkills` fetch the discover list and build the selections
-  // before hitting the import endpoint.
+  // before hitting the import endpoint. The `--overwrite` flag still
+  // applies in bulk mode, so we record it on the marker and forward it to
+  // every generated selection below.
   if (rest.includes("--all")) {
-    return { __all: true };
+    return { __all: true, overwrite: rest.includes("--overwrite") };
   }
   const provider = flagValue(rest, "--provider");
   const source = flagValue(rest, "--source");
@@ -352,6 +354,7 @@ async function runSkills(argv, serverUrl) {
       providerId: s.providerId,
       sourcePath: s.sourcePath,
       scope: s.scope,
+      overwrite: body.overwrite === true,
     }));
     effectiveBody = { selections };
   }

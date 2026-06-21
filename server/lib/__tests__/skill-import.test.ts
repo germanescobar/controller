@@ -349,6 +349,104 @@ test("importSkills overwrites when the caller asks for it", async () => {
   }
 });
 
+test("importSkills does not delete a colliding unified skill when the candidate fails validation", async () => {
+  // Regression: previously the overwrite path deleted the existing unified
+  // skill first and only then surfaced a validation error from
+  // `createUnifiedSkill`, leaving the user with neither the old nor the
+  // new skill when the source was malformed.
+  const home = makeTempDir("import-overwrite-bad-");
+  const orchestratorHome = makeTempDir("orch-overwrite-bad-");
+  const original = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  try {
+    const { createUnifiedSkill } = await import("../unified-skills.js");
+    await createUnifiedSkill({
+      name: "review",
+      description: "original",
+      body: "original body",
+    });
+
+    // Source SKILL.md has the same name but no description, which is
+    // invalid for a unified skill.
+    const sourcePath = writeSkillFile(
+      path.join(home, ".anita", "skills"),
+      "review",
+      { name: "review" },
+      "body"
+    );
+
+    const result = await importSkills(
+      {
+        selections: [
+          { providerId: "anita", sourcePath, scope: "user", overwrite: true },
+        ],
+      },
+      makeEnv(home)
+    );
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /description/i);
+
+    // The original unified skill must still be intact.
+    const { readUnifiedSkill } = await import("../unified-skills.js");
+    const existing = await readUnifiedSkill("review");
+    assert.ok(existing);
+    assert.equal(existing.body, "original body");
+    assert.equal(existing.metadata.description, "original");
+  } finally {
+    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects a source whose name fails the unified-skill character rules", async () => {
+  // A name with whitespace would slip past `readImportableSource`'s
+  // `name` non-empty check but is rejected by `createUnifiedSkill`. The
+  // pre-validation step should catch it before we try to delete anything.
+  const home = makeTempDir("import-bad-name-");
+  const orchestratorHome = makeTempDir("orch-bad-name-");
+  const original = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  try {
+    const { createUnifiedSkill } = await import("../unified-skills.js");
+    await createUnifiedSkill({
+      name: "review",
+      description: "original",
+      body: "original body",
+    });
+
+    const sourcePath = writeSkillFile(
+      path.join(home, ".anita", "skills"),
+      "review",
+      // Whitespace in the name is not allowed by `SKILL_NAME_RE`.
+      { name: "bad name", description: "new" },
+      "body"
+    );
+
+    const result = await importSkills(
+      {
+        selections: [
+          { providerId: "anita", sourcePath, scope: "user", overwrite: true },
+        ],
+      },
+      makeEnv(home)
+    );
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /letters, numbers/);
+
+    const { readUnifiedSkill } = await import("../unified-skills.js");
+    const existing = await readUnifiedSkill("review");
+    assert.ok(existing);
+    assert.equal(existing.body, "original body");
+  } finally {
+    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
 test("importSkills returns an error for an unknown provider", async () => {
   const home = makeTempDir("import-bad-provider-");
   const orchestratorHome = makeTempDir("orch-bad-provider-");

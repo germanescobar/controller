@@ -28,7 +28,12 @@ import os from "node:os";
 import path from "node:path";
 import { parseSkillFile, type SkillMetadata, type SkillScope } from "./skills.js";
 import { getProjects } from "./projects.js";
-import { listUnifiedSkills, createUnifiedSkill, deleteUnifiedSkill } from "./unified-skills.js";
+import {
+  listUnifiedSkills,
+  createUnifiedSkill,
+  deleteUnifiedSkill,
+  validateUnifiedSkillInput,
+} from "./unified-skills.js";
 
 /** A per-agent skill surfaced for import. */
 export interface ImportableSkill {
@@ -306,6 +311,28 @@ export async function importSkills(
       continue;
     }
 
+    // Validate the candidate up front. Otherwise an overwrite would delete
+    // the existing unified skill and then surface a validation error from
+    // `createUnifiedSkill`, leaving the user with neither the old nor the
+    // new skill. Pre-validating keeps the old entry in place when the new
+    // one is malformed.
+    const candidate = {
+      name: sourceSkill.name,
+      description: sourceSkill.description,
+      body: sourceSkill.body,
+    };
+    const validationError = validateUnifiedSkillInput(candidate);
+    if (validationError) {
+      results.push({
+        providerId: selection.providerId,
+        scope: selection.scope,
+        name: sourceSkill.name,
+        status: "error",
+        reason: validationError,
+      });
+      continue;
+    }
+
     const collision = unified.some(
       (entry) => entry.name.toLowerCase() === sourceSkill.name.toLowerCase()
     );
@@ -321,15 +348,13 @@ export async function importSkills(
     }
 
     if (collision && selection.overwrite) {
-      // Overwrite path: delete the existing unified skill first.
+      // Overwrite path: delete the existing unified skill first. We already
+      // validated the candidate above, so this is safe — `createUnifiedSkill`
+      // cannot reject a skill that has cleared `validateUnifiedSkillInput`.
       await deleteUnifiedSkill(sourceSkill.name);
     }
 
-    const created = await createUnifiedSkill({
-      name: sourceSkill.name,
-      description: sourceSkill.description,
-      body: sourceSkill.body,
-    });
+    const created = await createUnifiedSkill(candidate);
     if ("error" in created) {
       results.push({
         providerId: selection.providerId,
