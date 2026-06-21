@@ -315,6 +315,53 @@ When migrating, translate those JSON commands into native shell scripts at
 \`$SOURCE_PATH/.coding-orchestrator/\` and delete the fallback config files.
 `;
 
+function buildSearchSkillsBody(cliPath: string): string {
+  return `---
+name: search-skills
+description: Search and activate unified skills from the Controller catalog. Use when the user asks for a capability that might already be configured as a unified skill, or when you want to reuse an existing skill for the current turn.
+---
+
+${MANAGED_MARKER}
+
+# Search Skills
+
+Controller hosts an app-owned catalog of unified skills in Settings → Skills.
+These skills are available to every agent and take precedence over per-agent
+skills with the same name. You can search the catalog and activate a skill so
+its body is applied to your current turn, exactly as if the user had invoked it
+with the \`/\` picker.
+
+Invoke the CLI by its absolute path — it is not on your PATH. Every command
+below is run as \`${cliPath} <command>\`:
+
+## Commands
+
+- \`${cliPath} skills list\` — list every unified skill (name + description).
+- \`${cliPath} skills search <query>\` — search unified skills by name or keyword.
+- \`${cliPath} skills describe <name>\` — print the full SKILL.md body of a
+  unified skill.
+- \`${cliPath} skills activate <name>\` — activate a unified skill for the current
+  turn. Controller will prepend the skill body to the user's message the same
+  way the \`/\` picker does.
+
+## How to use it
+
+1. If you need a specific style or set of instructions, run \`search\` or
+   \`list\` to see whether a matching unified skill already exists.
+2. Use \`describe\` to read the full skill body before deciding to apply it.
+3. Use \`activate\` to apply the skill to the current turn. The skill takes
+   effect on the *next* user message you send.
+
+## Notes
+
+- Unified skills are managed by the user in Controller Settings → Skills.
+- Activation is scoped to the current turn; it does not permanently change the
+  session's behavior.
+- If a command reports that no skill matches, you can still fall back to normal
+  prompting.
+`;
+}
+
 interface ManagedSkill {
   name: string;
   body: string;
@@ -335,7 +382,7 @@ function codexSkillsHome(): string {
 
 function providerHomes(): ProviderSkillHome[] {
   return [
-    { id: "ada", dir: path.join(os.homedir(), ".ada", "skills") },
+    { id: "anita", dir: path.join(os.homedir(), ".anita", "skills") },
     { id: "codex", dir: codexSkillsHome() },
     { id: "claude", dir: path.join(os.homedir(), ".claude", "skills") },
   ];
@@ -354,6 +401,7 @@ export async function installManagedSkills(): Promise<void> {
     { name: "browser", body: buildBrowserSkillBody(`${cli} browser`) },
     { name: "integrations", body: buildIntegrationsSkillBody(`${cli} integrations`) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
+    { name: "search-skills", body: buildSearchSkillsBody(`${cli} skills`) },
   ];
 
   for (const { dir } of providerHomes()) {

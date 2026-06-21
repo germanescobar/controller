@@ -2,13 +2,14 @@
  * Skill discovery and loading for the orchestrator.
  *
  * The orchestrator is the only source of truth for `/<skill-name>` invocations
- * across Ada, Codex, and Claude. Each provider loads skills from its own
+ * across Anita, Codex, and Claude. Each provider loads skills from its own
  * filesystem locations; the front end only ever sees metadata, and the body is
  * read server-side at send time so the user always gets the freshest
  * `SKILL.md` and the wire payload stays small.
  *
  * Layout per provider (paths are OS-expanded):
- * - Ada:   `~/.ada/skills/<name>/SKILL.md` plus `<cwd>/.ada/skills/<name>/SKILL.md`
+ * - Anita: `~/.anita/skills/<name>/SKILL.md` plus `<cwd>/.anita/skills/<name>/SKILL.md`
+ *          (falling back to the legacy `~/.ada/skills` / `.ada/skills` locations)
  * - Codex: `~/.codex/skills/<name>/SKILL.md` plus
  *          `~/.codex/skills/.system/<name>/SKILL.md` plus
  *          `<cwd>/.codex/skills/<name>/SKILL.md`
@@ -20,16 +21,19 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { resolveCommand } from "./command-resolver.js";
+import { canonicalProviderId } from "./provider-id.js";
 import { childProcessEnv } from "./shell-env.js";
+import { listUnifiedSkills, readUnifiedSkill } from "./unified-skills.js";
 
 const execFileAsync = promisify(execFile);
 
-export type SkillScope = "user" | "system" | "repo";
+export type SkillScope = "unified" | "user" | "system" | "repo";
 
 export interface SkillMetadata {
   /** Skill name as declared in the frontmatter (trimmed, original case). */
@@ -38,7 +42,7 @@ export interface SkillMetadata {
   description: string;
   /** Absolute path to the `SKILL.md` file on disk. */
   path: string;
-  /** Whether the skill came from the user's home, the Codex system bundle, or a repo. */
+  /** Whether the skill came from the app-owned catalog, the user's home, the Codex system bundle, or a repo. */
   scope: SkillScope;
 }
 
@@ -54,7 +58,7 @@ export interface SkillBody {
  * server-side at send time so the agent receives the freshest content.
  */
 export interface SkillProvider {
-  /** Stable identifier — matches the agent provider id (`ada` / `codex` / `claude`). */
+  /** Stable identifier — matches the agent provider id (`anita` / `codex` / `claude`). */
   id: string;
   /** Human-readable name shown in errors. */
   name: string;
@@ -257,8 +261,17 @@ async function systemSkillDirs(
 // Per-provider configuration
 // ---------------------------------------------------------------------------
 
-function adaUserSkillsHome(): string {
-  return path.join(os.homedir(), ".ada", "skills");
+/**
+ * Anita reads user skills from `~/.anita/skills`, falling back to the legacy
+ * `~/.ada/skills` location when the canonical directory does not exist yet so
+ * setups created before the Ada→Anita rename keep working (mirrors the CLI).
+ */
+function anitaUserSkillsHome(): string {
+  const canonical = path.join(os.homedir(), ".anita", "skills");
+  if (existsSync(canonical)) return canonical;
+  const legacy = path.join(os.homedir(), ".ada", "skills");
+  if (existsSync(legacy)) return legacy;
+  return canonical;
 }
 
 /**
@@ -335,9 +348,9 @@ function claudeUserSkillsHome(): string {
   return path.join(os.homedir(), ".claude", "skills");
 }
 
-const ADA_CONFIG: ProviderConfig = {
-  repoDirName: ".ada/skills",
-  userDirs: () => [adaUserSkillsHome()],
+const ANITA_CONFIG: ProviderConfig = {
+  repoDirName: ".anita/skills",
+  userDirs: () => [anitaUserSkillsHome()],
 };
 
 const CODEX_CONFIG: ProviderConfig = {
@@ -371,12 +384,21 @@ function createDiskProvider(
     id,
     name,
     async listMetadata(cwd: string): Promise<SkillMetadata[]> {
-      const dirs = await collectDirs(config, cwd);
-      return listMetadataForScopes(dirs);
+      const [unified, perAgent] = await Promise.all([
+        listUnifiedSkills(),
+        collectDirs(config, cwd).then(listMetadataForScopes),
+      ]);
+
+      return mergeSkillMetadata(unified, perAgent);
     },
     async readBody(skillName: string, cwd: string): Promise<SkillBody | null> {
       const normalized = skillName.trim().toLowerCase();
       if (!normalized) return null;
+
+      // Unified catalog wins over per-provider matches for the same name.
+      const unified = await readUnifiedSkill(normalized);
+      if (unified) return unified;
+
       const metadataList = await this.listMetadata(cwd);
       const match = metadataList.find(
         (entry) => entry.name.toLowerCase() === normalized
@@ -395,7 +417,11 @@ function createDiskProvider(
   };
 }
 
-const adaSkillProvider: SkillProvider = createDiskProvider("ada", "Ada", ADA_CONFIG);
+const anitaSkillProvider: SkillProvider = createDiskProvider(
+  "anita",
+  "Anita",
+  ANITA_CONFIG
+);
 const codexSkillProvider: SkillProvider = createDiskProvider(
   "codex",
   "Codex",
@@ -408,17 +434,33 @@ const claudeSkillProvider: SkillProvider = createDiskProvider(
 );
 
 const providers: Record<string, SkillProvider> = {
-  ada: adaSkillProvider,
+  anita: anitaSkillProvider,
   codex: codexSkillProvider,
   claude: claudeSkillProvider,
 };
 
 export function getSkillProvider(providerId: string): SkillProvider | undefined {
-  return providers[providerId];
+  return providers[canonicalProviderId(providerId)];
 }
 
 export function getSkillProviders(): SkillProvider[] {
   return Object.values(providers);
+}
+
+/**
+ * Merge unified and per-provider skill metadata lists. Unified skills render
+ * first; per-provider skills with a matching name (case-insensitive) are
+ * hidden so the app-owned catalog wins.
+ */
+export function mergeSkillMetadata(
+  unified: SkillMetadata[],
+  perAgent: SkillMetadata[]
+): SkillMetadata[] {
+  const seen = new Set(unified.map((entry) => entry.name.toLowerCase()));
+  const dedupedPerAgent = perAgent.filter(
+    (entry) => !seen.has(entry.name.toLowerCase())
+  );
+  return [...unified, ...dedupedPerAgent];
 }
 
 // ---------------------------------------------------------------------------

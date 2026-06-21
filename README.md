@@ -1,15 +1,15 @@
 # Coding Orchestrator
 
-A web-based UI for managing and interacting with AI coding agents. It provides a chat-like interface to send prompts to coding agents (such as Ada, Codex, and Claude), stream their responses in real time, and organize work into projects and sessions.
+A web-based UI for managing and interacting with AI coding agents. It provides a chat-like interface to send prompts to coding agents (such as Anita, Codex, and Claude), stream their responses in real time, and organize work into projects and sessions.
 
 ## Features
 
-- **Multi-provider support** — plug in different AI coding agents (Ada, Codex, Claude) and switch between them per session.
+- **Multi-provider support** — plug in different AI coding agents (Anita, Codex, Claude) and switch between them per session.
 - **Project management** — register local project directories and manage them from a sidebar.
 - **Session management** — create, resume, and archive coding sessions within each project. Sessions persist their event history to disk.
 - **Real-time streaming** — agent output (text, reasoning, tool calls, tool results) is streamed to the browser via SSE.
 - **Model selection** — choose which model to use for each session.
-- **Slash-command skills** — type `/<skill-name>` in the chat input to activate an installed skill for Ada, Codex, or Claude. The orchestrator is the only source of truth for slash commands; it prepends the `SKILL.md` body at send time and turns off the agent CLIs' own slash-command paths so the two never compete.
+- **Slash-command skills** — type `/<skill-name>` in the chat input to activate an installed skill for Anita, Codex, or Claude. The orchestrator is the only source of truth for slash commands; it prepends the `SKILL.md` body at send time and turns off the agent CLIs' own slash-command paths so the two never compete.
 - **API key management** — configure provider API keys through a settings dialog; keys are passed as environment variables to the agent process.
 - **Responsive UI** — dark-themed interface with a collapsible sidebar that works on desktop and mobile.
 - **Desktop shell** — optional Electron wrapper that runs the same UI and backend as the browser app.
@@ -21,7 +21,7 @@ client/          React + Vite frontend (Tailwind CSS, shadcn/ui)
 electron/        Electron desktop shell
 server/          Express API backend
   lib/
-    agents.ts    Agent provider abstraction & Ada/Codex/Claude adapters
+    agents.ts    Agent provider abstraction & Anita/Codex/Claude adapters
     sessions.ts  Session & event persistence (JSON/JSONL files)
     projects.ts  Project registry
     api-keys.ts  API key storage
@@ -45,7 +45,7 @@ Electron is an additional shell around the same app. In development it loads the
 - Node.js 20+
 - `tmux` for persistent embedded terminals that survive backend restarts
 - At least one supported coding agent CLI installed and on your `PATH`:
-  - **Ada** (`ada`)
+  - **Anita** (`anita`)
   - **Codex** (`codex`)
   - **Claude** (`claude`)
 

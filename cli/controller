@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /*
- * controller — unified Controller CLI for agents (issues #109, #130).
+ * controller — unified Controller CLI for agents (issues #109, #130, #134).
  *
  * One entry point with per-surface subcommands:
  *   controller browser <action> ...        Drive the in-app preview browser.
- *   controller integrations <action> ...    Use configured third-party services.
+ *   controller integrations <action> ...   Use configured third-party services.
+ *   controller skills <action> ...           Search and activate unified skills.
  *
  * Invoked by its absolute install path (`~/coding-orchestrator/bin/controller`)
  * because sanitized/login shells drop injected env vars and PATH entries. The
@@ -25,7 +26,12 @@ const USAGE = `Usage:
   controller integrations describe <integration> <tool>
   controller integrations call <integration> <tool> [--json '{"key":"value"}']
   controller integrations request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']
-  controller integrations status <integration>`;
+  controller integrations status <integration>
+
+  controller skills list
+  controller skills search <query>
+  controller skills describe <name>
+  controller skills activate <name>`;
 
 function fail(message) {
   process.stderr.write(`Error: ${message}\n`);
@@ -239,11 +245,57 @@ function printIntegrations(command, result) {
   if (result.truncated) process.stdout.write("\n[output truncated]\n");
 }
 
-async function runIntegrations(argv, serverUrl) {
-  const { endpoint, body } = parseIntegrations(argv);
-  const { response, result } = await postJson(serverUrl, `/api/integrations/gateway/${endpoint}`, body);
+// --- skills surface (issue #134) ---
+
+function parseSkills(argv) {
+  const [command, ...rest] = argv;
+  switch (command) {
+    case "list":
+      return { endpoint: "list", body: {} };
+    case "search": {
+      const query = rest.join(" ").trim();
+      if (!query) fail("skills search requires a <query>");
+      return { endpoint: "search", body: { query } };
+    }
+    case "describe":
+      if (!rest[0]) fail("skills describe requires a <name>");
+      return { endpoint: "describe", body: { name: rest[0] } };
+    case "activate":
+      if (!rest[0]) fail("skills activate requires a <name>");
+      return { endpoint: "activate", body: { name: rest[0] } };
+    default:
+      fail(`Unknown skills command: ${command ?? ""}\n${USAGE}`);
+  }
+}
+
+function printSkills(command, result) {
+  if (command === "list") {
+    const skills = result.skills ?? [];
+    if (skills.length === 0) return process.stdout.write("No unified skills are configured.\n");
+    for (const s of skills) process.stdout.write(`${s.name} — ${s.description}\n`);
+    return;
+  }
+  if (command === "search") {
+    const skills = result.skills ?? [];
+    if (skills.length === 0) return process.stdout.write("No matching unified skills.\n");
+    for (const s of skills) process.stdout.write(`${s.name} — ${s.description}\n`);
+    return;
+  }
+  if (command === "describe") {
+    process.stdout.write(result.body ?? "");
+    return;
+  }
+  if (command === "activate") {
+    process.stdout.write(`${result.message ?? "Skill activated for the next turn."}\n`);
+    return;
+  }
+}
+
+async function runSkills(argv, serverUrl) {
+  const { endpoint, body } = parseSkills(argv);
+  const { response, result } = await postJson(serverUrl, `/api/skills/${endpoint}`, body);
   if (response.status >= 400 && result && result.error) fail(result.error);
-  printIntegrations(argv[0], result);
+  printSkills(argv[0], result);
 }
 
 async function main() {
@@ -252,12 +304,13 @@ async function main() {
     process.stdout.write(`${USAGE}\n`);
     process.exit(surface ? 0 : 1);
   }
-  if (surface !== "browser" && surface !== "integrations") {
+  if (surface !== "browser" && surface !== "integrations" && surface !== "skills") {
     fail(`Unknown surface: ${surface}\n${USAGE}`);
   }
   const serverUrl = await getServerUrl();
   if (surface === "browser") await runBrowser(rest, serverUrl);
-  else await runIntegrations(rest, serverUrl);
+  else if (surface === "integrations") await runIntegrations(rest, serverUrl);
+  else await runSkills(rest, serverUrl);
 }
 
 main().catch((error) => fail(error?.message ?? String(error)));

@@ -44,7 +44,7 @@ test("dedupe collapses identical text (orchestrator + agent echo)", () => {
 });
 
 test("dedupe collapses skill marker with the agent's echo of the same turn", () => {
-  // The orchestrator wrote `[/skill: github-issues] Hello`. Ada received
+  // The orchestrator wrote `[/skill: github-issues] Hello`. Anita received
   // `Apply the following skill... Hello` and wrote that to its events.
   // The dedupe should keep only the marker.
   const events = [

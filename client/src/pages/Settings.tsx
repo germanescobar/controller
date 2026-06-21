@@ -2,8 +2,9 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentsSection } from "../components/agents-section.tsx";
 import { IntegrationsSection } from "../components/integrations-section.tsx";
+import { SkillsSection } from "../components/skills-section.tsx";
 
-export type SettingsSection = "agents" | "integrations";
+export type SettingsSection = "agents" | "integrations" | "skills";
 
 interface SectionSpec {
   id: SettingsSection;
@@ -21,6 +22,11 @@ const SECTIONS: SectionSpec[] = [
     id: "integrations",
     label: "Integrations",
     description: "Connect third-party services for agents to use at runtime.",
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    description: "Create and edit app-owned skills available to all agents.",
   },
 ];
 
@@ -72,6 +78,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: SettingsPage
 
           {active.id === "agents" && <AgentsSection />}
           {active.id === "integrations" && <IntegrationsSection />}
+          {active.id === "skills" && <SkillsSection />}
         </div>
       </div>
     </div>

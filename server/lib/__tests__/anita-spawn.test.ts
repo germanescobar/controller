@@ -6,21 +6,21 @@ import os from "node:os";
 import path from "node:path";
 import { getAgentProvider } from "../agents.js";
 
-const ada = getAgentProvider("ada");
-assert.ok(ada, "ada provider must be registered");
+const anita = getAgentProvider("anita");
+assert.ok(anita, "anita provider must be registered");
 
 /**
- * Spawn the Ada provider against a tiny fake `ada` shim that prints its argv
+ * Spawn the Anita provider against a tiny fake `anita` shim that prints its argv
  * as JSON and exits. Returns the parsed argv array, which is what the provider
  * would have handed to `child_process.spawn`.
  *
- * The shim lives in a temp dir so we don't need `ada` actually installed —
+ * The shim lives in a temp dir so we don't need `anita` actually installed —
  * the test asserts how the orchestrator wires the CLI invocation, not what
- * Ada does internally.
+ * Anita does internally.
  */
-function captureAdaArgs(options: Record<string, unknown>): Promise<string[]> {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "ada-spawn-"));
-  const shim = path.join(dir, "ada");
+function captureAnitaArgs(options: Record<string, unknown>): Promise<string[]> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "anita-spawn-"));
+  const shim = path.join(dir, "anita");
   writeFileSync(
     shim,
     [
@@ -35,7 +35,7 @@ function captureAdaArgs(options: Record<string, unknown>): Promise<string[]> {
     ].join("\n")
   );
   chmodSync(shim, 0o755);
-  const child = ada!.spawn({
+  const child = anita!.spawn({
     message: "Hello",
     cwd: dir,
     env: {},
@@ -45,7 +45,7 @@ function captureAdaArgs(options: Record<string, unknown>): Promise<string[]> {
     reasoningEffort: undefined,
     serviceTier: undefined,
     ...options,
-  } as Parameters<NonNullable<typeof ada>["spawn"]>[0]);
+  } as Parameters<NonNullable<typeof anita>["spawn"]>[0]);
 
   return new Promise((resolve, reject) => {
     let out = "";
@@ -76,17 +76,17 @@ function captureAdaArgs(options: Record<string, unknown>): Promise<string[]> {
   });
 }
 
-test("ada spawn does not pass --system-prompt when none is provided", async () => {
-  const args = await captureAdaArgs({ systemPrompt: undefined });
+test("anita spawn does not pass --system-prompt when none is provided", async () => {
+  const args = await captureAnitaArgs({ systemPrompt: undefined });
   assert.ok(
     !args.includes("--system-prompt"),
     `unexpected --system-prompt in argv: ${args.join(" ")}`
   );
 });
 
-test("ada spawn passes --system-prompt before the chat subcommand", async () => {
+test("anita spawn passes --system-prompt before the chat subcommand", async () => {
   const prompt = "You are running inside Controller.";
-  const args = await captureAdaArgs({ systemPrompt: prompt });
+  const args = await captureAnitaArgs({ systemPrompt: prompt });
   const flagIndex = args.indexOf("--system-prompt");
   assert.ok(
     flagIndex >= 0,
@@ -100,16 +100,16 @@ test("ada spawn passes --system-prompt before the chat subcommand", async () => 
   );
 });
 
-test("ada spawn omits --system-prompt when the value is empty/whitespace", async () => {
-  const args = await captureAdaArgs({ systemPrompt: "   \n  " });
+test("anita spawn omits --system-prompt when the value is empty/whitespace", async () => {
+  const args = await captureAnitaArgs({ systemPrompt: "   \n  " });
   assert.ok(
     !args.includes("--system-prompt"),
     `empty systemPrompt should not emit the flag, got: ${args.join(" ")}`
   );
 });
 
-test("ada spawn keeps the user message in argv (not folded into system prompt)", async () => {
-  const args = await captureAdaArgs({
+test("anita spawn keeps the user message in argv (not folded into system prompt)", async () => {
+  const args = await captureAnitaArgs({
     message: "what is the weather?",
     systemPrompt: "static identity context",
   });

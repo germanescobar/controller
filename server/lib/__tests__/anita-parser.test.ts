@@ -2,16 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { getAgentProvider, type AgentStreamEvent } from "../agents.js";
 
-const ada = getAgentProvider("ada");
-assert.ok(ada, "ada provider must be registered");
+const anita = getAgentProvider("anita");
+assert.ok(anita, "anita provider must be registered");
 
 type ParserLine = (line: string) => AgentStreamEvent | AgentStreamEvent[] | null;
 type ParserFactory = () => ParserLine;
 
 function createParser(): ParserLine {
-  assert.ok(ada, "ada provider must be registered");
-  assert.ok(typeof ada.createParser === "function", "ada provider must expose createParser");
-  const factory = ada.createParser as ParserFactory;
+  assert.ok(anita, "anita provider must be registered");
+  assert.ok(typeof anita.createParser === "function", "anita provider must expose createParser");
+  const factory = anita.createParser as ParserFactory;
   return factory();
 }
 
@@ -39,13 +39,13 @@ function runFixture(jsonl: string): AgentStreamEvent[] {
   return out;
 }
 
-test("ada parser: run.started resets state and emits a normalized event", () => {
+test("anita parser: run.started resets state and emits a normalized event", () => {
   const events = runFixture(
     [
       JSON.stringify({
         type: "run.started",
         sessionId: "sess-1",
-        model: "ada/test",
+        model: "anita/test",
         workingDirectory: "/tmp/work",
         timestamp: "2026-06-08T00:00:00.000Z",
       }),
@@ -56,20 +56,20 @@ test("ada parser: run.started resets state and emits a normalized event", () => 
     {
       type: "run.started",
       sessionId: "sess-1",
-      model: "ada/test",
+      model: "anita/test",
       workingDirectory: "/tmp/work",
       timestamp: "2026-06-08T00:00:00.000Z",
     },
   ]);
 });
 
-test("ada parser: assistant.text.delta events accumulate and flush as a single assistant.text", () => {
+test("anita parser: assistant.text.delta events accumulate and flush as a single assistant.text", () => {
   const events = runFixture(
     [
       JSON.stringify({
         type: "run.started",
         sessionId: "sess-2",
-        model: "ada/test",
+        model: "anita/test",
         workingDirectory: "/tmp/work",
         timestamp: "2026-06-08T00:00:00.000Z",
       }),
@@ -84,7 +84,7 @@ test("ada parser: assistant.text.delta events accumulate and flush as a single a
     {
       type: "run.started",
       sessionId: "sess-2",
-      model: "ada/test",
+      model: "anita/test",
       workingDirectory: "/tmp/work",
       timestamp: "2026-06-08T00:00:00.000Z",
     },
@@ -108,7 +108,7 @@ test("ada parser: assistant.text.delta events accumulate and flush as a single a
   assert.equal(completed.type, "run.completed");
 });
 
-test("ada parser: text and reasoning are emitted in the right order between tool calls", () => {
+test("anita parser: text and reasoning are emitted in the right order between tool calls", () => {
   const events = runFixture(
     [
       JSON.stringify({ type: "run.started", sessionId: "sess-3" }),
@@ -162,8 +162,8 @@ test("ada parser: text and reasoning are emitted in the right order between tool
   assert.deepEqual(toolCall.input, { path: "/tmp/foo" });
 });
 
-test("ada parser: tool.call.delta accumulates inputDelta and tool.call can fall back to it", () => {
-  // Ada streams the tool call as a sequence of `tool.call.delta`
+test("anita parser: tool.call.delta accumulates inputDelta and tool.call can fall back to it", () => {
+  // Anita streams the tool call as a sequence of `tool.call.delta`
   // events, then *omits* the structured `input` field on the final
   // `tool.call` event. The parser should rebuild the input by
   // concatenating the `inputDelta` JSON fragments and parsing them.
@@ -205,7 +205,7 @@ test("ada parser: tool.call.delta accumulates inputDelta and tool.call can fall 
   assert.deepEqual(toolCall.input, { command: "ls -la" });
 });
 
-test("ada parser: prefers the structured input on a final tool.call over the accumulated deltas", () => {
+test("anita parser: prefers the structured input on a final tool.call over the accumulated deltas", () => {
   // When the final `tool.call` already carries a complete `input`
   // object, the parser should not reach for the accumulated
   // `inputDelta` fragments. This guarantees the wire format can
@@ -234,7 +234,7 @@ test("ada parser: prefers the structured input on a final tool.call over the acc
   assert.deepEqual(toolCall.input, { command: "echo hi" });
 });
 
-test("ada parser: run.failed flushes any in-flight text before emitting the failure", () => {
+test("anita parser: run.failed flushes any in-flight text before emitting the failure", () => {
   const events = runFixture(
     [
       JSON.stringify({ type: "run.started", sessionId: "sess-6" }),
@@ -269,8 +269,8 @@ test("ada parser: run.failed flushes any in-flight text before emitting the fail
   assert.equal(failed.sessionId, "sess-6");
 });
 
-test("ada parser: run.cancelled flushes in-flight text and emits a normalized terminal event", () => {
-  // Clean-cancellation path: Ada SIGINTs the run cooperatively and
+test("anita parser: run.cancelled flushes in-flight text and emits a normalized terminal event", () => {
+  // Clean-cancellation path: Anita SIGINTs the run cooperatively and
   // emits `run.cancelled` before exiting with code 130 (see
   // coding-agent#66). The orchestrator must surface this as a
   // `run.cancelled` event (not drop it as an unknown type, and not
@@ -317,10 +317,10 @@ test("ada parser: run.cancelled flushes in-flight text and emits a normalized te
   assert.equal(cancelled.timestamp, "2026-06-10T00:00:00.000Z");
 });
 
-test("ada parser: run.cancelled defaults reason to user_interrupt when omitted", () => {
-  // The orchestrator should still get a usable `reason` when Ada
+test("anita parser: run.cancelled defaults reason to user_interrupt when omitted", () => {
+  // The orchestrator should still get a usable `reason` when Anita
   // emits `run.cancelled` without one (older versions, partial
-  // payloads, etc.). "user_interrupt" is the only reason Ada emits
+  // payloads, etc.). "user_interrupt" is the only reason Anita emits
   // today, so it's a safe default.
   const events = runFixture(
     [
@@ -339,11 +339,11 @@ test("ada parser: run.cancelled defaults reason to user_interrupt when omitted",
   assert.equal(cancelled.reason, "user_interrupt");
   assert.ok(
     typeof cancelled.timestamp === "string" && cancelled.timestamp.length > 0,
-    "expected a generated timestamp when Ada omits one"
+    "expected a generated timestamp when Anita omits one"
   );
 });
 
-test("ada parser: a fresh run.started clears any in-flight segment from a prior run", () => {
+test("anita parser: a fresh run.started clears any in-flight segment from a prior run", () => {
   // Without a state reset, stale text accumulated by a previous run
   // would leak into the new turn. The parser should start each new
   // run from a clean slate.
@@ -367,16 +367,16 @@ test("ada parser: a fresh run.started clears any in-flight segment from a prior 
   assert.equal(assistantTexts[1].text, "fresh turn");
 });
 
-test("ada parser: unknown event types are dropped, never forwarded as AgentStreamEvent", () => {
+test("anita parser: unknown event types are dropped, never forwarded as AgentStreamEvent", () => {
   // Regression guard for the original bug: the parser used to
   // blindly cast every JSONL line into `AgentStreamEvent`, which
-  // let Ada's `assistant.text.delta` shape leak into the SSE
+  // let Anita's `assistant.text.delta` shape leak into the SSE
   // stream. The new parser must drop anything it doesn't
   // recognize.
   const events = runFixture(
     [
       JSON.stringify({ type: "run.started", sessionId: "sess-9" }),
-      JSON.stringify({ type: "future.ada.event", payload: { foo: "bar" } }),
+      JSON.stringify({ type: "future.anita.event", payload: { foo: "bar" } }),
       JSON.stringify({ type: "run.completed", sessionId: "sess-9" }),
     ].join("\n")
   );
@@ -404,7 +404,7 @@ test("ada parser: unknown event types are dropped, never forwarded as AgentStrea
   }
 });
 
-test("ada parser: consumes accumulated tool.call.delta fragments when a later tool reuses the same index", () => {
+test("anita parser: consumes accumulated tool.call.delta fragments when a later tool reuses the same index", () => {
   // Regression guard: a `tool.call` that arrives with a structured
   // `input` was leaving the accumulated `inputDelta` fragments in
   // the parser state. If a subsequent tool call reused the same
@@ -476,7 +476,7 @@ test("ada parser: consumes accumulated tool.call.delta fragments when a later to
   assert.deepEqual(toolCalls[1].input, { command: "ls" });
 });
 
-test("ada parser: empty final tool.call with no prior deltas leaves input empty, not the previous call's", () => {
+test("anita parser: empty final tool.call with no prior deltas leaves input empty, not the previous call's", () => {
   // Companion regression guard: a `tool.call` with no `input` and
   // no prior `tool.call.delta` should yield an empty `input`
   // object, not silently inherit the previous call's accumulated

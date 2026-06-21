@@ -62,6 +62,24 @@ export function worktreesRegistryFile(): string {
   return path.join(orchestratorHome(), "worktrees.json");
 }
 
+// --- Session Focus ---
+
+/**
+ * Directory holding per-session focus sidecars. Controller-owned
+ * focus-queue state lives here, keyed by the provider-generated
+ * (globally unique) session id, rather than on the agent-owned
+ * `.coding-agent/sessions/<id>.json` file the agent rewrites on
+ * every save (issue #139).
+ */
+export function sessionFocusDir(): string {
+  return path.join(orchestratorHome(), "focus");
+}
+
+/** Per-session focus sidecar, keyed by the session id. */
+export function sessionFocusFile(sessionId: string): string {
+  return path.join(sessionFocusDir(), `${sessionId}.json`);
+}
+
 // --- Terminal Tabs ---
 
 export function terminalTabsRegistryFile(): string {
@@ -78,4 +96,21 @@ export function sessionQueuesDir(): string {
 /** Per-session queue file, keyed by the provider-generated session id. */
 export function sessionQueueFile(sessionId: string): string {
   return path.join(sessionQueuesDir(), `${sessionId}.json`);
+}
+
+// --- Unified Skills ---
+
+/** Directory holding the app-owned unified skill catalog. */
+export function unifiedSkillsDir(): string {
+  return path.join(orchestratorHome(), "skills");
+}
+
+/** Per-skill directory under the unified catalog. */
+export function unifiedSkillDir(skillName: string): string {
+  return path.join(unifiedSkillsDir(), skillName);
+}
+
+/** Path to a unified skill's SKILL.md file. */
+export function unifiedSkillFile(skillName: string): string {
+  return path.join(unifiedSkillDir(skillName), "SKILL.md");
 }

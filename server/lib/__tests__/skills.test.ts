@@ -14,8 +14,10 @@ import {
   buildSkillPrefix,
   extractSkillInvocation,
   getSkillProvider,
+  mergeSkillMetadata,
   parseSkillFile,
   type SkillProvider,
+  type SkillMetadata,
 } from "../skills.js";
 
 function makeTempDir(prefix: string): string {
@@ -80,7 +82,7 @@ function withCodexHome(
 }
 
 function withProviderHome(
-  providerId: "ada" | "codex" | "claude",
+  providerId: "anita" | "codex" | "claude",
   run: (home: string, provider: SkillProvider) => Promise<void>
 ): Promise<void> {
   return withHome(async (home) => {
@@ -164,7 +166,7 @@ test("extractSkillInvocation does not match a bare `/`", () => {
 
 test("buildSkillPrefix frames the body as plain prose (no skill-load marker)", () => {
   // The prefix must not include the `skill:<name>` fenced marker that some
-  // agents (Ada) auto-detect and surface twice in the transcript. It
+  // agents (Anita) auto-detect and surface twice in the transcript. It
   // should be plain context the agent reads but doesn't echo.
   const prefix = buildSkillPrefix("imagegen", "do the thing");
   assert.doesNotMatch(prefix, /```skill:imagegen/);
@@ -184,10 +186,10 @@ test("buildSkillHistoryMessage renders the marker before the user text", () => {
 // Disk-backed provider: user-scope skills
 // ---------------------------------------------------------------------------
 
-test("ada provider lists user skills from ~/.ada/skills", async () => {
-  await withProviderHome("ada", async (home, provider) => {
+test("anita provider lists user skills from ~/.anita/skills", async () => {
+  await withProviderHome("anita", async (home, provider) => {
     makeSkillFile(
-      path.join(home, ".ada/skills"),
+      path.join(home, ".anita/skills"),
       "github-issues",
       { name: "github-issues", description: "Work on GitHub issues" },
       "Body"
@@ -198,6 +200,27 @@ test("ada provider lists user skills from ~/.ada/skills", async () => {
     assert.equal(metadata[0].scope, "user");
     assert.equal(metadata[0].description, "Work on GitHub issues");
   });
+});
+
+test("anita provider falls back to the legacy ~/.ada/skills location", async () => {
+  await withProviderHome("anita", async (home, provider) => {
+    // No `~/.anita/skills` exists; the provider should read the legacy
+    // location so setups created before the Ada→Anita rename keep working.
+    makeSkillFile(
+      path.join(home, ".ada/skills"),
+      "legacy-skill",
+      { name: "legacy-skill", description: "from the old home" },
+      "Body"
+    );
+    const metadata = await provider.listMetadata(os.tmpdir());
+    assert.equal(metadata.length, 1);
+    assert.equal(metadata[0].name, "legacy-skill");
+    assert.equal(metadata[0].scope, "user");
+  });
+});
+
+test("legacy 'ada' provider id resolves to the anita provider", () => {
+  assert.equal(getSkillProvider("ada"), getSkillProvider("anita"));
 });
 
 test("codex provider lists user + system skills, scoped accordingly", async () => {
@@ -238,9 +261,9 @@ test("claude provider reads ~/.claude/skills/<name>/SKILL.md", async () => {
 });
 
 test("skill name match is case-insensitive but the user message is unchanged", async () => {
-  await withProviderHome("ada", async (home, provider) => {
+  await withProviderHome("anita", async (home, provider) => {
     makeSkillFile(
-      path.join(home, ".ada/skills"),
+      path.join(home, ".anita/skills"),
       "ImageGen",
       { name: "ImageGen", description: "Image generator" },
       "body"
@@ -261,11 +284,11 @@ test("skill name match is case-insensitive but the user message is unchanged", a
 // ---------------------------------------------------------------------------
 
 test("repo skills are listed only when cwd is inside a git work tree", async () => {
-  await withProviderHome("ada", async (home, provider) => {
+  await withProviderHome("anita", async (home, provider) => {
     const worktree = makeTempDir("skills-worktree-");
     initGitRepo(worktree);
     makeSkillFile(
-      path.join(worktree, ".ada/skills"),
+      path.join(worktree, ".anita/skills"),
       "repo-skill",
       { name: "repo-skill", description: "r" },
       "body"
@@ -284,7 +307,7 @@ test("repo skills are listed only when cwd is inside a git work tree", async () 
 });
 
 test("readBody returns null for an unknown skill", async () => {
-  await withProviderHome("ada", async (_home, provider) => {
+  await withProviderHome("anita", async (_home, provider) => {
     assert.equal(await provider.readBody("not-a-skill", os.tmpdir()), null);
   });
 });
@@ -352,5 +375,86 @@ test("codex provider expands ~ in $CODEX_HOME", async () => {
       delete process.env.CODEX_HOME;
       rmSync(codexHome, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unified skills + merge behavior
+// ---------------------------------------------------------------------------
+
+function skillMeta(
+  name: string,
+  scope: SkillMetadata["scope"],
+  description = ""
+): SkillMetadata {
+  return {
+    name,
+    description,
+    path: `/skills/${name}/SKILL.md`,
+    scope,
+  };
+}
+
+test("mergeSkillMetadata puts unified first and dedupes per-agent matches", () => {
+  const unified = [skillMeta("browser", "unified", "managed")];
+  const perAgent = [
+    skillMeta("browser", "user"),
+    skillMeta("imagegen", "system"),
+  ];
+  const merged = mergeSkillMetadata(unified, perAgent);
+  assert.deepEqual(merged.map((entry) => [entry.name, entry.scope]), [
+    ["browser", "unified"],
+    ["imagegen", "system"],
+  ]);
+});
+
+test("mergeSkillMetadata dedupe is case-insensitive", () => {
+  const unified = [skillMeta("Browser", "unified")];
+  const perAgent = [skillMeta("browser", "user")];
+  const merged = mergeSkillMetadata(unified, perAgent);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].name, "Browser");
+  assert.equal(merged[0].scope, "unified");
+});
+
+test("readBody resolves unified skill body over per-provider match", async () => {
+  await withProviderHome("anita", async (home, provider) => {
+    const orchestratorHome = path.join(home, "coding-orchestrator");
+    const skillsDir = path.join(orchestratorHome, "skills");
+
+    // Per-agent skill named "shared"
+    makeSkillFile(
+      path.join(home, ".anita/skills"),
+      "shared",
+      { name: "shared", description: "agent" },
+      "per-agent body"
+    );
+
+    // Unified skill with the same name
+    makeSkillFile(skillsDir, "shared", { name: "shared", description: "unified" }, "unified body");
+
+    const body = await provider.readBody("shared", os.tmpdir());
+    assert.ok(body);
+    assert.equal(body.metadata.scope, "unified");
+    assert.equal(body.body, "unified body");
+
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  });
+});
+
+test("unified skills appear in listMetadata above per-agent skills", async () => {
+  await withProviderHome("anita", async (home, provider) => {
+    const orchestratorHome = path.join(home, "coding-orchestrator");
+    const skillsDir = path.join(orchestratorHome, "skills");
+
+    makeSkillFile(skillsDir, "shared", { name: "shared", description: "u" }, "body");
+    makeSkillFile(path.join(home, ".anita/skills"), "anita-only", { name: "anita-only", description: "a" }, "body");
+
+    const metadata = await provider.listMetadata(os.tmpdir());
+    assert.equal(metadata[0].name, "shared");
+    assert.equal(metadata[0].scope, "unified");
+    assert.ok(metadata.some((entry) => entry.name === "anita-only"));
+
+    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
