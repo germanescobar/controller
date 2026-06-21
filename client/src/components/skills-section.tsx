@@ -8,6 +8,7 @@ import {
   X,
   Loader2,
   Search,
+  Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +28,7 @@ import {
   type UnifiedSkill,
   type UnifiedSkillInput,
 } from "../api.ts";
+import { ImportSkillsDialog } from "./import-skills-dialog.tsx";
 
 export function SkillsSection() {
   const [skills, setSkills] = useState<UnifiedSkill[]>([]);
@@ -42,6 +44,7 @@ export function SkillsSection() {
   });
   const [saving, setSaving] = useState(false);
   const [deletingName, setDeletingName] = useState<string | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -159,10 +162,22 @@ export function SkillsSection() {
             className="w-full rounded-md border border-border bg-transparent py-1.5 pl-8 pr-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
-        <Button size="sm" onClick={openCreate} className="shrink-0 gap-1">
-          <Plus className="h-3.5 w-3.5" />
-          New skill
-        </Button>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setImportDialogOpen(true)}
+            className="gap-1"
+            title="Import skills from per-agent locations"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Import
+          </Button>
+          <Button size="sm" onClick={openCreate} className="shrink-0 gap-1">
+            <Plus className="h-3.5 w-3.5" />
+            New skill
+          </Button>
+        </div>
       </div>
 
       {loading && skills.length === 0 && (
@@ -327,6 +342,13 @@ export function SkillsSection() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ImportSkillsDialog
+        open={importDialogOpen}
+        onOpenChange={setImportDialogOpen}
+        existingNames={skills.map((s) => s.name)}
+        onImported={() => void load()}
+      />
     </div>
   );
 }

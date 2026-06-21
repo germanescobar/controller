@@ -741,6 +741,64 @@ export async function deleteUnifiedSkill(name: string): Promise<void> {
   await throwIfNotOk(res, "Failed to delete unified skill");
 }
 
+export type ImportableSkillScope = "user" | "system" | "repo";
+
+export interface ImportableSkill {
+  name: string;
+  description: string;
+  providerId: string;
+  scope: ImportableSkillScope;
+  sourcePath: string;
+  projectPath: string | null;
+}
+
+export async function fetchImportableSkills(): Promise<ImportableSkill[]> {
+  const res = await fetch(`${BASE}/unified-skills/import/discover`);
+  await throwIfNotOk(res, "Failed to discover importable skills");
+  const body = (await res.json()) as { skills?: unknown };
+  if (!body || !Array.isArray(body.skills)) return [];
+  return body.skills.filter(
+    (entry): entry is ImportableSkill =>
+      Boolean(entry) &&
+      typeof (entry as ImportableSkill).name === "string" &&
+      typeof (entry as ImportableSkill).providerId === "string" &&
+      typeof (entry as ImportableSkill).sourcePath === "string" &&
+      (entry as ImportableSkill).scope !== undefined
+  );
+}
+
+export type SkillImportStatus = "imported" | "skipped" | "error";
+
+export interface SkillImportResult {
+  providerId: string;
+  scope: ImportableSkillScope;
+  name: string;
+  status: SkillImportStatus;
+  reason?: string;
+  metadata?: UnifiedSkill;
+}
+
+export interface SkillImportRequest {
+  selections: Array<{
+    providerId: string;
+    sourcePath: string;
+    scope: ImportableSkillScope;
+    overwrite?: boolean;
+  }>;
+}
+
+export async function importUnifiedSkills(
+  request: SkillImportRequest
+): Promise<{ results: SkillImportResult[] }> {
+  const res = await fetch(`${BASE}/unified-skills/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  await throwIfNotOk(res, "Failed to import skills");
+  return res.json();
+}
+
 export interface AgentStatus {
   id: string;
   name: string;
