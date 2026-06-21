@@ -789,10 +789,11 @@ async function handleSessionStream(
         ? historyText.slice(0, 60) + "..."
         : historyText;
     // Focus state lives in a Controller-owned sidecar, not on the
-    // agent session file: Anita's `SessionStore.save()` (and similar
-    // writers) would silently drop our fields on every save, so a
-    // brand-new session's auto-pin would vanish within ~1s. See
-    // issue #139 / #140.
+    // session file: any provider that writes the session file
+    // (e.g. Anita on legacy resumed sessions) would silently drop
+    // our fields on every save, so a brand-new session's
+    // auto-pin would vanish within ~1s. See issue #139 / #140 /
+    // #165.
     const existingFocus = await readSessionFocus(sessionId);
     const focus = resolveSessionFocusState(existingFocus);
     await writeSessionFocus(buildSessionFocus(sessionId, focus));

@@ -153,11 +153,13 @@ test("updateSessionTitle returns null for unknown session", async () => {
   });
 });
 
-test("updateSessionTitle does not poison the agent session file with focus fields", async () => {
-  // The agent-owned `.coding-agent/sessions/<id>.json` file must
-  // never carry focus fields: Anita's SessionStore.save() drops any
-  // top-level field it doesn't know about, so a Controller-managed
-  // field on that file would silently disappear on the next save.
+test("updateSessionTitle does not poison the session file with focus fields", async () => {
+  // The `.coding-agent/sessions/<id>.json` file should keep a
+  // shape any provider can round-trip. Although new sessions are
+  // Controller-only (the `anita` CLI writes to `.anita/sessions/`
+  // — see #165), legacy resumed sessions can still be co-written
+  // by the agent, and any future provider that re-introduces an
+  // on-disk writer would silently drop unknown top-level fields.
   // This regression check is the post-issue-#139 invariant.
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
@@ -165,25 +167,25 @@ test("updateSessionTitle does not poison the agent session file with focus field
       makeFocus("session-1", { focusPinnedAt: "2026-01-01T00:00:00.000Z" })
     );
     await updateSessionTitle(projectPath, "session-1", "Renamed");
-    const agentFile = path.join(
+    const sessionFile = path.join(
       projectPath,
       ".coding-agent",
       "sessions",
       "session-1.json"
     );
-    const raw = JSON.parse(readFileSync(agentFile, "utf-8")) as Record<
+    const raw = JSON.parse(readFileSync(sessionFile, "utf-8")) as Record<
       string,
       unknown
     >;
     assert.equal(
       raw.focusPinnedAt,
       undefined,
-      "agent session file must not carry focusPinnedAt"
+      "session file must not carry focusPinnedAt"
     );
     assert.equal(
       raw.userUnpinned,
       undefined,
-      "agent session file must not carry userUnpinned"
+      "session file must not carry userUnpinned"
     );
   });
 });
@@ -276,11 +278,11 @@ test("getSession returns merged focus state from the sidecar", async () => {
   });
 });
 
-test("getSession ignores stale focus fields left on the agent session file", async () => {
+test("getSession ignores stale focus fields left on the session file", async () => {
   // Belt-and-suspenders: even if a pre-issue-#139 session file
   // still has focus fields on disk (e.g. a session from before the
-  // upgrade), getSession must not surface them — the sidecar is the
-  // source of truth.
+  // upgrade, or one that a second writer polluted), getSession
+  // must not surface them — the sidecar is the source of truth.
   await withTempProject(async (projectPath) => {
     await saveSession(
       projectPath,
@@ -443,20 +445,27 @@ test("resolveSessionFocusState does NOT re-pin a user-unpinned session on resume
   });
 });
 
-test("regression: a second writer overwriting the agent session file leaves focus state intact (issue #139/#141)", async () => {
+test("regression: a second writer overwriting the session file leaves focus state intact (issue #139/#141)", async () => {
   // The two-writer race that this regression guards against:
   //
   //   1. The Controller writes the session file and the focus sidecar
   //      (auto-pinning a brand-new session).
-  //   2. The agent (Anita) subsequently writes its own session file
-  //      multiple times per run, dropping any unknown top-level
-  //      fields. Pre-#139, the Controller's `focusPinnedAt` lived
-  //      on the session file, so it would silently disappear.
+  //   2. A second writer overwrites the session file, dropping any
+  //      unknown top-level fields. For new sessions this is
+  //      hypothetical (the `anita` CLI now writes to
+  //      `.anita/sessions/`, so the Controller is the sole writer
+  //      of `.coding-agent/sessions/<id>.json` — see #165), but
+  //      legacy resumed sessions can still be co-written by the
+  //      agent (which falls back to `.coding-agent/sessions/`),
+  //      and any future provider that re-introduces an on-disk
+  //      writer would behave the same. Pre-#139, the Controller's
+  //      `focusPinnedAt` lived on the session file, so it would
+  //      silently disappear.
   //
   // With the sidecar fix, focus state lives in a separate file
-  // that the agent never reads or writes, so the second writer
-  // cannot touch it — regardless of how many times it overwrites
-  // the agent session file.
+  // that the second writer never reads or writes, so it cannot
+  // touch the focus state — regardless of how many times it
+  // overwrites the session file.
   await withTempProject(async (projectPath) => {
     // Step 1: Controller auto-pins a brand-new session.
     await saveSession(projectPath, makeSession());
@@ -467,14 +476,14 @@ test("regression: a second writer overwriting the agent session file leaves focu
         userUnpinned: undefined,
       })
     );
-    const beforeAgentWrite = await getSession(projectPath, "session-1");
-    const originalPin = beforeAgentWrite?.focusPinnedAt;
+    const beforeSecondWrite = await getSession(projectPath, "session-1");
+    const originalPin = beforeSecondWrite?.focusPinnedAt;
     assert.ok(originalPin, "precondition: focus pin was set on create");
 
-    // Step 2: simulate Anita's writer clobbering the agent session
-    // file with only Anita's fields. This is the writer shape from
-    // `@germanescobar/anita/src/storage/session-store.ts` — note the
-    // absence of any Controller-managed fields.
+    // Step 2: simulate a second writer clobbering the session
+    // file with only its own fields. Modelled on the writer shape
+    // from `@germanescobar/anita/src/storage/session-store.ts` —
+    // note the absence of any Controller-managed fields.
     const anitaStyleSession: SessionState = {
       id: "session-1",
       workingDirectory: projectPath,
@@ -492,7 +501,9 @@ test("regression: a second writer overwriting the agent session file leaves focu
     };
     await saveSession(projectPath, anitaStyleSession);
 
-    // Simulate Anita's loop writing the file eight times per run.
+    // Simulate the agent's loop writing the file multiple times
+    // per run (Anita writes it ~8x per run on the legacy
+    // `.coding-agent/sessions/` path).
     for (let i = 0; i < 8; i++) {
       await saveSession(projectPath, {
         ...anitaStyleSession,
@@ -515,13 +526,13 @@ test("regression: a second writer overwriting the agent session file leaves focu
   });
 });
 
-test("regression: a second writer overwriting the agent session file cannot fake a pin (issue #139/#141)", async () => {
+test("regression: a second writer overwriting the session file cannot fake a pin (issue #139/#141)", async () => {
   // The inverse of the previous test: a malicious or buggy second
   // writer that *adds* focus fields to the session file must not
-  // be able to spoof focus state. Pre-#139, a future Anita field
-  // named `focusPinnedAt` would have been honored by the
+  // be able to spoof focus state. Pre-#139, a future provider
+  // field named `focusPinnedAt` would have been honored by the
   // Controller. Post-#139, the Controller ignores any focus
-  // fields on the agent file and reads from the sidecar only.
+  // fields on the session file and reads from the sidecar only.
   await withTempProject(async (projectPath) => {
     await saveSession(
       projectPath,
@@ -531,19 +542,20 @@ test("regression: a second writer overwriting the agent session file cannot fake
     assert.equal(
       session?.focusPinnedAt,
       undefined,
-      "focusPinnedAt written by the agent must be ignored — the sidecar is the source of truth"
+      "focusPinnedAt written to the session file must be ignored — the sidecar is the source of truth"
     );
   });
 });
 
 // Regression tests for the PR #142 review comment: `getSession`,
 // `archiveSession`, and `updateSessionTitle` must keep treating a
-// malformed (or transiently empty/partial) agent session file as a
-// missing session, not as an unhandled exception. Anita rewrites
-// `.coding-agent/sessions/<id>.json` multiple times per run (see
-// issue #140) and a reader can race the writer.
+// malformed (or transiently empty/partial) session file as a
+// missing session, not as an unhandled exception. For legacy
+// resumed sessions the agent still co-writes
+// `.coding-agent/sessions/<id>.json` via its `.coding-agent/`
+// fallback (see #165), and a reader can race the writer.
 
-function writeAgentSessionFile(
+function writeSessionFile(
   projectPath: string,
   sessionId: string,
   body: string
@@ -553,33 +565,33 @@ function writeAgentSessionFile(
   writeFileSync(path.join(sessionsDir, `${sessionId}.json`), body);
 }
 
-test("getSession returns null for a malformed agent session file (PR #142 review)", async () => {
+test("getSession returns null for a malformed session file (PR #142 review)", async () => {
   await withTempProject(async (projectPath) => {
-    writeAgentSessionFile(projectPath, "session-1", "{ not valid json");
+    writeSessionFile(projectPath, "session-1", "{ not valid json");
     const session = await getSession(projectPath, "session-1");
     assert.equal(session, null, "malformed file must be treated as a missing session");
   });
 });
 
-test("getSession returns null for a transiently empty agent session file (PR #142 review)", async () => {
+test("getSession returns null for a transiently empty session file (PR #142 review)", async () => {
   await withTempProject(async (projectPath) => {
-    writeAgentSessionFile(projectPath, "session-1", "");
+    writeSessionFile(projectPath, "session-1", "");
     const session = await getSession(projectPath, "session-1");
     assert.equal(session, null, "empty file must be treated as a missing session");
   });
 });
 
-test("archiveSession returns false for a malformed agent session file (PR #142 review)", async () => {
+test("archiveSession returns false for a malformed session file (PR #142 review)", async () => {
   await withTempProject(async (projectPath) => {
-    writeAgentSessionFile(projectPath, "session-1", "{ not valid json");
+    writeSessionFile(projectPath, "session-1", "{ not valid json");
     const ok = await archiveSession(projectPath, "session-1");
     assert.equal(ok, false, "archiving a malformed file must report failure, not throw");
   });
 });
 
-test("updateSessionTitle returns null for a malformed agent session file (PR #142 review)", async () => {
+test("updateSessionTitle returns null for a malformed session file (PR #142 review)", async () => {
   await withTempProject(async (projectPath) => {
-    writeAgentSessionFile(projectPath, "session-1", "{ not valid json");
+    writeSessionFile(projectPath, "session-1", "{ not valid json");
     const updated = await updateSessionTitle(projectPath, "session-1", "new title");
     assert.equal(updated, null, "title update on a malformed file must report failure, not throw");
   });
