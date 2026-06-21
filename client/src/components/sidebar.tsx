@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   PenSquare,
   FolderOpen,
@@ -14,6 +14,8 @@ import {
   Archive,
   Loader2,
   CheckCircle2,
+  RotateCw,
+  AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -25,9 +27,12 @@ import {
   archiveSession,
   markSessionFocusDone,
   updateSessionTitle,
+  fetchWorktreeSetupLog,
+  runWorktreeSetup,
   type Project,
-  type Session,
+  type SessionSummary,
   type Worktree,
+  type WorktreeSetupEvent,
 } from "../api.ts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -42,6 +47,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { canonicalProviderId } from "@/lib/provider-id";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -70,7 +76,7 @@ interface SidebarProps {
 }
 
 interface WorktreeWithSessions extends Worktree {
-  sessions: Session[];
+  sessions: SessionSummary[];
   isExpanded: boolean;
 }
 
@@ -84,7 +90,7 @@ export interface FocusQueueItem {
   projectName: string;
   worktreeId: string;
   worktreeName: string;
-  session: Session;
+  session: SessionSummary;
   active: boolean;
 }
 
@@ -114,7 +120,7 @@ function ClaudeLogo({ className }: { className?: string }) {
   );
 }
 
-function AdaLogo({ className }: { className?: string }) {
+function AnitaLogo({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -141,10 +147,11 @@ function SessionProviderIcon({
   provider?: string;
   className?: string;
 }) {
-  // Ada is the default provider — sessions created by the Ada CLI don't
-  // persist a `provider` field, so a missing/empty value means "ada".
-  if (!provider || provider === "ada") {
-    return <AdaLogo className={className} />;
+  // Anita is the default provider — sessions created by the Anita CLI don't
+  // persist a `provider` field, so a missing/empty value means "anita".
+  // The legacy "ada" id resolves to "anita" too.
+  if (canonicalProviderId(provider) === "anita") {
+    return <AnitaLogo className={className} />;
   }
   if (provider === "codex") {
     return <CodexLogo className={className} />;
@@ -157,6 +164,31 @@ function SessionProviderIcon({
 
 function worktreeVisibilityKey(projectId: string, worktreeId: string): string {
   return `${projectId}:${worktreeId}`;
+}
+
+// The destructive confirm button used by the project and worktree delete
+// dialogs. When `loading` is true the label is swapped for a spinner and
+// the button is disabled so the user can't double-click while the
+// destructive request is in flight. Exported for unit testing.
+export function DestructiveConfirmButton({
+  loading,
+  onClick,
+}: {
+  loading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button variant="destructive" onClick={onClick} disabled={loading}>
+      {loading ? (
+        <>
+          <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+          Deleting…
+        </>
+      ) : (
+        "Delete"
+      )}
+    </Button>
+  );
 }
 
 export function Sidebar({
@@ -201,6 +233,29 @@ export function Sidebar({
   } | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [savingRename, setSavingRename] = useState(false);
+  // Tracks destructive delete requests in flight so the matching confirm
+  // dialog can disable both buttons, swap the label for a spinner, and
+  // block dismissal until the request resolves. Mirrors `savingRename`.
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [deletingWorktree, setDeletingWorktree] = useState(false);
+  // Setup log dialog: shown when the user clicks the red `!` next to a
+  // worktree. `running` is true while a re-run is in flight; `lines`
+  // accumulates the live stream so the dialog becomes a small terminal.
+  const [setupLog, setSetupLog] = useState<{
+    projectId: string;
+    projectName: string;
+    worktreeId: string;
+    worktreeName: string;
+    loading: boolean;
+    error: string | null;
+    log: string | null;
+    exitCode: number | null;
+    ranAt: string | null;
+    running: boolean;
+    lines: string[];
+    streamError: string | null;
+  } | null>(null);
+  const setupRunCancelRef = useRef<(() => void) | null>(null);
 
   const focusQueue = useMemo<FocusQueueItem[]>(() => {
     return projectData
@@ -323,14 +378,26 @@ export function Sidebar({
 
   const confirmDeleteProject = async () => {
     if (!confirmDeleteProjectId) return;
-    await deleteProject(confirmDeleteProjectId);
-    setConfirmDeleteProjectId(null);
-    onProjectsChanged();
+    if (deletingProject) return;
+    setDeletingProject(true);
+    try {
+      await deleteProject(confirmDeleteProjectId);
+      setConfirmDeleteProjectId(null);
+      onProjectsChanged();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to delete project",
+      );
+    } finally {
+      setDeletingProject(false);
+    }
   };
 
   const confirmDeleteWorktreeAction = async () => {
     if (!confirmDeleteWorktree) return;
+    if (deletingWorktree) return;
     const { projectId, worktreeId } = confirmDeleteWorktree;
+    setDeletingWorktree(true);
     try {
       await deleteWorktree(projectId, worktreeId);
       setConfirmDeleteWorktree(null);
@@ -340,13 +407,15 @@ export function Sidebar({
       toast.error(
         err instanceof Error ? err.message : "Failed to delete worktree",
       );
+    } finally {
+      setDeletingWorktree(false);
     }
   };
 
   const openRenameDialog = (
     projectId: string,
     worktreeId: string,
-    session: Session,
+    session: SessionSummary,
   ) => {
     setRenameSession({ projectId, worktreeId, sessionId: session.id });
     setRenameDraft(session.title ?? "");
@@ -412,6 +481,171 @@ export function Sidebar({
       );
     }
   };
+
+  const openSetupLog = async (
+    projectId: string,
+    projectName: string,
+    worktreeId: string,
+    worktreeName: string,
+  ) => {
+    setSetupLog({
+      projectId,
+      projectName,
+      worktreeId,
+      worktreeName,
+      loading: true,
+      error: null,
+      log: null,
+      exitCode: null,
+      ranAt: null,
+      running: false,
+      lines: [],
+      streamError: null,
+    });
+    try {
+      const data = await fetchWorktreeSetupLog(projectId, worktreeId);
+      setSetupLog((prev) =>
+        prev && prev.worktreeId === worktreeId
+          ? {
+              ...prev,
+              loading: false,
+              log: data.log,
+              exitCode: data.exitCode,
+              ranAt: data.ranAt,
+              error: data.log
+                ? null
+                : "No setup log is available for this worktree yet.",
+            }
+          : prev,
+      );
+    } catch (err) {
+      setSetupLog((prev) =>
+        prev && prev.worktreeId === worktreeId
+          ? {
+              ...prev,
+              loading: false,
+              error:
+                err instanceof Error
+                  ? err.message
+                  : "Failed to load setup log",
+            }
+          : prev,
+      );
+    }
+  };
+
+  const closeSetupLog = () => {
+    setupRunCancelRef.current?.();
+    setupRunCancelRef.current = null;
+    setSetupLog(null);
+  };
+
+  const rerunSetup = async () => {
+    if (!setupLog || setupLog.running) return;
+    setSetupLog((prev) =>
+      prev
+        ? { ...prev, running: true, lines: [], streamError: null, error: null }
+        : prev,
+    );
+
+    const { events, cancel, result } = runWorktreeSetup(
+      setupLog.projectId,
+      setupLog.worktreeId,
+    );
+    setupRunCancelRef.current = cancel;
+
+    (async () => {
+      try {
+        for await (const event of events as AsyncIterable<WorktreeSetupEvent>) {
+          if (event.type === "log") {
+            const text = event.text.endsWith("\n")
+              ? event.text.slice(0, -1)
+              : event.text;
+            setSetupLog((prev) =>
+              prev && prev.worktreeId === setupLog.worktreeId
+                ? { ...prev, lines: [...prev.lines, text] }
+                : prev,
+            );
+          } else if (event.type === "error") {
+            setSetupLog((prev) =>
+              prev && prev.worktreeId === setupLog.worktreeId
+                ? { ...prev, streamError: event.text }
+                : prev,
+            );
+          }
+        }
+        const updated = await result;
+        // Refresh the cached log so the dialog shows the freshly written
+        // setup.log plus the new exit code/timestamp.
+        const data = await fetchWorktreeSetupLog(
+          setupLog.projectId,
+          setupLog.worktreeId,
+        );
+        setSetupLog((prev) =>
+          prev && prev.worktreeId === setupLog.worktreeId
+            ? {
+                ...prev,
+                running: false,
+                log: data.log,
+                exitCode: data.exitCode ?? updated.setupExitCode ?? null,
+                ranAt: data.ranAt ?? updated.setupRanAt ?? null,
+                error: data.log
+                  ? null
+                  : "Setup finished without producing a log file.",
+              }
+            : prev,
+        );
+        // Mirror the new exit code into the sidebar's worktree list so the `!`
+        // indicator clears as soon as a retry succeeds.
+        setProjectData((prev) =>
+          prev.map((p) =>
+            p.id === setupLog.projectId
+              ? {
+                  ...p,
+                  worktrees: p.worktrees.map((w) =>
+                    w.id === updated.id
+                      ? {
+                          ...w,
+                          setupExitCode: updated.setupExitCode,
+                          setupRanAt: updated.setupRanAt,
+                          setupLogPath: updated.setupLogPath,
+                        }
+                      : w,
+                  ),
+                }
+              : p,
+          ),
+        );
+        if (updated.setupExitCode === 0) {
+          toast.success("Setup completed");
+        } else if (updated.setupExitCode != null) {
+          toast.error(`Setup exited with code ${updated.setupExitCode}`);
+        }
+      } catch (err) {
+        setSetupLog((prev) =>
+          prev && prev.worktreeId === setupLog.worktreeId
+            ? {
+                ...prev,
+                running: false,
+                streamError:
+                  err instanceof Error
+                    ? err.message
+                    : "Failed to run setup script",
+              }
+            : prev,
+        );
+      } finally {
+        setupRunCancelRef.current = null;
+      }
+    })();
+  };
+
+  // Make sure an in-flight run is cancelled if the component unmounts.
+  useEffect(() => {
+    return () => {
+      setupRunCancelRef.current?.();
+    };
+  }, []);
 
   const formatTime = (iso: string) => {
     const diff = Date.now() - new Date(iso).getTime();
@@ -642,12 +876,23 @@ export function Sidebar({
                                   {worktree.name}
                                   {worktree.setupExitCode != null &&
                                     worktree.setupExitCode !== 0 && (
-                                      <span
-                                        className="ml-1 text-destructive"
-                                        title="Setup failed"
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          void openSetupLog(
+                                            project.id,
+                                            project.name,
+                                            worktree.id,
+                                            worktree.name,
+                                          );
+                                        }}
+                                        className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-destructive/15 align-middle text-destructive transition-colors hover:bg-destructive/25 focus:outline-none focus:ring-1 focus:ring-destructive"
+                                        title="Setup failed — click to view log"
+                                        aria-label={`View setup log for ${worktree.name}`}
                                       >
-                                        !
-                                      </span>
+                                        <AlertTriangle className="h-3 w-3" />
+                                      </button>
                                     )}
                                 </span>
                               </button>
@@ -837,7 +1082,7 @@ export function Sidebar({
       <Dialog
         open={!!confirmDeleteProjectId}
         onOpenChange={(open) => {
-          if (!open) setConfirmDeleteProjectId(null);
+          if (!open && !deletingProject) setConfirmDeleteProjectId(null);
         }}
       >
         <DialogContent showCloseButton={false}>
@@ -852,12 +1097,15 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>
+            <DialogClose
+              render={<Button variant="outline" disabled={deletingProject} />}
+            >
               Cancel
             </DialogClose>
-            <Button variant="destructive" onClick={confirmDeleteProject}>
-              Delete
-            </Button>
+            <DestructiveConfirmButton
+              loading={deletingProject}
+              onClick={confirmDeleteProject}
+            />
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -865,7 +1113,7 @@ export function Sidebar({
       <Dialog
         open={!!confirmDeleteWorktree}
         onOpenChange={(open) => {
-          if (!open) setConfirmDeleteWorktree(null);
+          if (!open && !deletingWorktree) setConfirmDeleteWorktree(null);
         }}
       >
         <DialogContent showCloseButton={false}>
@@ -880,12 +1128,15 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>
+            <DialogClose
+              render={<Button variant="outline" disabled={deletingWorktree} />}
+            >
               Cancel
             </DialogClose>
-            <Button variant="destructive" onClick={confirmDeleteWorktreeAction}>
-              Delete
-            </Button>
+            <DestructiveConfirmButton
+              loading={deletingWorktree}
+              onClick={confirmDeleteWorktreeAction}
+            />
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -925,6 +1176,104 @@ export function Sidebar({
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!setupLog}
+        onOpenChange={(open) => {
+          if (!open) closeSetupLog();
+        }}
+      >
+        <DialogContent
+          showCloseButton={!setupLog?.running}
+          className="sm:max-w-2xl"
+        >
+          {setupLog && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-destructive" />
+                  Setup failed
+                </DialogTitle>
+                <DialogDescription>
+                  {setupLog.projectName} /{" "}
+                  <span className="font-medium text-foreground">
+                    {setupLog.worktreeName}
+                  </span>
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                <span>
+                  Exit code:{" "}
+                  <span className="font-mono text-foreground">
+                    {setupLog.exitCode == null ? "—" : setupLog.exitCode}
+                  </span>
+                </span>
+                <span>
+                  Last run:{" "}
+                  <span className="font-mono text-foreground">
+                    {setupLog.ranAt
+                      ? new Date(setupLog.ranAt).toLocaleString()
+                      : "—"}
+                  </span>
+                </span>
+              </div>
+
+              <div className="rounded-md border border-border bg-zinc-950">
+                <ScrollArea className="h-72 w-full">
+                  <pre className="m-0 whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed text-zinc-100">
+                    {setupLog.loading
+                      ? "Loading setup log…"
+                      : setupLog.running
+                        ? setupLog.lines.join("\n") +
+                          (setupLog.lines.length === 0
+                            ? "Waiting for output…"
+                            : "")
+                        : setupLog.log ?? "(no log content)"}
+                  </pre>
+                </ScrollArea>
+              </div>
+
+              {(setupLog.error || setupLog.streamError) && (
+                <p className="text-xs text-destructive">
+                  {setupLog.error ?? setupLog.streamError}
+                </p>
+              )}
+
+              <DialogFooter>
+                <DialogClose
+                  render={
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={setupLog.running}
+                    />
+                  }
+                >
+                  Close
+                </DialogClose>
+                <Button
+                  type="button"
+                  onClick={() => void rerunSetup()}
+                  disabled={setupLog.running}
+                >
+                  {setupLog.running ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Running…
+                    </>
+                  ) : (
+                    <>
+                      <RotateCw className="h-3.5 w-3.5" />
+                      Re-run setup
+                    </>
+                  )}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </aside>

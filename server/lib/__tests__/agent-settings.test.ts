@@ -42,10 +42,26 @@ test("setAgentSetting persists enabled and path", async () => {
 
 test("setAgentSetting merges partial patches", async () => {
   await withTempHome(async () => {
-    await setAgentSetting("ada", { enabled: false });
-    await setAgentSetting("ada", { path: "/opt/ada" });
-    const setting = await getAgentSetting("ada");
-    assert.deepEqual(setting, { enabled: false, path: "/opt/ada" });
+    await setAgentSetting("anita", { enabled: false });
+    await setAgentSetting("anita", { path: "/opt/anita" });
+    const setting = await getAgentSetting("anita");
+    assert.deepEqual(setting, { enabled: false, path: "/opt/anita" });
+  });
+});
+
+test("legacy 'ada' settings resolve to the canonical 'anita' id", async () => {
+  await withTempHome(async () => {
+    // Settings saved before the Ada→Anita rename were keyed by "ada".
+    await setAgentSetting("ada", { enabled: false, path: "/opt/ada" });
+    // Both the legacy and canonical ids return the same setting.
+    assert.deepEqual(await getAgentSetting("anita"), {
+      enabled: false,
+      path: "/opt/ada",
+    });
+    assert.deepEqual(await getAgentSetting("ada"), {
+      enabled: false,
+      path: "/opt/ada",
+    });
   });
 });
 

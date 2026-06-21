@@ -330,7 +330,7 @@ These skills are available to every agent and take precedence over per-agent
 skills with the same name. You can search the catalog and activate a skill so
 its body is applied to your current turn, exactly as if the user had invoked it
 with the \`/\` picker. You can also import skills the user has installed under a
-per-agent location (e.g. \`~/.codex/skills/...\` or \`<project>/.ada/skills/...\`)
+per-agent location (e.g. \`~/.codex/skills/...\` or \`<project>/.anita/skills/...\`)
 into the unified catalog so they take precedence by name.
 
 Invoke the CLI by its absolute path — it is not on your PATH. Every command
@@ -403,7 +403,7 @@ function codexSkillsHome(): string {
 
 function providerHomes(): ProviderSkillHome[] {
   return [
-    { id: "ada", dir: path.join(os.homedir(), ".ada", "skills") },
+    { id: "anita", dir: path.join(os.homedir(), ".anita", "skills") },
     { id: "codex", dir: codexSkillsHome() },
     { id: "claude", dir: path.join(os.homedir(), ".claude", "skills") },
   ];

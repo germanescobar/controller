@@ -59,10 +59,10 @@ test("discoverImportableSkills returns nothing when no skills are installed", as
 test("discoverImportableSkills finds user skills for all three providers", async () => {
   const home = makeTempDir("import-user-");
   try {
-    writeSkillFile(path.join(home, ".ada", "skills"), "ada-only", {
-      name: "ada-only",
-      description: "Ada user skill",
-    }, "ada body");
+    writeSkillFile(path.join(home, ".anita", "skills"), "anita-only", {
+      name: "anita-only",
+      description: "Anita user skill",
+    }, "anita body");
     writeSkillFile(path.join(home, ".codex", "skills"), "codex-only", {
       name: "codex-only",
       description: "Codex user skill",
@@ -75,11 +75,32 @@ test("discoverImportableSkills finds user skills for all three providers", async
     const skills = await discoverImportableSkills(makeEnv(home));
     assert.equal(skills.length, 3);
     const byName = Object.fromEntries(skills.map((s) => [s.name, s]));
-    assert.equal(byName["ada-only"].providerId, "ada");
-    assert.equal(byName["ada-only"].scope, "user");
-    assert.equal(byName["ada-only"].projectPath, null);
+    assert.equal(byName["anita-only"].providerId, "anita");
+    assert.equal(byName["anita-only"].scope, "user");
+    assert.equal(byName["anita-only"].projectPath, null);
     assert.equal(byName["codex-only"].providerId, "codex");
     assert.equal(byName["claude-only"].providerId, "claude");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("discoverImportableSkills surfaces legacy .ada user skills under the anita provider", async () => {
+  // After the Ada→Anita rename (issue #151), pre-rename installs may still
+  // live under ~/.ada/skills. Discovery should pick them up so the user can
+  // promote them to the unified catalog.
+  const home = makeTempDir("import-legacy-user-");
+  try {
+    writeSkillFile(path.join(home, ".ada", "skills"), "legacy", {
+      name: "legacy",
+      description: "Pre-rename user skill",
+    }, "legacy body");
+
+    const skills = await discoverImportableSkills(makeEnv(home));
+    assert.equal(skills.length, 1);
+    assert.equal(skills[0].providerId, "anita");
+    assert.equal(skills[0].scope, "user");
+    assert.equal(skills[0].name, "legacy");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -109,7 +130,7 @@ test("discoverImportableSkills scans repo skills for every registered project", 
   try {
     const projectA = makeTempDir("project-a-");
     const projectB = makeTempDir("project-b-");
-    writeSkillFile(path.join(projectA, ".ada", "skills"), "from-a", {
+    writeSkillFile(path.join(projectA, ".anita", "skills"), "from-a", {
       name: "from-a",
       description: "repo from A",
     }, "a body");
@@ -134,11 +155,33 @@ test("discoverImportableSkills scans repo skills for every registered project", 
   }
 });
 
+test("discoverImportableSkills surfaces legacy .ada repo skills under the anita provider", async () => {
+  const home = makeTempDir("import-legacy-repo-");
+  try {
+    const project = makeTempDir("legacy-project-");
+    writeSkillFile(path.join(project, ".ada", "skills"), "from-legacy", {
+      name: "from-legacy",
+      description: "Pre-rename repo skill",
+    }, "body");
+
+    const env = makeEnv(home, [
+      { id: "p", name: "P", path: project, createdAt: "" },
+    ]);
+    const skills = await discoverImportableSkills(env);
+    assert.equal(skills.length, 1);
+    assert.equal(skills[0].providerId, "anita");
+    assert.equal(skills[0].scope, "repo");
+    assert.equal(skills[0].projectPath, project);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("discoverImportableSkills dedupes by source path", async () => {
   // Same file should never appear twice even if multiple providers scan it.
   const home = makeTempDir("import-dedupe-");
   try {
-    writeSkillFile(path.join(home, ".ada", "skills"), "dup", {
+    writeSkillFile(path.join(home, ".anita", "skills"), "dup", {
       name: "dup",
       description: "d",
     }, "body");
@@ -156,7 +199,7 @@ test("importSkills copies a user skill into the unified catalog", async () => {
   process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
-      path.join(home, ".ada", "skills"),
+      path.join(home, ".anita", "skills"),
       "review",
       { name: "review", description: "Review PRs" },
       "Review carefully"
@@ -166,7 +209,7 @@ test("importSkills copies a user skill into the unified catalog", async () => {
     const result = await importSkills(
       {
         selections: [
-          { providerId: "ada", sourcePath, scope: "user" },
+          { providerId: "anita", sourcePath, scope: "user" },
         ],
       },
       env
@@ -193,6 +236,35 @@ test("importSkills copies a user skill into the unified catalog", async () => {
   }
 });
 
+test("importSkills still accepts the legacy `ada` provider id", async () => {
+  // Pre-rename callers may still send `ada`. The import endpoint should
+  // resolve it the same way the rest of the app does (issue #151).
+  const home = makeTempDir("import-legacy-id-");
+  const orchestratorHome = makeTempDir("orch-legacy-id-");
+  const original = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  try {
+    const sourcePath = writeSkillFile(
+      path.join(home, ".ada", "skills"),
+      "legacy",
+      { name: "legacy", description: "d" },
+      "body"
+    );
+
+    const result = await importSkills(
+      { selections: [{ providerId: "ada", sourcePath, scope: "user" }] },
+      makeEnv(home)
+    );
+    assert.equal(result.results[0].status, "imported");
+    assert.equal(result.results[0].name, "legacy");
+  } finally {
+    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
 test("importSkills skips a selection whose name collides with a unified skill", async () => {
   const home = makeTempDir("import-skip-");
   const orchestratorHome = makeTempDir("orch-skip-");
@@ -200,7 +272,7 @@ test("importSkills skips a selection whose name collides with a unified skill", 
   process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
-      path.join(home, ".ada", "skills"),
+      path.join(home, ".anita", "skills"),
       "duplicate",
       { name: "duplicate", description: "d" },
       "body"
@@ -215,7 +287,7 @@ test("importSkills skips a selection whose name collides with a unified skill", 
     });
 
     const result = await importSkills(
-      { selections: [{ providerId: "ada", sourcePath, scope: "user" }] },
+      { selections: [{ providerId: "anita", sourcePath, scope: "user" }] },
       makeEnv(home)
     );
     assert.equal(result.results[0].status, "skipped");
@@ -248,7 +320,7 @@ test("importSkills overwrites when the caller asks for it", async () => {
     });
 
     const sourcePath = writeSkillFile(
-      path.join(home, ".ada", "skills"),
+      path.join(home, ".anita", "skills"),
       "dup",
       { name: "dup", description: "new" },
       "new body"
@@ -257,7 +329,7 @@ test("importSkills overwrites when the caller asks for it", async () => {
     const result = await importSkills(
       {
         selections: [
-          { providerId: "ada", sourcePath, scope: "user", overwrite: true },
+          { providerId: "anita", sourcePath, scope: "user", overwrite: true },
         ],
       },
       makeEnv(home)
@@ -310,7 +382,7 @@ test("importSkills returns an error for a missing source file", async () => {
     const result = await importSkills(
       {
         selections: [
-          { providerId: "ada", sourcePath: path.join(home, "does-not-exist", "SKILL.md"), scope: "user" },
+          { providerId: "anita", sourcePath: path.join(home, "does-not-exist", "SKILL.md"), scope: "user" },
         ],
       },
       makeEnv(home)
@@ -331,10 +403,10 @@ test("importSkills processes multiple selections in one call", async () => {
   const original = process.env.CODING_ORCHESTRATOR_HOME;
   process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
   try {
-    const adaSkill = writeSkillFile(
-      path.join(home, ".ada", "skills"),
-      "ada-skill",
-      { name: "ada-skill", description: "a" },
+    const anitaSkill = writeSkillFile(
+      path.join(home, ".anita", "skills"),
+      "anita-skill",
+      { name: "anita-skill", description: "a" },
       "a body"
     );
     const claudeSkill = writeSkillFile(
@@ -347,7 +419,7 @@ test("importSkills processes multiple selections in one call", async () => {
     const result = await importSkills(
       {
         selections: [
-          { providerId: "ada", sourcePath: adaSkill, scope: "user" },
+          { providerId: "anita", sourcePath: anitaSkill, scope: "user" },
           { providerId: "claude", sourcePath: claudeSkill, scope: "user" },
         ],
       },

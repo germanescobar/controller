@@ -2,13 +2,14 @@
  * Skill discovery and loading for the orchestrator.
  *
  * The orchestrator is the only source of truth for `/<skill-name>` invocations
- * across Ada, Codex, and Claude. Each provider loads skills from its own
+ * across Anita, Codex, and Claude. Each provider loads skills from its own
  * filesystem locations; the front end only ever sees metadata, and the body is
  * read server-side at send time so the user always gets the freshest
  * `SKILL.md` and the wire payload stays small.
  *
  * Layout per provider (paths are OS-expanded):
- * - Ada:   `~/.ada/skills/<name>/SKILL.md` plus `<cwd>/.ada/skills/<name>/SKILL.md`
+ * - Anita: `~/.anita/skills/<name>/SKILL.md` plus `<cwd>/.anita/skills/<name>/SKILL.md`
+ *          (falling back to the legacy `~/.ada/skills` / `.ada/skills` locations)
  * - Codex: `~/.codex/skills/<name>/SKILL.md` plus
  *          `~/.codex/skills/.system/<name>/SKILL.md` plus
  *          `<cwd>/.codex/skills/<name>/SKILL.md`
@@ -20,11 +21,13 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { resolveCommand } from "./command-resolver.js";
+import { canonicalProviderId } from "./provider-id.js";
 import { childProcessEnv } from "./shell-env.js";
 import { listUnifiedSkills, readUnifiedSkill } from "./unified-skills.js";
 
@@ -55,7 +58,7 @@ export interface SkillBody {
  * server-side at send time so the agent receives the freshest content.
  */
 export interface SkillProvider {
-  /** Stable identifier — matches the agent provider id (`ada` / `codex` / `claude`). */
+  /** Stable identifier — matches the agent provider id (`anita` / `codex` / `claude`). */
   id: string;
   /** Human-readable name shown in errors. */
   name: string;
@@ -258,8 +261,17 @@ async function systemSkillDirs(
 // Per-provider configuration
 // ---------------------------------------------------------------------------
 
-function adaUserSkillsHome(): string {
-  return path.join(os.homedir(), ".ada", "skills");
+/**
+ * Anita reads user skills from `~/.anita/skills`, falling back to the legacy
+ * `~/.ada/skills` location when the canonical directory does not exist yet so
+ * setups created before the Ada→Anita rename keep working (mirrors the CLI).
+ */
+function anitaUserSkillsHome(): string {
+  const canonical = path.join(os.homedir(), ".anita", "skills");
+  if (existsSync(canonical)) return canonical;
+  const legacy = path.join(os.homedir(), ".ada", "skills");
+  if (existsSync(legacy)) return legacy;
+  return canonical;
 }
 
 /**
@@ -336,9 +348,9 @@ function claudeUserSkillsHome(): string {
   return path.join(os.homedir(), ".claude", "skills");
 }
 
-const ADA_CONFIG: ProviderConfig = {
-  repoDirName: ".ada/skills",
-  userDirs: () => [adaUserSkillsHome()],
+const ANITA_CONFIG: ProviderConfig = {
+  repoDirName: ".anita/skills",
+  userDirs: () => [anitaUserSkillsHome()],
 };
 
 const CODEX_CONFIG: ProviderConfig = {
@@ -405,7 +417,11 @@ function createDiskProvider(
   };
 }
 
-const adaSkillProvider: SkillProvider = createDiskProvider("ada", "Ada", ADA_CONFIG);
+const anitaSkillProvider: SkillProvider = createDiskProvider(
+  "anita",
+  "Anita",
+  ANITA_CONFIG
+);
 const codexSkillProvider: SkillProvider = createDiskProvider(
   "codex",
   "Codex",
@@ -418,13 +434,13 @@ const claudeSkillProvider: SkillProvider = createDiskProvider(
 );
 
 const providers: Record<string, SkillProvider> = {
-  ada: adaSkillProvider,
+  anita: anitaSkillProvider,
   codex: codexSkillProvider,
   claude: claudeSkillProvider,
 };
 
 export function getSkillProvider(providerId: string): SkillProvider | undefined {
-  return providers[providerId];
+  return providers[canonicalProviderId(providerId)];
 }
 
 export function getSkillProviders(): SkillProvider[] {

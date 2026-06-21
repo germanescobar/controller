@@ -2,10 +2,12 @@
  * Import existing per-agent skills into the unified skill catalog (issue #145).
  *
  * Users often have skills installed under per-agent locations:
- *   - ~/.ada/skills/<name>/SKILL.md
+ *   - ~/.anita/skills/<name>/SKILL.md
+ *     (and the legacy ~/.ada/skills/<name>/SKILL.md for pre-rename installs)
  *   - ~/.codex/skills/<name>/SKILL.md (+ ~/.codex/skills/.system/<name>/SKILL.md)
  *   - ~/.claude/skills/<name>/SKILL.md
- *   - <project>/.ada/skills/<name>/SKILL.md
+ *   - <project>/.anita/skills/<name>/SKILL.md
+ *     (and the legacy <project>/.ada/skills/<name>/SKILL.md)
  *   - <project>/.codex/skills/<name>/SKILL.md
  *   - <project>/.claude/skills/<name>/SKILL.md
  *
@@ -32,7 +34,7 @@ import { listUnifiedSkills, createUnifiedSkill, deleteUnifiedSkill } from "./uni
 export interface ImportableSkill {
   name: string;
   description: string;
-  /** Provider id (`ada` / `codex` / `claude`). */
+  /** Provider id (`anita` / `codex` / `claude`). */
   providerId: string;
   /** Original scope (`user` / `system` / `repo`). */
   scope: SkillScope;
@@ -109,33 +111,41 @@ function defaultEnv(): SkillImportEnv {
 
 // ---------------------------------------------------------------------------
 // Per-provider scan roots — kept in sync with the loader in `skills.ts` so
-// discovery finds the same files the agent would see.
+// discovery finds the same files the agent would see. The default agent was
+// renamed from Ada to Anita (issue #151); the canonical locations are the
+// `.anita/` ones, but we also scan the legacy `.ada/` locations so users
+// who have not migrated can still promote those skills into the unified
+// catalog. Both surfaces report the canonical `anita` provider id.
 // ---------------------------------------------------------------------------
 
 interface ProviderScanConfig {
   providerId: string;
   userDirs(): string[];
   systemDirs?(): string[];
-  repoDirName: string;
+  /** Repo-relative dir names. Multiple are scanned so legacy layouts work. */
+  repoDirNames(): string[];
 }
 
 function providerConfigs(env: SkillImportEnv): ProviderScanConfig[] {
   return [
     {
-      providerId: "ada",
-      userDirs: () => [path.join(env.homedir(), ".ada", "skills")],
-      repoDirName: ".ada/skills",
+      providerId: "anita",
+      userDirs: () => [
+        path.join(env.homedir(), ".anita", "skills"),
+        path.join(env.homedir(), ".ada", "skills"),
+      ],
+      repoDirNames: () => [".anita/skills", ".ada/skills"],
     },
     {
       providerId: "codex",
       userDirs: () => [path.join(env.codexHome(), "skills")],
       systemDirs: () => [path.join(env.codexHome(), "skills", ".system")],
-      repoDirName: ".codex/skills",
+      repoDirNames: () => [".codex/skills"],
     },
     {
       providerId: "claude",
       userDirs: () => [path.join(env.homedir(), ".claude", "skills")],
-      repoDirName: ".claude/skills",
+      repoDirNames: () => [".claude/skills"],
     },
   ];
 }
@@ -222,20 +232,24 @@ export async function discoverImportableSkills(
       }
     }
     // Repo skills for every registered project. The repo dir follows the
-    // same `<cwd>/.<provider>/skills/` convention the loader uses.
+    // same `<cwd>/.<provider>/skills/` convention the loader uses. Providers
+    // that were renamed may list multiple repo dir names so legacy layouts
+    // are still importable.
     const projects = await env.getProjects();
     for (const project of projects) {
-      const base = path.join(project.path, config.repoDirName);
-      for (const dir of await listSkillDirs(base)) {
-        const skill = await readMetadataFromDir(
-          dir,
-          config.providerId,
-          "repo",
-          project.path
-        );
-        if (skill && !seenPaths.has(skill.sourcePath)) {
-          seenPaths.add(skill.sourcePath);
-          out.push(skill);
+      for (const repoDirName of config.repoDirNames()) {
+        const base = path.join(project.path, repoDirName);
+        for (const dir of await listSkillDirs(base)) {
+          const skill = await readMetadataFromDir(
+            dir,
+            config.providerId,
+            "repo",
+            project.path
+          );
+          if (skill && !seenPaths.has(skill.sourcePath)) {
+            seenPaths.add(skill.sourcePath);
+            out.push(skill);
+          }
         }
       }
     }
@@ -264,8 +278,12 @@ export async function importSkills(
   let unified = await listUnifiedSkills();
 
   for (const selection of request.selections) {
-    const providerIds = new Set(providerConfigs(env).map((c) => c.providerId));
-    if (!providerIds.has(selection.providerId)) {
+    // Accept the canonical provider ids and the legacy `ada` id so callers
+    // created before the Ada→Anita rename (issue #151) keep working.
+    const acceptedIds = new Set(
+      providerConfigs(env).flatMap((c) => [c.providerId, "ada"])
+    );
+    if (!acceptedIds.has(selection.providerId)) {
       results.push({
         providerId: selection.providerId,
         scope: "user",

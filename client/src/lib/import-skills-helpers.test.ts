@@ -27,9 +27,9 @@ function makeSkill(overrides: Partial<ImportableSkill> = {}): ImportableSkill {
   return {
     name: "review",
     description: "Review PRs",
-    providerId: "ada",
+    providerId: "anita",
     scope: "user",
-    sourcePath: "/Users/me/.ada/skills/review/SKILL.md",
+    sourcePath: "/Users/me/.anita/skills/review/SKILL.md",
     projectPath: null,
     ...overrides,
   };
@@ -93,16 +93,16 @@ test("selectAllImportable marks every skill as selected", () => {
 test("selectAllImportable replaces the previous selection", () => {
   const oldSkill = makeSkill({
     name: "old",
-    sourcePath: "/Users/me/.ada/skills/old/SKILL.md",
+    sourcePath: "/Users/me/.anita/skills/old/SKILL.md",
   });
   const newSkills = [
     makeSkill({
       name: "new-1",
-      sourcePath: "/Users/me/.ada/skills/new-1/SKILL.md",
+      sourcePath: "/Users/me/.anita/skills/new-1/SKILL.md",
     }),
     makeSkill({
       name: "new-2",
-      sourcePath: "/Users/me/.ada/skills/new-2/SKILL.md",
+      sourcePath: "/Users/me/.anita/skills/new-2/SKILL.md",
     }),
   ];
   const state = emptyState({ selected: new Set([importSkillKey(oldSkill)]) });
@@ -140,7 +140,7 @@ test("buildImportRequest translates the selection into the API payload", () => {
   const skills = [
     makeSkill({
       name: "a",
-      sourcePath: "/Users/me/.ada/skills/a/SKILL.md",
+      sourcePath: "/Users/me/.anita/skills/a/SKILL.md",
     }),
     makeSkill({
       name: "b",
@@ -161,7 +161,7 @@ test("buildImportRequest translates the selection into the API payload", () => {
   assert.equal(selections.length, 2);
   const byName = Object.fromEntries(selections.map((s) => [s.sourcePath, s]));
   assert.ok(byName[skills[0].sourcePath]);
-  assert.equal(byName[skills[0].sourcePath].providerId, "ada");
+  assert.equal(byName[skills[0].sourcePath].providerId, "anita");
   assert.equal(byName[skills[0].sourcePath].overwrite, false);
   assert.ok(byName[skills[2].sourcePath]);
   assert.equal(byName[skills[2].sourcePath].providerId, "claude");
@@ -173,11 +173,11 @@ test("buildImportRequest forwards the overwrite flag to every selection", () => 
   const skills = [
     makeSkill({
       name: "a",
-      sourcePath: "/Users/me/.ada/skills/a/SKILL.md",
+      sourcePath: "/Users/me/.anita/skills/a/SKILL.md",
     }),
     makeSkill({
       name: "b",
-      sourcePath: "/Users/me/.ada/skills/b/SKILL.md",
+      sourcePath: "/Users/me/.anita/skills/b/SKILL.md",
     }),
   ];
   const state: ImportSelectionState = {
@@ -194,11 +194,11 @@ test("buildImportRequest forwards the overwrite flag to every selection", () => 
 test("buildImportRequest drops stale keys not in the discoverable list", () => {
   const orphan = makeSkill({
     name: "orphan",
-    sourcePath: "/Users/me/.ada/skills/orphan/SKILL.md",
+    sourcePath: "/Users/me/.anita/skills/orphan/SKILL.md",
   });
   const visible = makeSkill({
     name: "visible",
-    sourcePath: "/Users/me/.ada/skills/visible/SKILL.md",
+    sourcePath: "/Users/me/.anita/skills/visible/SKILL.md",
   });
   const state: ImportSelectionState = {
     selected: new Set([importSkillKey(orphan), importSkillKey(visible)]),
@@ -206,27 +206,27 @@ test("buildImportRequest drops stale keys not in the discoverable list", () => {
   };
   const { selections } = buildImportRequest(state, [visible]);
   assert.equal(selections.length, 1);
-  assert.equal(selections[0].providerId, "ada");
+  assert.equal(selections[0].providerId, "anita");
   assert.equal(selections[0].sourcePath, visible.sourcePath);
 });
 
 test("summarizeImportResults tallies per-status counts", () => {
   const results: SkillImportResult[] = [
     {
-      providerId: "ada",
+      providerId: "anita",
       scope: "user",
       name: "a",
       status: "imported",
     },
     {
-      providerId: "ada",
+      providerId: "anita",
       scope: "user",
       name: "b",
       status: "skipped",
       reason: "collision",
     },
     {
-      providerId: "ada",
+      providerId: "anita",
       scope: "user",
       name: "c",
       status: "imported",

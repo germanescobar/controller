@@ -204,7 +204,7 @@ export function ImportSkillsDialog({
         <DialogHeader>
           <DialogTitle>Import per-agent skills</DialogTitle>
           <DialogDescription>
-            Skills installed under Ada, Codex, and Claude (user, system, or
+            Skills installed under Anita, Codex, and Claude (user, system, or
             project repo locations) can be promoted into the unified catalog
             so they win by name for every agent.
           </DialogDescription>
@@ -227,7 +227,7 @@ export function ImportSkillsDialog({
               <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
                 No importable skills found. Install skills under
                 <code className="mx-1 rounded bg-muted px-1 py-0.5 text-xs">
-                  ~/.ada/skills
+                  ~/.anita/skills
                 </code>
                 ,
                 <code className="mx-1 rounded bg-muted px-1 py-0.5 text-xs">
@@ -239,7 +239,7 @@ export function ImportSkillsDialog({
                 </code>
                 , or under a project&apos;s
                 <code className="mx-1 rounded bg-muted px-1 py-0.5 text-xs">
-                  ./.ada/skills
+                  ./.anita/skills
                 </code>
                 directory.
               </div>
