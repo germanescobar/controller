@@ -19,6 +19,7 @@ export interface PreviewWebview extends HTMLElement {
   getURL: () => string;
   getTitle: () => string;
   isLoading?: () => boolean;
+  reload?: () => void;
 }
 
 export interface PreviewBrowserHostOptions {
