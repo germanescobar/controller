@@ -367,6 +367,116 @@ interface ManagedSkill {
   body: string;
 }
 
+function buildSkillCreatorSkillBody(cliPath: string): string {
+  return `---
+name: skill-creator
+description: Create a new unified skill in the Controller catalog by interviewing the user, drafting a SKILL.md, and writing it via the Controller CLI. Use when the user asks to build a new skill, document a recurring workflow, or turn a one-off conversation into a reusable skill.
+---
+
+${MANAGED_MARKER}
+
+# Skill Creator
+
+You help the user create a new unified skill in Controller's app-owned
+catalog at \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Skills created
+here are available to every agent immediately and surface in the \`/\`
+picker.
+
+Use the Controller CLI to validate, write, and verify the skill:
+
+\`\`\`
+${cliPath} skills list
+${cliPath} skills search <query>
+${cliPath} skills create --name <name> --description <description> [--body <body> | --body-file <path>]
+\`\`\`
+
+The CLI is invoked by its absolute path — it is **not** on your PATH. Always
+pass the full path shown above.
+
+## Workflow
+
+Follow these steps in order. Skip a step only when the user has already
+provided the relevant information explicitly.
+
+1. **Understand intent.** Ask clarifying questions until you can articulate
+   what the skill should do, when the agent should reach for it, and what
+   "good" looks like. Prefer concrete examples over abstractions.
+
+2. **Check for collisions.** Run \`${cliPath} skills search <keyword>\` with
+   a couple of queries that describe the proposed skill. If a near-match
+   already exists, surface it and ask the user whether to refine the
+   existing skill, pick a different name, or continue anyway.
+
+3. **Draft the skill.** Write the three required fields:
+   - \`name\` — lowercase, letters/digits/dots/dashes/underscores only, up
+     to 64 characters. Recommend something the user can type as a
+     \`/<name>\` invocation.
+   - \`description\` — one sentence, up to 1024 characters, that tells the
+     agent *when* to use the skill. The description is the trigger; make
+     it concrete (\"Use when...\").
+   - \`body\` — the markdown body that follows the frontmatter. Use the
+     same tone as the other managed skills (sections, code blocks for
+     commands, "When this skill applies", "Notes"). Bodies are written as
+     guidance for the agent, not user-facing copy.
+
+4. **Confirm with the user.** Show the proposed \`name\`, \`description\`,
+   and a short summary of the body. Do not call \`create\` until the user
+   explicitly approves.
+
+5. **Write the skill.** Invoke:
+
+   \`\`\`
+   ${cliPath} skills create --name <name> --description <description> --body-file /tmp/skill-body.md
+   \`\`\`
+
+   Write the body to a temp file (or use \`--body\` for short skills) so
+   you don't have to hand-craft frontmatter. The CLI validates the name
+   and description and rejects duplicates.
+
+6. **Verify.** Run \`${cliPath} skills describe <name>\` to confirm the
+   file was written correctly, and \`${cliPath} skills search <keyword>\`
+   to confirm it shows up in the catalog.
+
+7. **Hand off.** Tell the user the new skill is available: it will appear
+   in the \`/\` picker for any agent in any worktree, and they can edit or
+   delete it from Settings → Skills.
+
+## Handling errors
+
+The \`create\` command returns a non-zero status and prints the validation
+error to stderr when input is rejected. Common cases:
+
+- **Duplicate name** — pick a different name and try again.
+- **Invalid name** (contains spaces, slashes, or other forbidden chars;
+  longer than 64 characters) — propose a corrected name and confirm.
+- **Missing or too-long description** — rewrite the description so it
+  fits the 1024-character limit and clearly describes the trigger.
+- **Empty body** — ask the user to confirm what the skill should instruct
+  the agent to do, then re-run \`create\`.
+
+Never silently rewrite the user's input; surface the error and ask.
+
+## Editing an existing skill
+
+This skill creates *new* skills. To edit a skill the user already has,
+point them at Settings → Skills, or use the \`update\` API
+(\`PUT /api/unified-skills/<name>\`) directly. The CLI \`create\` command
+fails on duplicate names so it cannot be used as an edit path.
+
+## Notes
+
+- Unified skills take precedence over per-agent skills with the same name,
+  so creating a skill called \`browser\` would shadow the managed
+  \`browser\` skill. Confirm with the user before claiming a name that
+  might collide with a built-in.
+- The CLI writes to \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Do
+  not try to write the file directly — let the CLI perform validation.
+- Skill activation (\`/name\`) prepends the body to the user's next
+  message, so the body should read as instructions *to the agent*, not
+  prose for the user.
+`;
+}
+
 interface ProviderSkillHome {
   id: string;
   dir: string;
@@ -394,14 +504,17 @@ function providerHomes(): ProviderSkillHome[] {
  * identical content.
  */
 export async function installManagedSkills(): Promise<void> {
-  // The unified CLI is invoked as `<path> <surface> <command>`; each skill gets
-  // its surface-prefixed invocation so the documented commands are runnable.
+  // The unified CLI is invoked as `<path> <surface> <command>`. The browser
+  // and integrations bodies render only the subcommand (so we pass the
+  // surface-prefixed path); the search-skills and skill-creator bodies
+  // embed the surface themselves, so we pass the bare CLI path there.
   const cli = controllerCliInstalledPath();
   const skills: ManagedSkill[] = [
     { name: "browser", body: buildBrowserSkillBody(`${cli} browser`) },
     { name: "integrations", body: buildIntegrationsSkillBody(`${cli} integrations`) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
-    { name: "search-skills", body: buildSearchSkillsBody(`${cli} skills`) },
+    { name: "search-skills", body: buildSearchSkillsBody(cli) },
+    { name: "skill-creator", body: buildSkillCreatorSkillBody(cli) },
   ];
 
   for (const { dir } of providerHomes()) {
