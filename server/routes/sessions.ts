@@ -48,6 +48,7 @@ import {
   type ClaudePermissionSuggestion,
 } from "../lib/agents.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
+import { canonicalProviderId, DEFAULT_PROVIDER_ID } from "../lib/provider-id.js";
 import {
   buildSkillHistoryMessage,
   buildSkillPrefix,
@@ -594,7 +595,9 @@ async function handleSessionStream(
     | "xhigh"
     | undefined;
   const serviceTier = req.query.serviceTier === "fast" ? "fast" : undefined;
-  const providerId = (req.query.provider as string) || "ada";
+  const providerId = canonicalProviderId(
+    (req.query.provider as string) || DEFAULT_PROVIDER_ID
+  );
   const mode = (req.query.mode as "default" | "plan" | undefined) || "default";
   const attachmentIds = (req.query.attachmentIds as string | undefined)
     ?.split(",")
@@ -612,7 +615,7 @@ async function handleSessionStream(
     res.status(400).json({ error: "message query param is required" });
     return;
   }
-  if (attachmentIds.length > 0 && providerId !== "ada" && providerId !== "codex" && providerId !== "claude") {
+  if (attachmentIds.length > 0 && providerId !== "anita" && providerId !== "codex" && providerId !== "claude") {
     res.status(400).json({ error: `${provider.name} does not support attachments` });
     return;
   }
@@ -642,7 +645,7 @@ async function handleSessionStream(
   // covered by the managed `browser` skill installed on startup.
   //
   // Delivery channel depends on the provider:
-  //   - Ada: pass the preamble via `--system-prompt` (real system message, never
+  //   - Anita: pass the preamble via `--system-prompt` (real system message, never
   //     echoed in the chat transcript). The skill prefix stays in the user
   //     message because it is per-turn and request-scoped.
   //   - Codex / Claude: prepend to the user message — the only reliable channel
@@ -650,7 +653,7 @@ async function handleSessionStream(
   //     mode; Claude's plan mode flows through the stream-json control channel).
   //     The skill prefix, if any, stays after the preamble.
   const controllerPreamble = buildControllerPreamble();
-  const usesSystemPrompt = providerId === "ada";
+  const usesSystemPrompt = providerId === "anita";
   const agentMessage = usesSystemPrompt
     ? skillResolution.agentMessage
     : framePreambleForPrompt(controllerPreamble) + skillResolution.agentMessage;
@@ -714,15 +717,15 @@ async function handleSessionStream(
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
-  // For non-Ada providers, we persist events ourselves since they don't
-  // write to .coding-agent/events/ like Ada does.
-  const shouldPersist = providerId !== "ada";
+  // For non-Anita providers, we persist events ourselves since they don't
+  // write to .coding-agent/events/ like Anita does.
+  const shouldPersist = providerId !== "anita";
   let streamSessionId = resumeSessionId ?? "";
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
   let runTerminated = false;
   // True when the most recent terminal event we streamed was
-  // `run.cancelled` (i.e. Ada exited cleanly with code 130 after a
+  // `run.cancelled` (i.e. Anita exited cleanly with code 130 after a
   // cooperative abort). When the child then closes with a non-zero
   // status, we must NOT synthesize a `run.failed` on top of it — the
   // synthetic banner is the exact bug this flag exists to prevent
@@ -735,12 +738,12 @@ async function handleSessionStream(
 
   // Close stdin for CLIs that otherwise wait on an open pipe. We pass the
   // prompt as an argv argument, so these providers don't need stdin; leaving
-  // it open has been observed to make Ada hang silently mid-run. Plan-mode
+  // it open has been observed to make Anita hang silently mid-run. Plan-mode
   // Claude is the exception: it streams the prompt and live approval decisions
   // over stdin, so its pipe must stay open for the whole turn.
   const claudeUsesControlChannel = providerId === "claude" && mode === "plan";
   if (
-    providerId === "ada" ||
+    providerId === "anita" ||
     providerId === "codex" ||
     (providerId === "claude" && !claudeUsesControlChannel)
   ) {
@@ -759,7 +762,7 @@ async function handleSessionStream(
       metadata: { projectId: req.params.projectId, worktreeId },
     });
     // Always write a user_message event so attachments persist for reloaded
-    // sessions. Some providers (e.g. Ada) also write their own user_message
+    // sessions. Some providers (e.g. Anita) also write their own user_message
     // event with empty attachments; the GET /events endpoint collapses
     // consecutive duplicates with the same text.
     if (!userMessageWritten) {
@@ -789,7 +792,7 @@ async function handleSessionStream(
         ? historyText.slice(0, 60) + "..."
         : historyText;
     // Focus state lives in a Controller-owned sidecar, not on the
-    // agent session file: Ada's `SessionStore.save()` (and similar
+    // agent session file: Anita's `SessionStore.save()` (and similar
     // writers) would silently drop our fields on every save, so a
     // brand-new session's auto-pin would vanish within ~1s. See
     // issue #139 / #140.
@@ -879,7 +882,7 @@ async function handleSessionStream(
     runTerminated = true;
     // If the run was already cancelled cooperatively, the inactivity
     // timeout is firing *because* the process is winding down on
-    // SIGINT — Ada may be silent in the gap between the `run.cancelled`
+    // SIGINT — Anita may be silent in the gap between the `run.cancelled`
     // event and the final exit. Reap the child silently so the run
     // ends, but do NOT emit a second terminal event on top of the
     // `run.cancelled` we already streamed (issue #94).
@@ -900,7 +903,7 @@ async function handleSessionStream(
       )}s; stopping the stalled run.`,
       timestamp: new Date().toISOString(),
     };
-    sseSend({ type: "ada_event", event: failureEvent });
+    sseSend({ type: "anita_event", event: failureEvent });
     // Persist to disk so the failure is visible after reconnects.
     persistAgentEvent(failureEvent);
     if (child.exitCode === null && !child.killed) {
@@ -963,7 +966,7 @@ async function handleSessionStream(
               .then(async () => {
                 // Always persist session metadata on run.started so
                 // provider/model are available when loading any session.
-                // Only persist individual events for non-Ada providers.
+                // Only persist individual events for non-Anita providers.
                 if (event.type === "run.started") {
                   await persistSessionStart(event.sessionId);
                 } else if (
@@ -992,7 +995,7 @@ async function handleSessionStream(
                     suggestions: event.suggestions,
                   });
                 }
-                sseSend({ type: "ada_event", event });
+                sseSend({ type: "anita_event", event });
               })
               .catch(() => {});
             if (providerId === "claude" && event.type === "user.input_requested") {
@@ -1055,7 +1058,7 @@ async function handleSessionStream(
                 runTerminated = true;
                 runCancelled = event.type === "run.cancelled";
               }
-              sseSend({ type: "ada_event", event });
+              sseSend({ type: "anita_event", event });
               if (providerId === "claude" && event.type === "user.input_requested") {
                 pausedForClaudeUserInput = true;
               }
@@ -1078,9 +1081,9 @@ async function handleSessionStream(
         // Emit a synthetic run.failed when the process ended abnormally
         // without already reporting completion or failure via stdout events.
         // Skip this entirely when the run was cancelled cooperatively:
-        // Ada emits `run.cancelled` and then exits with code 130, which
+        // Anita emits `run.cancelled` and then exits with code 130, which
         // is *not* an abnormal termination — surfacing both events would
-        // produce the misleading "Ada process exited with code 130" banner
+        // produce the misleading "Anita process exited with code 130" banner
         // (see issue #94).
         if (
           !runTerminated &&
@@ -1101,7 +1104,7 @@ async function handleSessionStream(
               error: errorText,
               timestamp: new Date().toISOString(),
             };
-            sseSend({ type: "ada_event", event: failureEvent });
+            sseSend({ type: "anita_event", event: failureEvent });
             persistAgentEvent(failureEvent);
           }
         }
@@ -1450,7 +1453,7 @@ async function streamCodexPlanSession(
           persistAgentEvent(event);
         }
 
-        sseSend({ type: "ada_event", event });
+        sseSend({ type: "anita_event", event });
 
         if (event.type === "run.completed" || event.type === "run.failed") {
           if (!streamSessionId) {

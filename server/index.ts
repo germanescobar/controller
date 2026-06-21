@@ -205,7 +205,7 @@ async function start(): Promise<void> {
     await restoreLoginShellPath();
   }
   // Sync managed skills (browser, controller-scripts, etc.) into each agent's
-  // user skills home so they are available across Ada, Codex, and Claude.
+  // user skills home so they are available across Anita, Codex, and Claude.
   await installManagedSkills().catch((error: unknown) => {
     console.error("Failed to install managed skills:", error);
   });

@@ -4,7 +4,7 @@ import { setAgentSetting } from "../lib/agent-settings.js";
 
 export const agentsRouter = Router();
 
-/** Install + enable status for every agent (Ada, Codex, Claude Code). */
+/** Install + enable status for every agent (Anita, Codex, Claude Code). */
 agentsRouter.get("/", async (_req, res) => {
   res.json(await getAgentStatuses());
 });

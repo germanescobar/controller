@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import { agentSettingsFile, ensureOrchestratorHome } from "./paths.js";
 import { clearCommandResolverCache } from "./command-resolver.js";
+import { canonicalProviderId } from "./provider-id.js";
 
 export interface AgentSetting {
   /** Whether the user has enabled this agent in Settings. */
@@ -27,7 +28,9 @@ function normalizeStore(parsed: unknown): AgentSettingsStore {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const store: AgentSettingsStore = {};
   for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
-    store[id] = normalizeSetting(value);
+    // Resolve legacy agent ids (e.g. "ada") to their canonical form so
+    // settings saved before the Ada→Anita rename keep applying.
+    store[canonicalProviderId(id)] = normalizeSetting(value);
   }
   return store;
 }
@@ -49,7 +52,7 @@ async function writeStore(store: AgentSettingsStore): Promise<void> {
 /** Settings for a single agent, falling back to the enabled-by-default value. */
 export async function getAgentSetting(agentId: string): Promise<AgentSetting> {
   const store = await readStore();
-  return store[agentId] ?? { ...DEFAULT_SETTING };
+  return store[canonicalProviderId(agentId)] ?? { ...DEFAULT_SETTING };
 }
 
 export async function getAgentSettings(): Promise<AgentSettingsStore> {
@@ -60,8 +63,9 @@ export async function setAgentSetting(
   agentId: string,
   patch: Partial<AgentSetting>
 ): Promise<AgentSetting> {
+  const id = canonicalProviderId(agentId);
   const store = await readStore();
-  const current = store[agentId] ?? { ...DEFAULT_SETTING };
+  const current = store[id] ?? { ...DEFAULT_SETTING };
   const next: AgentSetting = {
     enabled: patch.enabled ?? current.enabled,
     path:
@@ -71,7 +75,7 @@ export async function setAgentSetting(
           ? patch.path.trim()
           : null,
   };
-  store[agentId] = next;
+  store[id] = next;
   await writeStore(store);
   // A changed path override invalidates any cached resolution/version.
   clearCommandResolverCache();

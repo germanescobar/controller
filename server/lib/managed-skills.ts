@@ -382,7 +382,7 @@ function codexSkillsHome(): string {
 
 function providerHomes(): ProviderSkillHome[] {
   return [
-    { id: "ada", dir: path.join(os.homedir(), ".ada", "skills") },
+    { id: "anita", dir: path.join(os.homedir(), ".anita", "skills") },
     { id: "codex", dir: codexSkillsHome() },
     { id: "claude", dir: path.join(os.homedir(), ".claude", "skills") },
   ];

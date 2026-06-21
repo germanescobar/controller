@@ -146,7 +146,7 @@ export interface UserInputQuestion {
   options: UserInputOption[];
 }
 
-export type AdaStreamEvent =
+export type AnitaStreamEvent =
   | {
       type: "run.started";
       sessionId: string;
@@ -226,7 +226,7 @@ export type AdaStreamEvent =
 
 export type SessionStreamEvent =
   | { type: "started" }
-  | { type: "ada_event"; event: AdaStreamEvent }
+  | { type: "anita_event"; event: AnitaStreamEvent }
   | { type: "stderr"; text: string }
   | { type: "done"; exitCode: number | null }
   | { type: "error"; text: string; raw?: string }
