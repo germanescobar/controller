@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext, createElement } from "react";
+import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
 import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw, Pencil } from "lucide-react";
 import hljs from "highlight.js/lib/core";
@@ -38,8 +38,13 @@ import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
-import { getController, isControllerAvailable } from "@/lib/controller";
-import { usePreviewBrowserHost, type PreviewWebview } from "@/lib/usePreviewBrowserHost";
+import { isControllerAvailable } from "@/lib/controller";
+import {
+  usePreviewPane,
+  useActivePreviewPane,
+  usePreviewOpen,
+  type PreviewPaneState,
+} from "@/components/PreviewBrowserPool";
 import {
   fetchActiveRuntimes,
   fetchEvents,
@@ -620,14 +625,6 @@ interface SourceFilePreview {
 interface PreviewActions {
   available: boolean;
   open: (url: string) => void;
-}
-
-interface PreviewState {
-  input: string;
-  url: string | null;
-  title: string | null;
-  loading: boolean;
-  error: string | null;
 }
 
 type RightPanelTab = "terminal" | "changes" | "files" | "preview";
@@ -2401,70 +2398,29 @@ function FileTree({
   );
 }
 
-type PreviewWebviewElement = HTMLElement & {
-  reload: () => void;
-};
-
-function previewEventString(event: Event, key: "url" | "errorDescription" | "title"): string | null {
-  const value = (event as Event & Record<typeof key, unknown>)[key];
-  return typeof value === "string" ? value : null;
-}
-
+/*
+ * Preview chrome (URL bar, status, empty state). The live `<webview>` itself is
+ * owned by the app-level `PreviewBrowserProvider` and overlaid onto the
+ * `placeholderRef` element so it survives session/worktree switches (issue #158).
+ */
 function PreviewPanel({
   projectRoot,
   state,
   onClear,
   onOpenUrl,
-  onStateChange,
-  externalWebviewRef,
+  onReload,
+  onSetInput,
+  placeholderRef,
 }: {
   projectRoot?: string;
-  state: PreviewState;
+  state: PreviewPaneState;
   onClear: () => void;
   onOpenUrl: (url: string) => void;
-  onStateChange: (state: Partial<PreviewState>) => void;
-  // Mirrors the live `<webview>` element so the preview browser host can drive
-  // it from SessionView. Set alongside the internal ref in the ref callback.
-  externalWebviewRef?: React.MutableRefObject<PreviewWebview | null>;
+  onReload: () => void;
+  onSetInput: (input: string) => void;
+  // Region the pool sizes/positions the live webview over.
+  placeholderRef: (element: HTMLDivElement | null) => void;
 }) {
-  const webviewRef = useRef<PreviewWebviewElement | null>(null);
-
-  useEffect(() => {
-    const webview = webviewRef.current;
-    if (!webview) return;
-
-    const handleStart = () => onStateChange({ loading: true, error: null });
-    const handleStop = () => onStateChange({ loading: false });
-    const handleFail = (event: Event) => {
-      onStateChange({
-        loading: false,
-        error: previewEventString(event, "errorDescription") ?? "Preview failed to load",
-      });
-    };
-    const handleTitle = (event: Event) => {
-      onStateChange({ title: previewEventString(event, "title") });
-    };
-    const handleWillNavigate = (event: Event) => {
-      const nextUrl = previewEventString(event, "url");
-      if (!nextUrl || nextUrl === state.url) return;
-      event.preventDefault();
-      onOpenUrl(nextUrl);
-    };
-
-    webview.addEventListener("did-start-loading", handleStart);
-    webview.addEventListener("did-stop-loading", handleStop);
-    webview.addEventListener("did-fail-load", handleFail);
-    webview.addEventListener("page-title-updated", handleTitle);
-    webview.addEventListener("will-navigate", handleWillNavigate);
-    return () => {
-      webview.removeEventListener("did-start-loading", handleStart);
-      webview.removeEventListener("did-stop-loading", handleStop);
-      webview.removeEventListener("did-fail-load", handleFail);
-      webview.removeEventListener("page-title-updated", handleTitle);
-      webview.removeEventListener("will-navigate", handleWillNavigate);
-    };
-  }, [onOpenUrl, onStateChange, state.url]);
-
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     onOpenUrl(state.input);
@@ -2479,7 +2435,7 @@ function PreviewPanel({
         <Globe2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <input
           value={state.input}
-          onChange={(event) => onStateChange({ input: event.target.value })}
+          onChange={(event) => onSetInput(event.target.value)}
           placeholder="https://example.com, localhost:5173, or project file path"
           className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-2 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
         />
@@ -2491,7 +2447,7 @@ function PreviewPanel({
         </button>
         <button
           type="button"
-          onClick={() => webviewRef.current?.reload()}
+          onClick={onReload}
           disabled={!state.url}
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           title="Reload preview"
@@ -2525,30 +2481,19 @@ function PreviewPanel({
           ) : null}
         </div>
       ) : null}
-      {state.url ? (
-        createElement("webview", {
-          ref: (element: PreviewWebviewElement | null) => {
-            webviewRef.current = element;
-            if (externalWebviewRef) {
-              externalWebviewRef.current = element as unknown as PreviewWebview | null;
-            }
-          },
-          src: state.url,
-          partition: "controller-preview",
-          className: "min-h-0 flex-1",
-          webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
-        })
-      ) : (
-        <div className="flex flex-1 items-center justify-center px-6 text-center">
-          <div className="max-w-sm">
-            <Globe2 className="mx-auto mb-3 h-7 w-7 text-muted-foreground/60" />
-            <div className="text-sm font-medium text-foreground">No preview open</div>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Open a web URL or an HTML/file path inside the active project.
-            </p>
+      <div ref={placeholderRef} className="relative min-h-0 flex-1">
+        {!state.url && (
+          <div className="flex h-full items-center justify-center px-6 text-center">
+            <div className="max-w-sm">
+              <Globe2 className="mx-auto mb-3 h-7 w-7 text-muted-foreground/60" />
+              <div className="text-sm font-medium text-foreground">No preview open</div>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Open a web URL or an HTML/file path inside the active project.
+              </p>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -2748,13 +2693,9 @@ export function SessionView({
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
-  const [previewState, setPreviewState] = useState<PreviewState>({
-    input: "",
-    url: null,
-    title: null,
-    loading: false,
-    error: null,
-  });
+  // Element the app-level preview pool overlays the live `<webview>` onto. Set
+  // by `PreviewPanel` only while the Preview tab is visible (issue #158).
+  const [previewPlaceholder, setPreviewPlaceholder] = useState<HTMLDivElement | null>(null);
   // Slash-command skills. The list is fetched for the current provider +
   // worktree; `activeSkill` is what gets sent as `skillName` on the next
   // message (the chip + autocomplete popover UI is driven by these).
@@ -4587,72 +4528,34 @@ export function SessionView({
     openSourcePath(reference.path, reference.line, reference.label);
   }, [openSourcePath]);
 
-  const updatePreviewState = useCallback((next: Partial<PreviewState>) => {
-    setPreviewState((current) => ({ ...current, ...next }));
-  }, []);
+  // The live preview pane (state + `<webview>` + bridge socket) is owned by the
+  // app-level pool, keyed by `projectId:worktreeId` to match the worktree the
+  // server resolves from the agent's cwd. Keeping it above the (remounting)
+  // SessionView lets the browser survive session/worktree switches (issue #158).
+  const browserKey = activeWorktree ? `${projectId}:${activeWorktree.id}` : null;
+  const previewPane = usePreviewPane(browserKey);
+  const openPreviewUrl = usePreviewOpen();
 
-  const clearPreview = useCallback(() => {
-    setPreviewState((current) => ({
-      ...current,
-      url: null,
-      title: null,
-      loading: false,
-      error: null,
-    }));
-  }, []);
-
-  const openPreviewUrl = useCallback((url: string) => {
-    if (!isControllerAvailable()) {
-      toast.error("Preview is only available in the Electron app");
-      return;
-    }
+  // Bring the Preview tab forward when an agent opens a URL on this pane.
+  const surfacePreview = useCallback(() => {
     setTerminalOpen(true);
     setRightTab("preview");
     setMobilePanel("preview");
-    updatePreviewState({ input: url, loading: true, error: null });
-    getController()
-      .validatePreviewUrl(url, previewProjectRoot)
-      .then((result) => {
-        if (!result.allowed || !result.url) {
-          updatePreviewState({
-            loading: false,
-            error: result.error ?? "Preview URL is not allowed",
-          });
-          toast.error(result.error ?? "Preview URL is not allowed");
-          return;
-        }
-        setPreviewState((current) => ({
-          ...current,
-          input: result.url ?? url,
-          url: result.url ?? url,
-          title: null,
-          loading: true,
-          error: null,
-        }));
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : "Failed to open preview";
-        updatePreviewState({ loading: false, error: message });
-        toast.error(message);
-      });
-  }, [previewProjectRoot, updatePreviewState]);
+  }, []);
+
+  useActivePreviewPane({
+    key: browserKey,
+    projectRoot: previewProjectRoot,
+    placeholder: previewPlaceholder,
+    onSurface: surfacePreview,
+  });
 
   const previewActions = useMemo<PreviewActions>(() => ({
     available: previewAvailable,
-    open: openPreviewUrl,
-  }), [openPreviewUrl, previewAvailable]);
-
-  // Register this session's preview pane with the server so agents can drive it
-  // through the `controller-browser` CLI. Keyed by `projectId:worktreeId` to
-  // match the worktree the server resolves from the agent's cwd.
-  const previewWebviewRef = useRef<PreviewWebview | null>(null);
-  const browserKey = activeWorktree ? `${projectId}:${activeWorktree.id}` : null;
-  usePreviewBrowserHost({
-    enabled: previewAvailable,
-    browserKey,
-    getWebview: useCallback(() => previewWebviewRef.current, []),
-    openUrl: openPreviewUrl,
-  });
+    open: (url: string) => {
+      if (browserKey) openPreviewUrl(browserKey, url);
+    },
+  }), [previewAvailable, browserKey, openPreviewUrl]);
 
   const handleStructuredUserInputSubmit = async (
     requestId: string,
@@ -5941,13 +5844,13 @@ export function SessionView({
                       ? "bg-accent/30 text-foreground"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
-                  title={previewState.url ?? "Preview"}
+                  title={previewPane.state.url ?? "Preview"}
                 >
                   <Globe2 className="h-3 w-3 shrink-0" />
                   <span className="shrink-0">Preview</span>
-                  {previewState.url ? (
+                  {previewPane.state.url ? (
                     <span className="max-w-36 truncate font-mono text-[10px] text-muted-foreground/70">
-                      {previewState.url}
+                      {previewPane.state.url}
                     </span>
                   ) : null}
                 </button>
@@ -6062,11 +5965,12 @@ export function SessionView({
                 <div className="absolute inset-0 overflow-hidden bg-background">
                   <PreviewPanel
                     projectRoot={previewProjectRoot}
-                    state={previewState}
-                    onClear={clearPreview}
-                    onOpenUrl={openPreviewUrl}
-                    onStateChange={updatePreviewState}
-                    externalWebviewRef={previewWebviewRef}
+                    state={previewPane.state}
+                    onClear={previewPane.clear}
+                    onOpenUrl={previewPane.open}
+                    onReload={previewPane.reload}
+                    onSetInput={previewPane.setInput}
+                    placeholderRef={setPreviewPlaceholder}
                   />
                 </div>
               )}
