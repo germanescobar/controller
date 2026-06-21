@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Updated session-file ownership comments to reflect post-#152 / #163
+  reality** (#165). The Ada→Anita rename moved the `anita` CLI's session
+  store to `.anita/sessions/`, so for new sessions the
+  `.coding-agent/sessions/<id>.json` file is now Controller-owned only.
+  The focus-field stripping in `saveSession` is still useful — legacy
+  resumed sessions can still be co-written by the agent via the
+  `.coding-agent/sessions/` fallback, and any future provider that
+  re-introduces an on-disk writer would silently drop unknown top-level
+  fields — but the comments at `server/lib/sessions.ts`, `focus-state.ts`,
+  `paths.ts`, `routes/sessions.ts`, and the matching regression tests
+  previously described the file as "agent-owned" and justified the
+  stripping as "Anita's writer would erase our fields." That rationale
+  is no longer the whole story; the comments now describe the real
+  invariant (the on-disk file keeps a shape any provider can round-trip,
+  and focus state lives in the Controller-owned sidecar).
+
 ### Fixed
 
 - **Anita multi-turn transcripts now render in full** (#163). The orchestrator

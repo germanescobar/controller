@@ -67,9 +67,13 @@ export function worktreesRegistryFile(): string {
 /**
  * Directory holding per-session focus sidecars. Controller-owned
  * focus-queue state lives here, keyed by the provider-generated
- * (globally unique) session id, rather than on the agent-owned
- * `.coding-agent/sessions/<id>.json` file the agent rewrites on
- * every save (issue #139).
+ * (globally unique) session id, rather than on the
+ * orchestrator-owned `.coding-agent/sessions/<id>.json` file. The
+ * separation survives any future provider that re-introduces an
+ * on-disk writer (it would silently drop unknown top-level
+ * fields) and legacy resumed sessions the agent still
+ * co-writes via the `.coding-agent/sessions/` fallback. See
+ * #139 / #165.
  */
 export function sessionFocusDir(): string {
   return path.join(orchestratorHome(), "focus");

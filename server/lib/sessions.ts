@@ -27,11 +27,16 @@ export interface SessionState {
   status: string;
   // The three focus-queue fields below are populated by `getSession`
   // and `getSessions` by merging in the Controller-owned sidecar at
-  // `~/coding-orchestrator/focus/<sessionId>.json`.
-  // They are *not* persisted on the agent-owned session file:
-  // `saveSession` strips them before writing, since the agent
-  // (e.g. Anita) owns `.coding-agent/sessions/` and silently drops
-  // unknown top-level fields on every save (issue #139).
+  // `~/coding-orchestrator/focus/<sessionId>.json`. They are *not*
+  // persisted on the orchestrator-owned `.coding-agent/sessions/<id>.json`
+  // file: `saveSession` strips them before writing so the session
+  // file stays in a shape any provider can round-trip. After the
+  // Ada→Anita rename (#152) the `anita` CLI writes its own session
+  // to `.anita/sessions/`, so for new sessions the
+  // `.coding-agent/sessions/<id>.json` file is Controller-only —
+  // but legacy sessions can still be resumed through the agent
+  // (which falls back to `.coding-agent/sessions/`), so stripping
+  // remains the safe default. See #139 / #165.
   focusPinnedAt?: string;
   focusDoneAt?: string;
   // Set when the user explicitly unpins the session. Auto-pin on
@@ -152,7 +157,7 @@ export async function getSessions(
 ): Promise<SessionState[]> {
   const dir = storagePaths(projectPath).sessions;
   // Read the focus sidecars in a single pass so we can merge them
-  // into the agent-session list without a per-session round trip.
+  // into the session list without a per-session round trip.
   const focusById = await listSessionFocuses();
   let files: string[];
   try {
@@ -169,8 +174,8 @@ export async function getSessions(
       const content = await fs.readFile(filePath, "utf-8");
       session = JSON.parse(content) as SessionState;
     } catch {
-      // Skip unreadable / malformed agent session files so one
-      // broken file doesn't take down the whole list.
+      // Skip unreadable / malformed session files so one broken
+      // file doesn't take down the whole list.
       continue;
     }
     applyFocus(session, focusById.get(session.id) ?? null);
@@ -225,13 +230,14 @@ export async function getSession(
     storagePaths(projectPath).sessions,
     `${sessionId}.json`
   );
-  // Read and parse in the same try block. The agent (Anita) rewrites
-  // this file multiple times per run, so a request can race the
-  // writer and observe an empty or partially written file; both
-  // the read and the parse must be non-fatal so the routes
-  // (e.g. `GET /sessions/:sessionId`, `GET .../runtime`) keep
-  // returning a clean 404 instead of turning a transient bad
-  // read into a 500.
+  // Read and parse in the same try block. The session file can
+  // be rewritten mid-run (e.g. for legacy resumed sessions the
+  // agent still co-writes it via the `.coding-agent/sessions/`
+  // fallback), so a request can race the writer and observe an
+  // empty or partially written file; both the read and the parse
+  // must be non-fatal so the routes (e.g. `GET /sessions/:sessionId`,
+  // `GET .../runtime`) keep returning a clean 404 instead of
+  // turning a transient bad read into a 500.
   let session: SessionState;
   try {
     const content = await fs.readFile(filePath, "utf-8");
@@ -239,10 +245,10 @@ export async function getSession(
   } catch {
     return null;
   }
-  // Strip any legacy focus fields that may still be on the agent
-  // file from before issue #139 — the sidecar is the source of
-  // truth now. We do this even before merging so a stale on-disk
-  // value can't leak into the response.
+  // Strip any legacy focus fields that may still be on the
+  // session file from before issue #139 — the sidecar is the
+  // source of truth now. We do this even before merging so a
+  // stale on-disk value can't leak into the response.
   delete session.focusPinnedAt;
   delete session.focusDoneAt;
   delete session.userUnpinned;
@@ -281,7 +287,7 @@ export async function updateSessionFocus(
   sessionId: string,
   action: "pin" | "unpin" | "done"
 ): Promise<SessionState | null> {
-  // Read the focus sidecar and the agent session in parallel: the
+  // Read the focus sidecar and the session file in parallel: the
   // former holds the prior focus state we may need to preserve
   // (e.g. an existing pin timestamp), and the latter confirms the
   // session exists so the routes can return 404 otherwise.
@@ -344,11 +350,13 @@ export async function updateSessionTitle(
     storagePaths(projectPath).sessions,
     `${sessionId}.json`
   );
-  // Read and parse in the same try block: the agent rewrites this
-  // file mid-run, so a transient empty or partial file must not
-  // surface as an unhandled exception to the route. Returning
-  // `null` matches the pre-PR behavior (when this function went
-  // through `getSession`, which had the same read+parse envelope).
+  // Read and parse in the same try block: the session file can be
+  // rewritten mid-run (e.g. for legacy resumed sessions the agent
+  // still co-writes it via the `.coding-agent/sessions/` fallback),
+  // so a transient empty or partial file must not surface as an
+  // unhandled exception to the route. Returning `null` matches the
+  // pre-PR behavior (when this function went through `getSession`,
+  // which had the same read+parse envelope).
   let session: SessionState;
   try {
     const content = await fs.readFile(filePath, "utf-8");
@@ -364,10 +372,11 @@ export async function updateSessionTitle(
     delete session.title;
   }
 
-  // `updateSessionTitle` must not touch the focus sidecar, but the
-  // session file we just edited is the agent-owned one and should
-  // not gain Controller-managed fields. Strip them defensively in
-  // case a future change accidentally re-introduces them.
+  // `updateSessionTitle` must not touch the focus sidecar, and the
+  // session file should keep the shape any provider can round-trip.
+  // Strip the focus fields defensively in case a future change
+  // accidentally re-introduces them — focus state lives in the
+  // sidecar at `~/coding-orchestrator/focus/<sessionId>.json`.
   delete session.focusPinnedAt;
   delete session.focusDoneAt;
   delete session.userUnpinned;
@@ -388,7 +397,7 @@ export async function pinSessionIfNeeded(
   projectPath: string,
   sessionId: string
 ): Promise<SessionState | null> {
-  // Read the agent session to confirm the session exists and is
+  // Read the session file to confirm the session exists and is
   // not archived. The focus sidecar is read separately.
   const session = await getSession(projectPath, sessionId);
   if (!session) return null;
@@ -428,13 +437,18 @@ export async function getEvents(
 
 /**
  * Ensure session and event directories exist, then save/update a
- * session file. Controller-managed focus fields are stripped from
- * the payload before writing because this file is shared with the
- * agent process (e.g. Anita's `SessionStore.save()`) and we must not
- * pollute it with fields the agent doesn't know about (issue #139).
- * Focus state is persisted separately in
+ * session file. Focus fields are stripped from the payload before
+ * writing so the on-disk file stays in a shape any provider can
+ * round-trip without losing Controller-managed fields. After the
+ * Ada→Anita rename (#152) the `anita` CLI writes its own session
+ * to `.anita/sessions/`, so for new sessions
+ * `.coding-agent/sessions/<id>.json` is Controller-only — but
+ * legacy sessions can still be resumed through the agent (which
+ * falls back to `.coding-agent/sessions/`), and any future
+ * provider that re-introduces an on-disk writer would silently
+ * drop unknown fields. Focus state is persisted separately in
  * `~/coding-orchestrator/focus/<sessionId>.json` via
- * `writeSessionFocus`.
+ * `writeSessionFocus`. See #139 / #165.
  */
 export async function saveSession(
   projectPath: string,
@@ -443,11 +457,9 @@ export async function saveSession(
   const { sessions } = storagePaths(projectPath);
   await fs.mkdir(sessions, { recursive: true });
   const filePath = path.join(sessions, `${session.id}.json`);
-  // Strip Controller-managed focus fields before writing: this file
-  // is shared with the agent (e.g. Anita's `SessionStore.save()`) and
-  // the agent drops any top-level field it doesn't know about on
-  // every save, which would silently erase our pin/done/unpin
-  // signal (issue #139). Focus state lives separately in
+  // Strip Controller-managed focus fields before writing so the
+  // session file stays in a shape any provider can round-trip.
+  // Focus state lives separately in
   // `~/coding-orchestrator/focus/<sessionId>.json`.
   const persisted: SessionState = { ...session };
   delete persisted.focusPinnedAt;

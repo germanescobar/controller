@@ -6,18 +6,20 @@ import { sessionFocusDir, sessionFocusFile } from "./paths.js";
  * Controller-owned focus-queue state for a session.
  *
  * Lives in a sidecar file under the Controller home at
- * `~/coding-orchestrator/focus/<sessionId>.json` rather than on the
- * agent-owned `.coding-agent/sessions/<sessionId>.json`, because that
- * file is shared with the agent process (e.g. Anita writes it eight
- * times per run) and the agent's `SessionStore.save()` only knows
- * about its own fields — anything the Controller adds gets silently
- * dropped on the next save (issue #139). Session ids are globally
- * unique, so a single flat focus directory (keyed by session id) is
- * unambiguous without a per-project namespace.
- *
- * Keeping focus state in a Controller-owned file decouples it from the
- * agent's session format and ensures the auto-pin survives every
- * agent-side write.
+ * `~/coding-orchestrator/focus/<sessionId>.json` rather than on
+ * the orchestrator-owned `.coding-agent/sessions/<sessionId>.json`
+ * file. After the Ada→Anita rename (#152) the `anita` CLI writes
+ * its own session to `.anita/sessions/`, so the
+ * `.coding-agent/sessions/<id>.json` file is Controller-only for
+ * new sessions — but any future provider that re-introduces an
+ * on-disk writer would silently drop unknown top-level fields,
+ * and legacy resumed sessions can still be co-written by the
+ * agent (which falls back to `.coding-agent/sessions/`). Keeping
+ * focus state in a separate Controller-owned file decouples it
+ * from the agent's session format and guarantees the auto-pin
+ * survives every save. See #139 / #165. Session ids are globally
+ * unique, so a single flat focus directory (keyed by session id)
+ * is unambiguous without a per-project namespace.
  */
 export interface SessionFocus {
   sessionId: string;
