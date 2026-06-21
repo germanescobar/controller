@@ -41,6 +41,15 @@ export interface SessionState {
   userUnpinned?: boolean;
 }
 
+/**
+ * A session without its `messages` history. The conversation transcript can
+ * run to hundreds of KB (or megabytes) per session, so list endpoints that
+ * only need metadata (the sidebar tree, the focus queue) return summaries to
+ * keep the payload small. The full `SessionState` is still served by the
+ * single-session endpoint.
+ */
+export type SessionSummary = Omit<SessionState, "messages">;
+
 export interface AgentEvent {
   id: string;
   sessionId: string;
@@ -172,6 +181,40 @@ export async function getSessions(
       new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
   );
   return sessions.filter((s) => s.status !== "archived");
+}
+
+/**
+ * List sessions for a worktree without their conversation transcript. Used by
+ * the sidebar/focus-queue endpoint, where shipping every transcript would
+ * bloat the response to tens of megabytes for projects with many sessions.
+ *
+ * The summary is built from an explicit allowlist of metadata fields rather
+ * than by omitting known-heavy ones: session files also carry undeclared,
+ * provider-specific transcript fields (e.g. `conversationItems`) that are just
+ * as large as `messages`, and an allowlist guarantees none of them leak into
+ * the response as new fields are added.
+ */
+export async function getSessionSummaries(
+  projectPath: string
+): Promise<SessionSummary[]> {
+  const sessions = await getSessions(projectPath);
+  return sessions.map((s) => ({
+    id: s.id,
+    title: s.title,
+    workingDirectory: s.workingDirectory,
+    worktreeId: s.worktreeId,
+    model: s.model,
+    reasoningEffort: s.reasoningEffort,
+    serviceTier: s.serviceTier,
+    provider: s.provider,
+    mode: s.mode,
+    createdAt: s.createdAt,
+    lastActiveAt: s.lastActiveAt,
+    status: s.status,
+    focusPinnedAt: s.focusPinnedAt,
+    focusDoneAt: s.focusDoneAt,
+    userUnpinned: s.userUnpinned,
+  }));
 }
 
 export async function getSession(

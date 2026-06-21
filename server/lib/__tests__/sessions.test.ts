@@ -7,6 +7,7 @@ import {
   archiveSession,
   getSession,
   getSessions,
+  getSessionSummaries,
   pinSessionIfNeeded,
   saveSession,
   updateSessionFocus,
@@ -327,6 +328,48 @@ test("getSessions merges focus state from the sidecar directory", async () => {
     assert.equal(byId.get("session-1")?.focusPinnedAt, "2026-01-01T00:00:00.000Z");
     assert.equal(byId.get("session-2")?.userUnpinned, true);
     assert.equal(byId.get("session-2")?.focusPinnedAt, undefined);
+  });
+});
+
+test("getSessionSummaries strips the transcript but keeps metadata", async () => {
+  // The sidebar/focus-queue endpoint must not ship conversation transcripts:
+  // they dominate the payload (tens of MB across many sessions). The summary
+  // is built from an allowlist, so it must also drop undeclared transcript
+  // fields that providers persist alongside `messages` (e.g.
+  // `conversationItems`), not just the declared one.
+  await withTempProject(async (projectPath) => {
+    const heavy = {
+      ...makeSession({
+        id: "session-heavy",
+        title: "Heavy session",
+        provider: "codex",
+        messages: [{ role: "user", content: "x".repeat(10_000) }],
+      }),
+      // Undeclared provider field that lives in the persisted JSON.
+      conversationItems: [{ text: "y".repeat(10_000) }],
+    } as SessionState;
+    await saveSession(projectPath, heavy);
+    // Focus lives in the sidecar; the summary must surface the merged pin.
+    await writeSessionFocus(
+      makeFocus("session-heavy", { focusPinnedAt: "2026-01-01T00:00:00.000Z" })
+    );
+
+    const [summary] = await getSessionSummaries(projectPath);
+    assert.ok(summary, "summary should be returned");
+    assert.equal(summary.id, "session-heavy");
+    assert.equal(summary.title, "Heavy session");
+    assert.equal(summary.provider, "codex");
+    assert.equal(summary.focusPinnedAt, "2026-01-01T00:00:00.000Z");
+    assert.equal(
+      Object.hasOwn(summary, "messages"),
+      false,
+      "messages must be stripped from the summary"
+    );
+    assert.equal(
+      Object.hasOwn(summary, "conversationItems"),
+      false,
+      "undeclared transcript fields must be stripped too"
+    );
   });
 });
 
