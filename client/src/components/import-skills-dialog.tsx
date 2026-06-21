@@ -4,16 +4,15 @@
  * The server scans every provider's user/system skill homes plus the repo
  * skill directories of every registered project. We present the result as a
  * checkbox list; the user picks what to promote and we POST the selections
- * to `/unified-skills/import`. Name collisions with existing unified skills
- * are skipped by default; an "Overwrite existing" toggle flips the behavior
- * per-selection.
+ * to `/unified-skills/import`. Skills already in the unified catalog (by name)
+ * are hidden by default behind a "Show already imported" toggle; an "Overwrite
+ * existing" toggle lets the user re-import them to update from source.
  */
 
 import { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Download,
   Loader2,
-  AlertTriangle,
   Check,
   Minus,
   X,
@@ -65,13 +64,13 @@ interface SelectionState {
 
 const STATUS_LABEL: Record<SkillImportStatus, string> = {
   imported: "Imported",
-  skipped: "Skipped",
+  skipped: "Already imported",
   error: "Error",
 };
 
 const STATUS_BADGE: Record<SkillImportStatus, string> = {
   imported: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30",
-  skipped: "bg-amber-500/10 text-amber-600 border-amber-500/30",
+  skipped: "bg-muted text-muted-foreground border-border",
   error: "bg-destructive/10 text-destructive border-destructive/30",
 };
 
@@ -89,6 +88,9 @@ export function ImportSkillsDialog({
   });
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState<SkillImportResult[] | null>(null);
+  // Skills already in the unified catalog are hidden by default; this reveals
+  // them so the user can re-import (update) one with the overwrite toggle.
+  const [showImported, setShowImported] = useState(false);
 
   // Reset transient state whenever the dialog re-opens so a previous run
   // doesn't leak into a fresh discovery.
@@ -107,6 +109,7 @@ export function ImportSkillsDialog({
     setSkills(null);
     setLoadError(null);
     setSelection({ selected: new Set(), overwrite: false });
+    setShowImported(false);
     (async () => {
       try {
         const list = await fetchImportableSkills();
@@ -124,17 +127,25 @@ export function ImportSkillsDialog({
     };
   }, [open]);
 
-  // Pre-mark selections that would collide so the UI can show a warning
-  // before the user submits. We only warn here; the actual decision is
-  // the user's (the server skips by default unless `overwrite` is set).
+  // A skill is "already imported" when a unified skill of the same name
+  // exists. These are hidden by default (issue #145 feedback) so the list
+  // focuses on what's new; the `showImported` toggle reveals them.
   const collisionByName = useMemo(
     () => (skills ? buildCollisionMap(skills, existingNames) : new Map()),
     [skills, existingNames]
   );
-  const grouped = useMemo(() => {
+  const importedCount = useMemo(
+    () => (skills ? skills.filter((s) => collisionByName.has(s.name)).length : 0),
+    [skills, collisionByName]
+  );
+  const visibleSkills = useMemo(() => {
     if (!skills) return [];
+    if (showImported) return skills;
+    return skills.filter((s) => !collisionByName.has(s.name));
+  }, [skills, showImported, collisionByName]);
+  const grouped = useMemo(() => {
     const byProvider = new Map<string, ImportableSkill[]>();
-    for (const s of skills) {
+    for (const s of visibleSkills) {
       const list = byProvider.get(s.providerId) ?? [];
       list.push(s);
       byProvider.set(s.providerId, list);
@@ -142,7 +153,7 @@ export function ImportSkillsDialog({
     return Array.from(byProvider.entries()).sort(([a], [b]) =>
       a.localeCompare(b)
     );
-  }, [skills]);
+  }, [visibleSkills]);
 
   const toggle = useCallback(
     (skill: ImportableSkill) => {
@@ -152,9 +163,8 @@ export function ImportSkillsDialog({
   );
 
   const selectAll = useCallback(() => {
-    if (!skills) return;
-    setSelection((prev) => selectAllImportable(prev, skills));
-  }, [skills]);
+    setSelection((prev) => selectAllImportable(prev, visibleSkills));
+  }, [visibleSkills]);
 
   const clearAll = useCallback(() => {
     setSelection((prev) => clearImportSelection(prev));
@@ -200,7 +210,7 @@ export function ImportSkillsDialog({
         onOpenChange(next);
       }}
     >
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl lg:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Import per-agent skills</DialogTitle>
           <DialogDescription>
@@ -246,19 +256,34 @@ export function ImportSkillsDialog({
             ) : (
               <>
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={selection.overwrite}
-                      onChange={(e) =>
-                        setSelection((prev) =>
-                          setImportOverwrite(prev, e.target.checked)
-                        )
-                      }
-                      className="h-3.5 w-3.5 rounded border-border"
-                    />
-                    Overwrite existing unified skills with the same name
-                  </label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {importedCount > 0 && (
+                      <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={showImported}
+                          onChange={(e) => setShowImported(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-border"
+                        />
+                        Show already imported ({importedCount})
+                      </label>
+                    )}
+                    {showImported && (
+                      <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={selection.overwrite}
+                          onChange={(e) =>
+                            setSelection((prev) =>
+                              setImportOverwrite(prev, e.target.checked)
+                            )
+                          }
+                          className="h-3.5 w-3.5 rounded border-border"
+                        />
+                        Re-import and overwrite
+                      </label>
+                    )}
+                  </div>
                   <div className="flex items-center gap-2 text-xs">
                     <Button
                       size="sm"
@@ -281,16 +306,26 @@ export function ImportSkillsDialog({
                   </div>
                 </div>
 
-                <DiscoverList
-                  grouped={grouped}
-                  selected={selection.selected}
-                  collisionByName={collisionByName}
-                  onToggle={toggle}
-                />
+                {visibleSkills.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+                    All discovered skills are already in the unified catalog.
+                    Enable &ldquo;Show already imported&rdquo; to re-import one.
+                  </div>
+                ) : (
+                  <>
+                    <DiscoverList
+                      grouped={grouped}
+                      selected={selection.selected}
+                      collisionByName={collisionByName}
+                      onToggle={toggle}
+                    />
 
-                <p className="text-xs text-muted-foreground">
-                  {selection.selected.size} of {skills.length} selected
-                </p>
+                    <p className="text-xs text-muted-foreground">
+                      {selection.selected.size} of {visibleSkills.length}{" "}
+                      selected
+                    </p>
+                  </>
+                )}
               </>
             )}
           </>
@@ -392,7 +427,7 @@ function DiscoverList({
                     key={importSkillKey(skill)}
                     skill={skill}
                     checked={selected.has(importSkillKey(skill))}
-                    collides={collisionByName.has(skill.name)}
+                    alreadyImported={collisionByName.has(skill.name)}
                     onToggle={onToggle}
                   />
                 ))}
@@ -408,11 +443,16 @@ function DiscoverList({
 interface DiscoverRowProps {
   skill: ImportableSkill;
   checked: boolean;
-  collides: boolean;
+  alreadyImported: boolean;
   onToggle: (skill: ImportableSkill) => void;
 }
 
-function DiscoverRow({ skill, checked, collides, onToggle }: DiscoverRowProps) {
+function DiscoverRow({
+  skill,
+  checked,
+  alreadyImported,
+  onToggle,
+}: DiscoverRowProps) {
   return (
     <label
       className={`flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 transition-colors ${
@@ -433,14 +473,14 @@ function DiscoverRow({ skill, checked, collides, onToggle }: DiscoverRowProps) {
           <Badge variant="outline" className="text-[10px]">
             {skill.providerId}/{skill.scope}
           </Badge>
-          {collides && (
+          {alreadyImported && (
             <Badge
               variant="outline"
-              className="gap-1 border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600"
-              title="A unified skill with this name already exists"
+              className="gap-1 text-[10px] text-muted-foreground"
+              title="A unified skill with this name already exists. Enable “Re-import and overwrite” to update it."
             >
-              <AlertTriangle className="h-2.5 w-2.5" />
-              collision
+              <Check className="h-2.5 w-2.5" />
+              Already imported
             </Badge>
           )}
         </div>
@@ -480,9 +520,9 @@ function ResultsView({ results, summary }: ResultsViewProps) {
           </span>
         )}
         {skipped > 0 && (
-          <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-600">
+          <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
             <Minus className="h-3 w-3" />
-            {skipped} skipped
+            {skipped} already imported
           </span>
         )}
         {errored > 0 && (
