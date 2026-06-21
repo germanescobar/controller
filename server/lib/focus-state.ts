@@ -8,7 +8,7 @@ import { sessionFocusDir, sessionFocusFile } from "./paths.js";
  * Lives in a sidecar file under the Controller home at
  * `~/coding-orchestrator/focus/<sessionId>.json` rather than on the
  * agent-owned `.coding-agent/sessions/<sessionId>.json`, because that
- * file is shared with the agent process (e.g. Ada writes it eight
+ * file is shared with the agent process (e.g. Anita writes it eight
  * times per run) and the agent's `SessionStore.save()` only knows
  * about its own fields — anything the Controller adds gets silently
  * dropped on the next save (issue #139). Session ids are globally

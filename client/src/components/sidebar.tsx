@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { canonicalProviderId } from "@/lib/provider-id";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -119,7 +120,7 @@ function ClaudeLogo({ className }: { className?: string }) {
   );
 }
 
-function AdaLogo({ className }: { className?: string }) {
+function AnitaLogo({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -146,10 +147,11 @@ function SessionProviderIcon({
   provider?: string;
   className?: string;
 }) {
-  // Ada is the default provider — sessions created by the Ada CLI don't
-  // persist a `provider` field, so a missing/empty value means "ada".
-  if (!provider || provider === "ada") {
-    return <AdaLogo className={className} />;
+  // Anita is the default provider — sessions created by the Anita CLI don't
+  // persist a `provider` field, so a missing/empty value means "anita".
+  // The legacy "ada" id resolves to "anita" too.
+  if (canonicalProviderId(provider) === "anita") {
+    return <AnitaLogo className={className} />;
   }
   if (provider === "codex") {
     return <CodexLogo className={className} />;

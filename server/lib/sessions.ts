@@ -30,7 +30,7 @@ export interface SessionState {
   // `~/coding-orchestrator/focus/<sessionId>.json`.
   // They are *not* persisted on the agent-owned session file:
   // `saveSession` strips them before writing, since the agent
-  // (e.g. Ada) owns `.coding-agent/sessions/` and silently drops
+  // (e.g. Anita) owns `.coding-agent/sessions/` and silently drops
   // unknown top-level fields on every save (issue #139).
   focusPinnedAt?: string;
   focusDoneAt?: string;
@@ -225,7 +225,7 @@ export async function getSession(
     storagePaths(projectPath).sessions,
     `${sessionId}.json`
   );
-  // Read and parse in the same try block. The agent (Ada) rewrites
+  // Read and parse in the same try block. The agent (Anita) rewrites
   // this file multiple times per run, so a request can race the
   // writer and observe an empty or partially written file; both
   // the read and the parse must be non-fatal so the routes
@@ -430,7 +430,7 @@ export async function getEvents(
  * Ensure session and event directories exist, then save/update a
  * session file. Controller-managed focus fields are stripped from
  * the payload before writing because this file is shared with the
- * agent process (e.g. Ada's `SessionStore.save()`) and we must not
+ * agent process (e.g. Anita's `SessionStore.save()`) and we must not
  * pollute it with fields the agent doesn't know about (issue #139).
  * Focus state is persisted separately in
  * `~/coding-orchestrator/focus/<sessionId>.json` via
@@ -444,7 +444,7 @@ export async function saveSession(
   await fs.mkdir(sessions, { recursive: true });
   const filePath = path.join(sessions, `${session.id}.json`);
   // Strip Controller-managed focus fields before writing: this file
-  // is shared with the agent (e.g. Ada's `SessionStore.save()`) and
+  // is shared with the agent (e.g. Anita's `SessionStore.save()`) and
   // the agent drops any top-level field it doesn't know about on
   // every save, which would silently erase our pin/done/unpin
   // signal (issue #139). Focus state lives separately in

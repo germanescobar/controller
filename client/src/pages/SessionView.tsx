@@ -87,6 +87,7 @@ import {
   submitToolApproval,
   type ToolApprovalDecision,
 } from "../api.ts";
+import { canonicalProviderId } from "../lib/provider-id.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -215,14 +216,14 @@ const IS_TOUCH_DEVICE =
   window.matchMedia("(pointer: coarse)").matches;
 
 function supportsAttachments(provider: string): boolean {
-  return provider === "ada" || provider === "codex" || provider === "claude";
+  return provider === "anita" || provider === "codex" || provider === "claude";
 }
 
 function modelAcceptsAttachments(model: Model | undefined): boolean {
   if (!model) return false;
   if (model.provider === "codex" || model.provider === "claude") return true;
-  // For Ada and other providers, defer to the per-model capability flag
-  // reported by `ada models --json`. Models without capabilities are
+  // For Anita and other providers, defer to the per-model capability flag
+  // reported by `anita models --json`. Models without capabilities are
   // treated as not supporting attachments.
   if (!model.capabilities) return false;
   return model.capabilities.images || model.capabilities.files;
@@ -1332,7 +1333,7 @@ const EventBlock = memo(function EventBlock({
     return null;
   }
 
-  // Skill metadata events emitted by the agent CLI (e.g. Ada's
+  // Skill metadata events emitted by the agent CLI (e.g. Anita's
   // `skills_loaded`) are pure bookkeeping. The user already gets a
   // `Skill: <name>` badge on the matching user message bubble, so
   // rendering the raw JSON here would just show the skill body again.
@@ -2133,7 +2134,7 @@ function ErrorBlock({ text }: { text: unknown }) {
 
 function CancelledBlock({ reason }: { reason: string }) {
   // Soft, non-error indicator for a cooperative run cancellation
-  // (Ada SIGINT path, see coding-agent#66). Mirrors the muted
+  // (Anita SIGINT path, see coding-agent#66). Mirrors the muted
   // styling of a `run.completed` indicator so the user sees a single
   // clean "Run cancelled" line and *not* a red error banner.
   const label = `Run cancelled${reason ? ` · ${reason}` : ""}`;
@@ -2692,13 +2693,13 @@ export function SessionView({
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
   // Stable view of `queue` for use inside stream-event closures.
   const queueRef = useRef<QueuedMessage[]>([]);
-  // True while a Claude/Ada "steer" is stopping the current run and
+  // True while a Claude/Anita "steer" is stopping the current run and
   // resuming with the steer text. The composer is disabled during this
   // transition so a second steer can't race the stop+resume.
   const [steerInProgress, setSteerInProgress] = useState(false);
   const steerInProgressRef = useRef(false);
   // Carries the steer text across the stop -> stream-close -> resume hop
-  // for emulated (Claude/Ada) steering.
+  // for emulated (Claude/Anita) steering.
   const pendingSteerRef = useRef<string | null>(null);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
@@ -2722,7 +2723,7 @@ export function SessionView({
   const [agentProviders, setAgentProviders] = useState<AgentProviderInfo[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [providerLoadError, setProviderLoadError] = useState<string | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<string>("ada");
+  const [selectedProvider, setSelectedProvider] = useState<string>("anita");
   const [providerResolved, setProviderResolved] = useState(!sessionId);
   const [showProviderPicker, setShowProviderPicker] = useState(false);
   const initialTerminalState = loadStoredTerminals(projectId, worktreeId);
@@ -2831,14 +2832,14 @@ export function SessionView({
     selectedModelEntry?.capabilities?.files === true;
   // Restrict the file picker to the mime types the selected model can accept.
   // For providers without per-model capabilities (codex/claude) we keep the
-  // full list. For Ada models we filter down to whatever `ada models --json`
+  // full list. For Anita models we filter down to whatever `anita models --json`
   // reports.
   const attachmentAcceptMimeTypes: string[] = (() => {
     if (!providerSupportsAttachments) return [];
     if (!selectedModelEntry) {
-      return selectedProvider === "ada" ? [] : Array.from(SUPPORTED_ATTACHMENT_TYPES);
+      return selectedProvider === "anita" ? [] : Array.from(SUPPORTED_ATTACHMENT_TYPES);
     }
-    if (selectedProvider === "ada" && !selectedModelEntry.capabilities) return [];
+    if (selectedProvider === "anita" && !selectedModelEntry.capabilities) return [];
     const types: string[] = [];
     for (const mimeType of SUPPORTED_ATTACHMENT_TYPES) {
       if (isImageMimeType(mimeType) && !modelSupportsImages) continue;
@@ -3300,7 +3301,7 @@ export function SessionView({
           if (cancelled) return;
           if (sessionResult.status === "fulfilled") {
             const session = sessionResult.value;
-            setSelectedProvider(session.provider || "ada");
+            setSelectedProvider(canonicalProviderId(session.provider));
             setSelectedMode(session.mode || "default");
             if (session.model) {
               setSelectedModel(session.model);
@@ -3473,7 +3474,7 @@ export function SessionView({
           (entry) => entry.sessionId === sessionId && entry.active,
         );
         if (!isActive) {
-          // An emulated steer (Claude/Ada) on a run this component is only
+          // An emulated steer (Claude/Anita) on a run this component is only
           // watching via polling — not its own SSE — resumes here once the
           // stopped process goes inactive.
           if (
@@ -3963,7 +3964,7 @@ export function SessionView({
       } else if (data.type === "session_focus") {
         setIsFocusPinned(Boolean(data.focusPinnedAt));
         onFocusPinnedChange?.();
-      } else if (data.type === "ada_event") {
+      } else if (data.type === "anita_event") {
         const adaEvent = data.event;
         if (adaEvent.type === "run.started") {
           detectedSessionId = adaEvent.sessionId;
@@ -4075,10 +4076,10 @@ export function SessionView({
           // Thread status changes are useful internally, but they're noisy in
           // the visible transcript when there's no actionable information.
         } else if (adaEvent.type === "run.cancelled") {
-          // Clean cancellation (Ada SIGINT path). Surface a soft
+          // Clean cancellation (Anita SIGINT path). Surface a soft
           // indicator carrying the orchestrator-supplied reason, but
           // do NOT set runFailed: the run is expected to exit with
-          // code 130, and the synthetic "Ada process exited with
+          // code 130, and the synthetic "Anita process exited with
           // code 130" banner has already been suppressed server-side.
           if (isVisible()) {
             setStreamItems((prev) => [
@@ -4125,7 +4126,7 @@ export function SessionView({
         sendContextRef.current = null;
         const completedSessionId = detectedSessionId;
 
-        // Emulated steer (Claude/Ada): the active run was stopped so we
+        // Emulated steer (Claude/Anita): the active run was stopped so we
         // could steer. Resume immediately with the steer text only,
         // skipping the normal completion + auto-advance path.
         if (
@@ -4408,7 +4409,7 @@ export function SessionView({
 
   // Steer the running turn (Shift+Enter while streaming). Uses the composer
   // text, or the first enqueued message when the composer is empty
-  // ("promote queued to steer"). Codex steers natively; Claude/Ada stop the
+  // ("promote queued to steer"). Codex steers natively; Claude/Anita stop the
   // run and resume with the steer text via the stream's `done` handler.
   const handleSteer = async () => {
     const targetSessionId = activeStreamSessionId ?? sessionId;
@@ -4448,7 +4449,7 @@ export function SessionView({
       return;
     }
 
-    // Emulated steer (Claude/Ada): stop the current run; the stream's
+    // Emulated steer (Claude/Anita): stop the current run; the stream's
     // `done` handler resumes with the steer text once the process exits.
     // The composer stays disabled until the resumed run starts so a second
     // steer can't race the stop+resume.
@@ -5739,7 +5740,7 @@ export function SessionView({
                                   Object.entries(
                                     models.reduce<Record<string, Model[]>>((acc, m) => {
                                       // Prefer the structured `group` field from
-                                      // `ada models --json`; fall back to the
+                                      // `anita models --json`; fall back to the
                                       // provider when the model list comes from
                                       // another source.
                                       const key = m.group || m.provider || "ollama";

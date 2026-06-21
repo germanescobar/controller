@@ -25,23 +25,23 @@ export interface Model {
   capabilities?: ModelCapabilities;
 }
 
-interface AdaModelCapabilities {
+interface AnitaModelCapabilities {
   attachments?: {
     images?: unknown;
     files?: unknown;
   };
 }
 
-interface AdaModelEntry {
+interface AnitaModelEntry {
   label?: unknown;
   value?: unknown;
   group?: unknown;
   contextWindowTokens?: unknown;
-  capabilities?: AdaModelCapabilities;
+  capabilities?: AnitaModelCapabilities;
 }
 
-interface AdaModelsJson {
-  models?: AdaModelEntry[];
+interface AnitaModelsJson {
+  models?: AnitaModelEntry[];
 }
 
 function normalizeModelSize(group: string | undefined): string {
@@ -52,7 +52,7 @@ function normalizeModelSize(group: string | undefined): string {
 }
 
 function normalizeCapabilities(
-  raw: AdaModelCapabilities | undefined
+  raw: AnitaModelCapabilities | undefined
 ): ModelCapabilities | undefined {
   const attachments = raw?.attachments;
   if (!attachments || typeof attachments !== "object") return undefined;
@@ -62,10 +62,10 @@ function normalizeCapabilities(
   return { images, files };
 }
 
-function parseAdaModelsJson(stdout: string): Model[] {
-  let data: AdaModelsJson;
+function parseAnitaModelsJson(stdout: string): Model[] {
+  let data: AnitaModelsJson;
   try {
-    data = JSON.parse(stdout) as AdaModelsJson;
+    data = JSON.parse(stdout) as AnitaModelsJson;
   } catch {
     return [];
   }
@@ -95,15 +95,15 @@ function parseAdaModelsJson(stdout: string): Model[] {
   return models;
 }
 
-async function fetchAdaCliModels(): Promise<Model[]> {
+async function fetchAnitaCliModels(): Promise<Model[]> {
   try {
-    const adaCommand = await resolveAgentCommand("ada");
+    const anitaCommand = await resolveAgentCommand("anita");
     const apiKeyEnv = await getApiKeyEnvVars();
-    const { stdout } = await execFileAsync(adaCommand, ["models", "--json"], {
+    const { stdout } = await execFileAsync(anitaCommand, ["models", "--json"], {
       env: childProcessEnv(apiKeyEnv),
       timeout: 5000,
     });
-    return parseAdaModelsJson(stdout);
+    return parseAnitaModelsJson(stdout);
   } catch {
     return [];
   }
@@ -219,7 +219,7 @@ function getClaudeModels(): Model[] {
   ];
 }
 
-async function fetchAdaFallbackModels(): Promise<Model[]> {
+async function fetchAnitaFallbackModels(): Promise<Model[]> {
   const modelLists = await Promise.all([
     fetchOllamaModels(),
     ...PROVIDERS.map(async (p) => {
@@ -234,15 +234,15 @@ async function fetchAdaFallbackModels(): Promise<Model[]> {
   return modelLists.flat();
 }
 
-async function fetchAdaModels(): Promise<Model[]> {
-  const adaCliModels = await fetchAdaCliModels();
-  if (adaCliModels.length > 0) return adaCliModels;
+async function fetchAnitaModels(): Promise<Model[]> {
+  const anitaCliModels = await fetchAnitaCliModels();
+  if (anitaCliModels.length > 0) return anitaCliModels;
 
-  return fetchAdaFallbackModels();
+  return fetchAnitaFallbackModels();
 }
 
 modelsRouter.get("/", async (req, res) => {
-  const agent = (req.query.agent as string) || "ada";
+  const agent = (req.query.agent as string) || "anita";
 
   if (agent === "codex") {
     res.json(await fetchCodexModels());
@@ -254,5 +254,5 @@ modelsRouter.get("/", async (req, res) => {
     return;
   }
 
-  res.json(await fetchAdaModels());
+  res.json(await fetchAnitaModels());
 });

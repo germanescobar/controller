@@ -61,7 +61,7 @@ let restored = false;
  * Capture the user's login + interactive shell PATH and merge it into
  * `process.env.PATH`. A Finder/Dock-launched packaged macOS app inherits a
  * minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that omits NVM, Homebrew,
- * and pnpm directories, so spawning `codex`/`claude`/`ada` — and even the
+ * and pnpm directories, so spawning `codex`/`claude`/`anita` — and even the
  * `node` their shebangs resolve — fails with ENOENT. Sourcing the login
  * shell restores the same PATH the user sees in their terminal.
  *

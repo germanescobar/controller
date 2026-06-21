@@ -155,7 +155,7 @@ test("updateSessionTitle returns null for unknown session", async () => {
 
 test("updateSessionTitle does not poison the agent session file with focus fields", async () => {
   // The agent-owned `.coding-agent/sessions/<id>.json` file must
-  // never carry focus fields: Ada's SessionStore.save() drops any
+  // never carry focus fields: Anita's SessionStore.save() drops any
   // top-level field it doesn't know about, so a Controller-managed
   // field on that file would silently disappear on the next save.
   // This regression check is the post-issue-#139 invariant.
@@ -448,7 +448,7 @@ test("regression: a second writer overwriting the agent session file leaves focu
   //
   //   1. The Controller writes the session file and the focus sidecar
   //      (auto-pinning a brand-new session).
-  //   2. The agent (Ada) subsequently writes its own session file
+  //   2. The agent (Anita) subsequently writes its own session file
   //      multiple times per run, dropping any unknown top-level
   //      fields. Pre-#139, the Controller's `focusPinnedAt` lived
   //      on the session file, so it would silently disappear.
@@ -471,14 +471,14 @@ test("regression: a second writer overwriting the agent session file leaves focu
     const originalPin = beforeAgentWrite?.focusPinnedAt;
     assert.ok(originalPin, "precondition: focus pin was set on create");
 
-    // Step 2: simulate Ada's writer clobbering the agent session
-    // file with only Ada's fields. This is the writer shape from
-    // `@germanescobar/ada/src/storage/session-store.ts` — note the
+    // Step 2: simulate Anita's writer clobbering the agent session
+    // file with only Anita's fields. This is the writer shape from
+    // `@germanescobar/anita/src/storage/session-store.ts` — note the
     // absence of any Controller-managed fields.
-    const adaStyleSession: SessionState = {
+    const anitaStyleSession: SessionState = {
       id: "session-1",
       workingDirectory: projectPath,
-      model: "ada-model",
+      model: "anita-model",
       messages: [
         {
           type: "message",
@@ -490,12 +490,12 @@ test("regression: a second writer overwriting the agent session file leaves focu
       lastActiveAt: "2026-01-01T00:00:01.000Z",
       status: "active",
     };
-    await saveSession(projectPath, adaStyleSession);
+    await saveSession(projectPath, anitaStyleSession);
 
-    // Simulate Ada's loop writing the file eight times per run.
+    // Simulate Anita's loop writing the file eight times per run.
     for (let i = 0; i < 8; i++) {
       await saveSession(projectPath, {
-        ...adaStyleSession,
+        ...anitaStyleSession,
         lastActiveAt: new Date(Date.now() + i * 100).toISOString(),
       });
     }
@@ -518,7 +518,7 @@ test("regression: a second writer overwriting the agent session file leaves focu
 test("regression: a second writer overwriting the agent session file cannot fake a pin (issue #139/#141)", async () => {
   // The inverse of the previous test: a malicious or buggy second
   // writer that *adds* focus fields to the session file must not
-  // be able to spoof focus state. Pre-#139, a future Ada field
+  // be able to spoof focus state. Pre-#139, a future Anita field
   // named `focusPinnedAt` would have been honored by the
   // Controller. Post-#139, the Controller ignores any focus
   // fields on the agent file and reads from the sidecar only.
@@ -539,7 +539,7 @@ test("regression: a second writer overwriting the agent session file cannot fake
 // Regression tests for the PR #142 review comment: `getSession`,
 // `archiveSession`, and `updateSessionTitle` must keep treating a
 // malformed (or transiently empty/partial) agent session file as a
-// missing session, not as an unhandled exception. Ada rewrites
+// missing session, not as an unhandled exception. Anita rewrites
 // `.coding-agent/sessions/<id>.json` multiple times per run (see
 // issue #140) and a reader can race the writer.
 

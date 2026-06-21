@@ -11,7 +11,7 @@
  * the CLI reads.
  *
  * `CONTROLLER_SERVER_URL` is still injected as a best-effort fast path for
- * agents that inherit the environment (Claude, Ada); the CLI checks it before
+ * agents that inherit the environment (Claude, Anita); the CLI checks it before
  * falling back to the runtime file.
  */
 
@@ -68,7 +68,7 @@ export async function installControllerCli(): Promise<void> {
   );
 }
 
-/** Best-effort environment for agents that inherit it (Claude, Ada). */
+/** Best-effort environment for agents that inherit it (Claude, Anita). */
 export function controllerAgentEnv(): Record<string, string> {
   return { CONTROLLER_SERVER_URL: serverUrl() };
 }

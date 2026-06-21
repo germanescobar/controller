@@ -5,6 +5,7 @@ import {
   getCommandVersion,
 } from "./command-resolver.js";
 import { getAgentSetting, getAgentSettings } from "./agent-settings.js";
+import { canonicalProviderId } from "./provider-id.js";
 import { childProcessEnv } from "./shell-env.js";
 
 export interface AgentPlanStep {
@@ -132,7 +133,7 @@ export interface SpawnOptions {
   /**
    * Stable identity/environment context to deliver as a real system message
    * instead of prepending it to the user message. Only honored by providers
-   * whose CLI exposes a `--system-prompt` flag today (Ada). Other providers
+   * whose CLI exposes a `--system-prompt` flag today (Anita). Other providers
    * continue to receive context via the prepended user message — see
    * `server/lib/agent-preamble.ts` for the per-provider wiring.
    */
@@ -191,10 +192,10 @@ function normalizeErrorMessage(value: unknown, fallback: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Ada provider
+// Anita provider
 // ---------------------------------------------------------------------------
 
-interface AdaParserState {
+interface AnitaParserState {
   sessionId: string;
   // Current assistant text / reasoning segment being assembled from
   // token-level deltas. Emitted as a single `assistant.text` /
@@ -209,7 +210,7 @@ interface AdaParserState {
   toolCallInputs: Map<number, string>;
 }
 
-function createAdaParserState(): AdaParserState {
+function createAnitaParserState(): AnitaParserState {
   return {
     sessionId: "",
     textSegment: "",
@@ -224,8 +225,8 @@ function createAdaParserState(): AdaParserState {
  * (reasoning first, then text). The caller decides what to do with
  * the returned events (e.g. prepend them to the current batch).
  */
-function flushAdaAccumulatedSegments(
-  state: AdaParserState
+function flushAnitaAccumulatedSegments(
+  state: AnitaParserState
 ): AgentStreamEvent[] {
   const out: AgentStreamEvent[] = [];
   if (state.reasoningSegment) {
@@ -244,22 +245,22 @@ function flushAdaAccumulatedSegments(
  * at the start of every new run so a resumed session doesn't bleed
  * stale text into the new turn.
  */
-function resetAdaParserState(state: AdaParserState): void {
+function resetAnitaParserState(state: AnitaParserState): void {
   state.textSegment = "";
   state.reasoningSegment = "";
   state.toolCallInputs.clear();
 }
 
 /**
- * Map a single raw Ada stream event (one JSONL line) to the
+ * Map a single raw Anita stream event (one JSONL line) to the
  * normalized `AgentStreamEvent` shape. Returns `null` for events that
  * should be dropped, an array when the line produces multiple
  * normalized events (e.g. flushing a text segment before a tool call),
  * or a single event otherwise.
  */
-function mapAdaEvent(
+function mapAnitaEvent(
   raw: Record<string, unknown>,
-  state: AdaParserState
+  state: AnitaParserState
 ): AgentStreamEvent | AgentStreamEvent[] | null {
   const type = raw.type as string | undefined;
   if (!type) return null;
@@ -267,7 +268,7 @@ function mapAdaEvent(
   if (type === "run.started") {
     const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : "";
     state.sessionId = sessionId;
-    resetAdaParserState(state);
+    resetAnitaParserState(state);
     return {
       type: "run.started",
       sessionId,
@@ -305,7 +306,7 @@ function mapAdaEvent(
   if (type === "tool.call") {
     // Flush any pending prose so it renders before the tool call in
     // the live transcript.
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     const id = typeof raw.id === "string" ? raw.id : "";
     const name = typeof raw.name === "string" ? raw.name : "";
     const index = typeof raw.index === "number" ? raw.index : 0;
@@ -316,7 +317,7 @@ function mapAdaEvent(
         : {};
 
     if (Object.keys(input).length === 0) {
-      // Fall back to the accumulated `inputDelta` strings. Ada emits
+      // Fall back to the accumulated `inputDelta` strings. Anita emits
       // them as JSON fragments that concatenate into a valid JSON
       // document; if they don't parse, keep the empty object so the
       // UI at least sees the tool name and id.
@@ -349,7 +350,7 @@ function mapAdaEvent(
     // Tool results can follow a tool call, but they can also follow a
     // short text or reasoning segment — flush those first so the
     // transcript order matches the model's emission order.
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     const event: AgentStreamEvent = {
       type: "tool.result",
       id: typeof raw.id === "string" ? raw.id : "",
@@ -363,7 +364,7 @@ function mapAdaEvent(
   if (type === "run.completed" || type === "run.failed" || type === "run.cancelled") {
     // Final flush — anything still being accumulated belongs in the
     // transcript before the run terminates.
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     state.toolCallInputs.clear();
     const sessionId =
       typeof raw.sessionId === "string" && raw.sessionId
@@ -381,7 +382,7 @@ function mapAdaEvent(
       return flushed.length > 0 ? [...flushed, event] : event;
     }
     if (type === "run.cancelled") {
-      // Clean cancellation: Ada emits this when SIGINT aborts the run
+      // Clean cancellation: Anita emits this when SIGINT aborts the run
       // cooperatively (see coding-agent#66). The orchestrator surfaces
       // it as a non-error terminal event so the UI does not flash a
       // red "exited with code 130" banner on top of it.
@@ -400,7 +401,7 @@ function mapAdaEvent(
     const event: AgentStreamEvent = {
       type: "run.failed",
       sessionId,
-      error: normalizeErrorMessage(raw.error, "Ada run failed"),
+      error: normalizeErrorMessage(raw.error, "Anita run failed"),
       timestamp:
         typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
     };
@@ -408,7 +409,7 @@ function mapAdaEvent(
   }
 
   if (type === "plan.updated") {
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     const plan = Array.isArray(raw.plan)
       ? (raw.plan
           .map((step) => normalizePlanStep(step))
@@ -426,7 +427,7 @@ function mapAdaEvent(
   }
 
   if (type === "plan.delta") {
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     const event: AgentStreamEvent = {
       type: "plan.delta",
       id: typeof raw.id === "string" ? raw.id : "",
@@ -436,7 +437,7 @@ function mapAdaEvent(
   }
 
   if (type === "user.input_requested") {
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     const questions = Array.isArray(raw.questions)
       ? (raw.questions
           .map((question) => normalizeUserInputQuestion(question))
@@ -451,7 +452,7 @@ function mapAdaEvent(
   }
 
   if (type === "thread.status") {
-    const flushed = flushAdaAccumulatedSegments(state);
+    const flushed = flushAnitaAccumulatedSegments(state);
     const event: AgentStreamEvent = {
       type: "thread.status",
       threadId: typeof raw.threadId === "string" ? raw.threadId : "",
@@ -464,16 +465,16 @@ function mapAdaEvent(
   }
 
   // Unknown event shape — drop it. The previous implementation cast
-  // unknown shapes to `AgentStreamEvent`, which let Ada's delta events
+  // unknown shapes to `AgentStreamEvent`, which let Anita's delta events
   // leak into the SSE stream and reach a client that didn't know how
   // to handle them.
   return null;
 }
 
-const adaProvider: AgentProvider = {
-  id: "ada",
-  name: "Ada",
-  command: "ada",
+const anitaProvider: AgentProvider = {
+  id: "anita",
+  name: "Anita",
+  command: "anita",
 
   spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, systemPrompt }) {
     const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
@@ -485,7 +486,7 @@ const adaProvider: AgentProvider = {
     }
     // Deliver stable identity/environment context (e.g. the Controller
     // preamble) as a real system message so it never reaches the chat
-    // transcript. Ada labels it `Additional system prompt from
+    // transcript. Anita labels it `Additional system prompt from
     // --system-prompt:` in its system prompt section. Flags must come
     // before the `chat` subcommand.
     if (systemPrompt && systemPrompt.trim()) {
@@ -499,10 +500,10 @@ const adaProvider: AgentProvider = {
     args.push(message);
     if (resumeSessionId) args.push("--resume", resumeSessionId);
 
-    const fullCmd = `ada ${[...cmdArgs, ...args].join(" ")}`;
-    console.log(`[ada] ${fullCmd.slice(0, 100)}...`);
+    const fullCmd = `anita ${[...cmdArgs, ...args].join(" ")}`;
+    console.log(`[anita] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn(command ?? "ada", [...cmdArgs, ...args], {
+    return spawn(command ?? "anita", [...cmdArgs, ...args], {
       cwd,
       env: childProcessEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
@@ -510,17 +511,17 @@ const adaProvider: AgentProvider = {
   },
 
   createParser() {
-    const state = createAdaParserState();
+    const state = createAnitaParserState();
     return (line: string): AgentStreamParseResult => {
       const raw = JSON.parse(line) as Record<string, unknown>;
-      return mapAdaEvent(raw, state);
+      return mapAnitaEvent(raw, state);
     };
   },
 
   parseEvent(line: string): AgentStreamParseResult {
-    const state = createAdaParserState();
+    const state = createAnitaParserState();
     const raw = JSON.parse(line) as Record<string, unknown>;
-    return mapAdaEvent(raw, state);
+    return mapAnitaEvent(raw, state);
   },
 };
 
@@ -1385,13 +1386,13 @@ function getThreadActiveFlags(status: unknown): string[] | undefined {
 // ---------------------------------------------------------------------------
 
 const providers: Record<string, AgentProvider> = {
-  ada: adaProvider,
+  anita: anitaProvider,
   codex: codexProvider,
   claude: claudeProvider,
 };
 
 export function getAgentProvider(id: string): AgentProvider | undefined {
-  return providers[id];
+  return providers[canonicalProviderId(id)];
 }
 
 export function getAgentProviders(): AgentProvider[] {

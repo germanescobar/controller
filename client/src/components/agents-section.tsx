@@ -13,13 +13,13 @@ import {
   type AgentStatus,
 } from "../api.ts";
 
-// API-key providers are model backends consumed by the Ada agent, so they are
-// rendered nested under the Ada row rather than as a top-level section.
-const ADA_AGENT_ID = "ada";
+// API-key providers are model backends consumed by the Anita agent, so they are
+// rendered nested under the Anita row rather than as a top-level section.
+const ANITA_AGENT_ID = "anita";
 
 /*
  * Settings section for enabling agents, setting their CLI paths, and
- * configuring the model-provider API keys the Ada agent uses. Self-loading so
+ * configuring the model-provider API keys the Anita agent uses. Self-loading so
  * it can drop into the settings page without the page wiring its data.
  */
 export function AgentsSection() {
@@ -56,7 +56,7 @@ export function AgentsSection() {
           onToggle={() => handleToggleAgent(agent)}
           onSavePath={(path) => handleSaveAgentPath(agent.id, path)}
         >
-          {agent.id === ADA_AGENT_ID && (
+          {agent.id === ANITA_AGENT_ID && (
             <ApiKeysSection providers={providers} onChange={load} />
           )}
         </AgentRow>
