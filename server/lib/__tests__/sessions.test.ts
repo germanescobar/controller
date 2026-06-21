@@ -21,10 +21,23 @@ import {
   type SessionFocus,
 } from "../focus-state.js";
 
+/*
+ * Runs `run` against a fresh temp project directory and an isolated
+ * Controller home. Focus sidecars now live under the Controller home
+ * (`~/coding-orchestrator/focus/`), so each test gets its own home
+ * via `CODING_ORCHESTRATOR_HOME` to keep focus state from leaking
+ * between tests or into the real user directory.
+ */
 function withTempProject(run: (projectPath: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "sessions-"));
+  const home = mkdtempSync(path.join(os.tmpdir(), "orch-home-"));
+  const prevHome = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = home;
   return run(dir).finally(() => {
+    if (prevHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = prevHome;
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 }
 
@@ -56,7 +69,6 @@ test("updateSessionFocus pin sets focusPinnedAt and clears focusDoneAt", async (
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { focusDoneAt: "2026-01-01T00:00:00.000Z" })
     );
     const updated = await updateSessionFocus(projectPath, "session-1", "pin");
@@ -71,7 +83,6 @@ test("updateSessionFocus pin is idempotent and preserves userUnpinned override",
     // First, user explicitly unpins.
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { userUnpinned: true })
     );
     // An explicit pin always wins (user is consciously overriding the unpin).
@@ -85,7 +96,6 @@ test("updateSessionFocus unpin clears focusPinnedAt and sets userUnpinned", asyn
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { focusPinnedAt: "2026-01-01T00:00:00.000Z" })
     );
     const updated = await updateSessionFocus(projectPath, "session-1", "unpin");
@@ -98,7 +108,6 @@ test("updateSessionFocus done clears focusPinnedAt, sets focusDoneAt, and drops 
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", {
         focusPinnedAt: "2026-01-01T00:00:00.000Z",
         userUnpinned: true,
@@ -152,7 +161,6 @@ test("updateSessionTitle does not poison the agent session file with focus field
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { focusPinnedAt: "2026-01-01T00:00:00.000Z" })
     );
     await updateSessionTitle(projectPath, "session-1", "Renamed");
@@ -195,7 +203,6 @@ test("pinSessionIfNeeded is a no-op for an already-pinned session", async () => 
     const originalPin = "2026-01-01T00:00:00.000Z";
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { focusPinnedAt: originalPin })
     );
     const updated = await pinSessionIfNeeded(projectPath, "session-1");
@@ -207,7 +214,6 @@ test("pinSessionIfNeeded respects userUnpinned flag and does not re-pin", async 
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { userUnpinned: true })
     );
     const updated = await pinSessionIfNeeded(projectPath, "session-1");
@@ -223,7 +229,6 @@ test("pinSessionIfNeeded is a no-op for archived sessions", async () => {
       makeSession({ status: "archived" })
     );
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { userUnpinned: true })
     );
     const updated = await pinSessionIfNeeded(projectPath, "session-1");
@@ -242,7 +247,6 @@ test("archiveSession clears userUnpinned so a rehydrated session gets a clean sl
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", {
         focusPinnedAt: "2026-01-01T00:00:00.000Z",
         userUnpinned: true,
@@ -255,7 +259,7 @@ test("archiveSession clears userUnpinned so a rehydrated session gets a clean sl
     assert.equal(after?.userUnpinned, undefined, "userUnpinned should be cleared on archive");
     // The sidecar itself is removed on archive so the next time the
     // session is rehydrated it starts with a fully clean focus state.
-    const sidecar = await readSessionFocus(projectPath, "session-1");
+    const sidecar = await readSessionFocus("session-1");
     assert.equal(sidecar, null, "focus sidecar should be removed on archive");
   });
 });
@@ -264,7 +268,6 @@ test("getSession returns merged focus state from the sidecar", async () => {
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { focusPinnedAt: "2026-01-01T00:00:00.000Z" })
     );
     const session = await getSession(projectPath, "session-1");
@@ -312,11 +315,9 @@ test("getSessions merges focus state from the sidecar directory", async () => {
       makeSession({ id: "session-2", title: "two" })
     );
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { focusPinnedAt: "2026-01-01T00:00:00.000Z" })
     );
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-2", {
         userUnpinned: true,
       })
@@ -378,20 +379,18 @@ test("resolveSessionFocusState does NOT re-pin a user-unpinned session on resume
   await withTempProject(async (projectPath) => {
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       makeFocus("session-1", { userUnpinned: true /* no focusPinnedAt */ })
     );
 
     // Simulate what persistSessionStart does: read the existing
     // focus sidecar, resolve the focus state, write the new sidecar.
-    const existingFocus = await readSessionFocus(projectPath, "session-1");
+    const existingFocus = await readSessionFocus("session-1");
     assert.ok(existingFocus, "precondition: focus sidecar exists");
     assert.equal(existingFocus?.userUnpinned, true);
     assert.equal(existingFocus?.focusPinnedAt, undefined);
 
     const focus = resolveSessionFocusState(existingFocus);
     await writeSessionFocus(
-      projectPath,
       buildSessionFocus("session-1", focus)
     );
 
@@ -419,7 +418,6 @@ test("regression: a second writer overwriting the agent session file leaves focu
     // Step 1: Controller auto-pins a brand-new session.
     await saveSession(projectPath, makeSession());
     await writeSessionFocus(
-      projectPath,
       buildSessionFocus("session-1", {
         focusPinnedAt: new Date().toISOString(),
         focusDoneAt: undefined,
@@ -468,7 +466,7 @@ test("regression: a second writer overwriting the agent session file leaves focu
     );
 
     // And the sidecar file itself is still present and unchanged.
-    const sidecar = await readSessionFocus(projectPath, "session-1");
+    const sidecar = await readSessionFocus("session-1");
     assert.ok(sidecar, "focus sidecar must still exist");
     assert.equal(sidecar?.focusPinnedAt, originalPin);
   });

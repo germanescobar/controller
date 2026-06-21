@@ -62,6 +62,24 @@ export function worktreesRegistryFile(): string {
   return path.join(orchestratorHome(), "worktrees.json");
 }
 
+// --- Session Focus ---
+
+/**
+ * Directory holding per-session focus sidecars. Controller-owned
+ * focus-queue state lives here, keyed by the provider-generated
+ * (globally unique) session id, rather than on the agent-owned
+ * `.coding-agent/sessions/<id>.json` file the agent rewrites on
+ * every save (issue #139).
+ */
+export function sessionFocusDir(): string {
+  return path.join(orchestratorHome(), "focus");
+}
+
+/** Per-session focus sidecar, keyed by the session id. */
+export function sessionFocusFile(sessionId: string): string {
+  return path.join(sessionFocusDir(), `${sessionId}.json`);
+}
+
 // --- Terminal Tabs ---
 
 export function terminalTabsRegistryFile(): string {
