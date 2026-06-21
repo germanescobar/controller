@@ -15,6 +15,17 @@ import { parseSkillFile, type SkillBody, type SkillMetadata } from "./skills.js"
 /** Valid name characters for unified skills. */
 const SKILL_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
+/**
+ * Maximum length for the skill name. Names longer than this are almost
+ * certainly not what a user would type as a `/<name>` invocation, and the
+ * filesystem is unlikely to be the limiting factor on the platforms we ship
+ * to. Tightening the cap also matches what the skill-creator skill proposes.
+ */
+export const SKILL_NAME_MAX_LENGTH = 64;
+
+/** Maximum length for the description field in the frontmatter. */
+export const SKILL_DESCRIPTION_MAX_LENGTH = 1024;
+
 export interface UnifiedSkillInput {
   name: string;
   description: string;
@@ -86,10 +97,17 @@ function normalizeName(name: string): string {
 function validateInput(input: UnifiedSkillInput): string | null {
   const name = input.name.trim();
   if (!name) return "Skill name is required.";
+  if (name.length > SKILL_NAME_MAX_LENGTH) {
+    return `Skill name must be ${SKILL_NAME_MAX_LENGTH} characters or fewer (got ${name.length}).`;
+  }
   if (!SKILL_NAME_RE.test(name)) {
     return "Skill name may only contain letters, numbers, dots, dashes, and underscores.";
   }
-  if (!input.description.trim()) return "Description is required.";
+  const description = input.description.trim();
+  if (!description) return "Description is required.";
+  if (description.length > SKILL_DESCRIPTION_MAX_LENGTH) {
+    return `Description must be ${SKILL_DESCRIPTION_MAX_LENGTH} characters or fewer (got ${description.length}).`;
+  }
   return null;
 }
 

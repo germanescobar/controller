@@ -31,7 +31,8 @@ const USAGE = `Usage:
   controller skills list
   controller skills search <query>
   controller skills describe <name>
-  controller skills activate <name>`;
+  controller skills activate <name>
+  controller skills create --name <name> --description <description> [--body <body>] [--body-file <path>]`;
 
 function fail(message) {
   process.stderr.write(`Error: ${message}\n`);
@@ -298,6 +299,55 @@ async function runSkills(argv, serverUrl) {
   printSkills(argv[0], result);
 }
 
+// `create` does not fit the `parseSkills` shape because it takes
+// `--name` / `--description` / `--body` / `--body-file` flags and reads
+// from disk when given a body file. It also POSTs to a different endpoint
+// that returns `{ ok, skill }` instead of the bare payload.
+async function readBodyFile(path) {
+  const fs = await import("node:fs/promises");
+  return fs.readFile(path, "utf-8");
+}
+
+function parseFlags(rest, flags) {
+  const out = {};
+  for (let i = 0; i < rest.length; i += 1) {
+    if (flags.includes(rest[i]) && rest[i + 1] !== undefined) {
+      out[rest[i].slice(2)] = rest[i + 1];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+async function runSkillsCreate(rest, serverUrl) {
+  const flags = parseFlags(rest, ["--name", "--description", "--body", "--body-file"]);
+  if (!flags.name) fail("skills create requires --name <name>");
+  if (!flags.description) fail("skills create requires --description <description>");
+  if (flags["body-file"] && flags.body) {
+    fail("skills create accepts only one of --body or --body-file");
+  }
+  let body = "";
+  if (flags["body-file"]) {
+    try {
+      body = await readBodyFile(flags["body-file"]);
+    } catch (error) {
+      fail(`Could not read body file: ${error?.message ?? error}`);
+    }
+  } else if (flags.body !== undefined) {
+    body = flags.body;
+  }
+  const { response, result } = await postJson(serverUrl, "/api/skills/create", {
+    name: flags.name,
+    description: flags.description,
+    body,
+  });
+  if (!result || result.ok === false) {
+    fail((result && result.error) || `Skill create failed (HTTP ${response.status})`);
+  }
+  const skill = result.skill ?? {};
+  process.stdout.write(`Created skill "${skill.name}" at ${skill.path}\n`);
+}
+
 async function main() {
   const [surface, ...rest] = process.argv.slice(2);
   if (!surface || surface === "-h" || surface === "--help") {
@@ -310,7 +360,13 @@ async function main() {
   const serverUrl = await getServerUrl();
   if (surface === "browser") await runBrowser(rest, serverUrl);
   else if (surface === "integrations") await runIntegrations(rest, serverUrl);
-  else await runSkills(rest, serverUrl);
+  else if (surface === "skills") {
+    if (rest[0] === "create") {
+      await runSkillsCreate(rest.slice(1), serverUrl);
+    } else {
+      await runSkills(rest, serverUrl);
+    }
+  }
 }
 
 main().catch((error) => fail(error?.message ?? String(error)));

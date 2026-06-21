@@ -103,3 +103,23 @@ unifiedSkillsRouter.post("/skills/activate", async (req: Request, res: Response)
     message: `Activated "${body.metadata.name}" for the next turn.`,
   });
 });
+
+/**
+ * Agent-facing endpoint for creating a unified skill. The CLI surface
+ * (`controller skills create`) calls this so the agent doesn't have to hand-
+ * craft YAML frontmatter or hit the REST endpoint directly. The validation
+ * rules are shared with `createUnifiedSkill`; any failure returns a 400 with
+ * a human-readable error string the agent can show the user.
+ */
+unifiedSkillsRouter.post("/skills/create", async (req: Request, res: Response) => {
+  const input = (req.body ?? {}) as Partial<UnifiedSkillInput>;
+  const name = typeof input.name === "string" ? input.name : "";
+  const description = typeof input.description === "string" ? input.description : "";
+  const body = typeof input.body === "string" ? input.body : "";
+  const result = await createUnifiedSkill({ name, description, body });
+  if ("error" in result) {
+    res.status(400).json({ ok: false, error: result.error });
+    return;
+  }
+  res.status(201).json({ ok: true, skill: result });
+});
