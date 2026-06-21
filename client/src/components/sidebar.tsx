@@ -166,6 +166,31 @@ function worktreeVisibilityKey(projectId: string, worktreeId: string): string {
   return `${projectId}:${worktreeId}`;
 }
 
+// The destructive confirm button used by the project and worktree delete
+// dialogs. When `loading` is true the label is swapped for a spinner and
+// the button is disabled so the user can't double-click while the
+// destructive request is in flight. Exported for unit testing.
+export function DestructiveConfirmButton({
+  loading,
+  onClick,
+}: {
+  loading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button variant="destructive" onClick={onClick} disabled={loading}>
+      {loading ? (
+        <>
+          <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+          Deleting…
+        </>
+      ) : (
+        "Delete"
+      )}
+    </Button>
+  );
+}
+
 export function Sidebar({
   projects,
   activeProjectId,
@@ -208,6 +233,11 @@ export function Sidebar({
   } | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [savingRename, setSavingRename] = useState(false);
+  // Tracks destructive delete requests in flight so the matching confirm
+  // dialog can disable both buttons, swap the label for a spinner, and
+  // block dismissal until the request resolves. Mirrors `savingRename`.
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [deletingWorktree, setDeletingWorktree] = useState(false);
   // Setup log dialog: shown when the user clicks the red `!` next to a
   // worktree. `running` is true while a re-run is in flight; `lines`
   // accumulates the live stream so the dialog becomes a small terminal.
@@ -348,14 +378,26 @@ export function Sidebar({
 
   const confirmDeleteProject = async () => {
     if (!confirmDeleteProjectId) return;
-    await deleteProject(confirmDeleteProjectId);
-    setConfirmDeleteProjectId(null);
-    onProjectsChanged();
+    if (deletingProject) return;
+    setDeletingProject(true);
+    try {
+      await deleteProject(confirmDeleteProjectId);
+      setConfirmDeleteProjectId(null);
+      onProjectsChanged();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to delete project",
+      );
+    } finally {
+      setDeletingProject(false);
+    }
   };
 
   const confirmDeleteWorktreeAction = async () => {
     if (!confirmDeleteWorktree) return;
+    if (deletingWorktree) return;
     const { projectId, worktreeId } = confirmDeleteWorktree;
+    setDeletingWorktree(true);
     try {
       await deleteWorktree(projectId, worktreeId);
       setConfirmDeleteWorktree(null);
@@ -365,6 +407,8 @@ export function Sidebar({
       toast.error(
         err instanceof Error ? err.message : "Failed to delete worktree",
       );
+    } finally {
+      setDeletingWorktree(false);
     }
   };
 
@@ -1038,7 +1082,7 @@ export function Sidebar({
       <Dialog
         open={!!confirmDeleteProjectId}
         onOpenChange={(open) => {
-          if (!open) setConfirmDeleteProjectId(null);
+          if (!open && !deletingProject) setConfirmDeleteProjectId(null);
         }}
       >
         <DialogContent showCloseButton={false}>
@@ -1053,12 +1097,15 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>
+            <DialogClose
+              render={<Button variant="outline" disabled={deletingProject} />}
+            >
               Cancel
             </DialogClose>
-            <Button variant="destructive" onClick={confirmDeleteProject}>
-              Delete
-            </Button>
+            <DestructiveConfirmButton
+              loading={deletingProject}
+              onClick={confirmDeleteProject}
+            />
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1066,7 +1113,7 @@ export function Sidebar({
       <Dialog
         open={!!confirmDeleteWorktree}
         onOpenChange={(open) => {
-          if (!open) setConfirmDeleteWorktree(null);
+          if (!open && !deletingWorktree) setConfirmDeleteWorktree(null);
         }}
       >
         <DialogContent showCloseButton={false}>
@@ -1081,12 +1128,15 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <DialogClose render={<Button variant="outline" />}>
+            <DialogClose
+              render={<Button variant="outline" disabled={deletingWorktree} />}
+            >
               Cancel
             </DialogClose>
-            <Button variant="destructive" onClick={confirmDeleteWorktreeAction}>
-              Delete
-            </Button>
+            <DestructiveConfirmButton
+              loading={deletingWorktree}
+              onClick={confirmDeleteWorktreeAction}
+            />
           </DialogFooter>
         </DialogContent>
       </Dialog>
