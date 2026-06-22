@@ -106,6 +106,112 @@ async function resolveDefaultBranch(cwd: string): Promise<string | null> {
   return null;
 }
 
+// Try to base the new worktree on `origin/<candidate>` so it starts from the
+// up-to-date remote tip. Runs `git fetch origin <candidate>` first, streamed
+// to the caller via `emit`. If the fetch fails, the remote ref is missing,
+// or `origin` is not configured, fall back to the local ref — and ultimately
+// to local HEAD — without aborting the request.
+async function resolveBaseRef(
+  project: { path: string },
+  candidateBase: string | null,
+  emit: (obj: Record<string, unknown>) => void
+): Promise<string | null> {
+  if (!candidateBase) {
+    return await resolveLocalHead(project.path);
+  }
+
+  // Only fetch from `origin`. Repos with a different primary remote still
+  // get local-HEAD behavior — the user can opt in by naming that remote
+  // explicitly through a project-level setting (out of scope here).
+  const remoteUrl = await runGitCapture(project.path, [
+    "remote",
+    "get-url",
+    "origin",
+  ]);
+  if (!remoteUrl) {
+    emit({
+      type: "log",
+      stream: "stdout",
+      text: `no 'origin' remote configured — basing worktree on local ${candidateBase}\n`,
+    });
+    return await resolveLocalBranchOrHead(project.path, candidateBase);
+  }
+
+  const fetchArgs = ["fetch", "origin", candidateBase];
+  emit({ type: "log", stream: "stdout", text: `git ${fetchArgs.join(" ")}\n` });
+  const fetchExit = await runStreamed(
+    "git",
+    fetchArgs,
+    project.path,
+    (chunk, stream) => emit({ type: "log", stream, text: chunk })
+  );
+  if (fetchExit !== 0) {
+    emit({
+      type: "log",
+      stream: "stderr",
+      text: `git fetch origin ${candidateBase} failed (exit ${fetchExit}) — falling back to local ${candidateBase}\n`,
+    });
+    return await resolveLocalBranchOrHead(project.path, candidateBase);
+  }
+
+  // Prefer the freshly fetched remote tracking ref. Fall back to the local
+  // ref if it doesn't exist on the remote (branch only exists locally).
+  const remoteRef = await runGitExitCode(project.path, [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    `refs/remotes/origin/${candidateBase}`,
+  ]);
+  if (remoteRef === 0) {
+    return `origin/${candidateBase}`;
+  }
+
+  // In clones with a narrow refspec (e.g. `--single-branch` clones, or any
+  // repo where the user has overridden `remote.<name>.fetch`), `git fetch
+  // origin <ref>` writes only to `FETCH_HEAD` and does not update
+  // `refs/remotes/origin/<ref>`. Read `FETCH_HEAD` directly so the new
+  // worktree still bases on the freshly fetched tip instead of falling
+  // back to a stale local ref.
+  const fetchedHead = await runGitCapture(project.path, [
+    "rev-parse",
+    "--verify",
+    "FETCH_HEAD^{commit}",
+  ]);
+  if (fetchedHead) {
+    emit({
+      type: "log",
+      stream: "stdout",
+      text: `no refs/remotes/origin/${candidateBase} after fetch — basing worktree on FETCH_HEAD (${fetchedHead})\n`,
+    });
+    return fetchedHead;
+  }
+
+  emit({
+    type: "log",
+    stream: "stdout",
+    text: `origin/${candidateBase} not found after fetch — basing worktree on local ${candidateBase}\n`,
+  });
+  return await resolveLocalBranchOrHead(project.path, candidateBase);
+}
+
+async function resolveLocalBranchOrHead(cwd: string, branch: string): Promise<string | null> {
+  const exists = await runGitExitCode(cwd, [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    `refs/heads/${branch}`,
+  ]);
+  if (exists === 0) return branch;
+  return await resolveLocalHead(cwd);
+}
+
+async function resolveLocalHead(cwd: string): Promise<string | null> {
+  const symbolic = await runGitCapture(cwd, ["symbolic-ref", "--short", "HEAD"]);
+  if (symbolic) return symbolic;
+  const commit = await runGitCapture(cwd, ["rev-parse", "HEAD"]);
+  return commit ?? null;
+}
+
 function sortBranchesWithDefault(branches: string[], defaultBranch: string | null): string[] {
   if (!defaultBranch || !branches.includes(defaultBranch)) {
     return [...branches].sort((a, b) => a.localeCompare(b));
@@ -578,21 +684,12 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
 
   emit({ type: "started", name, branch });
 
-  // Resolve baseBranch: provided value, then current HEAD symbolic ref, fallback to commit.
-  let resolvedBase = baseBranch;
-  if (!resolvedBase) {
-    resolvedBase = await runGitCapture(project.path, [
-      "symbolic-ref",
-      "--short",
-      "HEAD",
-    ]);
-    if (!resolvedBase) {
-      resolvedBase = await runGitCapture(project.path, [
-        "rev-parse",
-        "HEAD",
-      ]);
-    }
-  }
+  // Resolve baseBranch to a concrete ref. Prefer `origin/<branch>` so a new
+  // worktree starts from the up-to-date remote tip even when local HEAD is
+  // behind. Fall back to the local ref (and ultimately local HEAD) if the
+  // fetch fails or the remote tracking ref is unavailable.
+  const candidateBase = baseBranch ?? (await resolveDefaultBranch(project.path));
+  const resolvedBase = await resolveBaseRef(project, candidateBase, emit);
 
   // Does the requested branch already exist?
   const branchExists =

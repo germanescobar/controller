@@ -23,6 +23,19 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **New worktrees now base off `origin/<branch>` by default** (#172).
+  Creating a worktree from the orchestrator runs `git fetch origin <branch>`
+  first and uses the freshly fetched remote tracking ref as the base, so a
+  new worktree starts from the up-to-date remote tip even when the local
+  branch is behind. If `origin/<branch>` does not exist after the fetch
+  (or the fetch itself fails — offline, no `origin` configured, etc.) the
+  handler falls back to the local ref, and ultimately to local HEAD, while
+  emitting SSE `log` events explaining the fallback. The fetch and any
+  fallback log lines stream through the existing `/worktrees` SSE
+  channel. This is a behavior change for existing projects: worktrees
+  created without an explicit `baseBranch` will now do a `git fetch` and
+  base off `origin/<defaultBranch>` rather than the local HEAD.
+
 - **Renamed controller-managed skills to a `controller-` prefix and hid them
   from the `/` picker** (#159). The five app-managed skills installed into
   each provider's user home on startup
