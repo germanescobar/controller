@@ -166,6 +166,26 @@ async function resolveBaseRef(
     return `origin/${candidateBase}`;
   }
 
+  // In clones with a narrow refspec (e.g. `--single-branch` clones, or any
+  // repo where the user has overridden `remote.<name>.fetch`), `git fetch
+  // origin <ref>` writes only to `FETCH_HEAD` and does not update
+  // `refs/remotes/origin/<ref>`. Read `FETCH_HEAD` directly so the new
+  // worktree still bases on the freshly fetched tip instead of falling
+  // back to a stale local ref.
+  const fetchedHead = await runGitCapture(project.path, [
+    "rev-parse",
+    "--verify",
+    "FETCH_HEAD^{commit}",
+  ]);
+  if (fetchedHead) {
+    emit({
+      type: "log",
+      stream: "stdout",
+      text: `no refs/remotes/origin/${candidateBase} after fetch — basing worktree on FETCH_HEAD (${fetchedHead})\n`,
+    });
+    return fetchedHead;
+  }
+
   emit({
     type: "log",
     stream: "stdout",

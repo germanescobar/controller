@@ -14,6 +14,11 @@ import path from "node:path";
  * router against a temp `CODING_ORCHESTRATOR_HOME`, build a real git
  * repo with a fake `origin` remote, and exercise `POST /worktrees` over
  * real HTTP/SSE.
+ *
+ * The narrow-refspec test (#186 review feedback) covers clones created
+ * with `--single-branch` (or any repo where the user has overridden
+ * `remote.<name>.fetch`): in that case `git fetch origin <ref>` only
+ * writes to `FETCH_HEAD`, so we have to read it directly.
  */
 
 async function readSse(res: Response): Promise<unknown[]> {
@@ -378,5 +383,78 @@ test("falls back to local ref when no origin remote is configured", async () => 
     );
     const localMainTip = await getTip(projectPath, "main");
     assert.equal(newTip, localMainTip);
+  });
+});
+
+test("resolves to remote tip via FETCH_HEAD when the fetch refspec is narrow", async () => {
+  await withCreateEnv(async ({ projectPath, homeDir }) => {
+    await buildRepo(projectPath, async ({ remoteUrl }) => {
+      // Narrow the project's fetch refspec so a `git fetch origin feature`
+      // only updates FETCH_HEAD and never creates refs/remotes/origin/feature.
+      // This is the same shape as a `--single-branch` clone.
+      await runGit(projectPath, [
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/main:refs/remotes/origin/main",
+      ]);
+
+      // Push main, then create + push a feature branch, and advance
+      // origin/feature one commit beyond the local tip.
+      await runGit(projectPath, ["push", "-u", "origin", "main"]);
+      await runGit(projectPath, ["checkout", "-b", "feature"]);
+      await fs.writeFile(path.join(projectPath, "feature-local.txt"), "local\n");
+      await runGit(projectPath, ["add", "feature-local.txt"]);
+      await runGit(projectPath, ["commit", "-m", "feature-local-commit"]);
+      await runGit(projectPath, ["push", "-u", "origin", "feature"]);
+      await advanceRemoteBranch(remoteUrl, "feature", { homeDir, name: "feature-remote" }, "feature-remote-commit");
+
+      // Sanity: after a fetch, refs/remotes/origin/feature does NOT exist
+      // (because of the narrow refspec), but FETCH_HEAD does. This is the
+      // exact bug shape the reviewer flagged.
+      await runGit(projectPath, ["fetch", "origin", "feature"]);
+      assert.equal(
+        await getTip(projectPath, "refs/remotes/origin/feature"),
+        null,
+        "preconditions: narrow refspec should prevent refs/remotes/origin/feature from being created"
+      );
+      assert.ok(
+        await getTip(projectPath, "FETCH_HEAD"),
+        "preconditions: FETCH_HEAD should be populated by the fetch"
+      );
+    });
+  }, async ({ projectPath, baseUrl }) => {
+    const { status, events } = await createWorktree(baseUrl, {
+      name: "issue-172",
+      branch: "wt-narrow",
+      baseBranch: "feature",
+    });
+    assert.equal(status, 200);
+    assert.equal(events.find((e) => e.type === "done")?.exitCode, 0);
+
+    // The FETCH_HEAD fallback log line should appear.
+    const allLog = events
+      .filter((e) => e.type === "log")
+      .map((e) => String(e.text ?? ""))
+      .join("");
+    assert.match(allLog, /no refs\/remotes\/origin\/feature after fetch/);
+    assert.match(allLog, /FETCH_HEAD/);
+
+    // The new worktree is at the origin/feature tip (read via FETCH_HEAD),
+    // not at the stale local feature tip.
+    const newTip = await getTip(
+      path.join(
+        process.env.CODING_ORCHESTRATOR_HOME!,
+        "worktrees",
+        "proj-1",
+        "issue-172"
+      ),
+      "HEAD"
+    );
+    const originFeatureTip = await getTip(projectPath, "FETCH_HEAD");
+    assert.equal(
+      newTip,
+      originFeatureTip,
+      "worktree should match the freshly fetched tip via FETCH_HEAD"
+    );
   });
 });
