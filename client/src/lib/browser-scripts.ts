@@ -267,17 +267,79 @@ export function buildSnapshotScript(
  * the contract without parsing the whole serialised function.
  */
 export const SNAPSHOT_BODY = `
-    function suggestSelector(el){
-      if (el.id) return '#' + el.id;
-      var name = el.getAttribute && el.getAttribute('name');
-      if (name) return el.tagName.toLowerCase() + '[name="' + name + '"]';
+    function cssEscape(value){
+      if (window.CSS && CSS.escape) return CSS.escape(value);
+      return String(value).replace(/(["\\\\\\[\\]\\:\\.\\#\\>\\+\\~\\*\\=\\^\\$\\|\\?\\(\\)])/g, '\\\\$1');
+    }
+    function cheapSelector(el){
+      // Fast, attribute-only heuristic. Used as the first try; the caller
+      // verifies the result actually matches the source element before
+      // accepting it.
       var tab = el.getAttribute && el.getAttribute('data-testid');
       if (tab) return '[data-testid="' + tab + '"]';
-      // Last-ditch: a structural CSS selector based on tag + a single
-      // distinguishing attribute. The renderer re-runs this to resolve refs.
+      var name = el.getAttribute && el.getAttribute('name');
+      if (name) return el.tagName.toLowerCase() + '[name="' + name + '"]';
       var role = el.getAttribute && el.getAttribute('role');
       if (role) return '[role="' + role + '"]';
       return el.tagName.toLowerCase();
+    }
+    function nthOfType(el){
+      // :nth-of-type(n) where n is the element's position among same-tag
+      // siblings. Always unique within its parent, so chained up the tree
+      // it identifies exactly one node.
+      var parent = el.parentElement;
+      if (!parent) return el.tagName.toLowerCase();
+      var nth = 0;
+      for (var i = 0; i < parent.children.length; i++) {
+        if (parent.children[i].tagName === el.tagName) {
+          nth += 1;
+          if (parent.children[i] === el) {
+            return el.tagName.toLowerCase() + ':nth-of-type(' + nth + ')';
+          }
+        }
+      }
+      return el.tagName.toLowerCase();
+    }
+    function uniqueSelector(el){
+      // An id is unique by definition. Short-circuit so refs are stable as
+      // long as the page keeps the id, even if the DOM around it changes.
+      if (el.id) return '#' + cssEscape(el.id);
+      // Try the cheap heuristic first. Accept it only when it actually
+      // resolves to this element — querySelectorAll(base).length === 1 is
+      // not enough, because the lone match could be a sibling with the
+      // same attributes.
+      var base = cheapSelector(el);
+      var cheapMatch = document.querySelector(base);
+      if (cheapMatch === el) return base;
+      // Build a positional path up the tree. Anchor on the nearest id'd
+      // ancestor when we hit one — that keeps the selector short and
+      // stable against DOM changes outside the id'd subtree. If the
+      // resulting selector does not uniquely resolve to the source
+      // element, fall back to a full nth-of-type chain to the root.
+      var path = [];
+      var cur = el;
+      while (cur && cur.nodeType === 1) {
+        if (cur !== el && cur.id) {
+          path.unshift('#' + cssEscape(cur.id));
+          break;
+        }
+        path.unshift(nthOfType(cur));
+        cur = cur.parentElement;
+      }
+      var sel = path.join(' > ');
+      if (document.querySelector(sel) === el) return sel;
+      // Last-resort chain from the source element to the document root.
+      // We stop when c has no parentElement — that is the documentElement,
+      // which we still want to include in the chain (it carries the
+      // document's tag, e.g. "html"). Walking past it would error.
+      var fullPath = [];
+      var c = el;
+      while (c && c.nodeType === 1) {
+        fullPath.unshift(nthOfType(c));
+        if (!c.parentElement) break;
+        c = c.parentElement;
+      }
+      return fullPath.join(' > ');
     }
     function implicitRole(el){
       switch (el.tagName) {
@@ -336,7 +398,8 @@ export const SNAPSHOT_BODY = `
     function refId(){ counter += 1; return 'e' + counter; }
     function record(el){
       var id = refId();
-      refs[id] = suggestSelector(el);
+      var sel = uniqueSelector(el);
+      refs[id] = sel;
       return id;
     }
     if (mode === 'a11y') {
@@ -344,6 +407,12 @@ export const SNAPSHOT_BODY = `
         if (!el || el.nodeType !== 1) return;
         // Skip pure-presentation subtrees.
         if (el.getAttribute('aria-hidden') === 'true') return;
+        // Skip hidden controls entirely. ref= resolves the stored
+        // selector later and clicks it programmatically; clicks on
+        // display:none / visibility:hidden elements still dispatch,
+        // so a hidden dialog in the snapshot would let an agent
+        // trigger a control the user cannot see. Issue #170 review.
+        if (!visible(el)) return;
         var children = Array.from(el.children);
         var interactive = collectInteractive(el).length > 0;
         var hasText = (el.textContent || '').trim().length > 0;
@@ -369,7 +438,7 @@ export const SNAPSHOT_BODY = `
     var interactiveLines = [];
     nodes.forEach(function(el){
       if (!visible(el)) return;
-      var s = suggestSelector(el);
+      var s = uniqueSelector(el);
       if (!s) return;
       var id = record(el);
       var label = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 60);

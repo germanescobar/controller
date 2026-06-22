@@ -86,20 +86,31 @@ function elApi(root: MockElement) {
   const nodeIndex = new Map<MockElement, unknown>();
   function indexFor(el: MockElement): unknown {
     let n = nodeIndex.get(el);
-    if (!n) {
-      n = toNode(el);
-      nodeIndex.set(el, n);
-    }
-    return n;
+    if (n) return n;
+    // Reserve the slot with a placeholder before recursing into children.
+    // This breaks the toNode↔indexFor cycle: any child that asks for
+    // `el` (e.g. a node looking up its own parent) gets the placeholder
+    // back, and we patch the real object in once construction finishes.
+    const placeholder: Record<string, unknown> = {};
+    nodeIndex.set(el, placeholder);
+    n = toNode(el);
+    Object.assign(placeholder, n);
+    return placeholder;
   }
 
   function toNode(el: MockElement): unknown {
-    const selfRef = indexFor.bind(null, el);
+    // Eagerly index children + parent so the in-page script can traverse
+    // the tree without re-resolving identity on every walk. We compute
+    // these before constructing the returned object to avoid mutating it
+    // after the fact.
+    const childNodes = el.children.map((c) => indexFor(c));
+    const parentNode = el.parent ? indexFor(el.parent) : null;
     return {
       nodeType: 1,
       tagName: el.tagName,
       id: el.id,
-      children: el.children.map((c) => indexFor(c)),
+      children: childNodes,
+      parentElement: parentNode,
       // Array-like so the size check + iteration in `forEach` work.
       // We do not implement the full HTMLCollection contract — only what the
       // scripts use.
@@ -120,7 +131,7 @@ function elApi(root: MockElement) {
       // and check membership in the descendant set.
       contains: (other: unknown) => {
         if (!other || typeof other !== "object") return false;
-        for (const node of (selfAndDescendants)) {
+        for (const node of selfAndDescendants) {
           if (indexFor(node) === other) return true;
         }
         return false;
@@ -249,7 +260,11 @@ function runScript<T>(script: string, body: unknown): T {
   const ctx = {
     document: body as Record<string, unknown>,
     window: {
-      getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+      // The snapshot script's visible() helper reads the element's actual
+      // style, so the mock must return the per-element style instead of a
+      // single global "everything is visible" result.
+      getComputedStyle: (el: { style: { display: string; visibility: string } }) =>
+        el.style,
       CSS: undefined,
     },
     location: { href: "about:blank" },
@@ -422,4 +437,105 @@ test("buildSnapshotScript reports found=false when the selector does not match",
   const script = buildSnapshotScript("#missing", "default");
   const result = runScript<{ found: boolean }>(script, toBody());
   assert.equal(result.found, false);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #170 review: unique selectors for refs (P1) and hidden-node skipping
+// in a11y mode (P2).
+// ---------------------------------------------------------------------------
+
+test("snapshot registers unique refs for sibling elements with no distinguishing attrs (issue #170 P1)", () => {
+  // Two buttons with the same role/text and no id/data-testid/name. The
+  // pre-fix suggestSelector returned "button" for both, so ref=e2 resolved
+  // to the first button via querySelector. The new path builds a positional
+  // :nth-of-type chain so each ref uniquely identifies its element.
+  const cancel = makeEl("button", { textContent: "Cancel" });
+  const del = makeEl("button", { textContent: "Delete" });
+  const root = makeEl("body", { children: [cancel, del] });
+  const { toBody } = elApi(root);
+  const script = buildSnapshotScript(undefined, "default");
+  const result = runScript<{
+    found: boolean;
+    refs?: Record<string, string>;
+  }>(script, toBody());
+  assert.equal(result.found, true);
+  assert.ok(result.refs);
+  // Both buttons get distinct refs, and the selectors resolve to distinct
+  // elements when fed back through querySelector. The pre-fix behaviour
+  // was that both refs shared the bare "button" selector — we want the
+  // selectors to differ so the second one unambiguously points at the
+  // element the snapshot showed next to its ref.
+  const refKeys = Object.keys(result.refs);
+  assert.equal(refKeys.length, 2);
+  const sel0 = result.refs[refKeys[0]];
+  const sel1 = result.refs[refKeys[1]];
+  assert.ok(sel0 && sel1);
+  assert.notEqual(sel0, sel1);
+  // At least one selector must include :nth-of-type(n) — that is the
+  // uniqueness fix. (The first button is allowed to keep "button" because
+  // querySelector("button") on a two-button page resolves to it, so the
+  // ref is still accurate; the second button needs the disambiguator.)
+  const hasNthOfType = [sel0, sel1].some((s) => /:nth-of-type\(\d+\)/.test(s));
+  assert.ok(hasNthOfType, `expected at least one selector to use :nth-of-type; got ${sel0} and ${sel1}`);
+});
+
+test("snapshot prefers a short selector when the element has a unique id (issue #170 P1)", () => {
+  // An id is unique by definition; the path-fallback should never fire and
+  // we should not bolt on :nth-of-type. The cheap "#id" form is enough.
+  const button = makeEl("button", { id: "save", textContent: "Save" });
+  const root = makeEl("body", { children: [button] });
+  const { toBody } = elApi(root);
+  const script = buildSnapshotScript(undefined, "default");
+  const result = runScript<{
+    refs?: Record<string, string>;
+  }>(script, toBody());
+  assert.equal(result.refs?.["e1"], "#save");
+});
+
+test("a11y snapshot skips display:none controls and does not register refs for them (issue #170 P2)", () => {
+  // The visible button is recorded with a ref. The hidden button is
+  // excluded from the tree, so the agent has no way to drive it.
+  const visible = makeEl("button", { textContent: "Save" });
+  const hidden = makeEl("button", {
+    textContent: "Delete",
+    style: { display: "none", visibility: "visible" },
+  });
+  const root = makeEl("body", { children: [visible, hidden] });
+  const { toBody } = elApi(root);
+  const script = buildSnapshotScript(undefined, "a11y");
+  const result = runScript<{
+    found: boolean;
+    text?: string;
+    refs?: Record<string, string>;
+  }>(script, toBody());
+  assert.equal(result.found, true);
+  assert.match(result.text ?? "", /Save/);
+  // The hidden control's text must not appear in the tree.
+  assert.doesNotMatch(result.text ?? "", /Delete/);
+  // The hidden button (second of two) would resolve to ":nth-of-type(2)";
+  // skipping it means no ref points at it. The body and the visible button
+  // legitimately get refs (both carry text), so we don't assert an exact
+  // count — only that nothing addresses the hidden control.
+  const selectors = Object.values(result.refs ?? {});
+  assert.ok(selectors.every((s) => !/:nth-of-type\(2\)/.test(s)));
+});
+
+test("a11y snapshot skips visibility:hidden controls (issue #170 P2)", () => {
+  const visible = makeEl("button", { textContent: "OK" });
+  const hidden = makeEl("button", {
+    textContent: "Cancel",
+    style: { display: "block", visibility: "hidden" },
+  });
+  const root = makeEl("body", { children: [visible, hidden] });
+  const { toBody } = elApi(root);
+  const script = buildSnapshotScript(undefined, "a11y");
+  const result = runScript<{
+    text?: string;
+    refs?: Record<string, string>;
+  }>(script, toBody());
+  assert.match(result.text ?? "", /OK/);
+  assert.doesNotMatch(result.text ?? "", /Cancel/);
+  // The hidden second button is never addressable via a ref.
+  const selectors = Object.values(result.refs ?? {});
+  assert.ok(selectors.every((s) => !/:nth-of-type\(2\)/.test(s)));
 });
