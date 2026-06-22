@@ -36,6 +36,14 @@ const USAGE = `Usage:
   controller skills import-discover
   controller skills import [--provider <id>] [--source <path>] [--scope <scope>] [--overwrite]... [--all]`;
 
+// Exposed for tests: only auto-run `main()` when this file is the script the
+// process was launched as, so unit tests can import the helpers without
+// triggering CLI parsing against the test runner's argv.
+import { pathToFileURL } from "node:url";
+export const isMain =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
 function fail(message) {
   process.stderr.write(`Error: ${message}\n`);
   process.exit(1);
@@ -150,7 +158,7 @@ function flagValue(rest, flag) {
   return idx >= 0 ? rest[idx + 1] : undefined;
 }
 
-function parseIntegrations(argv) {
+export function parseIntegrations(argv) {
   const [command, ...rest] = argv;
   switch (command) {
     case "list":
@@ -210,7 +218,7 @@ function parseIntegrations(argv) {
   }
 }
 
-function printIntegrations(command, result) {
+export function printIntegrations(command, result) {
   if (command === "list") {
     const conns = result.connections ?? [];
     if (conns.length === 0) return process.stdout.write("No integrations are enabled for this session.\n");
@@ -367,6 +375,19 @@ async function runSkills(argv, serverUrl) {
   printSkills(argv[0], result);
 }
 
+// --- integrations dispatcher (issue #178) ---
+//
+// Bridges `parseIntegrations` (which already maps the subcommand to a
+// gateway endpoint + body) to the existing `printIntegrations` renderer.
+// Server-side the gateway endpoints are mounted under `/api/integrations/gateway/*`
+// (`server/routes/integrations.ts`), so the URL prefix is `/gateway/`.
+export async function runIntegrations(argv, serverUrl) {
+  const { endpoint, body } = parseIntegrations(argv);
+  const { response, result } = await postJson(serverUrl, `/api/integrations/gateway/${endpoint}`, body);
+  if (response.status >= 400 && result && result.error) fail(result.error);
+  printIntegrations(argv[0], result);
+}
+
 // `create` does not fit the `parseSkills` shape because it takes
 // `--name` / `--description` / `--body` / `--body-file` flags and reads
 // from disk when given a body file. It also POSTs to a different endpoint
@@ -437,4 +458,6 @@ async function main() {
   }
 }
 
-main().catch((error) => fail(error?.message ?? String(error)));
+if (isMain) {
+  main().catch((error) => fail(error?.message ?? String(error)));
+}
