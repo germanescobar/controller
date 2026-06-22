@@ -155,19 +155,49 @@ below is run as \`${cliPath} browser <command>\`:
 - \`${cliPath} browser open <url>\` — open a URL in the preview pane. Accepts
   \`localhost:PORT\`, a full \`http(s)://\` URL, or a project-relative file path
   (e.g. \`./dist/index.html\`).
-- \`${cliPath} browser snapshot [selector]\` — print a text snapshot of the
-  current page (title, URL, and visible text). Pass a CSS selector to scope it
-  to a subtree. Read this to confirm what rendered.
-- \`${cliPath} browser click <selector>\` — click the element matching a CSS
-  selector.
+- \`${cliPath} browser snapshot [--a11y] [selector]\` — print a snapshot of the
+  current page. The default mode returns visible text plus an interactive-
+  elements listing (each marked with a \`[ref=eN]\` id); pass \`--a11y\` to get
+  a structured accessibility tree (role + accessible name + \`[ref=eN]\`)
+  instead. Pass a CSS selector to scope the snapshot to a subtree.
+- \`${cliPath} browser click <selector>\` — click an element.
 - \`${cliPath} browser type <selector> <text> [--submit]\` — type text into a
   field. Add \`--submit\` to submit its form.
+
+## Selectors for click / type
+
+\`click\` and \`type\` accept a plain CSS selector, or a locator-style prefix
+when the page's markup is outside your control. Engine prefixes:
+
+- \`text=...\` — match by visible text (e.g. \`text=Cancel\`). Case-insensitive
+  substring; prefers the most specific match.
+- \`role=<role>[name="..."]\` — match by ARIA role, optionally filtered by
+  accessible name (e.g. \`role=button[name="Submit"]\`). Implicit roles are
+  honored (\`button\`, \`a[href]\`, \`input\`, etc.).
+- \`label=...\` — match by associated \`<label>\` text or \`aria-label\`.
+- \`placeholder=...\` — match a form field by its placeholder.
+- \`ref=<id>\` — match the element the most recent \`snapshot\` recorded under
+  that id (look for \`[ref=eN]\` markers in the snapshot output). The renderer
+  holds a per-pane refs cache that \`open\` clears, so \`ref=\` is a shortcut
+  for "the element I just read about" without re-deriving a selector.
+
+CSS is still the default — a selector with no prefix is a plain
+\`document.querySelector\`. Pick the prefix that matches the page's structure
+and the durability you need; a \`text=\` or \`role=\` selector survives markup
+changes that would break a positional CSS selector.
 
 ## How to use it
 
 1. \`open\` the page you want to inspect.
-2. \`snapshot\` to read the rendered result.
-3. \`click\` / \`type\` to interact, then \`snapshot\` again to confirm the effect.
+2. \`snapshot\` to read the rendered result. On a third-party site you do not
+   control, prefer \`snapshot --a11y\` so the output lists roles and accessible
+   names you can target. The default mode is cheaper for pages you own and
+   want to skim quickly.
+3. Use the \`[ref=eN]\` markers from the snapshot to drive \`click\` / \`type\`
+   without re-deriving a selector (e.g. \`click ref=e3\`). This is the most
+   stable loop on a page whose DOM you do not control.
+4. \`click\` / \`type\` to interact, then \`snapshot\` again to confirm the
+   effect.
 
 ## Notes
 
@@ -175,7 +205,11 @@ below is run as \`${cliPath} browser <command>\`:
   from your working directory.
 - Allowed targets: localhost and project-local files by default, plus web URLs.
 - If a command reports that no preview pane is connected, ask the user to open
-  the Preview tab for this session, then retry.
+  the Preview tab for this session, then retry. The bridge waits up to a few
+  seconds for a reconnecting pane before erroring, so a transient drop is
+  usually safe to ignore — re-running the command is enough.
+- \`ref=\` lookups return \`Stale ref\` if the page changed between the snapshot
+  and the action. Re-run \`snapshot\` to refresh the refs.
 `;
 }
 

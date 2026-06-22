@@ -16,9 +16,19 @@
 
 const USAGE = `Usage:
   controller browser open <url>
-  controller browser snapshot [selector]
+  controller browser snapshot [--a11y] [selector]
   controller browser click <selector>
   controller browser type <selector> <text> [--submit]
+
+  Selectors for click/type (issue #170) accept a plain CSS selector, or a
+  locator-style prefix: \`text=...\`, \`role=<role>[name="..."]\`,
+  \`label=...\`, \`placeholder=...\`, \`ref=<id>\`. \`ref=<id>\` resolves to an
+  element from the most recent \`snapshot\` call — see the \`[ref=eN]\` markers
+  the snapshot prints next to interactive elements.
+
+  \`snapshot --a11y\` prints the page as a structured accessibility tree
+  (role + accessible name + ref) instead of the default text + interactive
+  elements view. Refs are populated in both modes.
 
   controller integrations list
   controller integrations search <query>
@@ -103,8 +113,21 @@ function parseBrowser(argv) {
       if (!rest[0]) fail("browser open requires a <url>");
       return { action: "open", params: { url: rest[0] } };
     }
-    case "snapshot":
-      return { action: "snapshot", params: rest[0] ? { selector: rest[0] } : {} };
+    case "snapshot": {
+      // --a11y switches the response shape to a structured accessibility
+      // tree (issue #170). The default mode still emits refs in its
+      // interactive-elements listing, so the agent only needs --a11y when
+      // it wants the full tree.
+      const a11y = rest.includes("--a11y");
+      const positional = rest.filter((a) => a !== "--a11y");
+      return {
+        action: "snapshot",
+        params: {
+          ...(positional[0] ? { selector: positional[0] } : {}),
+          a11y,
+        },
+      };
+    }
     case "click": {
       if (!rest[0]) fail("browser click requires a <selector>");
       return { action: "click", params: { selector: rest[0] } };
@@ -130,6 +153,9 @@ async function runBrowser(argv, serverUrl) {
     const header = [result.title, result.url].filter(Boolean).join(" — ");
     if (header) process.stdout.write(`${header}\n\n`);
     process.stdout.write(`${result.text ?? ""}\n`);
+    if (result.refCount && result.refCount > 0) {
+      process.stdout.write(`\n${result.refCount} ref(s) registered — use \`click ref=e1\` or \`type ref=e1 <text>\` to target them.\n`);
+    }
     return;
   }
   const lines = [];

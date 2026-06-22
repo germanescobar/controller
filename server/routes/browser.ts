@@ -4,6 +4,11 @@
  * The CLI POSTs a browser command here; the route resolves the target pane,
  * enforces the navigation policy for `open`, and forwards the command to the
  * renderer that owns the visible `<webview>` via the preview browser bridge.
+ *
+ * Issue #170 added a `--a11y` flag for `snapshot` (returns an accessibility
+ * tree with stable element refs the agent can target by id via `ref=<id>`).
+ * The CLI forwards the flag as a boolean `a11y` param; everything else is
+ * passed through unchanged.
  */
 
 import { Router, type Request, type Response } from "express";

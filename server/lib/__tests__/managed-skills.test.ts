@@ -156,7 +156,7 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
     assert.match(
       anitaBrowser,
-      cliCommandRegex(cliPath, "browser snapshot [selector]")
+      cliCommandRegex(cliPath, "browser snapshot [--a11y] [selector]")
     );
 
     const anitaIntegrations = readFileSync(

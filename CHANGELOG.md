@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Browser CLI: locator-style selectors + accessibility snapshot** (#170).
+  The `controller browser click`/`type` commands now accept a
+  `selector=` prefix in addition to plain CSS: `text=...`,
+  `role=<role>[name="..."]`, `label=...`, `placeholder=...`, and
+  `ref=<id>`. The renderer resolves each prefix inside the guest page, so
+  `click text=Cancel` works on any page that renders the literal text and
+  `click role=button[name="Submit"]` matches buttons by accessible name.
+  `ref=<id>` resolves to the CSS selector the most recent `snapshot`
+  recorded under that id. `snapshot --a11y` emits a structured
+  accessibility tree (role + accessible name + `[ref=eN]`) instead of
+  the default visible-text view, so an agent can target an element on
+  any page without hand-built CSS. Both snapshot modes emit refs; the
+  default mode keeps the existing text + interactive-element listing
+  with `[ref=eN]` appended, so backward compatibility is preserved.
+  When the preview pane drops mid-session, the bridge now waits up to
+  3s for the renderer to reconnect before rejecting, so a transient
+  pane detach no longer aborts an in-flight agent command.
+
 ### Fixed
 
 - **`controller integrations …` no longer crashes with
