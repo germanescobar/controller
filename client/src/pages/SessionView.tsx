@@ -4108,7 +4108,12 @@ export function SessionView({
             fetchEvents(projectId, completedSessionId, worktreeId)
               .then((evts) => {
                 setEvents(evts);
-                if (evts.length > 0 && !runFailed && (data.exitCode ?? 1) === 0) {
+                // Once the persisted transcript is loaded it covers the whole
+                // run — including cancelled/failed runs, which #166 now
+                // persists. Clearing the live items only on a clean exit left
+                // both lists rendering on cancel/failure, duplicating every
+                // paragraph. Clear whenever persisted events are present.
+                if (evts.length > 0) {
                   setStreamItems([]);
                 }
               })
