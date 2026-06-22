@@ -652,7 +652,7 @@ async function handleSessionStream(
   //     today (Codex ignores collaboration-mode developer instructions in default
   //     mode; Claude's plan mode flows through the stream-json control channel).
   //     The skill prefix, if any, stays after the preamble.
-  const controllerPreamble = buildControllerPreamble();
+  const controllerPreamble = await buildControllerPreamble();
   const usesSystemPrompt = providerId === "anita";
   const agentMessage = usesSystemPrompt
     ? skillResolution.agentMessage
