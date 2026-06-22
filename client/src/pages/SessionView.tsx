@@ -4112,9 +4112,18 @@ export function SessionView({
                 // run — including cancelled/failed runs, which #166 now
                 // persists. Clearing the live items only on a clean exit left
                 // both lists rendering on cancel/failure, duplicating every
-                // paragraph. Clear whenever persisted events are present.
+                // paragraph. Drop the live items that the transcript now
+                // mirrors, but keep terminal status banners (`error`,
+                // `run_cancelled`): the server never persists run.failed /
+                // run.cancelled events, so these are the only record of the
+                // cancel/failure reason.
                 if (evts.length > 0) {
-                  setStreamItems([]);
+                  setStreamItems((prev) =>
+                    prev.filter(
+                      (item) =>
+                        item.type === "error" || item.type === "run_cancelled"
+                    )
+                  );
                 }
               })
               .catch(() => {});
