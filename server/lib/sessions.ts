@@ -10,6 +10,7 @@ import {
   type ResolvedFocusState,
   type SessionFocus,
 } from "./focus-state.js";
+import { projectStoreDir } from "./paths.js";
 
 export interface SessionState {
   id: string;
@@ -74,7 +75,11 @@ export interface AttachmentMetadata {
 }
 
 function storagePaths(projectPath: string) {
-  const base = path.join(projectPath, ".coding-agent");
+  // Controller-owned storage lives under the Controller home, not in the
+  // project tree. See `projectStoreDir` for why: a project-local
+  // `.coding-agent/` collides with the `anita` CLI's own session storage
+  // and double-records every event.
+  const base = projectStoreDir(projectPath);
   return {
     sessions: path.join(base, "sessions"),
     events: path.join(base, "events"),
