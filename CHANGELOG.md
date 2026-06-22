@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`controller integrations …` no longer crashes with
+  `ReferenceError: runIntegrations is not defined`** (#178). The unified
+  CLI's dispatcher called a `runIntegrations` helper that was never
+  defined, so every `list` / `search` / `tools` / `describe` / `call` /
+  `request` / `status` subcommand threw before reaching the server. The
+  dispatcher is now wired up to `parseIntegrations` and `printIntegrations`,
+  mirroring the `browser` and `skills` surfaces, and POSTs to the
+  `/api/integrations/<endpoint>` gateway routes the server already
+  exposes. Server-side errors are surfaced as a non-zero exit with the
+  message from `result.error`, consistent with the other surfaces. A new
+  smoke-test file (`cli/__tests__/controller-cli.test.mjs`) imports the
+  CLI module, stubs `fetch`, and asserts the regression class is caught
+  early.
+
 ### Changed
 
 - **Renamed controller-managed skills to a `controller-` prefix and hid them
