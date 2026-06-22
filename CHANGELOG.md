@@ -24,7 +24,37 @@ All notable changes to this project are documented here.
   3s for the renderer to reconnect before rejecting, so a transient
   pane detach no longer aborts an in-flight agent command.
 
+### Fixed
+
+- **`controller integrations …` no longer crashes with
+  `ReferenceError: runIntegrations is not defined`** (#178). The unified
+  CLI's dispatcher called a `runIntegrations` helper that was never
+  defined, so every `list` / `search` / `tools` / `describe` / `call` /
+  `request` / `status` subcommand threw before reaching the server. The
+  dispatcher is now wired up to `parseIntegrations` and `printIntegrations`,
+  mirroring the `browser` and `skills` surfaces, and POSTs to the
+  `/api/integrations/gateway/<endpoint>` routes the server already
+  exposes (caught in review — the gateway endpoints live under
+  `/gateway/*`, not at the router root). Server-side errors are surfaced
+  as a non-zero exit with the message from `result.error`, consistent
+  with the other surfaces. A new smoke-test file
+  (`cli/__tests__/controller-cli.test.mjs`) imports the CLI module,
+  stubs `fetch`, and asserts the regression class is caught early.
+
 ### Changed
+
+- **New worktrees now base off `origin/<branch>` by default** (#172).
+  Creating a worktree from the orchestrator runs `git fetch origin <branch>`
+  first and uses the freshly fetched remote tracking ref as the base, so a
+  new worktree starts from the up-to-date remote tip even when the local
+  branch is behind. If `origin/<branch>` does not exist after the fetch
+  (or the fetch itself fails — offline, no `origin` configured, etc.) the
+  handler falls back to the local ref, and ultimately to local HEAD, while
+  emitting SSE `log` events explaining the fallback. The fetch and any
+  fallback log lines stream through the existing `/worktrees` SSE
+  channel. This is a behavior change for existing projects: worktrees
+  created without an explicit `baseBranch` will now do a `git fetch` and
+  base off `origin/<defaultBranch>` rather than the local HEAD.
 
 - **Renamed controller-managed skills to a `controller-` prefix and hid them
   from the `/` picker** (#159). The five app-managed skills installed into
