@@ -13,12 +13,13 @@ All notable changes to this project are documented here.
   `request` / `status` subcommand threw before reaching the server. The
   dispatcher is now wired up to `parseIntegrations` and `printIntegrations`,
   mirroring the `browser` and `skills` surfaces, and POSTs to the
-  `/api/integrations/<endpoint>` gateway routes the server already
-  exposes. Server-side errors are surfaced as a non-zero exit with the
-  message from `result.error`, consistent with the other surfaces. A new
-  smoke-test file (`cli/__tests__/controller-cli.test.mjs`) imports the
-  CLI module, stubs `fetch`, and asserts the regression class is caught
-  early.
+  `/api/integrations/gateway/<endpoint>` routes the server already
+  exposes (caught in review — the gateway endpoints live under
+  `/gateway/*`, not at the router root). Server-side errors are surfaced
+  as a non-zero exit with the message from `result.error`, consistent
+  with the other surfaces. A new smoke-test file
+  (`cli/__tests__/controller-cli.test.mjs`) imports the CLI module,
+  stubs `fetch`, and asserts the regression class is caught early.
 
 ### Changed
 

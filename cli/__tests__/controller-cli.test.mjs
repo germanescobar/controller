@@ -41,7 +41,7 @@ test("parseIntegrations maps subcommands to gateway endpoints", async () => {
   );
 });
 
-test("runIntegrations POSTs to /api/integrations/<endpoint> and prints the result", async () => {
+test("runIntegrations POSTs to /api/integrations/gateway/<endpoint> and prints the result", async () => {
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -67,7 +67,7 @@ test("runIntegrations POSTs to /api/integrations/<endpoint> and prints the resul
     process.chdir(originalCwd);
   }
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "http://controller.test/api/integrations/list");
+  assert.equal(calls[0].url, "http://controller.test/api/integrations/gateway/list");
   const body = JSON.parse(calls[0].init.body);
   assert.equal(body.cwd, originalCwd);
   assert.deepEqual(stdoutChunks.join(""), "Trello  [rest/request]  ok\n");

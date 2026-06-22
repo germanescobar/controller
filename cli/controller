@@ -378,12 +378,12 @@ async function runSkills(argv, serverUrl) {
 // --- integrations dispatcher (issue #178) ---
 //
 // Bridges `parseIntegrations` (which already maps the subcommand to a
-// gateway endpoint + body) to the existing `printIntegrations` renderer. The
-// server-side `POST /api/integrations/<endpoint>` routes are wired up; this
-// is the missing client half that lets agents reach them.
+// gateway endpoint + body) to the existing `printIntegrations` renderer.
+// Server-side the gateway endpoints are mounted under `/api/integrations/gateway/*`
+// (`server/routes/integrations.ts`), so the URL prefix is `/gateway/`.
 export async function runIntegrations(argv, serverUrl) {
   const { endpoint, body } = parseIntegrations(argv);
-  const { response, result } = await postJson(serverUrl, `/api/integrations/${endpoint}`, body);
+  const { response, result } = await postJson(serverUrl, `/api/integrations/gateway/${endpoint}`, body);
   if (response.status >= 400 && result && result.error) fail(result.error);
   printIntegrations(argv[0], result);
 }
