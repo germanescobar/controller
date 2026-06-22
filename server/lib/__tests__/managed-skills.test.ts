@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { installManagedSkills } from "../managed-skills.js";
+import {
+  installManagedSkills,
+  MANAGED_SKILL_DIRS,
+  managedMarker,
+} from "../managed-skills.js";
 
 /**
  * Run `installManagedSkills` against temp homes so the test does not touch
@@ -214,16 +218,13 @@ test("managed skills install under controller-prefixed directory names", async (
   await withIsolatedHomes(async () => {
     await installManagedSkills();
 
-    // Each managed skill should land in a `controller-`-prefixed directory
-    // (or stay as the grandfathered `controller-scripts`). The marker comment
-    // references issue #159 so future renames can detect unowned files.
-    const expected: Array<{ dir: string; name: string }> = [
-      { dir: "controller-browser", name: "controller-browser" },
-      { dir: "controller-integrations", name: "controller-integrations" },
-      { dir: "controller-scripts", name: "controller-scripts" },
-      { dir: "controller-search-skills", name: "controller-search-skills" },
-      { dir: "controller-skill-creator", name: "controller-skill-creator" },
-    ];
+    // Each managed skill should land in a directory listed in
+    // `MANAGED_SKILL_DIRS` — the same set the disk provider keys on to
+    // detect `scope: "managed"`. The marker comment embedded in each body
+    // is documentary only; the directory name is the ownership signal.
+    const expected: Array<{ dir: string; name: string }> = MANAGED_SKILL_DIRS.map(
+      (dir) => ({ dir, name: dir })
+    );
 
     for (const provider of [".anita", ".codex", ".claude"]) {
       for (const { dir, name } of expected) {
@@ -251,12 +252,64 @@ test("managed skills install under controller-prefixed directory names", async (
           name,
           `${skillFile} frontmatter name does not match the directory name`
         );
-        // The body must carry the up-to-date managed marker.
+        // The body must carry the documentary marker for the matching
+        // directory name.
         assert.ok(
-          body.includes("<!-- managed-by: coding-orchestrator (issue #159) -->"),
-          `${skillFile} is missing the current MANAGED_MARKER`
+          body.includes(managedMarker(name)),
+          `${skillFile} is missing the managed marker for "${name}"`
         );
       }
     }
+  });
+});
+
+test("installManagedSkills rewrites a managed directory even when its body has no marker", async () => {
+  // Regression test for the bug surfaced after PR #173: when the marker
+  // comment was bumped, a leftover app-owned directory whose file body
+  // predated the bump was treated as user-authored and never re-synchronized.
+  // With directory-name ownership, the install loop must always re-sync a
+  // directory in `MANAGED_SKILL_DIRS`, regardless of marker content.
+  await withIsolatedHomes(async () => {
+    const skillsDir = path.join(os.homedir(), ".anita", "skills");
+    const skillDir = path.join(skillsDir, "controller-scripts");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      "# stale body\nno marker, no managed-by line\n",
+      "utf-8"
+    );
+
+    await installManagedSkills();
+
+    const after = readFileSync(path.join(skillDir, "SKILL.md"), "utf-8");
+    assert.ok(
+      after.includes(managedMarker("controller-scripts")),
+      "managed directory should have been rewritten with the current body"
+    );
+    assert.ok(
+      after.includes("# Controller Scripts"),
+      "managed directory should now contain the current shipped body"
+    );
+  });
+});
+
+test("installManagedSkills does not touch unrelated directories under the skills home", async () => {
+  // A user-authored skill dropped into the same parent must be left alone,
+  // even if it carries marker-shaped comments. The install loop only
+  // iterates over `MANAGED_SKILL_DIRS`, so other directories are never
+  // read or rewritten.
+  await withIsolatedHomes(async () => {
+    const skillsDir = path.join(os.homedir(), ".anita", "skills");
+    const userDir = path.join(skillsDir, "my-personal-skill");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    mkdirSync(userDir, { recursive: true });
+    const userBody = "# mine\nThis is the user's skill body.\n";
+    writeFileSync(path.join(userDir, "SKILL.md"), userBody, "utf-8");
+
+    await installManagedSkills();
+
+    const after = readFileSync(path.join(userDir, "SKILL.md"), "utf-8");
+    assert.equal(after, userBody, "user-authored skill should be untouched");
   });
 });

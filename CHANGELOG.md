@@ -29,6 +29,33 @@ All notable changes to this project are documented here.
   carry the previous marker comment and would otherwise be re-read as
   regular user-authored skills.
 
+- **Switched managed-skill ownership detection from a versioned marker
+  comment to the directory name** (#159 follow-up). The previous marker
+  comment embedded an issue number (`issue #159`); bumping that number
+  silently re-classified every leftover app-owned directory as
+  user-authored, so `controller-scripts` (the grandfathered name from
+  #173) reappeared in the `/` picker on machines upgraded across the
+  rename. Ownership is now decided by a single source of truth —
+  `MANAGED_SKILL_DIRS` in `server/lib/managed-skills.ts` — checked by
+  the install loop, the disk provider's `scope: "managed"` detection,
+  and the per-agent skill discovery used by the
+  `controller skills import-discover` command (managed skills are now
+  filtered out so they don't appear as import candidates). The marker
+  comment is still embedded in each shipped body for documentation, but
+  it now includes the directory name (e.g.
+  `<!-- managed-by: coding-orchestrator (controller-scripts) -->`)
+  and is not authoritative: a directory in `MANAGED_SKILL_DIRS` is
+  always app-owned regardless of marker content, and the install loop
+  will rewrite it on next server start. The import endpoint also
+  refuses a `sourcePath` that points at a managed directory, so a
+  cached or hand-rolled request can't promote an app-owned skill into
+  the unified catalog. Users with leftover app-owned directories from
+  before this change need no manual cleanup; the next server restart
+  re-syncs them. The previous note about manually removing
+  `~/.{anita,codex,claude}/skills/{browser, integrations, search-skills,
+  skill-creator}` is no longer required for this purpose (it was a
+  one-time follow-up to #173's rename).
+
 
 
 ### Changed

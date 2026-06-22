@@ -27,7 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { resolveCommand } from "./command-resolver.js";
-import { MANAGED_MARKER } from "./managed-skills.js";
+import { isManagedSkillDir } from "./managed-skills.js";
 import { canonicalProviderId } from "./provider-id.js";
 import { childProcessEnv } from "./shell-env.js";
 import { listUnifiedSkills, readUnifiedSkill } from "./unified-skills.js";
@@ -185,13 +185,15 @@ async function readMetadataFromDir(
   if (!parsed) return [];
   const name = (parsed.metadata.name ?? "").trim();
   if (!name) return [];
-  // A `SKILL.md` tagged with `MANAGED_MARKER` is owned by the orchestrator
-  // (see `server/lib/managed-skills.ts`). Surface it with `scope: "managed"`
-  // so the `/` picker can hide it while still leaving the body available to
-  // the agent via `readBody`. This takes precedence over the directory scope
-  // (`user` / `system` / `repo`) because the marker is the authoritative
-  // ownership signal.
-  const effectiveScope: SkillScope = raw.includes(MANAGED_MARKER)
+  // A `SKILL.md` whose parent directory is owned by the orchestrator (see
+  // `MANAGED_SKILL_DIRS` in `server/lib/managed-skills.ts`) is surfaced
+  // with `scope: "managed"` so the `/` picker can hide it while still
+  // leaving the body available to the agent via `readBody`. Directory-name
+  // ownership is intentional: a versioned marker comment would silently
+  // re-classify a leftover app-owned directory as user-authored whenever
+  // the marker text was bumped.
+  const dirName = path.basename(dir);
+  const effectiveScope: SkillScope = isManagedSkillDir(dirName)
     ? "managed"
     : scope;
   return [
