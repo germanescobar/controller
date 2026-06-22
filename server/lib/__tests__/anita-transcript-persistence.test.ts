@@ -14,21 +14,36 @@ import type { AgentStreamEvent } from "../agents.js";
 
 /*
  * Regression test for issue #163: the orchestrator must persist the Anita
- * transcript (assistant text + tool calls/results) to `.coding-agent/events/`
+ * transcript (assistant text + tool calls/results) to its own event store
  * and read it back via `getEvents` for a multi-turn session.
  *
- * The Ada->Anita rename (#152) moved the `anita` CLI's data dir to `.anita/`
- * while the orchestrator only read its own `.coding-agent/events/`, which used
- * to contain just the orchestrator-written `user_message`/`run_diff` events
- * because Anita persistence was skipped. The UI therefore rendered only user
- * bubbles and file-edit cards; assistant turns came back empty. The fix makes
- * the orchestrator persist every provider's parsed transcript events itself
- * (like Codex/Claude), so this test mirrors that persistence path.
+ * Persistence was once skipped for Anita; the orchestrator's event store then
+ * held only the orchestrator-written `user_message`/`run_diff` events, so the
+ * UI rendered user bubbles and file-edit cards but empty assistant turns. The
+ * fix makes the orchestrator persist every provider's parsed transcript events
+ * itself (like Codex/Claude), so this test mirrors that persistence path. The
+ * store now lives under the Controller home rather than a project-local
+ * `.coding-agent/` to avoid colliding with the `anita` CLI's own storage.
  */
 
+/*
+ * Run with an isolated project dir and an isolated Controller home. Session
+ * and event storage now lives under the Controller home (see
+ * `projectStoreDir`), so the home is overridden via
+ * `CODING_ORCHESTRATOR_HOME` to keep test writes out of the real home and
+ * clean them up afterward.
+ */
 function withTempProject(run: (projectPath: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "anita-transcript-"));
-  return run(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+  const home = mkdtempSync(path.join(os.tmpdir(), "orch-home-"));
+  const prevHome = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = home;
+  return run(dir).finally(() => {
+    if (prevHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = prevHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
 }
 
 /* Persist a parsed agent stream event exactly as the session stream handler does. */

@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  appendEvent,
   archiveSession,
   getSession,
   getSessions,
@@ -21,6 +22,7 @@ import {
   writeSessionFocus,
   type SessionFocus,
 } from "../focus-state.js";
+import { projectStoreDir } from "../paths.js";
 
 /*
  * Runs `run` against a fresh temp project directory and an isolated
@@ -65,6 +67,41 @@ function makeFocus(
     ...overrides,
   };
 }
+
+test("session and event storage lives under the Controller home, not the project tree", async () => {
+  // The `anita` CLI falls back to writing its own session storage into a
+  // project-local `.coding-agent/`. If Controller wrote there too, every
+  // transcript event would be recorded twice. Storage must stay under the
+  // Controller home so the namespaces never overlap.
+  await withTempProject(async (projectPath) => {
+    await saveSession(projectPath, makeSession());
+    await appendEvent(projectPath, "session-1", {
+      id: "evt-1",
+      sessionId: "session-1",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      type: "assistant_response",
+      data: { content: [{ type: "text", text: "hi" }] },
+    });
+
+    const store = projectStoreDir(projectPath);
+    assert.ok(
+      store.startsWith(process.env.CODING_ORCHESTRATOR_HOME!),
+      "store must live under the Controller home"
+    );
+    assert.ok(
+      !existsSync(path.join(projectPath, ".coding-agent")),
+      "Controller must not write into the project-local .coding-agent/"
+    );
+    assert.ok(
+      existsSync(path.join(store, "sessions", "session-1.json")),
+      "session file must land in the Controller-home store"
+    );
+    assert.ok(
+      existsSync(path.join(store, "events", "session-1.jsonl")),
+      "event file must land in the Controller-home store"
+    );
+  });
+});
 
 test("updateSessionFocus pin sets focusPinnedAt and clears focusDoneAt", async () => {
   await withTempProject(async (projectPath) => {
@@ -168,8 +205,7 @@ test("updateSessionTitle does not poison the session file with focus fields", as
     );
     await updateSessionTitle(projectPath, "session-1", "Renamed");
     const sessionFile = path.join(
-      projectPath,
-      ".coding-agent",
+      projectStoreDir(projectPath),
       "sessions",
       "session-1.json"
     );

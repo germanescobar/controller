@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 export function orchestratorHome(): string {
   return (
@@ -82,6 +83,32 @@ export function sessionFocusDir(): string {
 /** Per-session focus sidecar, keyed by the session id. */
 export function sessionFocusFile(sessionId: string): string {
   return path.join(sessionFocusDir(), `${sessionId}.json`);
+}
+
+// --- Session & Event Storage ---
+
+/**
+ * Per-project storage root for Controller-owned session, event, and
+ * attachment files. Lives under the Controller home — NOT in the
+ * project working tree.
+ *
+ * Controller previously stored these in `<project>/.coding-agent/`, but
+ * that is exactly the directory the `anita` CLI falls back to for its
+ * own session storage when no `.anita/sessions/` exists (see the CLI's
+ * `resolveStorageBase`). With both processes writing
+ * `.coding-agent/events/<sessionId>.jsonl`, every transcript event was
+ * recorded twice — once in the CLI's native shape, once in
+ * Controller's normalized shape. Owning a directory outside the project
+ * tree removes the shared namespace entirely.
+ *
+ * Keyed by a hash of the absolute project path so each project/worktree
+ * gets an isolated, stable directory and `getSessions` keeps returning
+ * only that location's sessions.
+ */
+export function projectStoreDir(projectPath: string): string {
+  const resolved = path.resolve(projectPath);
+  const key = createHash("sha256").update(resolved).digest("hex").slice(0, 16);
+  return path.join(orchestratorHome(), "projects", `${path.basename(resolved)}-${key}`);
 }
 
 // --- Terminal Tabs ---
