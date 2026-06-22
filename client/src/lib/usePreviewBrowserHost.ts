@@ -5,6 +5,12 @@
  * this session view owns, and executes incoming browser commands against the
  * visible `<webview>` element. Navigation reuses the normal preview-open path
  * so the user sees the pane switch and load while the agent works.
+ *
+ * Issue #170 added locator-style selector engines (`text=`, `role=`, `label=`,
+ * `placeholder=`, `ref=`) and an accessibility-tree snapshot. The renderer
+ * remembers the refs the most recent snapshot emitted (per pane) so a later
+ * `click`/`type ref=e3` resolves on the same page without the agent having to
+ * re-send the selector. A new navigation (`open`) clears the stored refs.
  */
 
 import { useEffect, useRef } from "react";
@@ -12,6 +18,11 @@ import type {
   BrowserCommandResult,
   BrowserServerMessage,
 } from "../../../shared/preview-browser.ts";
+import {
+  buildClickScript,
+  buildSnapshotScript,
+  buildTypeScript,
+} from "./browser-scripts.ts";
 
 /** Subset of the Electron `<webview>` tag API we drive. */
 export interface PreviewWebview extends HTMLElement {
@@ -61,6 +72,10 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let disposed = false;
+    // Per-pane refs cache (issue #170). The snapshot produces a ref map; the
+    // next click/type with `ref=` reads from it. Cleared on `open` because a
+    // new page invalidates the selectors.
+    const refs: Record<string, string> = {};
 
     const runCommand = async (
       message: BrowserServerMessage
@@ -78,19 +93,22 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               getWebviewRef.current(),
               typeof message.params.selector === "string"
                 ? message.params.selector
-                : undefined
+                : undefined,
+              message.params.a11y === true
             );
           case "click":
             return await handleClick(
               getWebviewRef.current(),
-              String(message.params.selector ?? "")
+              String(message.params.selector ?? ""),
+              refs
             );
           case "type":
             return await handleType(
               getWebviewRef.current(),
               String(message.params.selector ?? ""),
               String(message.params.text ?? ""),
-              Boolean(message.params.submit)
+              Boolean(message.params.submit),
+              refs
             );
           default:
             return { ok: false, error: `Unsupported action` };
@@ -120,7 +138,18 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
           return;
         }
         if (message.kind !== "command") return;
+        if (message.action === "open") {
+          // A new navigation invalidates any refs we cached.
+          for (const k of Object.keys(refs)) delete refs[k];
+        }
         void runCommand(message).then((result) => {
+          // Snapshot replies carry refs the next `ref=` call will resolve;
+          // capture them so a later click can target by id without re-running
+          // a querySelector over the snapshot text.
+          if (message.action === "snapshot" && result.ok && result.refs) {
+            for (const k of Object.keys(refs)) delete refs[k];
+            Object.assign(refs, result.refs);
+          }
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
@@ -179,55 +208,92 @@ async function handleOpen(
 
 async function handleSnapshot(
   webview: PreviewWebview | null,
-  selector?: string
+  selector: string | undefined,
+  a11y: boolean
 ): Promise<BrowserCommandResult> {
   if (!webview) {
     return { ok: false, error: "No page is open. Use `open <url>` first." };
   }
   const result = (await webview.executeJavaScript(
-    snapshotScript(selector)
-  )) as { found: boolean; url?: string; title?: string; text?: string } | null;
+    buildSnapshotScript(selector, a11y ? "a11y" : "default")
+  )) as {
+    found: boolean;
+    url?: string;
+    title?: string;
+    text?: string;
+    refs?: Record<string, string>;
+    refCount?: number;
+  } | null;
   if (!result || !result.found) {
     return {
       ok: false,
-      error: selector ? `No element matches: ${selector}` : "Could not read the page",
+      error: selector
+        ? `No element matches: ${selector}`
+        : "Could not read the page",
     };
   }
-  return { ok: true, url: result.url, title: result.title, text: result.text };
+  return {
+    ok: true,
+    url: result.url,
+    title: result.title,
+    text: result.text,
+    refs: result.refs,
+    refCount: result.refCount,
+  };
 }
 
 async function handleClick(
   webview: PreviewWebview | null,
-  selector: string
+  selector: string,
+  refs: Record<string, string>
 ): Promise<BrowserCommandResult> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
   if (!selector) return { ok: false, error: "Missing selector" };
-  const result = (await webview.executeJavaScript(clickScript(selector))) as {
-    found: boolean;
-  } | null;
-  if (!result || !result.found) {
-    return { ok: false, error: `No element matches: ${selector}` };
+  const result = (await webview.executeJavaScript(
+    buildClickScript({ selector, refs })
+  )) as { ok: boolean; engine?: string; error?: string } | null;
+  if (!result) return { ok: false, error: "Renderer returned no result" };
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.error === "unknown ref"
+          ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
+          : result.error === "stale ref"
+            ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
+            : `No element matches: ${selector} (engine: ${result.engine ?? "?"})`,
+    };
   }
-  return { ok: true, summary: `Clicked ${selector}` };
+  return { ok: true, summary: `Clicked ${selector} (${result.engine})` };
 }
 
 async function handleType(
   webview: PreviewWebview | null,
   selector: string,
   text: string,
-  submit: boolean
+  submit: boolean,
+  refs: Record<string, string>
 ): Promise<BrowserCommandResult> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
   if (!selector) return { ok: false, error: "Missing selector" };
   const result = (await webview.executeJavaScript(
-    typeScript(selector, text, submit)
-  )) as { found: boolean } | null;
-  if (!result || !result.found) {
-    return { ok: false, error: `No element matches: ${selector}` };
+    buildTypeScript({ selector, refs, text, submit })
+  )) as { ok: boolean; engine?: string; error?: string } | null;
+  if (!result) return { ok: false, error: "Renderer returned no result" };
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.error === "unknown ref"
+          ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
+          : result.error === "stale ref"
+            ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
+            : `No element matches: ${selector} (engine: ${result.engine ?? "?"})`,
+    };
   }
   return {
     ok: true,
-    summary: `Typed into ${selector}${submit ? " and submitted" : ""}`,
+    summary: `Typed into ${selector}${submit ? " and submitted" : ""} (${result.engine})`,
   };
 }
 
@@ -293,60 +359,4 @@ function safeCall<T>(fn: () => T): T | null {
   } catch {
     return null;
   }
-}
-
-function snapshotScript(selector?: string): string {
-  return `(function(sel){
-    var root = sel ? document.querySelector(sel) : document.body;
-    if (!root) return { found: false };
-    function suggestSelector(el){
-      if (el.id) return '#' + el.id;
-      var name = el.getAttribute && el.getAttribute('name');
-      if (name) return el.tagName.toLowerCase() + '[name="' + name + '"]';
-      var tab = el.getAttribute && el.getAttribute('data-testid');
-      if (tab) return '[data-testid="' + tab + '"]';
-      return null;
-    }
-    var text = (root.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 8000);
-    var nodes = Array.prototype.slice.call(
-      document.querySelectorAll('a,button,input,textarea,select,[role="button"]')
-    ).slice(0, 80);
-    var lines = [];
-    nodes.forEach(function(el){
-      var s = suggestSelector(el);
-      if (!s) return;
-      var label = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 60);
-      lines.push('- ' + el.tagName.toLowerCase() + ' ' + s + (label ? ' — ' + label : ''));
-    });
-    var full = text + (lines.length ? '\\n\\nInteractive elements:\\n' + lines.join('\\n') : '');
-    return { found: true, url: location.href, title: document.title, text: full };
-  })(${JSON.stringify(selector ?? null)})`;
-}
-
-function clickScript(selector: string): string {
-  return `(function(sel){
-    var el = document.querySelector(sel);
-    if (!el) return { found: false };
-    el.scrollIntoView({ block: 'center', inline: 'center' });
-    el.click();
-    return { found: true };
-  })(${JSON.stringify(selector)})`;
-}
-
-function typeScript(selector: string, text: string, submit: boolean): string {
-  return `(function(sel, value, submit){
-    var el = document.querySelector(sel);
-    if (!el) return { found: false };
-    el.focus();
-    var proto = (typeof HTMLTextAreaElement !== 'undefined' && el instanceof HTMLTextAreaElement)
-      ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-    if (setter && setter.set) setter.set.call(el, value); else el.value = value;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    if (submit && el.form) {
-      if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
-    }
-    return { found: true };
-  })(${JSON.stringify(selector)}, ${JSON.stringify(text)}, ${JSON.stringify(submit)})`;
 }
