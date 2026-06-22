@@ -2,8 +2,13 @@
  * Installs app-managed skills for each agent.
  *
  * We write the bundled `SKILL.md` files into each provider's user skills home
- * on startup. Files we don't own (no managed marker) are left untouched so
- * user edits are never clobbered.
+ * on startup. Ownership is decided by **directory name** (see
+ * `MANAGED_SKILL_DIRS`): a directory in that set is app-owned regardless of
+ * what the file body contains, so user edits inside an app-owned directory
+ * are always overwritten and the marker comment is purely documentary. This
+ * is more robust than a versioned marker comment, which would silently
+ * re-classify a leftover app-owned directory as user-authored whenever the
+ * marker text was bumped.
  */
 
 import fs from "node:fs/promises";
@@ -11,8 +16,33 @@ import os from "node:os";
 import path from "node:path";
 import { controllerCliInstalledPath } from "./controller-cli.js";
 
-export const MANAGED_MARKER =
-  "<!-- managed-by: coding-orchestrator (issue #159) -->";
+/**
+ * The directory names the orchestrator owns. This is the single source of
+ * truth used by both the install loop and the disk provider's scope
+ * detection — keep these two consumers in sync.
+ */
+export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
+  "controller-browser",
+  "controller-integrations",
+  "controller-scripts",
+  "controller-search-skills",
+  "controller-skill-creator",
+]);
+
+/** True when the given skill directory is owned by the orchestrator. */
+export function isManagedSkillDir(dirName: string): boolean {
+  return MANAGED_SKILL_DIRS.includes(dirName);
+}
+
+/**
+ * Build the documentary marker comment embedded in every shipped body.
+ * Embedding the directory name keeps the comment useful for humans
+ * (`grep`-ing for it surfaces the matching skill) without making the
+ * comment an authoritative ownership signal — that's `MANAGED_SKILL_DIRS`.
+ */
+export function managedMarker(dirName: string): string {
+  return `<!-- managed-by: coding-orchestrator (${dirName}) -->`;
+}
 
 function buildIntegrationsSkillBody(cliPath: string): string {
   return `---
@@ -20,7 +50,7 @@ name: controller-integrations
 description: Discover and use the third-party services the user connected in Controller (APIs, MCP servers, native CLIs) through a uniform gateway. Use whenever a task needs an external service — search for a capability, then call it. Credentials are injected by Controller; you never see or handle secrets.
 ---
 
-${MANAGED_MARKER}
+${managedMarker("controller-integrations")}
 
 # Integrations
 
@@ -103,7 +133,7 @@ name: controller-browser
 description: Drive the visible in-app preview browser to open pages, read the rendered DOM, and click or type — use it to verify UI/web work instead of guessing.
 ---
 
-${MANAGED_MARKER}
+${managedMarker("controller-browser")}
 
 # Browser
 
@@ -154,7 +184,7 @@ name: controller-scripts
 description: Create and update the Controller coding orchestrator's per-project .coding-orchestrator/setup.sh and .coding-orchestrator/run.sh scripts. Use whenever a project needs to configure how worktrees install dependencies, set up ports or environment variables, and start local development services. Also use when the user asks for setup/run scripts, dev server configuration per worktree, PORT_OFFSET handling, or migrating conductor.json/.superset script configs into native Controller scripts.
 ---
 
-${MANAGED_MARKER}
+${managedMarker("controller-scripts")}
 
 # Controller Scripts
 
@@ -342,7 +372,7 @@ name: controller-search-skills
 description: Search and activate unified skills from the Controller catalog. Use when the user asks for a capability that might already be configured as a unified skill, or when you want to reuse an existing skill for the current turn.
 ---
 
-${MANAGED_MARKER}
+${managedMarker("controller-search-skills")}
 
 # Search Skills
 
@@ -373,11 +403,16 @@ below is run as \`${cliPath} skills <command>\`:
   way the \`/\` picker does.
 - \`${cliPath} skills import-discover\` — list per-agent skills that are eligible
   for import into the unified catalog (one entry per source \`SKILL.md\`, tagged
-  with \`<provider>/<scope>\` and the project path for repo skills).
+  with \`<provider>/<scope>\` and the project path for repo skills). App-owned
+  skills (e.g. \`controller-browser\`) are hidden — they are already available
+  to every agent via the disk provider and would only collide with themselves
+  if imported.
 - \`${cliPath} skills import --provider <id> --source <path> [--scope <scope>] [--overwrite]\`
   — copy a single per-agent skill into the unified catalog. Use
   \`${cliPath} skills import --all\` to import every entry from
-  \`import-discover\` in one go.
+  \`import-discover\` in one go. Imports of managed directories are refused
+  with an error so a stale discovery result can't promote an app-owned skill
+  into the catalog.
 
 ## How to use it
 
@@ -420,7 +455,7 @@ name: controller-skill-creator
 description: Create a new unified skill in the Controller catalog by interviewing the user, drafting a SKILL.md, and writing it via the Controller CLI. Use when the user asks to build a new skill, document a recurring workflow, or turn a one-off conversation into a reusable skill.
 ---
 
-${MANAGED_MARKER}
+${managedMarker("controller-skill-creator")}
 
 # Skill Creator
 
@@ -552,8 +587,9 @@ function providerHomes(): ProviderSkillHome[] {
 
 /**
  * Write the managed skills into each provider's user skills home.
- * Idempotent: skips files that exist but aren't ours, and avoids rewriting
- * identical content.
+ * Idempotent: rewrites every directory in `MANAGED_SKILL_DIRS` (we own
+ * them) and skips any other directory the user might have dropped into
+ * the same parent (we don't own those).
  */
 export async function installManagedSkills(): Promise<void> {
   // The unified CLI is invoked as `<path> <surface> <command>`. Each builder
@@ -578,8 +614,10 @@ export async function installManagedSkills(): Promise<void> {
         existing = null;
       }
 
-      if (existing !== null && !existing.includes(MANAGED_MARKER)) {
-        // A user-authored skill with the same name takes precedence.
+      if (!isManagedSkillDir(skill.name)) {
+        // Defensive: every entry in `skills` should be in
+        // `MANAGED_SKILL_DIRS`. Bail rather than risk clobbering an
+        // unrelated user-authored file that happens to share a name.
         continue;
       }
       if (existing === skill.body) continue;

@@ -460,21 +460,25 @@ test("unified skills appear in listMetadata above per-agent skills", async () =>
 });
 
 // ---------------------------------------------------------------------------
-// Controller-managed skills: scope and dedupe behavior (issue #159)
+// Controller-managed skills: scope and dedupe behavior
+//
+// Ownership is decided by **directory name** (see `MANAGED_SKILL_DIRS` in
+// `server/lib/managed-skills.ts`). The marker comment embedded in each
+// shipped body is documentary only — the disk provider no longer keys on
+// its presence, so a leftover app-owned directory whose body predates a
+// marker-text bump is still recognized as managed.
 // ---------------------------------------------------------------------------
 
-const MANAGED_MARKER = "<!-- managed-by: coding-orchestrator (issue #159) -->";
-
-test("per-agent SKILL.md with MANAGED_MARKER is surfaced as scope 'managed'", async () => {
+test("a SKILL.md under a managed directory name is surfaced as scope 'managed'", async () => {
   await withProviderHome("anita", async (home, provider) => {
-    // A managed skill lives in the user home with the marker comment in the
-    // body. The loader should tag its metadata as `scope: "managed"` so the
-    // `/` picker can hide it.
+    // No marker comment in the body. Directory-name ownership is what
+    // counts, so this still resolves to `scope: "managed"` and the `/`
+    // picker will hide it.
     makeSkillFile(
       path.join(home, ".anita/skills"),
       "controller-browser",
       { name: "controller-browser", description: "Drive the preview browser" },
-      `${MANAGED_MARKER}\n# controller-browser\nbody`
+      "# controller-browser\nbody"
     );
     const metadata = await provider.listMetadata(os.tmpdir());
     assert.equal(metadata.length, 1);
@@ -483,15 +487,37 @@ test("per-agent SKILL.md with MANAGED_MARKER is surfaced as scope 'managed'", as
   });
 });
 
-test("a user-authored SKILL.md in the same directory keeps scope 'user'", async () => {
+test("legacy marker text still classifies a managed directory as scope 'managed'", async () => {
+  // Regression test for the bug surfaced after PR #173: the marker comment
+  // was bumped from `issue #109` to `issue #159`, but a user with the old
+  // marker on disk stopped being recognized as managed and re-appeared in
+  // the `/` picker. With directory-name ownership, marker text is irrelevant
+  // and any marker (current or legacy) keeps the directory classified
+  // correctly.
   await withProviderHome("anita", async (home, provider) => {
-    // No marker → regular user skill. The scope should not be silently
-    // upgraded to "managed" just because the directory looks controlled.
+    makeSkillFile(
+      path.join(home, ".anita/skills"),
+      "controller-scripts",
+      { name: "controller-scripts", description: "setup.sh / run.sh" },
+      "<!-- managed-by: coding-orchestrator (issue #109) -->\n# controller-scripts\nbody"
+    );
+    const metadata = await provider.listMetadata(os.tmpdir());
+    assert.equal(metadata.length, 1);
+    assert.equal(metadata[0].scope, "managed");
+  });
+});
+
+test("a user-authored SKILL.md in a non-managed directory keeps scope 'user'", async () => {
+  await withProviderHome("anita", async (home, provider) => {
+    // A non-managed directory name must not be silently promoted to
+    // `scope: "managed"` even if its body happens to carry a marker-shaped
+    // comment — that would re-classify every user skill whose name happens
+    // to match `controller-*` or any future app-owned directory.
     makeSkillFile(
       path.join(home, ".anita/skills"),
       "my-skill",
       { name: "my-skill", description: "Mine" },
-      "# my-skill\nbody"
+      "<!-- managed-by: coding-orchestrator (controller-something) -->\n# my-skill\nbody"
     );
     const metadata = await provider.listMetadata(os.tmpdir());
     assert.equal(metadata.length, 1);

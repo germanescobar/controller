@@ -192,6 +192,82 @@ test("discoverImportableSkills dedupes by source path", async () => {
   }
 });
 
+test("discoverImportableSkills hides controller-managed skills from every provider home", async () => {
+  // Controller-managed skills (controller-browser, controller-scripts, etc.)
+  // are agent-facing, not user-invokable. They are written into every
+  // provider's user home on startup and would only collide with themselves
+  // if surfaced as import candidates. Discovery must filter them out so the
+  // `controller skills import-discover` command does not list them.
+  const home = makeTempDir("import-managed-");
+  try {
+    const managedDirs: Array<{ provider: string; sub: string; name: string }> = [
+      { provider: ".anita", sub: "skills", name: "controller-browser" },
+      { provider: ".anita", sub: "skills", name: "controller-scripts" },
+      { provider: ".codex", sub: "skills", name: "controller-integrations" },
+      { provider: ".codex", sub: "skills/.system", name: "controller-search-skills" },
+      { provider: ".claude", sub: "skills", name: "controller-skill-creator" },
+    ];
+    for (const { provider, sub, name } of managedDirs) {
+      writeSkillFile(path.join(home, provider, sub), name, {
+        name,
+        description: `managed ${name}`,
+      }, "managed body");
+    }
+    // A real user skill lives next to the managed ones and must still surface.
+    writeSkillFile(path.join(home, ".anita", "skills"), "my-personal-skill", {
+      name: "my-personal-skill",
+      description: "user-authored",
+    }, "user body");
+
+    const skills = await discoverImportableSkills(makeEnv(home));
+    const names = skills.map((s) => s.name);
+    assert.deepEqual(names, ["my-personal-skill"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects a source path that points to a managed skill directory", async () => {
+  // Defense in depth: even if a caller has cached a `sourcePath` from a
+  // pre-filter discovery call, the import endpoint must refuse to promote a
+  // managed skill into the unified catalog. This is symmetric with the
+  // existing "refuses a source path outside the known skill roots" check.
+  const home = makeTempDir("import-managed-reject-");
+  const orchestratorHome = makeTempDir("orch-managed-reject-");
+  const original = process.env.CODING_ORCHESTRATOR_HOME;
+  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  try {
+    const sourcePath = writeSkillFile(
+      path.join(home, ".anita", "skills"),
+      "controller-scripts",
+      { name: "controller-scripts", description: "managed body" },
+      "managed body"
+    );
+
+    const result = await importSkills(
+      {
+        selections: [
+          { providerId: "anita", sourcePath, scope: "user" },
+        ],
+      },
+      makeEnv(home)
+    );
+    assert.equal(result.results[0].status, "error");
+    assert.match(
+      result.results[0].reason ?? "",
+      /known per-agent skill location/
+    );
+
+    const { listUnifiedSkills } = await import("../unified-skills.js");
+    assert.equal((await listUnifiedSkills()).length, 0);
+  } finally {
+    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
 test("importSkills copies a user skill into the unified catalog", async () => {
   const home = makeTempDir("import-run-");
   const orchestratorHome = makeTempDir("orch-");

@@ -26,6 +26,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { isManagedSkillDir } from "./managed-skills.js";
 import { parseSkillFile, type SkillMetadata, type SkillScope } from "./skills.js";
 import { getProjects } from "./projects.js";
 import {
@@ -167,6 +168,20 @@ async function listSkillDirs(baseDir: string): Promise<string[]> {
     .map((entry) => path.join(baseDir, entry.name));
 }
 
+/**
+ * Filter out directories owned by the orchestrator (see
+ * `MANAGED_SKILL_DIRS`). Managed skills are already available to every
+ * agent via the disk provider and don't need to be promoted into the
+ * unified catalog — surfacing them in `discoverImportableSkills` would
+ * only invite the user to "import" a skill that collides with itself.
+ * Tested in `server/lib/__tests__/skill-import.test.ts`.
+ */
+function listImportableSkillDirs(baseDir: string): Promise<string[]> {
+  return listSkillDirs(baseDir).then((dirs) =>
+    dirs.filter((dir) => !isManagedSkillDir(path.basename(dir)))
+  );
+}
+
 async function readMetadataFromDir(
   dir: string,
   providerId: string,
@@ -212,7 +227,7 @@ export async function discoverImportableSkills(
 
   for (const config of providerConfigs(env)) {
     for (const base of config.userDirs()) {
-      for (const dir of await listSkillDirs(base)) {
+      for (const dir of await listImportableSkillDirs(base)) {
         const skill = await readMetadataFromDir(dir, config.providerId, "user", null);
         if (skill && !seenPaths.has(skill.sourcePath)) {
           seenPaths.add(skill.sourcePath);
@@ -222,7 +237,7 @@ export async function discoverImportableSkills(
     }
     if (config.systemDirs) {
       for (const base of config.systemDirs()) {
-        for (const dir of await listSkillDirs(base)) {
+        for (const dir of await listImportableSkillDirs(base)) {
           const skill = await readMetadataFromDir(
             dir,
             config.providerId,
@@ -244,7 +259,7 @@ export async function discoverImportableSkills(
     for (const project of projects) {
       for (const repoDirName of config.repoDirNames()) {
         const base = path.join(project.path, repoDirName);
-        for (const dir of await listSkillDirs(base)) {
+        for (const dir of await listImportableSkillDirs(base)) {
           const skill = await readMetadataFromDir(
             dir,
             config.providerId,
