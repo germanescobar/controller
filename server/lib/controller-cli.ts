@@ -14,6 +14,12 @@
  * requiring a manual symlink into `~/.local/bin`. The absolute path remains
  * the documented fallback for any provider that drops PATH.
  *
+ * Before installing, we also remove the legacy `~/.local/bin/controller`
+ * workaround the issue originally documented — but only when the symlink
+ * resolves into our own bundle. A user-authored binary named `controller`
+ * somewhere on PATH is left strictly alone; the cleanup targets the documented
+ * workaround, not the name.
+ *
  * The server URL is published to a runtime file the CLI reads. We also inject
  * `CONTROLLER_SERVER_URL` as a fast path for agents that inherit env vars but
  * drop the runtime-file lookup (Claude, Anita); the CLI checks the env var
@@ -21,6 +27,7 @@
  */
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mergePathEntries } from "./shell-env.js";
@@ -73,11 +80,68 @@ export async function installControllerCli(): Promise<void> {
     await fs.chmod(dest, 0o755);
   }
 
+  // Best-effort: remove the `~/.local/bin/controller` workaround the issue
+  // originally documented. Only targets symlinks/files whose `realpath` lands
+  // inside our own bundle, so a user-authored binary named `controller` is
+  // left strictly alone.
+  await removeLegacyControllerSymlinks().catch(() => {});
+
   await fs.writeFile(
     controllerRuntimeFile(),
     `${JSON.stringify({ serverUrl: serverUrl() }, null, 2)}\n`,
     "utf-8"
   );
+}
+
+/**
+ * Directories to scan for the legacy `controller` workaround. Kept narrow on
+ * purpose — only the directories the issue itself suggested. We deliberately
+ * do not walk the whole `PATH` because the cleanup is "remove the
+ * documented workaround", not "police the user's PATH".
+ */
+function legacySymlinkDirs(): string[] {
+  return [path.join(os.homedir(), ".local", "bin")];
+}
+
+function legacySymlinkNames(): string[] {
+  return ["controller", "controller-browser"];
+}
+
+/**
+ * Remove the `controller` / `controller-browser` workaround files the issue
+ * originally pointed users at, but only when they actually resolve into our
+ * own CLI bundle. A user-authored `controller` binary the user wrote
+ * themselves is left alone — we compare the candidate's `realpath` against
+ * the bundled source dir, not just the name.
+ *
+ * Best-effort by design: any failure is swallowed. Never blocks startup.
+ * Exposed for testing.
+ */
+export async function removeLegacyControllerSymlinks(): Promise<void> {
+  const sourceDir = cliSourceDir();
+  for (const dir of legacySymlinkDirs()) {
+    for (const name of legacySymlinkNames()) {
+      const candidate = path.join(dir, name);
+      let resolved: string;
+      try {
+        resolved = await fs.realpath(candidate);
+      } catch {
+        // Missing or unreadable — nothing to clean up here.
+        continue;
+      }
+      // Only remove candidates that ultimately point at our bundled CLI. A
+      // user-authored `controller` somewhere on `PATH` is left strictly
+      // alone; the cleanup targets the documented workaround, not the name.
+      if (resolved !== sourceDir && !resolved.startsWith(sourceDir + path.sep)) {
+        continue;
+      }
+      try {
+        await fs.unlink(candidate);
+      } catch {
+        // Best-effort: permission issues, races, etc. are not fatal.
+      }
+    }
+  }
 }
 
 /** Best-effort environment for agents that inherit it (Claude, Anita, Codex).

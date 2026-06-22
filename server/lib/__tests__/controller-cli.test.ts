@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { controllerAgentEnv, controllerCliBinDir, controllerCliInstalledPath } from "../controller-cli.js";
+import { fileURLToPath } from "node:url";
+import { symlinkSync, writeFileSync } from "node:fs";
+import {
+  controllerAgentEnv,
+  controllerCliBinDir,
+  controllerCliInstalledPath,
+  removeLegacyControllerSymlinks,
+} from "../controller-cli.js";
 import { orchestratorHome } from "../paths.js";
 
 /**
@@ -80,3 +89,120 @@ test("controllerAgentEnv handles an empty inherited PATH", () => {
     else process.env.PATH = savedPath;
   }
 });
+
+/**
+ * The cleanup targets `os.homedir() + "/.local/bin"`. To avoid touching the
+ * real user home (which, for the bug reporter, actually contains the
+ * workaround we're trying to remove), every cleanup test pins HOME to a
+ * fresh temp dir and cleans it up afterwards.
+ */
+async function withTempHome<T>(fn: () => Promise<T>): Promise<T> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "controller-cli-cleanup-"));
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  try {
+    return await fn();
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("removeLegacyControllerSymlinks removes the documented workaround", async () => {
+  await withTempHome(async () => {
+    const legacyDir = path.join(os.homedir(), ".local", "bin");
+    await fs.mkdir(legacyDir, { recursive: true });
+
+    // The workaround from the issue: a symlink in ~/.local/bin/controller
+    // pointing at the bundled CLI. We point at the bundled source dir
+    // (rather than the orchestrator-home install path) because the test runs
+    // before `installControllerCli()` and we only need `realpath` to land
+    // inside `cliSourceDir()` for the cleanup to recognize it.
+    const testDir = path.dirname(fileURLToPath(import.meta.url));
+    // __tests__/ → lib/ → server/ → repo root, then into cli/.
+    const bundledSource = path.join(testDir, "..", "..", "..", "cli", "controller");
+    assert.ok(
+      await fileExists(bundledSource),
+      `bundled CLI source expected at ${bundledSource}`
+    );
+    const linkPath = path.join(legacyDir, "controller");
+    symlinkSync(bundledSource, linkPath);
+
+    // Sanity: the symlink is there before we run cleanup.
+    assert.ok(await fileExists(linkPath));
+
+    await removeLegacyControllerSymlinks();
+
+    assert.equal(
+      await fileExists(linkPath),
+      false,
+      "the legacy workaround symlink should have been removed"
+    );
+  });
+});
+
+test("removeLegacyControllerSymlinks leaves a user-authored controller alone", async () => {
+  await withTempHome(async () => {
+    const legacyDir = path.join(os.homedir(), ".local", "bin");
+    await fs.mkdir(legacyDir, { recursive: true });
+
+    // A real (non-symlink) file the user wrote themselves. realpath returns
+    // the file itself, which is not inside Controller's CLI source dir, so
+    // the cleanup must leave it alone.
+    const userBinary = path.join(legacyDir, "controller");
+    writeFileSync(userBinary, "#!/bin/sh\necho user controller\n");
+    await fs.chmod(userBinary, 0o755);
+
+    await removeLegacyControllerSymlinks();
+
+    assert.equal(
+      await fileExists(userBinary),
+      true,
+      "a user-authored controller binary must not be removed"
+    );
+  });
+});
+
+test("removeLegacyControllerSymlinks leaves an unrelated symlink alone", async () => {
+  await withTempHome(async () => {
+    const legacyDir = path.join(os.homedir(), ".local", "bin");
+    await fs.mkdir(legacyDir, { recursive: true });
+
+    // A symlink that resolves somewhere Controller does not own. The cleanup
+    // must not touch it.
+    const linkPath = path.join(legacyDir, "controller");
+    // `/usr/bin/env` is universal on macOS/Linux dev machines and is a
+    // symlink (resolves to /usr/bin/...). It is definitely not inside our
+    // CLI source dir.
+    symlinkSync("/usr/bin/env", linkPath);
+
+    await removeLegacyControllerSymlinks();
+
+    assert.equal(
+      await fileExists(linkPath),
+      true,
+      "a symlink that does not point at our CLI must be left alone"
+    );
+  });
+});
+
+test("removeLegacyControllerSymlinks is a no-op when the legacy dir is absent", async () => {
+  await withTempHome(async () => {
+    // No ~/.local/bin created — the cleanup must not throw.
+    await removeLegacyControllerSymlinks();
+  });
+});
+
+async function fileExists(target: string): Promise<boolean> {
+  try {
+    await fs.lstat(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
