@@ -94,6 +94,7 @@ import {
   type ToolApprovalDecision,
 } from "../api.ts";
 import { canonicalProviderId } from "../lib/provider-id.ts";
+import { modelProviderLabel } from "../lib/model-labels.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -4743,8 +4744,19 @@ export function SessionView({
     }
   };
 
-  const selectedModelName =
-    models.find((m) => m.id === selectedModel)?.name ?? selectedModel;
+  const selectedModelName = (() => {
+    const model = models.find((m) => m.id === selectedModel);
+    if (!model) return selectedModel;
+    const providerLabel = modelProviderLabel(model);
+    // For Anita we always show provider - model because the same model name
+    // can be available from multiple providers (e.g., local Ollama vs. Ollama
+    // Cloud). For other agents (codex, claude) the provider is implicit, so
+    // we keep showing just the model name.
+    if (selectedProvider === "anita" && providerLabel) {
+      return `${providerLabel} - ${model.name}`;
+    }
+    return model.name;
+  })();
   const selectedReasoningEffortLabel =
     REASONING_EFFORT_OPTIONS.find((option) => option.value === selectedReasoningEffort)?.label ??
     selectedReasoningEffort;
