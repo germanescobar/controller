@@ -373,7 +373,7 @@ function CollapsibleUserMessage({ text }: { text: string }) {
         <button
           type="button"
           onClick={() => setExpanded(!expanded)}
-          className="mt-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+          className="mt-1 cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
         >
           {expanded ? "Show less" : "Show more"}
         </button>
@@ -765,7 +765,7 @@ function DiffBlock({ files }: { files: DiffFile[] }) {
     <div className="rounded-md border border-border/30 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left min-w-0 hover:bg-muted/40 transition-colors bg-muted/20"
+        className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left min-w-0 hover:bg-muted/40 transition-colors bg-muted/20"
       >
         {expanded ? (
           <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />
@@ -886,7 +886,7 @@ const RunDiffCard = memo(function RunDiffCard({ data }: { data: Record<string, u
         {hiddenCount > 0 && (
           <button
             onClick={() => setShowAllFiles(true)}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/40"
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/40"
           >
             <span>Show {hiddenCount} more file{hiddenCount === 1 ? "" : "s"}</span>
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
@@ -905,7 +905,7 @@ function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
     <div>
       <button
         onClick={() => setExpanded((open) => !open)}
-        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/40"
+        className="flex w-full cursor-pointer min-w-0 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/40"
       >
         {expanded ? (
           <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />
@@ -1218,7 +1218,7 @@ function WorkingBlock({
     <div className="rounded-lg bg-muted/30 overflow-hidden">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 transition-colors"
+        className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left hover:bg-muted/50 transition-colors"
       >
         {expanded ? (
           <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />

@@ -681,7 +681,7 @@ export function Sidebar({
               type="button"
               onClick={onFocusModeToggle}
               className={cn(
-                "rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                "cursor-pointer rounded-md px-2 py-1 text-xs font-medium transition-colors",
                 focusMode
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
                   : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
