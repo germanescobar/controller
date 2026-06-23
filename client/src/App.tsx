@@ -562,7 +562,7 @@ export function App() {
     projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Controller";
 
   return (
-    <div className="dark flex h-dvh w-full bg-background text-foreground">
+    <div className="flex h-dvh w-full bg-background text-foreground">
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/50 md:hidden"
