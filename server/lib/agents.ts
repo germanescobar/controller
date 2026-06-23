@@ -1410,6 +1410,8 @@ export interface AgentStatus {
   resolvedPath: string | null;
   /** Best-effort `--version` output, or null. */
   version: string | null;
+  /** Default model id pre-selected for new sessions, or null. */
+  defaultModel: string | null;
 }
 
 /**
@@ -1438,7 +1440,7 @@ export async function getAgentStatuses(): Promise<AgentStatus[]> {
   const settings = await getAgentSettings();
   return Promise.all(
     Object.values(providers).map(async (provider) => {
-      const setting = settings[provider.id] ?? { enabled: true, path: null };
+      const setting = settings[provider.id] ?? { enabled: true, path: null, defaultModel: null };
       const resolvedPath = resolveCommand(provider.command, setting.path);
       const installed = resolvedPath !== null;
       const version = installed ? await getCommandVersion(resolvedPath) : null;
@@ -1449,6 +1451,7 @@ export async function getAgentStatuses(): Promise<AgentStatus[]> {
         enabled: setting.enabled,
         resolvedPath,
         version,
+        defaultModel: setting.defaultModel,
       };
     })
   );

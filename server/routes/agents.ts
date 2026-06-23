@@ -1,8 +1,15 @@
 import { Router } from "express";
 import { getAgentProvider, getAgentStatuses } from "../lib/agents.js";
 import { setAgentSetting } from "../lib/agent-settings.js";
+import { fetchAnitaModels, fetchCodexModels, getClaudeModels } from "../lib/models.js";
 
 export const agentsRouter = Router();
+
+async function fetchModelsForAgent(agentId: string) {
+  if (agentId === "codex") return fetchCodexModels();
+  if (agentId === "claude") return getClaudeModels();
+  return fetchAnitaModels();
+}
 
 /** Install + enable status for every agent (Anita, Codex, Claude Code). */
 agentsRouter.get("/", async (_req, res) => {
@@ -17,9 +24,10 @@ agentsRouter.put("/:agentId", async (req, res) => {
     return;
   }
 
-  const { enabled, path } = req.body as {
+  const { enabled, path, defaultModel } = req.body as {
     enabled?: unknown;
     path?: unknown;
+    defaultModel?: unknown;
   };
 
   if (enabled !== undefined && typeof enabled !== "boolean") {
@@ -30,10 +38,31 @@ agentsRouter.put("/:agentId", async (req, res) => {
     res.status(400).json({ error: "path must be a string or null" });
     return;
   }
+  if (
+    defaultModel !== undefined &&
+    defaultModel !== null &&
+    typeof defaultModel !== "string"
+  ) {
+    res.status(400).json({ error: "defaultModel must be a string or null" });
+    return;
+  }
+
+  if (defaultModel) {
+    const models = await fetchModelsForAgent(agentId);
+    if (!models.some((model) => model.id === defaultModel)) {
+      res.status(400).json({
+        error: `defaultModel "${defaultModel}" is not available for ${agentId}`,
+      });
+      return;
+    }
+  }
 
   await setAgentSetting(agentId, {
     ...(enabled !== undefined ? { enabled } : {}),
     ...(path !== undefined ? { path: path as string | null } : {}),
+    ...(defaultModel !== undefined
+      ? { defaultModel: defaultModel as string | null }
+      : {}),
   });
 
   const statuses = await getAgentStatuses();

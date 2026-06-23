@@ -831,6 +831,7 @@ export interface AgentStatus {
   enabled: boolean;
   resolvedPath: string | null;
   version: string | null;
+  defaultModel: string | null;
 }
 
 export async function fetchAgents(): Promise<AgentStatus[]> {
@@ -840,7 +841,7 @@ export async function fetchAgents(): Promise<AgentStatus[]> {
 
 export async function updateAgent(
   agentId: string,
-  patch: { enabled?: boolean; path?: string | null }
+  patch: { enabled?: boolean; path?: string | null; defaultModel?: string | null }
 ): Promise<AgentStatus> {
   const res = await fetch(`${BASE}/agents/${agentId}`, {
     method: "PUT",

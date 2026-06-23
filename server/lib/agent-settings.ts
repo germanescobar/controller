@@ -8,11 +8,13 @@ export interface AgentSetting {
   enabled: boolean;
   /** Explicit absolute path to the CLI, overriding PATH resolution. */
   path: string | null;
+  /** Default model id the user wants pre-selected for new sessions. */
+  defaultModel: string | null;
 }
 
 type AgentSettingsStore = Record<string, AgentSetting>;
 
-const DEFAULT_SETTING: AgentSetting = { enabled: true, path: null };
+const DEFAULT_SETTING: AgentSetting = { enabled: true, path: null, defaultModel: null };
 
 async function readStore(): Promise<AgentSettingsStore> {
   try {
@@ -41,6 +43,10 @@ function normalizeSetting(value: unknown): AgentSetting {
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
     path: typeof raw.path === "string" && raw.path.trim() ? raw.path.trim() : null,
+    defaultModel:
+      typeof raw.defaultModel === "string" && raw.defaultModel.trim()
+        ? raw.defaultModel.trim()
+        : null,
   };
 }
 
@@ -73,6 +79,12 @@ export async function setAgentSetting(
         ? current.path
         : patch.path && patch.path.trim()
           ? patch.path.trim()
+          : null,
+    defaultModel:
+      patch.defaultModel === undefined
+        ? current.defaultModel
+        : patch.defaultModel && patch.defaultModel.trim()
+          ? patch.defaultModel.trim()
           : null,
   };
   store[id] = next;

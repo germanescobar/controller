@@ -9,8 +9,10 @@ import {
   deleteProviderKey,
   fetchAgents,
   updateAgent,
+  fetchModels,
   type ProviderStatus,
   type AgentStatus,
+  type Model,
 } from "../api.ts";
 
 // API-key providers are model backends consumed by the Anita agent, so they are
@@ -47,6 +49,11 @@ export function AgentsSection() {
     setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
   };
 
+  const handleSaveDefaultModel = async (agentId: string, defaultModel: string | null) => {
+    const updated = await updateAgent(agentId, { defaultModel });
+    setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+  };
+
   return (
     <div className="space-y-3">
       {agents.map((agent) => (
@@ -55,6 +62,7 @@ export function AgentsSection() {
           agent={agent}
           onToggle={() => handleToggleAgent(agent)}
           onSavePath={(path) => handleSaveAgentPath(agent.id, path)}
+          onSaveDefaultModel={(defaultModel) => handleSaveDefaultModel(agent.id, defaultModel)}
         >
           {agent.id === ANITA_AGENT_ID && (
             <ApiKeysSection providers={providers} onChange={load} />
@@ -69,13 +77,36 @@ interface AgentRowProps {
   agent: AgentStatus;
   onToggle: () => void;
   onSavePath: (path: string | null) => Promise<void>;
+  onSaveDefaultModel: (defaultModel: string | null) => Promise<void>;
   children?: ReactNode;
 }
 
-function AgentRow({ agent, onToggle, onSavePath, children }: AgentRowProps) {
+function AgentRow({ agent, onToggle, onSavePath, onSaveDefaultModel, children }: AgentRowProps) {
   const [showPath, setShowPath] = useState(false);
   const [pathInput, setPathInput] = useState("");
   const [savingPath, setSavingPath] = useState(false);
+  const [models, setModels] = useState<Model[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [savingDefaultModel, setSavingDefaultModel] = useState(false);
+
+  useEffect(() => {
+    if (!agent.enabled) return;
+    let cancelled = false;
+    setModelsLoading(true);
+    fetchModels(agent.id)
+      .then((list) => {
+        if (!cancelled) setModels(list);
+      })
+      .catch(() => {
+        if (!cancelled) setModels([]);
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent.id, agent.enabled]);
 
   const openPathEditor = () => {
     setPathInput(agent.resolvedPath ?? "");
@@ -87,6 +118,19 @@ function AgentRow({ agent, onToggle, onSavePath, children }: AgentRowProps) {
     await onSavePath(pathInput.trim() || null);
     setSavingPath(false);
     setShowPath(false);
+  };
+
+  const handleDefaultModelChange = async (
+    event: React.ChangeEvent<HTMLSelectElement>
+  ) => {
+    const value = event.target.value;
+    const defaultModel = value === "" ? null : value;
+    setSavingDefaultModel(true);
+    try {
+      await onSaveDefaultModel(defaultModel);
+    } finally {
+      setSavingDefaultModel(false);
+    }
   };
 
   return (
@@ -153,6 +197,32 @@ function AgentRow({ agent, onToggle, onSavePath, children }: AgentRowProps) {
             )}
           </Button>
         </form>
+      )}
+
+      {agent.enabled && (
+        <div className="mt-3">
+          <label className="block text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Default model
+          </label>
+          <div className="mt-1.5 flex items-center gap-2">
+            <select
+              value={agent.defaultModel ?? ""}
+              onChange={handleDefaultModelChange}
+              disabled={modelsLoading || savingDefaultModel || models.length === 0}
+              className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+            >
+              <option value="">{modelsLoading ? "Loading..." : "(none)"}</option>
+              {models.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+            {savingDefaultModel && (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            )}
+          </div>
+        </div>
       )}
 
       {children && <div className="mt-3 border-t border-border pt-3">{children}</div>}
