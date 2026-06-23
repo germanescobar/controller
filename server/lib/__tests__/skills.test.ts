@@ -460,22 +460,24 @@ test("unified skills appear in listMetadata above per-agent skills", async () =>
 });
 
 // ---------------------------------------------------------------------------
-// Controller-managed skills: scope and dedupe behavior
+// Controller-managed skills: scope detection in the unified catalog
 //
-// Ownership is decided by **directory name** (see `MANAGED_SKILL_DIRS` in
-// `server/lib/managed-skills.ts`). The marker comment embedded in each
-// shipped body is documentary only — the disk provider no longer keys on
-// its presence, so a leftover app-owned directory whose body predates a
-// marker-text bump is still recognized as managed.
+// Controller-managed skills (see MANAGED_SKILL_DIRS in
+// `server/lib/managed-skills.ts`) now live in the unified catalog
+// (`<orchestrator>/skills/<name>/SKILL.md`) and are tagged
+// `scope: "controller"` by `listUnifiedSkills` so the `/<name>` picker can
+// render them with a `controller` badge. The disk provider no longer
+// reclassifies per-agent entries by directory name, so a user-authored
+// skill in `~/.claude/skills/controller-something/` keeps its natural
+// `user` scope.
 // ---------------------------------------------------------------------------
 
-test("a SKILL.md under a managed directory name is surfaced as scope 'managed'", async () => {
+test("a SKILL.md in the unified catalog whose name is in MANAGED_SKILL_DIRS is tagged scope 'controller'", async () => {
   await withProviderHome("anita", async (home, provider) => {
-    // No marker comment in the body. Directory-name ownership is what
-    // counts, so this still resolves to `scope: "managed"` and the `/`
-    // picker will hide it.
+    const orchestratorHome = path.join(home, "coding-orchestrator");
+    const skillsDir = path.join(orchestratorHome, "skills");
     makeSkillFile(
-      path.join(home, ".anita/skills"),
+      skillsDir,
       "controller-browser",
       { name: "controller-browser", description: "Drive the preview browser" },
       "# controller-browser\nbody"
@@ -483,36 +485,37 @@ test("a SKILL.md under a managed directory name is surfaced as scope 'managed'",
     const metadata = await provider.listMetadata(os.tmpdir());
     assert.equal(metadata.length, 1);
     assert.equal(metadata[0].name, "controller-browser");
-    assert.equal(metadata[0].scope, "managed");
+    assert.equal(metadata[0].scope, "controller");
+
+    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
 
-test("legacy marker text still classifies a managed directory as scope 'managed'", async () => {
-  // Regression test for the bug surfaced after PR #173: the marker comment
-  // was bumped from `issue #109` to `issue #159`, but a user with the old
-  // marker on disk stopped being recognized as managed and re-appeared in
-  // the `/` picker. With directory-name ownership, marker text is irrelevant
-  // and any marker (current or legacy) keeps the directory classified
-  // correctly.
+test("a user-authored SKILL.md in the unified catalog keeps scope 'unified'", async () => {
   await withProviderHome("anita", async (home, provider) => {
+    const orchestratorHome = path.join(home, "coding-orchestrator");
+    const skillsDir = path.join(orchestratorHome, "skills");
     makeSkillFile(
-      path.join(home, ".anita/skills"),
-      "controller-scripts",
-      { name: "controller-scripts", description: "setup.sh / run.sh" },
-      "<!-- managed-by: coding-orchestrator (issue #109) -->\n# controller-scripts\nbody"
+      skillsDir,
+      "github-issues",
+      { name: "github-issues", description: "Work on GitHub issues" },
+      "body"
     );
     const metadata = await provider.listMetadata(os.tmpdir());
     assert.equal(metadata.length, 1);
-    assert.equal(metadata[0].scope, "managed");
+    assert.equal(metadata[0].scope, "unified");
+
+    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
 
-test("a user-authored SKILL.md in a non-managed directory keeps scope 'user'", async () => {
+test("a user-authored SKILL.md in a per-agent home (any name) keeps its user scope", async () => {
+  // The disk provider no longer reclassifies per-agent entries by
+  // directory name. A `controller-` named skill in `~/.claude/skills/`
+  // should be treated as a normal user skill — the orchestrator's
+  // `installManagedSkills` writes its managed set into the unified
+  // catalog, so a name collision here is the user's choice.
   await withProviderHome("anita", async (home, provider) => {
-    // A non-managed directory name must not be silently promoted to
-    // `scope: "managed"` even if its body happens to carry a marker-shaped
-    // comment — that would re-classify every user skill whose name happens
-    // to match `controller-*` or any future app-owned directory.
     makeSkillFile(
       path.join(home, ".anita/skills"),
       "my-skill",
@@ -525,21 +528,43 @@ test("a user-authored SKILL.md in a non-managed directory keeps scope 'user'", a
   });
 });
 
-test("mergeSkillMetadata keeps managed entries for body lookup (unified still wins)", () => {
-  const unified = [skillMeta("imagegen", "unified", "u")];
+test("mergeSkillMetadata orders unified → user/repo/system → controller", () => {
+  // Mixed list of every scope — the sort must produce the documented
+  // grouping regardless of input order, and tiebreak by name.
+  const unified = [
+    skillMeta("controller-browser", "controller", "managed browser"),
+    skillMeta("github-issues", "unified", "user-authored"),
+    skillMeta("controller-search-skills", "controller", "managed search"),
+  ];
   const perAgent = [
-    skillMeta("controller-browser", "managed", "managed browser"),
-    skillMeta("github-issues", "user", "user skill"),
+    skillMeta("my-user-skill", "user", "user authored"),
+    skillMeta("zeta", "repo", "repo skill"),
+    skillMeta("alpha", "user", "user authored"),
   ];
   const merged = mergeSkillMetadata(unified, perAgent);
-  // Unified renders first; managed + user entries follow in their original
-  // order. The managed entry must remain reachable so the agent can
-  // `readBody` it on demand.
-  assert.deepEqual(merged.map((entry) => [entry.name, entry.scope]), [
-    ["imagegen", "unified"],
-    ["controller-browser", "managed"],
-    ["github-issues", "user"],
-  ]);
+  assert.deepEqual(
+    merged.map((entry) => [entry.name, entry.scope]),
+    [
+      ["github-issues", "unified"],
+      ["alpha", "user"],
+      ["my-user-skill", "user"],
+      ["zeta", "repo"],
+      ["controller-browser", "controller"],
+      ["controller-search-skills", "controller"],
+    ]
+  );
+});
+
+test("mergeSkillMetadata hides per-agent entries that collide with a unified name (case-insensitive)", () => {
+  const unified = [skillMeta("github-issues", "unified", "u")];
+  const perAgent = [
+    skillMeta("github-issues", "user", "user copy"),
+    skillMeta("GitHub-Issues", "repo", "another collision"),
+  ];
+  const merged = mergeSkillMetadata(unified, perAgent);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].name, "github-issues");
+  assert.equal(merged[0].scope, "unified");
 });
 
 test("extractSkillInvocation matches the renamed controller- names", () => {

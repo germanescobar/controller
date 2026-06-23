@@ -3666,16 +3666,13 @@ export function SessionView({
   }, [message]);
   const filteredSkills = useMemo(() => {
     if (skillQuery === null) return [];
-    // Hide controller-managed skills (e.g. `controller-browser`) from the
-    // `/` picker. They are still in `availableSkills` so a user can type the
-    // name manually and submit; the server-side slash path will prepend the
-    // body either way. Managed skills are agent-facing, not user-invokable.
-    const userVisible = availableSkills.filter(
-      (entry) => entry.scope !== "managed"
-    );
+    // Every skill in `availableSkills` is now user-invokable. The
+    // server sorts the list by scope (`unified` → `user`/`repo`/`system`
+    // → `controller`), so the picker groups them visually via the scope
+    // badge rendered next to the name.
     const needle = skillQuery.token.toLowerCase();
-    if (!needle) return userVisible;
-    return userVisible.filter((entry) =>
+    if (!needle) return availableSkills;
+    return availableSkills.filter((entry) =>
       entry.name.toLowerCase().startsWith(needle)
     );
   }, [availableSkills, skillQuery]);

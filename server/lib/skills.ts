@@ -27,14 +27,18 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { resolveCommand } from "./command-resolver.js";
-import { isManagedSkillDir } from "./managed-skills.js";
 import { canonicalProviderId } from "./provider-id.js";
 import { childProcessEnv } from "./shell-env.js";
 import { listUnifiedSkills, readUnifiedSkill } from "./unified-skills.js";
 
 const execFileAsync = promisify(execFile);
 
-export type SkillScope = "unified" | "user" | "system" | "repo" | "managed";
+export type SkillScope =
+  | "unified"
+  | "user"
+  | "system"
+  | "repo"
+  | "controller";
 
 export interface SkillMetadata {
   /** Skill name as declared in the frontmatter (trimmed, original case). */
@@ -185,23 +189,20 @@ async function readMetadataFromDir(
   if (!parsed) return [];
   const name = (parsed.metadata.name ?? "").trim();
   if (!name) return [];
-  // A `SKILL.md` whose parent directory is owned by the orchestrator (see
-  // `MANAGED_SKILL_DIRS` in `server/lib/managed-skills.ts`) is surfaced
-  // with `scope: "managed"` so the `/` picker can hide it while still
-  // leaving the body available to the agent via `readBody`. Directory-name
-  // ownership is intentional: a versioned marker comment would silently
-  // re-classify a leftover app-owned directory as user-authored whenever
-  // the marker text was bumped.
-  const dirName = path.basename(dir);
-  const effectiveScope: SkillScope = isManagedSkillDir(dirName)
-    ? "managed"
-    : scope;
+  // Controller-managed skills used to be mirrored into per-agent homes
+  // with a directory name in `MANAGED_SKILL_DIRS`, in which case the disk
+  // provider reclassified them as `scope: "managed"` so the `/` picker
+  // could hide them. They now live in the unified catalog (see
+  // `installManagedSkills`) and are tagged `scope: "controller"` there,
+  // so the per-agent reclassification path is no longer needed — a stale
+  // legacy directory is left as-is (its scope stays the one passed in by
+  // `collectDirs`).
   return [
     {
       name,
       description: (parsed.metadata.description ?? "").trim(),
       path: skillFile,
-      scope: effectiveScope,
+      scope,
     },
   ];
 }
@@ -460,10 +461,28 @@ export function getSkillProviders(): SkillProvider[] {
 }
 
 /**
- * Merge unified and per-provider skill metadata lists. Unified skills render
- * first; per-provider skills with a matching name (case-insensitive) are
- * hidden so the app-owned catalog wins.
+ * Merge unified and per-provider skill metadata lists, then sort the
+ * result by scope. The `/<name>` picker groups by source so the user
+ * can see at a glance which skills come from where:
+ *
+ *   1. `unified` — user-authored skills in the Controller catalog
+ *   2. `user` / `repo` / `system` — per-agent skills (and Codex's system
+ *      bundle) the agent already has on its own
+ *   3. `controller` — Controller-managed skills, surfaced via the
+ *      picker for convenience but representing built-in functionality
+ *      rather than user content
+ *
+ * Per-provider skills with a name that collides with a unified entry
+ * (case-insensitive) are hidden so the app-owned catalog wins.
  */
+const SCOPE_ORDER: Record<SkillScope, number> = {
+  unified: 0,
+  user: 1,
+  repo: 1,
+  system: 1,
+  controller: 2,
+};
+
 export function mergeSkillMetadata(
   unified: SkillMetadata[],
   perAgent: SkillMetadata[]
@@ -472,7 +491,12 @@ export function mergeSkillMetadata(
   const dedupedPerAgent = perAgent.filter(
     (entry) => !seen.has(entry.name.toLowerCase())
   );
-  return [...unified, ...dedupedPerAgent];
+  const merged = [...unified, ...dedupedPerAgent];
+  return merged.sort((a, b) => {
+    const orderDiff = SCOPE_ORDER[a.scope] - SCOPE_ORDER[b.scope];
+    if (orderDiff !== 0) return orderDiff;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 // ---------------------------------------------------------------------------
