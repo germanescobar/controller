@@ -14,6 +14,7 @@ import {
   type AgentStatus,
   type Model,
 } from "../api.ts";
+import { modelProviderLabel } from "../lib/model-labels.ts";
 
 // API-key providers are model backends consumed by the Anita agent, so they are
 // rendered nested under the Anita row rather than as a top-level section.
@@ -79,6 +80,29 @@ interface AgentRowProps {
   onSavePath: (path: string | null) => Promise<void>;
   onSaveDefaultModel: (defaultModel: string | null) => Promise<void>;
   children?: ReactNode;
+}
+
+interface ModelGroup {
+  label: string;
+  models: Model[];
+}
+
+/**
+ * Group a flat list of models by their provider label so the default-model
+ * picker can render them inside `<optgroup>`s. The provider label comes
+ * from `modelProviderLabel` (group name first, then id prefix). When every
+ * model ends up in the same group, callers can still iterate over a single
+ * "Other" group so the rendering stays uniform.
+ */
+function groupModelsByProvider(models: Model[]): ModelGroup[] {
+  const groups = new Map<string, Model[]>();
+  for (const model of models) {
+    const label = modelProviderLabel(model) || "Other";
+    const bucket = groups.get(label);
+    if (bucket) bucket.push(model);
+    else groups.set(label, [model]);
+  }
+  return Array.from(groups.entries()).map(([label, models]) => ({ label, models }));
 }
 
 function AgentRow({ agent, onToggle, onSavePath, onSaveDefaultModel, children }: AgentRowProps) {
@@ -212,11 +236,25 @@ function AgentRow({ agent, onToggle, onSavePath, onSaveDefaultModel, children }:
               className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
             >
               <option value="">{modelsLoading ? "Loading..." : "(none)"}</option>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
+              {(() => {
+                const groups = groupModelsByProvider(models);
+                // When more than one provider is available, prefix each
+                // option with the provider name so the choice stays
+                // unambiguous even on platforms where optgroup labels are
+                // easy to miss (e.g., native select menus on small screens).
+                const prefixProvider = groups.length > 1;
+                return groups.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {prefixProvider
+                          ? `${group.label} - ${model.name}`
+                          : model.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                ));
+              })()}
             </select>
             {savingDefaultModel && (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
