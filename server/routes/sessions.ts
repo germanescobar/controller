@@ -559,6 +559,292 @@ sessionsRouter.get("/:projectId/git/branch-diff", async (req, res) => {
 sessionsRouter.get("/:projectId/sessions/stream", handleSessionStream);
 
 /*
+ * Start a new session headlessly (issue #190).
+ *
+ * The CLI / automation surface for kicking off a new agent run without
+ * owning an SSE connection. Mirrors `GET /sessions/stream` — same body
+ * validation, same provider dispatch, same persistence pipeline — but
+ * responds with `{ sessionId, url }` once the first `run.started` event
+ * lands, so the caller can hand the sessionId back to a human to follow
+ * along in the UI.
+ *
+ * `url` is a `controller://project/<id>/worktree/<id>/session/<id>`
+ * reference. The orchestrator's React app doesn't expose a public URL
+ * scheme yet, so the URI is informational; the in-app sidebar picks the
+ * session up automatically because the persistence layer already wrote
+ * the session file by the time we return.
+ */
+sessionsRouter.post("/:projectId/sessions", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const body = (req.body ?? {}) as {
+    worktreeId?: string;
+    message?: string;
+    provider?: string;
+    model?: string;
+    mode?: "default" | "plan";
+    skillName?: string;
+    attachmentIds?: string[];
+    reasoningEffort?: string;
+    serviceTier?: "fast" | "flex";
+  };
+  const worktreeId = body.worktreeId;
+  const message = body.message;
+  if (typeof worktreeId !== "string" || !worktreeId) {
+    res.status(400).json({ error: "worktreeId is required" });
+    return;
+  }
+  if (typeof message !== "string" || !message.trim()) {
+    res.status(400).json({ error: "message is required" });
+    return;
+  }
+  const mode: "default" | "plan" = body.mode === "plan" ? "plan" : "default";
+  const attachmentIds = Array.isArray(body.attachmentIds)
+    ? body.attachmentIds.filter((id): id is string => typeof id === "string")
+    : [];
+
+  // Reuse the SSE handler's validation + persistence path. The shim
+  // response intercepts `writeHead(200, ...)` to hold the real response
+  // open, captures the first `run.started` event to learn the agent's
+  // sessionId, then flushes a JSON 200 with `{ sessionId, url }`. Any
+  // preflight failure (handler returns 4xx before `writeHead`) is
+  // forwarded as a JSON error. Subsequent stream events are discarded
+  // — the persistence layer already wrote them to disk, and the UI
+  // subscribes to the existing `GET /sessions/:sessionId/events`
+  // endpoint to render the transcript live.
+  const shim = makeSessionStartShim(project.id, worktreeId, res);
+  try {
+    await handleSessionStream(
+      makeHeadlessSessionStartRequest(req, project.id, worktreeId, {
+        message,
+        provider: body.provider,
+        model: body.model,
+        mode,
+        skillName: body.skillName,
+        attachmentIds,
+        reasoningEffort: body.reasoningEffort,
+        serviceTier: body.serviceTier,
+      }),
+      shim.res
+    );
+  } catch (error) {
+    shim.fail(error instanceof Error ? error.message : String(error));
+  }
+});
+
+/*
+ * Build a minimal Express request shim that `handleSessionStream` accepts.
+ * The SSE handler reads everything from `req.query`; we put the JSON body
+ * through the same shape so the validation + provider dispatch paths run
+ * unchanged. We intentionally drop `req.on("close", ...)` so the real HTTP
+ * client closing the response is decoupled from the agent process — the
+ * run continues even if the CLI exits immediately after printing the URL.
+ */
+function makeHeadlessSessionStartRequest(
+  req: Request<{ projectId: string }>,
+  projectId: string,
+  worktreeId: string,
+  body: {
+    message: string;
+    provider?: string;
+    model?: string;
+    mode: "default" | "plan";
+    skillName?: string;
+    attachmentIds: string[];
+    reasoningEffort?: string;
+    serviceTier?: "fast" | "flex";
+  }
+): Request<{ projectId: string }> {
+  const query: Record<string, string> = {
+    worktreeId,
+    message: body.message,
+    provider: body.provider || "",
+    mode: body.mode,
+  };
+  if (body.model) query.model = body.model;
+  if (body.skillName) query.skillName = body.skillName;
+  if (body.attachmentIds.length) query.attachmentIds = body.attachmentIds.join(",");
+  if (body.reasoningEffort) query.reasoningEffort = body.reasoningEffort;
+  if (body.serviceTier) query.serviceTier = body.serviceTier;
+  return {
+    params: { projectId },
+    query,
+    on: () => undefined,
+  } as unknown as Request<{ projectId: string }>;
+}
+
+/*
+ * Response shim for the headless session-start endpoint. Mirrors
+ * `makeHeadlessStreamResponse` (used by `advanceSessionQueue`) but with
+ * one critical difference: instead of swallowing every event, it holds
+ * the real `res` open until the agent's first `run.started` event
+ * lands, then flushes a JSON 200 with `{ sessionId, url }` and
+ * discards everything after.
+ *
+ * The `res` returned to the SSE handler is a mock that
+ *   - forwards preflight errors (`status().json()` before `writeHead`)
+ *     to the real client so the CLI sees a clean 4xx with a message,
+ *   - intercepts `writeHead(200, ...)` to start holding the response,
+ *   - intercepts `write(...)` to scan SSE events for `run.started`,
+ *   - returns no-ops for everything else.
+ */
+function makeSessionStartShim(
+  projectId: string,
+  worktreeId: string,
+  realRes: Response
+): {
+  res: Response;
+  fail: (message: string) => void;
+} {
+  let headersSent = false;
+  let finished = false;
+  let buffer = "";
+  let sessionId: string | null = null;
+  // True after the first `run.started` lands. We keep the real `res` open
+  // and discard subsequent stream events, but no longer scan the buffer
+  // for terminal events — `handleSessionStream` will call `end()` once
+  // the run completes, which closes the response with whatever was last
+  // written (the JSON 200 with `{ sessionId, url }`).
+  let startedEmitted = false;
+  let lastError: string | null = null;
+
+  function sessionUrl(id: string): string {
+    return `controller://project/${projectId}/worktree/${worktreeId}/session/${id}`;
+  }
+
+  function sendPreflightError(status: number, body: { error: string }) {
+    if (finished) return;
+    finished = true;
+    realRes.status(status).json(body);
+  }
+
+  function flushSessionStart(id: string) {
+    if (finished) return;
+    finished = true;
+    realRes.status(200).json({ sessionId: id, url: sessionUrl(id) });
+  }
+
+  function scanBufferForStarted() {
+    if (startedEmitted) return;
+    let idx = buffer.indexOf("\n\n");
+    while (idx !== -1) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
+      if (dataLine) {
+        try {
+          const event = JSON.parse(dataLine.slice(6));
+          if (event && event.type === "anita_event" && event.event) {
+            if (event.event.type === "run.started") {
+              const id = typeof event.event.sessionId === "string" ? event.event.sessionId : "";
+              if (id) {
+                startedEmitted = true;
+                sessionId = id;
+                flushSessionStart(id);
+                return;
+              }
+            } else if (
+              event.event.type === "run.failed" ||
+              event.event.type === "run.cancelled"
+            ) {
+              const errText =
+                typeof event.event.error === "string"
+                  ? event.event.error
+                  : `Agent ${event.event.type.replace("run.", "")}`;
+              lastError = errText;
+              startedEmitted = true;
+              return;
+            }
+          } else if (event && event.type === "error" && typeof event.text === "string") {
+            lastError = event.text;
+            startedEmitted = true;
+            return;
+          }
+        } catch {
+          // Ignore unparseable lines — the persistence layer handles them.
+        }
+      }
+      idx = buffer.indexOf("\n\n");
+    }
+  }
+
+  const res = {
+    status: (code: number) => {
+      if (code >= 400) {
+        // Capture preflight error; the handler will call `.json(...)` next.
+        return {
+          json: (body: unknown) => {
+            const message =
+              body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string"
+                ? (body as { error: string }).error
+                : `Request failed (HTTP ${code})`;
+            sendPreflightError(code, { error: message });
+            return res;
+          },
+        };
+      }
+      // 2xx preflight writes are unusual (handler should call writeHead
+      // for the SSE path) but we still no-op them.
+      return {
+        json: () => res,
+        send: () => res,
+      };
+    },
+    json: (body: unknown) => {
+      // `res.json(...)` without a prior `res.status(...)` is unusual but
+      // defensive: forward as a 500 with the body text if present.
+      if (finished) return res;
+      const message =
+        body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string"
+          ? (body as { error: string }).error
+          : "Unexpected error";
+      sendPreflightError(500, { error: message });
+      return res;
+    },
+    writeHead: (_code: number, _headers?: Record<string, unknown>) => {
+      headersSent = true;
+      // Hold the real response open — do not write the SSE headers.
+      // `flushSessionStart` will send a JSON 200 once `run.started`
+      // lands, and `end()` will finalize the response.
+      return res;
+    },
+    write: (chunk: string | Buffer) => {
+      if (!headersSent || finished) return true;
+      buffer += typeof chunk === "string" ? chunk : chunk.toString();
+      scanBufferForStarted();
+      return true;
+    },
+    end: () => {
+      // If the SSE stream closed without `run.started` (e.g. the agent
+      // crashed before reporting it), surface the last error we saw
+      // (or a generic "no sessionId" fallback) so the CLI knows nothing
+      // got started.
+      if (!finished) {
+        const message = lastError ?? "Agent exited before reporting a sessionId";
+        sendPreflightError(500, { error: message });
+      }
+      if (!realRes.writableEnded) {
+        realRes.end();
+      }
+      return res;
+    },
+    on: () => res,
+  } as unknown as Response;
+
+  return {
+    res,
+    fail: (message: string) => {
+      if (finished) return;
+      sendPreflightError(500, { error: message });
+    },
+  };
+}
+
+/*
  * Runs one agent turn and streams it to the client over SSE. Also invoked
  * headlessly (with discarding req/res shims) by `advanceSessionQueue` to run
  * the next enqueued message after a turn completes — that path streams to no

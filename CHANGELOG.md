@@ -24,6 +24,40 @@ All notable changes to this project are documented here.
   3s for the renderer to reconnect before rejecting, so a transient
   pane detach no longer aborts an in-flight agent command.
 
+- **Worktree + session-start CLI surfaces** (#190). Two new top-level
+  surfaces on the unified `controller` CLI let an agent manage its own
+  worktrees and kick off new sessions without going through the in-app
+  worktree picker:
+
+  - `controller worktrees list <project>` wraps
+    `GET /api/projects/:projectId/worktrees`.
+  - `controller worktrees create <project> --name <name> [--branch <branch>] [--base <baseBranch>]`
+    subscribes to the existing
+    `POST /api/projects/:projectId/worktrees` SSE stream and prints the
+    log output plus the new worktree's id and path; non-zero exit on
+    a failed `git worktree add` or setup script.
+  - `controller worktrees delete <project> <worktreeId>` wraps
+    `DELETE /api/projects/:projectId/worktrees/:worktreeId`.
+  - `controller sessions start <project> --worktree <worktreeId> --message <text>`
+    (with optional `--provider`, `--model`, `--mode`, `--skill`) calls
+    the new `POST /api/projects/:projectId/sessions` endpoint and prints
+    `{ sessionId, url }` once the agent's first `run.started` event
+    lands, so the caller can hand the sessionId to a human to follow
+    along in the UI.
+
+  `<project>` accepts either the project's id (UUID) or its human name;
+  the CLI resolves names against `GET /api/projects` so the agent
+  doesn't need to know the project's id to invoke the command. The new
+  endpoint is a headless companion to the existing
+  `GET /api/projects/:projectId/sessions/stream` SSE handler: it runs
+  the same validation, skill-resolution, and persistence pipeline
+  (session file + `user_message` event written before the agent spawns),
+  and the UI subscribes to the existing
+  `GET /api/projects/:projectId/sessions/:sessionId/events` endpoint to
+  render the transcript live. The agent preamble now includes a
+  project-management block that surfaces every new subcommand with the
+  absolute CLI install path so the agent can copy/paste them verbatim.
+
 ### Fixed
 
 - **`controller integrations …` no longer crashes with

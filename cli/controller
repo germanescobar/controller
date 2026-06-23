@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /*
- * controller — unified Controller CLI for agents (issues #109, #130, #134).
+ * controller — unified Controller CLI for agents (issues #109, #130, #134, #190).
  *
  * One entry point with per-surface subcommands:
  *   controller browser <action> ...        Drive the in-app preview browser.
  *   controller integrations <action> ...   Use configured third-party services.
- *   controller skills <action> ...           Search and activate unified skills.
+ *   controller skills <action> ...          Search and activate unified skills.
+ *   controller worktrees <action> ...       Manage worktrees on a project.
+ *   controller sessions <action> ...        Start a session pinned to a worktree.
  *
  * Invoked by its absolute install path (`~/coding-orchestrator/bin/controller`)
  * because sanitized/login shells drop injected env vars and PATH entries. The
@@ -44,7 +46,22 @@ const USAGE = `Usage:
   controller skills activate <name>
   controller skills create --name <name> --description <description> [--body <body>] [--body-file <path>]
   controller skills import-discover
-  controller skills import [--provider <id>] [--source <path>] [--scope <scope>] [--overwrite]... [--all]`;
+  controller skills import [--provider <id>] [--source <path>] [--scope <scope>] [--overwrite]... [--all]
+
+  controller worktrees list <project>
+  controller worktrees create <project> --name <name> [--branch <branch>] [--base <baseBranch>]
+  controller worktrees delete <project> <worktreeId>
+
+  <project> accepts either the project's id (UUID) or its human name. The
+  CLI resolves names to ids against the orchestrator's project list.
+
+  controller sessions start <project> --worktree <worktreeId> --message <text> \\
+      [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]
+
+  \`sessions start\` kicks off a new agent run on the given worktree and prints
+  a URL the user can open in Controller to follow along. The CLI does not
+  stream transcript events; the run is persisted to disk and the UI subscribes
+  to the existing event-list endpoint for live updates.`;
 
 // Exposed for tests: only auto-run `main()` when this file is the script the
 // process was launched as, so unit tests can import the helpers without
@@ -102,6 +119,265 @@ async function postJson(serverUrl, route, body) {
     fail(`Unexpected response (HTTP ${response.status})`);
   }
   return { response, result };
+}
+
+// --- project resolver (issue #190) ---
+//
+// `<project>` in the worktrees / sessions surfaces accepts either a project
+// id (UUID) or the project's human name. We fetch the project list once and
+// match in JS so the server doesn't need a name-lookup endpoint just to make
+// the CLI more human-friendly.
+export async function resolveProjectId(serverUrl, ref) {
+  if (!ref) fail("a <project> (id or name) is required");
+  const url = `${serverUrl.replace(/\/$/, "")}/api/projects`;
+  let response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+  }
+  if (response.status >= 400) {
+    fail(`Failed to list projects (HTTP ${response.status})`);
+  }
+  let projects;
+  try {
+    projects = await response.json();
+  } catch {
+    fail("Unexpected project list response");
+  }
+  if (!Array.isArray(projects)) {
+    fail("Unexpected project list response shape");
+  }
+  const match = projects.find((p) => p && p.id === ref);
+  if (match) return match.id;
+  const byName = projects.find((p) => p && p.name === ref);
+  if (byName) return byName.id;
+  fail(`No project matches "${ref}"`);
+}
+
+// --- worktrees surface (issue #190) ---
+
+export function parseWorktrees(argv) {
+  const [command, project, ...rest] = argv;
+  if (!command) fail(`Unknown worktrees command\n${USAGE}`);
+  if (!project) fail(`worktrees ${command} requires a <project>`);
+  switch (command) {
+    case "list":
+      return { project, action: "list" };
+    case "create": {
+      const name = flagValue(rest, "--name");
+      if (!name) fail("worktrees create requires --name <name>");
+      const branch = flagValue(rest, "--branch");
+      const base = flagValue(rest, "--base");
+      return {
+        project,
+        action: "create",
+        body: {
+          name,
+          ...(branch ? { branch } : {}),
+          ...(base ? { baseBranch: base } : {}),
+        },
+      };
+    }
+    case "delete": {
+      if (!rest[0]) fail("worktrees delete requires a <worktreeId>");
+      return { project, action: "delete", worktreeId: rest[0] };
+    }
+    default:
+      fail(`Unknown worktrees command: ${command}\n${USAGE}`);
+  }
+}
+
+function formatWorktreeRow(worktree) {
+  const port = worktree.portOffset != null ? `  portOffset=${worktree.portOffset}` : "";
+  const setup =
+    worktree.setupExitCode != null
+      ? `  setup=${worktree.setupExitCode === 0 ? "ok" : `exit(${worktree.setupExitCode})`}`
+      : "";
+  return `${worktree.id}  ${worktree.name}  ${worktree.branch ?? "(no branch)"}${worktree.isMain ? "  [main]" : ""}${port}${setup}\n  ${worktree.path}`;
+}
+
+export async function runWorktrees(argv, serverUrl) {
+  const parsed = parseWorktrees(argv);
+  const projectId = await resolveProjectId(serverUrl, parsed.project);
+  if (parsed.action === "list") {
+    const { response, result } = await getJson(
+      serverUrl,
+      `/api/projects/${projectId}/worktrees`
+    );
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to list worktrees (HTTP ${response.status})`);
+    }
+    const worktrees = Array.isArray(result) ? result : [];
+    if (worktrees.length === 0) {
+      process.stdout.write("No worktrees.\n");
+      return;
+    }
+    for (const worktree of worktrees) {
+      process.stdout.write(`${formatWorktreeRow(worktree)}\n`);
+    }
+    return;
+  }
+  if (parsed.action === "create") {
+    const url = `${serverUrl.replace(/\/$/, "")}/api/projects/${projectId}/worktrees`;
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...parsed.body, cwd: process.cwd() }),
+      });
+    } catch (error) {
+      fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    }
+    if (!response.body) {
+      fail(`Worktree create failed (HTTP ${response.status})`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let exitCode = 0;
+    let worktree = null;
+    let errorText = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf("\n\n");
+      while (idx !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
+        if (dataLine) {
+          let event;
+          try {
+            event = JSON.parse(dataLine.slice(6));
+          } catch {
+            continue;
+          }
+          if (event.type === "log" && typeof event.text === "string") {
+            process.stdout.write(event.text.endsWith("\n") ? event.text : `${event.text}\n`);
+          } else if (event.type === "worktree_created" && event.worktree) {
+            worktree = event.worktree;
+          } else if (event.type === "error" && typeof event.text === "string") {
+            errorText = event.text;
+            process.stderr.write(`${event.text}\n`);
+          } else if (event.type === "done") {
+            exitCode = typeof event.exitCode === "number" ? event.exitCode : 0;
+            if (event.worktree) worktree = event.worktree;
+          }
+        }
+        idx = buffer.indexOf("\n\n");
+      }
+    }
+    if (exitCode !== 0) {
+      fail(errorText ?? `Worktree create failed (exit ${exitCode})`);
+    }
+    if (!worktree) {
+      fail("Worktree create stream ended without a worktree payload");
+    }
+    process.stdout.write(`\nCreated worktree ${worktree.name} (id=${worktree.id})\n  ${worktree.path}\n`);
+    return;
+  }
+  if (parsed.action === "delete") {
+    const { response, result } = await postJson(
+      serverUrl,
+      `/api/projects/${projectId}/worktrees/${parsed.worktreeId}`,
+      {}
+    );
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to delete worktree (HTTP ${response.status})`);
+    }
+    process.stdout.write("Deleted worktree.\n");
+    return;
+  }
+  fail(`Unknown worktrees action: ${parsed.action}`);
+}
+
+async function getJson(serverUrl, route) {
+  let response;
+  try {
+    response = await fetch(`${serverUrl.replace(/\/$/, "")}${route}`);
+  } catch (error) {
+    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+  }
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  return { response, result };
+}
+
+// --- sessions surface (issue #190) ---
+
+export function parseSessions(argv) {
+  const [command, project, ...rest] = argv;
+  if (!command) fail(`Unknown sessions command\n${USAGE}`);
+  if (!project) fail(`sessions ${command} requires a <project>`);
+  switch (command) {
+    case "start": {
+      const worktreeId = flagValue(rest, "--worktree");
+      if (!worktreeId) fail("sessions start requires --worktree <worktreeId>");
+      const provider = flagValue(rest, "--provider");
+      const model = flagValue(rest, "--model");
+      const mode = flagValue(rest, "--mode");
+      const skill = flagValue(rest, "--skill");
+      // `--message` is the last flag: everything after it is the message
+      // text, verbatim. This matches the shell idiom of quoting the
+      // prompt at the end of the command and avoids forcing the agent
+      // to escape whitespace inside the body.
+      const messageIdx = rest.indexOf("--message");
+      if (messageIdx < 0) {
+        fail("sessions start requires --message <text>");
+      }
+      const message = rest.slice(messageIdx + 1).join(" ").trim();
+      if (!message) {
+        fail("sessions start requires --message <text>");
+      }
+      return {
+        project,
+        action: "start",
+        body: {
+          worktreeId,
+          message,
+          ...(provider ? { provider } : {}),
+          ...(model ? { model } : {}),
+          ...(mode ? { mode } : {}),
+          ...(skill ? { skillName: skill } : {}),
+        },
+      };
+    }
+    default:
+      fail(`Unknown sessions command: ${command}\n${USAGE}`);
+  }
+}
+
+export async function runSessions(argv, serverUrl) {
+  const parsed = parseSessions(argv);
+  const projectId = await resolveProjectId(serverUrl, parsed.project);
+  if (parsed.action === "start") {
+    const { response, result } = await postJson(
+      serverUrl,
+      `/api/projects/${projectId}/sessions`,
+      parsed.body
+    );
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to start session (HTTP ${response.status})`);
+    }
+    const sessionId = result?.sessionId;
+    const url = result?.url;
+    if (typeof sessionId !== "string" || !sessionId) {
+      fail("Server did not return a sessionId");
+    }
+    process.stdout.write(`Started session ${sessionId}\n`);
+    if (typeof url === "string" && url) {
+      process.stdout.write(`Open in Controller: ${url}\n`);
+    }
+    return;
+  }
+  fail(`Unknown sessions action: ${parsed.action}`);
 }
 
 // --- browser surface (issue #109) ---
@@ -469,7 +745,13 @@ async function main() {
     process.stdout.write(`${USAGE}\n`);
     process.exit(surface ? 0 : 1);
   }
-  if (surface !== "browser" && surface !== "integrations" && surface !== "skills") {
+  if (
+    surface !== "browser" &&
+    surface !== "integrations" &&
+    surface !== "skills" &&
+    surface !== "worktrees" &&
+    surface !== "sessions"
+  ) {
     fail(`Unknown surface: ${surface}\n${USAGE}`);
   }
   const serverUrl = await getServerUrl();
@@ -481,6 +763,10 @@ async function main() {
     } else {
       await runSkills(rest, serverUrl);
     }
+  } else if (surface === "worktrees") {
+    await runWorktrees(rest, serverUrl);
+  } else if (surface === "sessions") {
+    await runSessions(rest, serverUrl);
   }
 }
 

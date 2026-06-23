@@ -102,3 +102,187 @@ test("runIntegrations surfaces server errors as a non-zero exit", async () => {
   assert.equal(exitCode, 1);
   assert.match(stderrText, /No enabled integration named "Nope"\./);
 });
+
+// ---------------------------------------------------------------------------
+// worktrees + sessions CLI parsers (issue #190)
+// ---------------------------------------------------------------------------
+
+test("parseWorktrees maps list/create/delete to the right actions", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseWorktrees(["list", "demo"]),
+    { project: "demo", action: "list" }
+  );
+  assert.deepEqual(
+    cli.parseWorktrees(["create", "demo", "--name", "issue-190", "--branch", "feat-190", "--base", "main"]),
+    {
+      project: "demo",
+      action: "create",
+      body: { name: "issue-190", branch: "feat-190", baseBranch: "main" },
+    }
+  );
+  assert.deepEqual(
+    cli.parseWorktrees(["delete", "demo", "wt-123"]),
+    { project: "demo", action: "delete", worktreeId: "wt-123" }
+  );
+});
+
+test("parseSessions maps start to a session-start payload, including the verbatim --message text", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start",
+    "demo",
+    "--worktree",
+    "wt-123",
+    "--provider",
+    "codex",
+    "--model",
+    "gpt-5",
+    "--mode",
+    "plan",
+    "--skill",
+    "github-issues",
+    "--message",
+    "Implement the project-mgmt block",
+  ]);
+  assert.equal(parsed.project, "demo");
+  assert.equal(parsed.action, "start");
+  assert.deepEqual(parsed.body, {
+    worktreeId: "wt-123",
+    message: "Implement the project-mgmt block",
+    provider: "codex",
+    model: "gpt-5",
+    mode: "plan",
+    skillName: "github-issues",
+  });
+});
+
+test("parseSessions treats the message as the rest of argv (whitespace + trailing args stay verbatim)", async () => {
+  const cli = await loadCli();
+  // Simulate the shell joining a quoted multi-word message plus an extra
+  // trailing argument — `--message`'s value is everything after the flag.
+  const parsed = cli.parseSessions([
+    "start",
+    "demo",
+    "--worktree",
+    "wt-123",
+    "--message",
+    "look at issue 190 and",
+    "implement",
+    "the CLI surfaces",
+  ]);
+  assert.equal(parsed.body.message, "look at issue 190 and implement the CLI surfaces");
+});
+
+test("runWorktrees list resolves project names to ids and prints one row per worktree", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "proj-uuid-1", name: "controller" },
+          { id: "proj-uuid-2", name: "demo" },
+        ],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          {
+            id: "wt-1",
+            name: "main",
+            branch: "main",
+            isMain: true,
+            path: "/tmp/worktrees/proj-uuid-2/main",
+            portOffset: 0,
+          },
+          {
+            id: "wt-2",
+            name: "issue-190",
+            branch: "issue-190",
+            isMain: false,
+            path: "/tmp/worktrees/proj-uuid-2/issue-190",
+            setupExitCode: 0,
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runWorktrees(["list", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // First call lists projects (to resolve name -> id), then the worktree list.
+  assert.equal(calls[0].url, "http://controller.test/api/projects");
+  assert.equal(calls[1].url, "http://controller.test/api/projects/proj-uuid-2/worktrees");
+  const out = stdoutChunks.join("");
+  assert.match(out, /wt-1  main  main  \[main\]/);
+  assert.match(out, /wt-2  issue-190  issue-190  setup=ok/);
+});
+
+test("runSessions start POSTs to the new sessions endpoint and prints the URL", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        sessionId: "sess-xyz",
+        url: "controller://project/proj-uuid-1/worktree/wt-1/session/sess-xyz",
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      [
+        "start",
+        "controller",
+        "--worktree",
+        "wt-1",
+        "--message",
+        "work on issue 190",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const sessionCall = calls.find((c) => c.url.endsWith("/api/projects/proj-uuid-1/sessions"));
+  assert.ok(sessionCall, "expected a POST to /api/projects/:projectId/sessions");
+  const body = JSON.parse(sessionCall.init.body);
+  assert.equal(body.cwd, process.cwd());
+  assert.equal(body.worktreeId, "wt-1");
+  assert.equal(body.message, "work on issue 190");
+  const out = stdoutChunks.join("");
+  assert.match(out, /Started session sess-xyz/);
+  assert.match(out, /controller:\/\/project\/proj-uuid-1\/worktree\/wt-1\/session\/sess-xyz/);
+});
