@@ -38,6 +38,7 @@ export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-scripts",
   "controller-search-skills",
   "controller-skill-creator",
+  "controller-worktrees",
 ]);
 
 /** True when the given skill name (case-insensitive) is owned by the orchestrator. */
@@ -428,6 +429,83 @@ When migrating, translate those JSON commands into native shell scripts at
 \`$SOURCE_PATH/.coding-orchestrator/\` and delete the fallback config files.
 `;
 
+function buildWorktreesSkillBody(cliPath: string): string {
+  return `---
+name: controller-worktrees
+description: Worktree the current conversation and start an agent turn on the new worktree from the CLI, without going through the in-app picker. Use when the user asks to create a worktree, work on an issue in a fresh worktree, or kick off a turn on an existing worktree.
+---
+
+${managedMarker("controller-worktrees")}
+
+# Worktrees
+
+This skill is managed by the Controller app (directory name
+\`controller-worktrees\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-worktrees <task>\` or pick it from
+the autocomplete.
+
+You can worktree the current conversation and start a turn on the new
+worktree from the shell, without going through the in-app picker. Use it when
+the user says "let's create a worktree and start working on issue X", or when
+you want to scope a long task to an isolated branch without leaving the CLI.
+
+Invoke the Controller CLI by its absolute path — it is not on your PATH.
+Every command below is run as either \`${cliPath} worktrees <command>\` or
+\`${cliPath} sessions <command>\`.
+
+## Commands
+
+- \`${cliPath} worktrees list <project>\` — list the worktrees on a project.
+- \`${cliPath} worktrees create <project> --name <name> [--branch <branch>] [--base <baseBranch>]\` — create a new worktree. Streams the setup-script output as it runs; the new worktree's id is printed on success.
+- \`${cliPath} worktrees delete <project> <worktreeId>\` — delete a worktree. The worktree must not have an active session.
+- \`${cliPath} sessions start <project> --worktree <worktreeId> --message <text> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]\` — kick off a new agent turn on a worktree and print the session URL.
+
+\`<project>\` accepts either the project's id (UUID) or its human name. The CLI
+resolves names against the orchestrator's project list, so you don't need to
+look up the UUID yourself.
+
+## Workflow
+
+The common shape is "worktree this conversation, then start a turn":
+
+\`\`\`sh
+${cliPath} worktrees list <project>
+${cliPath} worktrees create <project> --name issue-<n>-<slug> --branch issue-<n>
+${cliPath} sessions start <project> --worktree <worktreeId> --message "<prompt>" --provider <provider>
+\`\`\`
+
+The third command prints \`Started session <id>\` and a \`controller://...\`
+URL — open that URL in the Controller app to see the live transcript.
+
+## Flags to remember
+
+- \`--message\` must be **last** on the command line. Everything after it is
+  the prompt text, verbatim. Putting another flag after \`--message\` will
+  fail the parse with a clear error rather than silently corrupting the
+  prompt.
+- \`--provider\` accepts \`codex\`, \`claude\`, or \`anita\`. The session URL
+  works regardless of provider; the transcript is rendered by the existing
+  in-app event stream, so no client-side streaming changes are involved.
+- \`--base <baseBranch>\` lets you branch off a non-default base (e.g.
+  \`--base main\` or \`--base origin/main\`). The CLI resolves it against
+  the project's remote when possible.
+
+## Notes
+
+- \`worktrees create\` runs the project's \`.coding-orchestrator/setup.sh\`
+  inside the new worktree before printing the id. The setup script must
+  finish before the worktree is usable; the CLI streams its output so a
+  failure surfaces immediately.
+- \`sessions start\` returns as soon as the agent reports its first
+  \`run.started\` event. The session continues running independently; you do
+  not need to keep the CLI open.
+- The unified CLI is invoked by its absolute path. The bare \`controller\`
+  command may not resolve on PATH inside your shell — copy the full path
+  verbatim from this skill body.
+`;
+}
+
 function buildSearchSkillsBody(cliPath: string): string {
   return `---
 name: controller-search-skills
@@ -646,6 +724,7 @@ export async function installManagedSkills(): Promise<void> {
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
     { name: "controller-search-skills", body: buildSearchSkillsBody(cli) },
     { name: "controller-skill-creator", body: buildSkillCreatorSkillBody(cli) },
+    { name: "controller-worktrees", body: buildWorktreesSkillBody(cli) },
   ];
 
   for (const skill of skills) {
