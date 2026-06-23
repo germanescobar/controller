@@ -3095,10 +3095,12 @@ export function SessionView({
       .then((m) => {
         setModels(m);
         setSelectedModel((prev) => {
-          if (prev && m.some((model) => model.id === prev)) return prev;
+          // When the caller supplies a saved default, prefer it over any prior
+          // selection so the new-session composer starts from the user's setting.
           if (defaultModelId && m.some((model) => model.id === defaultModelId)) {
             return defaultModelId;
           }
+          if (prev && m.some((model) => model.id === prev)) return prev;
           return m.length > 0 ? m[0].id : "";
         });
 
