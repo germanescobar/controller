@@ -121,6 +121,33 @@ async function postJson(serverUrl, route, body) {
   return { response, result };
 }
 
+// Server route handlers use method-specific verbs (DELETE for worktree
+// removal, etc.), so callers that don't fit the JSON-POST shape need their
+// own helper. `runWorktrees delete` goes through here instead of
+// `postJson` so the wire request matches `server/routes/worktrees.ts:788`.
+async function deleteJson(serverUrl, route) {
+  let response;
+  try {
+    response = await fetch(`${serverUrl.replace(/\/$/, "")}${route}`, {
+      method: "DELETE",
+    });
+  } catch (error) {
+    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+  }
+  let result = null;
+  // Some DELETE handlers return no body; treat empty/invalid JSON as
+  // success-shape and only fail when we have a parsed object with `error`.
+  const raw = await response.text();
+  if (raw) {
+    try {
+      result = JSON.parse(raw);
+    } catch {
+      result = null;
+    }
+  }
+  return { response, result };
+}
+
 // --- project resolver (issue #190) ---
 //
 // `<project>` in the worktrees / sessions surfaces accepts either a project
@@ -280,10 +307,9 @@ export async function runWorktrees(argv, serverUrl) {
     return;
   }
   if (parsed.action === "delete") {
-    const { response, result } = await postJson(
+    const { response, result } = await deleteJson(
       serverUrl,
-      `/api/projects/${projectId}/worktrees/${parsed.worktreeId}`,
-      {}
+      `/api/projects/${projectId}/worktrees/${parsed.worktreeId}`
     );
     if (response.status >= 400) {
       fail(result?.error ?? `Failed to delete worktree (HTTP ${response.status})`);
@@ -332,7 +358,27 @@ export function parseSessions(argv) {
       if (messageIdx < 0) {
         fail("sessions start requires --message <text>");
       }
-      const message = rest.slice(messageIdx + 1).join(" ").trim();
+      const trailing = rest.slice(messageIdx + 1);
+      // Reject any known option flag that appears after `--message`'s
+      // value — otherwise the flag and its argument would be appended to
+      // the prompt and silently corrupt the agent's first turn.
+      const RESERVED_FLAGS = [
+        "--worktree",
+        "--provider",
+        "--model",
+        "--mode",
+        "--skill",
+      ];
+      const offendingFlag = trailing.find((arg) =>
+        RESERVED_FLAGS.includes(arg)
+      );
+      if (offendingFlag) {
+        fail(
+          `--message must be the last flag on the command line, but found ${offendingFlag} after it. ` +
+            `Quote the prompt at the end, e.g. --message "<prompt>" ${offendingFlag === "--worktree" ? "" : "..."}`
+        );
+      }
+      const message = trailing.join(" ").trim();
       if (!message) {
         fail("sessions start requires --message <text>");
       }

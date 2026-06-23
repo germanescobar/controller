@@ -174,6 +174,91 @@ test("parseSessions treats the message as the rest of argv (whitespace + trailin
   assert.equal(parsed.body.message, "look at issue 190 and implement the CLI surfaces");
 });
 
+test("parseSessions rejects a reserved flag that appears after --message", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    // Wrap in an async fn so the synchronous throw surfaces as a
+    // rejection that `assert.rejects` can capture.
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "start",
+          "demo",
+          "--worktree",
+          "wt-123",
+          "--message",
+          "hi",
+          "--provider",
+          "anita",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  // The error must name the offending flag so the caller can fix it.
+  assert.match(stderrText, /--message must be the last flag/);
+  assert.match(stderrText, /--provider/);
+});
+
+test("runWorktrees delete sends DELETE and reports success", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-2", name: "demo" }],
+      };
+    }
+    if (
+      String(url).endsWith("/api/projects/proj-uuid-2/worktrees/wt-123")
+    ) {
+      return {
+        status: 200,
+        // Empty body is a valid success shape for DELETE.
+        text: async () => "",
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runWorktrees(["delete", "demo", "wt-123"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const deleteCall = calls.find(
+    (c) => c.url === "http://controller.test/api/projects/proj-uuid-2/worktrees/wt-123"
+  );
+  assert.ok(deleteCall, "expected a request to the worktree delete endpoint");
+  // The server registers DELETE for this route; POST would 404.
+  assert.equal(deleteCall.init.method, "DELETE");
+  assert.match(stdoutChunks.join(""), /Deleted worktree\./);
+});
+
 test("runWorktrees list resolves project names to ids and prints one row per worktree", async () => {
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
