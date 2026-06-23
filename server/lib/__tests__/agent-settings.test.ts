@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -24,7 +24,7 @@ function withTempHome(run: () => Promise<void>): Promise<void> {
 test("getAgentSetting defaults to enabled with no path", async () => {
   await withTempHome(async () => {
     const setting = await getAgentSetting("codex");
-    assert.deepEqual(setting, { enabled: true, path: null });
+    assert.deepEqual(setting, { enabled: true, path: null, defaultModel: null });
   });
 });
 
@@ -32,7 +32,7 @@ test("setAgentSetting persists enabled and path", async () => {
   await withTempHome(async () => {
     await setAgentSetting("codex", { enabled: false, path: "/usr/local/bin/codex" });
     const setting = await getAgentSetting("codex");
-    assert.deepEqual(setting, { enabled: false, path: "/usr/local/bin/codex" });
+    assert.deepEqual(setting, { enabled: false, path: "/usr/local/bin/codex", defaultModel: null });
 
     const onDisk = JSON.parse(readFileSync(agentSettingsFile(), "utf-8"));
     assert.equal(onDisk.codex.enabled, false);
@@ -45,7 +45,7 @@ test("setAgentSetting merges partial patches", async () => {
     await setAgentSetting("anita", { enabled: false });
     await setAgentSetting("anita", { path: "/opt/anita" });
     const setting = await getAgentSetting("anita");
-    assert.deepEqual(setting, { enabled: false, path: "/opt/anita" });
+    assert.deepEqual(setting, { enabled: false, path: "/opt/anita", defaultModel: null });
   });
 });
 
@@ -57,10 +57,12 @@ test("legacy 'ada' settings resolve to the canonical 'anita' id", async () => {
     assert.deepEqual(await getAgentSetting("anita"), {
       enabled: false,
       path: "/opt/ada",
+      defaultModel: null,
     });
     assert.deepEqual(await getAgentSetting("ada"), {
       enabled: false,
       path: "/opt/ada",
+      defaultModel: null,
     });
   });
 });
@@ -70,5 +72,40 @@ test("setAgentSetting normalizes blank path to null", async () => {
     await setAgentSetting("claude", { path: "   " });
     const settings = await getAgentSettings();
     assert.equal(settings.claude.path, null);
+  });
+});
+
+test("setAgentSetting persists and clears defaultModel", async () => {
+  await withTempHome(async () => {
+    await setAgentSetting("codex", { defaultModel: "gpt-5.5" });
+    let setting = await getAgentSetting("codex");
+    assert.equal(setting.defaultModel, "gpt-5.5");
+
+    await setAgentSetting("codex", { defaultModel: null });
+    setting = await getAgentSetting("codex");
+    assert.equal(setting.defaultModel, null);
+
+    await setAgentSetting("codex", { defaultModel: "" });
+    setting = await getAgentSetting("codex");
+    assert.equal(setting.defaultModel, null);
+
+    const onDisk = JSON.parse(readFileSync(agentSettingsFile(), "utf-8"));
+    assert.equal(onDisk.codex.defaultModel, null);
+  });
+});
+
+test("normalizeSetting tolerates legacy objects without defaultModel", async () => {
+  await withTempHome(async () => {
+    writeFileSync(
+      agentSettingsFile(),
+      JSON.stringify({ claude: { enabled: true, path: "/usr/local/bin/claude" } }),
+      "utf-8"
+    );
+    const setting = await getAgentSetting("claude");
+    assert.deepEqual(setting, {
+      enabled: true,
+      path: "/usr/local/bin/claude",
+      defaultModel: null,
+    });
   });
 });

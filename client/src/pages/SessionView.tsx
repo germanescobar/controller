@@ -47,6 +47,7 @@ import {
 } from "@/components/PreviewBrowserPool";
 import {
   fetchActiveRuntimes,
+  fetchAgents,
   fetchEvents,
   fetchBranchDiff,
   fetchGitDiff,
@@ -2666,6 +2667,7 @@ export function SessionView({
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
   const [agentProviders, setAgentProviders] = useState<AgentProviderInfo[]>([]);
+  const [agents, setAgents] = useState<import("../api.ts").AgentStatus[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [providerLoadError, setProviderLoadError] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>("anita");
@@ -3088,44 +3090,71 @@ export function SessionView({
     }
   };
 
-  const loadModels = (provider?: string) => {
+  const loadModels = (provider?: string, defaultModelId?: string | null) => {
     fetchModels(provider ?? selectedProvider)
       .then((m) => {
         setModels(m);
-        // Only reset to the first model if the current selection isn't in the list
         setSelectedModel((prev) => {
           if (prev && m.some((model) => model.id === prev)) return prev;
+          if (defaultModelId && m.some((model) => model.id === defaultModelId)) {
+            return defaultModelId;
+          }
           return m.length > 0 ? m[0].id : "";
         });
+
+        // Surface a toast when the saved default is no longer in the agent's
+        // current catalog. Only fire on the new-session screen and only when
+        // we explicitly tried to apply a default.
+        if (defaultModelId && !sessionId) {
+          const fallbackModel = m[0];
+          if (!m.some((model) => model.id === defaultModelId) && fallbackModel) {
+            const agentName =
+              agentProviders.find((p) => p.id === (provider ?? selectedProvider))?.name ??
+              selectedProvider;
+            toast.info(
+              `Your default model for ${agentName} (${defaultModelId}) is no longer available. Using ${fallbackModel.name} for this session. Update it in Settings.`,
+              { duration: 6000 }
+            );
+          }
+        }
       })
       .catch(() => {});
+  };
+
+  const getAgentDefaultModel = (providerId: string): string | null => {
+    return agents.find((a) => a.id === providerId)?.defaultModel ?? null;
   };
 
   const loadAgentProviders = () => {
     setProvidersLoaded(false);
     setProviderLoadError(null);
-    fetchAgentProviders()
-      .then((p) => {
-        setAgentProviders(p);
-        if (p.length === 0) {
+    Promise.all([fetchAgentProviders(), fetchAgents()])
+      .then(([providers, agentsList]) => {
+        setAgentProviders(providers);
+        setAgents(agentsList);
+        if (providers.length === 0) {
           setProviderLoadError("No agent providers were found. Check your CLI installs and retry.");
         }
         if (!sessionId) {
           setSelectedProvider((prev) =>
-            p.some((provider) => provider.id === prev) ? prev : p[0]?.id ?? prev
+            providers.some((provider) => provider.id === prev) ? prev : providers[0]?.id ?? prev
           );
         }
       })
       .catch(() => {
         setAgentProviders([]);
+        setAgents([]);
         setProviderLoadError("Could not load agent providers. Retry before starting a session.");
       })
       .finally(() => setProvidersLoaded(true));
   };
 
   useEffect(() => {
-    if (providerResolved && providerReady) loadModels(selectedProvider);
-  }, [selectedProvider, providerResolved, providerReady]);
+    if (providerResolved && providerReady) {
+      const defaultModelId = sessionId ? undefined : getAgentDefaultModel(selectedProvider);
+      loadModels(selectedProvider, defaultModelId);
+    }
+  }, [selectedProvider, providerResolved, providerReady, sessionId]);
 
   useEffect(() => {
     if (!providerSupportsPlanMode && selectedMode !== "default") {
@@ -3283,6 +3312,15 @@ export function SessionView({
       setSelectedMode("default");
       setSelectedReasoningEffort("medium");
       setSelectedServiceTier("flex");
+      // Pre-select the saved default model for this provider when starting a
+      // new session. If the saved default is no longer in the catalog, the
+      // loadModels fallback will pick the first model and surface a toast.
+      const defaultModelId = getAgentDefaultModel(selectedProvider);
+      if (defaultModelId) {
+        // Defer slightly so the provider effect has resolved models first, or
+        // just call loadModels with the default to handle both cases.
+        loadModels(selectedProvider, defaultModelId);
+      }
     }
     setActiveStreamSessionId(sessionId ?? null);
     setUserInputDraft({});
