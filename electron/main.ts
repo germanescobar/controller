@@ -9,6 +9,7 @@ import {
   session as electronSession,
   type Session,
   type WebContents,
+  shell,
 } from "electron";
 import path from "node:path";
 import { createServer } from "node:net";
@@ -358,6 +359,7 @@ async function createWindow(options: CreateWindowOptions): Promise<BrowserWindow
 
   registerContextMenu(win);
   attachErrorReporting(win);
+  attachExternalLinkHandler(win.webContents);
 
   if (options.loadFile) {
     await win.loadFile(options.loadFile);
@@ -388,6 +390,34 @@ function attachPreviewPartitionGuards(): void {
 function blockPreviewPopups(contents: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
     warnWithTime(`blocked preview popup: ${url}`);
+    return { action: "deny" };
+  });
+}
+
+// Electron 22+ denies `target="_blank"` requests by default. Without a
+// setWindowOpenHandler, `window.open()` (and therefore every external
+// link rendered by the app) is silently dropped — the status bar's
+// Tailscale link and the transcript's external anchors never reach the
+// user's browser. We forward http(s) URLs to the system default browser
+// via shell.openExternal and deny anything else. Preview webviews
+// override this with a stricter deny-all handler installed by
+// attachPreviewWebviewGuards.
+function attachExternalLinkHandler(contents: WebContents): void {
+  contents.setWindowOpenHandler(({ url }) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      warnWithTime(`ignoring window.open with non-URL: ${url}`);
+      return { action: "deny" };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      warnWithTime(`denied window.open with non-http(s) scheme: ${url}`);
+      return { action: "deny" };
+    }
+    void shell.openExternal(parsed.toString()).catch((error) => {
+      warnWithTime(`failed to open external URL ${url}:`, error);
+    });
     return { action: "deny" };
   });
 }
