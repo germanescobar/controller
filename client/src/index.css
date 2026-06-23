@@ -129,6 +129,19 @@
   html {
     @apply font-sans;
     }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  [data-slot="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role="button"][aria-disabled="true"],
+  [data-slot="button"]:disabled {
+    cursor: not-allowed;
+  }
 }
 
 /* Terminal panel padding and touch scrolling */
