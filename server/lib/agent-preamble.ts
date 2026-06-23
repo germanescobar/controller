@@ -11,13 +11,21 @@
  * surfaces without having to run `controller skills list` /
  * `controller integrations list` on a guess.
  *
- * **Skills are restricted to the unified (app-owned) catalog.** Per-agent
- * user/repo skills are deliberately not advertised here because
- * `controller skills describe` only resolves the unified catalog — listing
- * per-agent skills would point the agent at a 404 on the drill-down path.
- * Per-agent skills are still available via the orchestrator's `/<name>`
- * activation flow (issue #98); the preamble is a discoverability surface
- * for what the CLI can actually fetch.
+ * **These are *additional* skills, not the complete list.** Each provider
+ * (Codex, Claude, Anita) has its own native skill system — built-in
+ * capabilities, per-agent user/repo skills in `~/.codex/skills/`,
+ * `~/.claude/skills/`, `.anita/skills/`, repo conventions, plugin
+ * marketplaces, etc. Controller layers an *app-owned* catalog on top of
+ * that. Calling it `<additional_skills>` makes the layering explicit so
+ * the agent doesn't treat this as the full universe and forget about its
+ * own skills. The orchestrator's `/<name>` activation flow (issue #98)
+ * still works for every skill regardless of source.
+ *
+ * **Invoke the CLI by its absolute install path.** Some providers (Codex in
+ * particular) sanitize or rebuild the env before spawning user commands, so
+ * the bare `controller` command may not resolve on PATH inside the agent's
+ * shell. The preamble inlines the absolute install path so the agent can
+ * copy/paste it verbatim; the skill bodies document the same contract.
  *
  * Only `name` + `description` are inlined; full bodies stay on demand via
  * the CLI.
@@ -30,6 +38,7 @@
  *     system-prompt channel in their default modes today.
  */
 
+import { controllerCliInstalledPath } from "./controller-cli.js";
 import { gatewayList, type ListedConnection } from "./integration-gateway.js";
 import { listUnifiedSkills } from "./unified-skills.js";
 import type { SkillMetadata } from "./skills.js";
@@ -38,43 +47,90 @@ export interface ControllerPreambleOptions {
   // Reserved for future per-session options (e.g. feature flags).
 }
 
-const SKILLS_INTRO =
-  "The following skills are available. To use one, call `controller skills describe <name>` " +
-  "for the full body and follow its instructions, or ask the user to invoke it as `/<name>`.";
+// Some providers (Codex) sanitize or rebuild env vars before spawning user
+// commands, so the bare `controller` command is not guaranteed to resolve on
+// PATH inside the agent's shell. The preamble inlines the absolute install
+// path so the agent can copy/paste a working command. The path is resolved
+// lazily at preamble-build time so the tests (which override
+// `CODING_ORCHESTRATOR_HOME` after module import) see the test temp home,
+// not the real install path. The path is stable across rebuilds — the
+// install step is idempotent (see `controller-cli.ts`).
 
-const INTEGRATIONS_INTRO =
-  "The following integrations are available. To discover their tools call " +
-  "`controller integrations tools <name>`; to invoke one call " +
-  "`controller integrations call <name> <tool>` (or `request` for raw HTTP).";
+function controllerCliNote(): string {
+  return (
+    `Invoke the Controller CLI by its absolute path ` +
+    `\`${controllerCliInstalledPath()}\` — the bare \`controller\` command ` +
+    `is not guaranteed to be on your PATH. Copy the full path verbatim ` +
+    `from this preamble.`
+  );
+}
 
-const EMPTY_SKILLS = "<available_skills>\n(none configured)\n</available_skills>";
+function skillsIntro(): string {
+  return (
+    controllerCliNote() +
+    "\n\n" +
+    "In addition to your own skills, Controller exposes a catalog of " +
+    "*additional* skills. To use one, call " +
+    `\`${controllerCliInstalledPath()} skills describe <name>\` for the ` +
+    "full body and follow its instructions, or ask the user to invoke it " +
+    "as `/<name>`. The `/<name>` picker accepts both your native skills and " +
+    "Controller's."
+  );
+}
+
+function integrationsIntro(): string {
+  return (
+    controllerCliNote() +
+    "\n\n" +
+    "In addition to any native tooling your provider exposes, the following " +
+    "third-party integrations are connected through Controller. To discover " +
+    "their tools call " +
+    `\`${controllerCliInstalledPath()} integrations tools <name>\`; to invoke one call ` +
+    `\`${controllerCliInstalledPath()} integrations call <name> <tool>\` ` +
+    "(or `request` for raw HTTP). These integrations are *additional* — " +
+    "they do not replace any native capabilities you already have."
+  );
+}
+
+const EMPTY_SKILLS =
+  "<additional_skills>\n(none configured)\n</additional_skills>";
 const EMPTY_INTEGRATIONS =
-  "<available_integrations>\n(none configured)\n</available_integrations>";
+  "<additional_integrations>\n(none configured)\n</additional_integrations>";
 
 /**
- * Build the `<available_skills>` block. Only the unified (app-owned) catalog
- * is listed — per-agent user/repo skills are intentionally excluded because
- * the advertised drill-down (`controller skills describe <name>`) only
- * resolves unified skills.
+ * Build the `<additional_skills>` block. Lists Controller's app-owned
+ * unified skill catalog only — the per-agent skill system (Codex's
+ * `~/.codex/skills/`, Claude's `~/.claude/skills/`, Anita's
+ * `.anita/skills/`, repo conventions, built-ins) is a separate layer the
+ * agent already has access to on its own and is intentionally not surfaced
+ * here. The `controller skills describe <name>` drill-down only resolves
+ * the unified catalog, so listing per-agent skills would point the agent
+ * at a 404 on the advertised path.
  */
 export async function buildAvailableSkillsBlock(): Promise<string> {
   const skills: SkillMetadata[] = await listUnifiedSkills();
   if (skills.length === 0) return EMPTY_SKILLS;
 
   const lines = skills.map((s) => formatSkillLine(s));
-  return ["<available_skills>", ...lines, "</available_skills>"].join("\n");
+  return ["<additional_skills>", ...lines, "</additional_skills>"].join("\n");
 }
 
 /**
- * Build the `<available_integrations>` block. Lists only enabled connections
- * (matches `gatewayList`); sorted by name for stable output.
+ * Build the `<additional_integrations>` block. Lists only enabled
+ * third-party connections (matches `gatewayList`); sorted by name for
+ * stable output. This is layered on top of whatever native tools the
+ * provider already exposes.
  */
 export async function buildAvailableIntegrationsBlock(): Promise<string> {
   const connections = await gatewayList();
   if (connections.length === 0) return EMPTY_INTEGRATIONS;
   const sorted = [...connections].sort((a, b) => a.name.localeCompare(b.name));
   const lines = sorted.map((c) => formatIntegrationLine(c));
-  return ["<available_integrations>", ...lines, "</available_integrations>"].join("\n");
+  return [
+    "<additional_integrations>",
+    ...lines,
+    "</additional_integrations>",
+  ].join("\n");
 }
 
 /**
@@ -83,7 +139,7 @@ export async function buildAvailableIntegrationsBlock(): Promise<string> {
  * their order is stable so the output is reproducible.
  */
 export async function buildControllerPreamble(
-  _options?: ControllerPreambleOptions
+  _options?: ControllerPreambleOptions,
 ): Promise<string> {
   const [skillsBlock, integrationsBlock] = await Promise.all([
     buildAvailableSkillsBlock(),
@@ -92,11 +148,11 @@ export async function buildControllerPreamble(
   return [
     "You are running inside Controller, a desktop orchestrator for coding agents.",
     "",
-    SKILLS_INTRO,
+    skillsIntro(),
     "",
     skillsBlock,
     "",
-    INTEGRATIONS_INTRO,
+    integrationsIntro(),
     "",
     integrationsBlock,
   ].join("\n");

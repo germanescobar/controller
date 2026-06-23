@@ -9,6 +9,7 @@ import {
   buildControllerPreamble,
   framePreambleForPrompt,
 } from "../agent-preamble.js";
+import { controllerCliInstalledPath } from "../controller-cli.js";
 import { createConnection } from "../integrations.js";
 import { orchestratorHome } from "../paths.js";
 
@@ -78,6 +79,12 @@ async function makeConnection(
   });
 }
 
+// Regex metacharacter escape for the absolute CLI install path. Centralized
+// so the "absolute path is inlined" tests share one definition.
+function escapeForRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ---------------------------------------------------------------------------
 // Static identity line + framing
 // ---------------------------------------------------------------------------
@@ -100,7 +107,7 @@ test("framing marks the block as context-only", () => {
 test("skills block renders (none configured) when the unified catalog is empty", async () => {
   await withTempHome(async () => {
     const block = await buildAvailableSkillsBlock();
-    assert.equal(block, "<available_skills>\n(none configured)\n</available_skills>");
+    assert.equal(block, "<additional_skills>\n(none configured)\n</additional_skills>");
   });
 });
 
@@ -109,7 +116,7 @@ test("integrations block renders (none configured) when no connections are enabl
     const block = await buildAvailableIntegrationsBlock();
     assert.equal(
       block,
-      "<available_integrations>\n(none configured)\n</available_integrations>"
+      "<additional_integrations>\n(none configured)\n</additional_integrations>"
     );
   });
 });
@@ -123,7 +130,7 @@ test("skills block lists unified skills by name and description only", async () 
     await makeUnifiedSkill("github-issues", "Work on GitHub issues");
     await makeUnifiedSkill("pr-feedback", "Triage and address PR review feedback");
     const block = await buildAvailableSkillsBlock();
-    assert.match(block, /<available_skills>/);
+    assert.match(block, /<additional_skills>/);
     assert.match(block, /- github-issues — Work on GitHub issues/);
     assert.match(block, /- pr-feedback — Triage and address PR review feedback/);
     // No bodies leaked into the preamble.
@@ -134,7 +141,9 @@ test("skills block lists unified skills by name and description only", async () 
 test("skills block does NOT advertise per-agent (user/repo) skills", async () => {
   // Per-agent skills are intentionally excluded: `controller skills describe`
   // only resolves the unified catalog, so listing per-agent skills would
-  // point the agent at a 404 on the advertised drill-down path.
+  // point the agent at a 404 on the advertised drill-down path. The
+  // preamble instead names those locations in the intro so the agent
+  // knows they still apply.
   await withTempHome(async () => {
     await makeUnifiedSkill("shared", "Unified, app-owned");
     await makeUserSkill("anita-only", "Anita-specific skill");
@@ -171,9 +180,9 @@ test("full preamble composes identity line, skills block, and integrations block
 
     const preamble = await buildControllerPreamble();
     assert.match(preamble, /running inside Controller/);
-    assert.match(preamble, /<available_skills>/);
+    assert.match(preamble, /<additional_skills>/);
     assert.match(preamble, /- github-issues — Work on GitHub issues/);
-    assert.match(preamble, /<available_integrations>/);
+    assert.match(preamble, /<additional_integrations>/);
     assert.match(preamble, /- github \(openapi\/tools\)/);
   });
 });
@@ -185,22 +194,94 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
     await makeConnection("tavily", "cli");
 
     const preamble = await buildControllerPreamble();
+    const cliPath = controllerCliInstalledPath();
+    const note = `Invoke the Controller CLI by its absolute path \`${cliPath}\` — the bare \`controller\` command is not guaranteed to be on your PATH. Copy the full path verbatim from this preamble.`;
     const expected = [
       "You are running inside Controller, a desktop orchestrator for coding agents.",
       "",
-      "The following skills are available. To use one, call `controller skills describe <name>` for the full body and follow its instructions, or ask the user to invoke it as `/<name>`.",
+      note,
       "",
-      "<available_skills>",
+      "In addition to your own skills, Controller exposes a catalog of " +
+        "*additional* skills. To use one, call " +
+        `\`${cliPath} skills describe <name>\` for the full body and follow its instructions, or ask the user to invoke it as ` +
+        "`/<name>`. The `/<name>` picker accepts both your native skills and " +
+        "Controller's.",
+      "",
+      "<additional_skills>",
       "- github-issues — Work on GitHub issues",
-      "</available_skills>",
+      "</additional_skills>",
       "",
-      "The following integrations are available. To discover their tools call `controller integrations tools <name>`; to invoke one call `controller integrations call <name> <tool>` (or `request` for raw HTTP).",
+      note,
       "",
-      "<available_integrations>",
+      "In addition to any native tooling your provider exposes, the following " +
+        "third-party integrations are connected through Controller. To discover " +
+        "their tools call " +
+        `\`${cliPath} integrations tools <name>\`; to invoke one call ` +
+        `\`${cliPath} integrations call <name> <tool>\` (or ` +
+        "`request` for raw HTTP). These integrations are *additional* — " +
+        "they do not replace any native capabilities you already have.",
+      "",
+      "<additional_integrations>",
       "- github (openapi/tools) — OpenAPI (https://github.example) — run `tools`/`describe` to discover operations, then `call`.",
       "- tavily (cli/cli) — Native CLI `tavily` — run `status`, then invoke it directly.",
-      "</available_integrations>",
+      "</additional_integrations>",
     ].join("\n");
     assert.equal(preamble, expected);
+  });
+});
+
+test("full preamble inlines the absolute controller CLI path so agents can copy/paste it", async () => {
+  // Codex's exec layer rebuilds the env before spawning user commands, so the
+  // bare `controller` command is not guaranteed to resolve on PATH inside the
+  // agent's shell. The preamble must include the absolute install path so
+  // agents can invoke the CLI verbatim.
+  await withTempHome(async () => {
+    const cliPath = controllerCliInstalledPath();
+    const escaped = escapeForRegex(cliPath);
+    const preamble = await buildControllerPreamble();
+    // The path is introduced once at the top of the skills intro and again
+    // at the top of the integrations intro, plus embedded in the example
+    // commands — so it appears at least four times.
+    const pathOccurrences = preamble.match(new RegExp(escaped, "g")) ?? [];
+    assert.ok(
+      pathOccurrences.length >= 4,
+      `expected the absolute path to appear in both the skills and integrations intros, saw ${pathOccurrences.length} occurrences`
+    );
+    // The preamble inlines copy/paste-ready commands for the CLI.
+    assert.match(preamble, new RegExp(`\`${escaped} skills describe <name>\``));
+    assert.match(preamble, new RegExp(`\`${escaped} integrations tools <name>\``));
+    assert.match(preamble, new RegExp(`\`${escaped} integrations call <name> <tool>\``));
+    // And it warns that the bare `controller` command is unreliable on PATH.
+    assert.match(preamble, /not guaranteed to be on your PATH/);
+  });
+});
+
+test("preamble frames skills and integrations as additive, not exhaustive", async () => {
+  // Each provider (Codex, Claude, Anita) has its own native skill system —
+  // built-ins, per-agent user/repo skills, plugin marketplaces, repo
+  // conventions, etc. Controller layers an app-owned catalog on top of
+  // that. The preamble must make the layering explicit so agents don't
+  // treat this as the full universe and forget about their own skills.
+  await withTempHome(async () => {
+    const preamble = await buildControllerPreamble();
+    // Both blocks are explicitly labeled `<additional_*>`.
+    assert.match(preamble, /<additional_skills>/);
+    assert.match(preamble, /<\/additional_skills>/);
+    assert.match(preamble, /<additional_integrations>/);
+    assert.match(preamble, /<\/additional_integrations>/);
+    // The intros frame Controller's skills/integrations as an *extra*
+    // layer, not a replacement for the agent's own capabilities.
+    assert.match(preamble, /In addition to your own skills/);
+    assert.match(preamble, /In addition to any native tooling/);
+    // The skills intro points at the `/<name>` picker and explains that it
+    // accepts both the agent's native skills and Controller's.
+    assert.match(preamble, /\/<name>\` picker accepts both your native skills and Controller's/);
+    // The word "*additional*" (with markdown emphasis) appears in both
+    // intros to reinforce the layering.
+    const additionalCount = (preamble.match(/\*additional\*/g) ?? []).length;
+    assert.ok(
+      additionalCount >= 2,
+      `expected "*additional*" to appear in both intros, saw ${additionalCount}`
+    );
   });
 });

@@ -170,11 +170,12 @@ async function listSkillDirs(baseDir: string): Promise<string[]> {
 
 /**
  * Filter out directories owned by the orchestrator (see
- * `MANAGED_SKILL_DIRS`). Managed skills are already available to every
- * agent via the disk provider and don't need to be promoted into the
- * unified catalog — surfacing them in `discoverImportableSkills` would
- * only invite the user to "import" a skill that collides with itself.
- * Tested in `server/lib/__tests__/skill-import.test.ts`.
+ * `MANAGED_SKILL_DIRS`). Controller-managed skills already live in the
+ * unified catalog (see `installManagedSkills`), so re-importing them into
+ * the unified catalog would either be a no-op or surface as a collision.
+ * The filter is also defensive against stale `controller-*` directories
+ * left behind by older Controller installs that mirrored the managed
+ * skills into per-agent homes.
  */
 function listImportableSkillDirs(baseDir: string): Promise<string[]> {
   return listSkillDirs(baseDir).then((dirs) =>

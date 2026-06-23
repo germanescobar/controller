@@ -9,6 +9,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { isManagedSkillName } from "./managed-skills.js";
 import { unifiedSkillFile, unifiedSkillDir, unifiedSkillsDir } from "./paths.js";
 import { parseSkillFile, type SkillBody, type SkillMetadata } from "./skills.js";
 
@@ -60,7 +61,13 @@ export async function listUnifiedSkills(): Promise<SkillMetadata[]> {
       name,
       description: (parsed.metadata.description ?? "").trim(),
       path: skillFile,
-      scope: "unified",
+      // Controller-managed skills (see `MANAGED_SKILL_DIRS`) live in the
+      // unified catalog so the `/<name>` picker can show them with a
+      // `controller` badge, distinct from user-authored unified skills.
+      // We key on the skill name (not the directory name) so a user
+      // skill that happens to live in a `controller-` directory is still
+      // tagged `unified`.
+      scope: isManagedSkillName(name) ? "controller" : "unified",
     });
   }
   return out;

@@ -1,25 +1,36 @@
 /*
- * Installs app-managed skills for each agent.
+ * Installs Controller-managed skills into the unified skill catalog.
  *
- * We write the bundled `SKILL.md` files into each provider's user skills home
- * on startup. Ownership is decided by **directory name** (see
- * `MANAGED_SKILL_DIRS`): a directory in that set is app-owned regardless of
- * what the file body contains, so user edits inside an app-owned directory
- * are always overwritten and the marker comment is purely documentary. This
- * is more robust than a versioned marker comment, which would silently
- * re-classify a leftover app-owned directory as user-authored whenever the
- * marker text was bumped.
+ * The skills are written into `~/coding-orchestrator/skills/<name>/SKILL.md`
+ * (the same place user-authored unified skills live) on startup. They are
+ * surfaced to agents through the orchestrator's `/<name>` picker rather than
+ * each provider's per-agent skills home — the agents themselves don't need
+ * to see these skills natively, because they're only meaningful when the
+ * user is working through Controller. Surfacing them via the unified
+ * catalog also gives us a single ownership story: directory name in
+ * `MANAGED_SKILL_DIRS` ⇒ owned by Controller, gets re-synchronized on every
+ * startup. User-authored skills in the same parent are left strictly alone.
+ *
+ * Historical note: these used to be mirrored into each provider's user
+ * skills home (`~/.claude/skills/controller-browser/`, etc.). That made them
+ * visible to the agents without going through Controller, which conflicted
+ * with their "Controller-only" semantics and confused agents that
+ * mistakenly treated the controller-managed entries as the full skill
+ * universe. They are now unified-catalog entries tagged with
+ * `scope: "controller"` so the `/<name>` picker can show them with a clear
+ * "controller" badge, grouped after user-authored unified skills.
  */
 
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { controllerCliInstalledPath } from "./controller-cli.js";
+import { unifiedSkillDir } from "./paths.js";
 
 /**
- * The directory names the orchestrator owns. This is the single source of
- * truth used by both the install loop and the disk provider's scope
- * detection — keep these two consumers in sync.
+ * The directory names the orchestrator owns in the unified catalog. This is
+ * the single source of truth used by both the install loop and the unified
+ * catalog reader's scope detection — keep these two consumers in sync.
  */
 export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-browser",
@@ -29,9 +40,23 @@ export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-skill-creator",
 ]);
 
-/** True when the given skill directory is owned by the orchestrator. */
+/** True when the given skill name (case-insensitive) is owned by the orchestrator. */
+export function isManagedSkillName(name: string): boolean {
+  return MANAGED_SKILL_DIRS.includes(name);
+}
+
+/**
+ * Legacy alias. The previous design owned these skills by *directory name
+ * inside a provider's user home* (e.g. `~/.claude/skills/controller-browser/`).
+ * The new design owns them by *directory name inside the unified catalog*
+ * (e.g. `~/coding-orchestrator/skills/controller-browser/`). The two checks
+ * are equivalent today, but new code should prefer {@link isManagedSkillName}
+ * for clarity.
+ *
+ * @deprecated Use {@link isManagedSkillName}.
+ */
 export function isManagedSkillDir(dirName: string): boolean {
-  return MANAGED_SKILL_DIRS.includes(dirName);
+  return isManagedSkillName(dirName);
 }
 
 /**
@@ -60,9 +85,10 @@ path (it is not on your PATH). Every command below is run as
 \`${cliPath} integrations <command>\`.
 
 This skill is managed by the Controller app (directory name
-\`controller-integrations\`). It is hidden from the \`/\` picker — the agent
-discovers the body through the filesystem location, not via a user-invoked
-slash command.
+\`controller-integrations\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-integrations <query>\` or pick it
+from the autocomplete.
 
 Controller holds the credentials and injects them server-side when making the
 call — there is no token for you to read, and you must never ask the user to
@@ -143,9 +169,10 @@ server or a project HTML file, read what actually rendered, and interact with
 the page. The user sees everything you do in the Preview tab.
 
 This skill is managed by the Controller app (directory name
-\`controller-browser\`). It is hidden from the \`/\` picker — the agent
-discovers the body through the filesystem location, not via a user-invoked
-slash command.
+\`controller-browser\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-browser <task>\` or pick it from
+the autocomplete.
 
 Invoke the CLI by its absolute path — it is not on your PATH. Every command
 below is run as \`${cliPath} browser <command>\`:
@@ -223,9 +250,10 @@ ${managedMarker("controller-scripts")}
 # Controller Scripts
 
 This skill is managed by the Controller app (directory name
-\`controller-scripts\`). It is hidden from the \`/\` picker — the agent
-discovers the body through the filesystem location, not via a user-invoked
-slash command.
+\`controller-scripts\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-scripts <task>\` or pick it from
+the autocomplete.
 
 Controller resolves native scripts from the project's root
 \`.coding-orchestrator/\` directory:
@@ -411,9 +439,10 @@ ${managedMarker("controller-search-skills")}
 # Search Skills
 
 This skill is managed by the Controller app (directory name
-\`controller-search-skills\`). It is hidden from the \`/\` picker — the agent
-discovers the body through the filesystem location, not via a user-invoked
-slash command.
+\`controller-search-skills\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-search-skills <query>\` or pick it
+from the autocomplete.
 
 Controller hosts an app-owned catalog of unified skills in Settings → Skills.
 These skills are available to every agent and take precedence over per-agent
@@ -494,9 +523,10 @@ ${managedMarker("controller-skill-creator")}
 # Skill Creator
 
 This skill is managed by the Controller app (directory name
-\`controller-skill-creator\`). It is hidden from the \`/\` picker — the agent
-discovers the body through the filesystem location, not via a user-invoked
-slash command.
+\`controller-skill-creator\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-skill-creator <task>\` or pick it
+from the autocomplete.
 
 You help the user create a new unified skill in Controller's app-owned
 catalog at \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Skills created
@@ -598,32 +628,12 @@ fails on duplicate names so it cannot be used as an edit path.
 `;
 }
 
-interface ProviderSkillHome {
-  id: string;
-  dir: string;
-}
-
-function codexSkillsHome(): string {
-  const override = process.env.CODEX_HOME?.trim();
-  const home = override
-    ? override.replace(/^~(?=$|\/)/, os.homedir())
-    : path.join(os.homedir(), ".codex");
-  return path.join(home, "skills");
-}
-
-function providerHomes(): ProviderSkillHome[] {
-  return [
-    { id: "anita", dir: path.join(os.homedir(), ".anita", "skills") },
-    { id: "codex", dir: codexSkillsHome() },
-    { id: "claude", dir: path.join(os.homedir(), ".claude", "skills") },
-  ];
-}
-
 /**
- * Write the managed skills into each provider's user skills home.
- * Idempotent: rewrites every directory in `MANAGED_SKILL_DIRS` (we own
- * them) and skips any other directory the user might have dropped into
- * the same parent (we don't own those).
+ * Write the managed skills into the unified skill catalog
+ * (`~/coding-orchestrator/skills/<name>/SKILL.md`). Idempotent: rewrites
+ * every directory in `MANAGED_SKILL_DIRS` (we own them) and skips any
+ * other directory the user might have dropped into the same parent
+ * (we don't own those).
  */
 export async function installManagedSkills(): Promise<void> {
   // The unified CLI is invoked as `<path> <surface> <command>`. Each builder
@@ -638,26 +648,59 @@ export async function installManagedSkills(): Promise<void> {
     { name: "controller-skill-creator", body: buildSkillCreatorSkillBody(cli) },
   ];
 
-  for (const { dir } of providerHomes()) {
-    for (const skill of skills) {
-      const skillFile = path.join(dir, skill.name, "SKILL.md");
-      let existing: string | null = null;
+  for (const skill of skills) {
+    if (!isManagedSkillName(skill.name)) {
+      // Defensive: every entry in `skills` should be in
+      // `MANAGED_SKILL_DIRS`. Bail rather than risk clobbering an
+      // unrelated user-authored file that happens to share a name.
+      continue;
+    }
+
+    const skillDir = unifiedSkillDir(skill.name);
+    const skillFile = path.join(skillDir, "SKILL.md");
+    let existing: string | null = null;
+    try {
+      existing = await fs.readFile(skillFile, "utf-8");
+    } catch {
+      existing = null;
+    }
+    if (existing === skill.body) continue;
+
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(skillFile, skill.body, "utf-8");
+  }
+
+  // One-time migration: older Controller installs mirrored the managed
+  // skills into each provider's user skills home. After this change they
+  // live in the unified catalog, so the per-agent copies are stale and
+  // would just confuse each agent's native `/<name>` picker. Remove them.
+  await removeLegacyPerAgentManagedSkills();
+}
+
+/**
+ * Best-effort cleanup of stale `controller-*` skills in each provider's
+ * user skills home. Older Controller releases mirrored the managed skills
+ * into `~/.claude/skills/`, `~/.codex/skills/`, and `~/.anita/skills/`. The
+ * current design keeps them in the unified catalog, so those per-agent
+ * copies are obsolete. We delete any directory whose name is in
+ * `MANAGED_SKILL_DIRS`; user-authored directories are never touched.
+ *
+ * Errors are swallowed — cleanup must never block startup.
+ */
+async function removeLegacyPerAgentManagedSkills(): Promise<void> {
+  const homes: string[] = [
+    path.join(os.homedir(), ".claude", "skills"),
+    path.join(os.homedir(), ".codex", "skills"),
+    path.join(os.homedir(), ".anita", "skills"),
+  ];
+  for (const home of homes) {
+    for (const name of MANAGED_SKILL_DIRS) {
+      const dir = path.join(home, name);
       try {
-        existing = await fs.readFile(skillFile, "utf-8");
+        await fs.rm(dir, { recursive: true, force: true });
       } catch {
-        existing = null;
+        // Best-effort.
       }
-
-      if (!isManagedSkillDir(skill.name)) {
-        // Defensive: every entry in `skills` should be in
-        // `MANAGED_SKILL_DIRS`. Bail rather than risk clobbering an
-        // unrelated user-authored file that happens to share a name.
-        continue;
-      }
-      if (existing === skill.body) continue;
-
-      await fs.mkdir(path.dirname(skillFile), { recursive: true });
-      await fs.writeFile(skillFile, skill.body, "utf-8");
     }
   }
 }

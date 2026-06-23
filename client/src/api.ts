@@ -673,7 +673,7 @@ export type SkillScope =
   | "user"
   | "system"
   | "repo"
-  | "managed";
+  | "controller";
 
 export interface AgentSkill {
   name: string;
