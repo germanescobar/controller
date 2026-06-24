@@ -80,8 +80,8 @@ interface SidebarProps {
   onProjectsChanged: () => void;
   onSettings: () => void;
   onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
-  focusMode?: boolean;
-  onFocusModeToggle?: () => void;
+  controllerMode?: boolean;
+  onControllerModeToggle?: () => void;
   focusRefreshKey?: number;
   // Bumped by the App's project-event subscription when an out-of-band
   // lifecycle change lands (worktree added/removed, session added,
@@ -220,8 +220,8 @@ export function Sidebar({
   onProjectsChanged,
   onSettings,
   onFocusQueueChange,
-  focusMode = false,
-  onFocusModeToggle,
+  controllerMode = false,
+  onControllerModeToggle,
   focusRefreshKey,
   eventsRefreshKey,
   completedSessions,
@@ -700,16 +700,16 @@ export function Sidebar({
           {focusQueue.length > 0 ? (
             <button
               type="button"
-              onClick={onFocusModeToggle}
+              onClick={onControllerModeToggle}
               className={cn(
                 "cursor-pointer rounded-md px-2 py-1 text-xs font-medium transition-colors",
-                focusMode
+                controllerMode
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
                   : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
               )}
-              title={focusMode ? "Exit focus mode (E)" : "Start focus mode (F)"}
+              title={controllerMode ? "Exit Controller Mode (E)" : "Start Controller Mode (F)"}
             >
-              Focus Mode
+              Controller Mode
             </button>
           ) : null}
         </div>

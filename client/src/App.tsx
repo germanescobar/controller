@@ -30,7 +30,7 @@ import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
-import { useFocusModeShortcuts } from "./lib/useFocusModeShortcuts.ts";
+import { useControllerModeShortcuts } from "./lib/useControllerModeShortcuts.ts";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
@@ -177,7 +177,7 @@ export function App() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set());
-  const [focusMode, setFocusMode] = useState(false);
+  const [controllerMode, setControllerMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
   // Scheduled "advance to the next focus item" while a 4-second
@@ -331,35 +331,35 @@ export function App() {
     };
   }, [activeProjectId, scheduleEventsRefetch]);
 
-  const handleFocusModeToggle = useCallback(() => {
-    if (focusMode) {
-      setFocusMode(false);
+  const handleControllerModeToggle = useCallback(() => {
+    if (controllerMode) {
+      setControllerMode(false);
       cancelPendingAdvance();
       return;
     }
     const firstItem = focusQueue[0];
     if (!firstItem) {
-      toast.info("Pin a session to use focus mode");
+      toast.info("Pin a session to use Controller Mode");
       return;
     }
-    setFocusMode(true);
+    setControllerMode(true);
     openFocusItem(firstItem);
-  }, [focusMode, focusQueue, openFocusItem, cancelPendingAdvance]);
+  }, [controllerMode, focusQueue, openFocusItem, cancelPendingAdvance]);
 
-  const handleFocusModeEnter = useCallback(() => {
+  const handleControllerModeEnter = useCallback(() => {
     const firstItem = focusQueue[0];
     if (!firstItem) {
-      toast.info("Pin a session to use focus mode");
+      toast.info("Pin a session to use Controller Mode");
       return;
     }
-    setFocusMode(true);
+    setControllerMode(true);
     openFocusItem(firstItem);
   }, [focusQueue, openFocusItem]);
 
-  const handleFocusModeExit = useCallback(() => {
-    setFocusMode(false);
-    // Exiting focus mode also cancels any pending advance — the
-    // target session is no longer relevant once focus mode is off.
+  const handleControllerModeExit = useCallback(() => {
+    setControllerMode(false);
+    // Exiting controller mode also cancels any pending advance — the
+    // target session is no longer relevant once controller mode is off.
     if (advanceTimerRef.current !== null) {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
@@ -427,7 +427,7 @@ export function App() {
   const focusPosition =
     currentFocusIndex >= 0
       ? { current: currentFocusIndex + 1, total: focusQueue.length }
-      : focusMode
+      : controllerMode
         ? { current: 0, total: focusQueue.length }
         : undefined;
   const currentFocusItem = currentFocusIndex >= 0 ? focusQueue[currentFocusIndex] : null;
@@ -441,7 +441,7 @@ export function App() {
       return;
     }
     if (focusQueue.length === 0) {
-      setFocusMode(false);
+      setControllerMode(false);
       toast.info("Focus queue is empty");
       return;
     }
@@ -517,7 +517,7 @@ export function App() {
       setFocusRefreshKey((key) => key + 1);
 
       if (nextQueue.length === 0) {
-        setFocusMode(false);
+        setControllerMode(false);
         toast.success("Focus queue complete");
         return;
       }
@@ -532,7 +532,7 @@ export function App() {
     }
   };
 
-  // After the user sends a message in focus mode, schedule an
+  // After the user sends a message in controller mode, schedule an
   // advance to the next focus item rather than navigating
   // immediately. The user just committed a message, and bouncing
   // them away from the originating session before the in-flight
@@ -545,7 +545,7 @@ export function App() {
   // just replied to (queue-of-one, no-op).
   const handleFocusAdvanceAfterSend = useCallback(
     (sentFromSessionId: string) => {
-      if (!focusMode) return;
+      if (!controllerMode) return;
       const next = pickNextFocusItem(focusQueue, sentFromSessionId);
       if (!next) return;
       // Replace any existing pending advance (the user sent again
@@ -580,7 +580,7 @@ export function App() {
         commitPendingAdvance();
       }, FOCUS_ADVANCE_COUNTDOWN_MS);
     },
-    [focusMode, focusQueue, commitPendingAdvance, cancelPendingAdvance],
+    [controllerMode, focusQueue, commitPendingAdvance, cancelPendingAdvance],
   );
 
   // Sidebar resizing
@@ -591,16 +591,16 @@ export function App() {
     maxWidth: 480,
   });
 
-  // Focus mode keyboard shortcuts (N / D / F / E). While an advance is
+  // Controller Mode keyboard shortcuts (N / D / F / E). While an advance is
   // pending, S (or Esc) stays and N continues immediately (even while the
   // composer is focused). Esc only cancels when focus is not in an editable
   // element (issue #104).
-  useFocusModeShortcuts({
-    focusMode,
+  useControllerModeShortcuts({
+    controllerMode,
     onSkip: handleFocusSkip,
     onDone: handleFocusDone,
-    onEnter: handleFocusModeEnter,
-    onExit: handleFocusModeExit,
+    onEnter: handleControllerModeEnter,
+    onExit: handleControllerModeExit,
     onCancelAdvance: pendingFocusAdvance ? cancelPendingAdvance : undefined,
     onCommitAdvance: pendingFocusAdvance ? commitPendingAdvance : undefined,
   });
@@ -660,8 +660,8 @@ export function App() {
             closeSidebar();
           }}
           onFocusQueueChange={handleFocusQueueChange}
-          focusMode={focusMode}
-          onFocusModeToggle={handleFocusModeToggle}
+          controllerMode={controllerMode}
+          onControllerModeToggle={handleControllerModeToggle}
           focusRefreshKey={focusRefreshKey}
           eventsRefreshKey={eventsRefreshKey}
         />
@@ -788,11 +788,11 @@ export function App() {
                 },
               });
             }}
-            focusMode={focusMode}
+            controllerMode={controllerMode}
             focusPosition={focusPosition}
             onFocusDone={handleFocusDone}
             onFocusSkip={handleFocusSkip}
-            onFocusExit={handleFocusModeExit}
+            onFocusExit={handleControllerModeExit}
             onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
             onTitleChange={() => setFocusRefreshKey((key) => key + 1)}
             onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
