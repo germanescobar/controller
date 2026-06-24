@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   dedupeUserMessageEvents,
+  deriveAutoTitle,
   parseSkillMarker,
 } from "../../routes/sessions.js";
 import type { AgentEvent } from "../sessions.js";
@@ -29,6 +30,25 @@ test("parseSkillMarker returns null for non-marker text", () => {
   assert.equal(parseSkillMarker("just a message"), null);
   assert.equal(parseSkillMarker("[/skill] no name"), null);
   assert.equal(parseSkillMarker(""), null);
+});
+
+test("deriveAutoTitle strips a leading skill marker", () => {
+  assert.equal(
+    deriveAutoTitle("[/skill: pr-feedback] Can you help me file an issue"),
+    "Can you help me file an issue"
+  );
+});
+
+test("deriveAutoTitle leaves non-marker text untouched", () => {
+  assert.equal(deriveAutoTitle("Just a plain request"), "Just a plain request");
+});
+
+test("deriveAutoTitle truncates after stripping the marker", () => {
+  const rest = "a".repeat(80);
+  assert.equal(
+    deriveAutoTitle(`[/skill: foo] ${rest}`),
+    `${"a".repeat(60)}...`
+  );
 });
 
 test("dedupe collapses identical text (orchestrator + agent echo)", () => {
