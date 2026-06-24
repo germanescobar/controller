@@ -2718,6 +2718,9 @@ export function SessionView({
   const [activeSkills, setActiveSkills] = useState<AgentSkill[]>([]);
   const [skillPopoverOpen, setSkillPopoverOpen] = useState(false);
   const [skillHighlightIndex, setSkillHighlightIndex] = useState(0);
+  // Ref to the highlighted skill option so keyboard navigation can scroll it
+  // into view when the selection moves past the scrollable viewport (#216).
+  const highlightedSkillRef = useRef<HTMLButtonElement | null>(null);
   // Caret position in the composer, used to scan the token under the caret so
   // the `/` picker opens from any position (not only the start of the input).
   const [caretPos, setCaretPos] = useState(0);
@@ -3749,6 +3752,13 @@ export function SessionView({
       setSkillPopoverOpen(false);
     }
   }, [skillQuery, filteredSkills.length]);
+  // Keep the highlighted option visible as arrow keys move the selection past
+  // the scrollable viewport (#216). `nearest` avoids jumping the list when the
+  // item is already on screen.
+  useEffect(() => {
+    if (!skillPopoverOpen) return;
+    highlightedSkillRef.current?.scrollIntoView({ block: "nearest" });
+  }, [skillHighlightIndex, skillPopoverOpen]);
 
   /**
    * Add the chosen skill to the active stack and strip the in-progress
@@ -5536,6 +5546,11 @@ export function SessionView({
                             return (
                             <button
                               key={entry.path}
+                              ref={
+                                index === skillHighlightIndex
+                                  ? highlightedSkillRef
+                                  : undefined
+                              }
                               type="button"
                               role="option"
                               aria-selected={index === skillHighlightIndex}
