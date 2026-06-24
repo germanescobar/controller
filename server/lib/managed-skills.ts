@@ -461,21 +461,43 @@ Every command below is run as either \`${cliPath} worktrees <command>\` or
 - \`${cliPath} worktrees delete <project> <worktreeId>\` — delete a worktree. The worktree must not have an active session.
 - \`${cliPath} sessions start <project> --worktree <worktreeId> --message <text> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]\` — kick off a new agent turn on a worktree and print the session URL.
 
-\`<project>\` accepts either the project's id (UUID) or its human name. The CLI
-resolves names against the orchestrator's project list, so you don't need to
-look up the UUID yourself.
+## Picking a project
+
+\`<project>\` accepts either the project's UUID or its human name. To find the
+human name that matches the current working directory, read the orchestrator's
+project list:
+
+\`\`\`sh
+jq -r '.[].name' ~/.coding-orchestrator/projects.json
+\`\`\`
+
+Match the entry whose \`path\` field equals the repo root (\`pwd\`), then pass
+that name directly to the CLI — no UUID lookup needed.
 
 ## Workflow
 
-The common shape is "worktree this conversation, then start a turn":
+End-to-end example for "worktree this conversation and start a turn on issue 42":
 
 \`\`\`sh
-${cliPath} worktrees list <project>
-${cliPath} worktrees create <project> --name issue-<n>-<slug> --branch issue-<n>
-${cliPath} sessions start <project> --worktree <worktreeId> --provider <provider> --message "<prompt>"
+# 1. Create the worktree (project name taken from the step above)
+${cliPath} worktrees create "Coding Orchestrator" --name issue-42
+# → Created worktree issue-42 (id=f1247ed6-3a1b-4c9d-b8e2-9f0a1c2d3e4f)
+
+# 2. Start a session on the new worktree
+${cliPath} sessions start "Coding Orchestrator" \\
+  --worktree f1247ed6-3a1b-4c9d-b8e2-9f0a1c2d3e4f \\
+  --provider claude \\
+  --skill github-issues \\
+  --message "Work on GitHub issue #42 in the germanescobar/controller repo"
+# → Started session abc123 — controller://sessions/abc123
 \`\`\`
 
-The third command prints \`Started session <id>\` and a \`controller://...\`
+Key ordering rules shown above:
+- \`<project>\` is **positional** and comes immediately after the subcommand.
+- All flags (\`--provider\`, \`--skill\`, etc.) come **before** \`--message\`.
+- \`--message\` is always **last**; everything after it is treated as prompt text.
+
+The second command prints \`Started session <id>\` and a \`controller://...\`
 URL — open that URL in the Controller app to see the live transcript.
 
 ## Flags to remember
@@ -503,6 +525,22 @@ URL — open that URL in the Controller app to see the live transcript.
 - The unified CLI is invoked by its absolute path. The bare \`controller\`
   command may not resolve on PATH inside your shell — copy the full path
   verbatim from this skill body.
+- \`<worktreeId>\` is the UUID printed by \`worktrees create\` (e.g.
+  \`f1247ed6-...\`), **not** the worktree directory path or branch name.
+
+### Recovering from a failed \`sessions start\`
+
+If \`sessions start\` returns \`Agent exited before reporting a sessionId\`, the
+agent process died before the orchestrator could capture its session id. This
+is provider-dependent and not a worktree problem. Recovery steps:
+
+1. Retry the exact same \`sessions start\` command with \`--provider claude\` (or
+   \`--provider anita\`) added explicitly. The default provider may be
+   unavailable or broken in the current environment.
+2. If the retry also fails, check whether the provider's CLI is installed and
+   authenticated (e.g. \`claude --version\`).
+3. The worktree itself is intact — you don't need to recreate it. Use the
+   same \`<worktreeId>\` from the original \`worktrees create\` output.
 `;
 }
 

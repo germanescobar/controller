@@ -243,8 +243,9 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       worktrees,
       cliCommandRegex(cliPath, "sessions start <project> --worktree <worktreeId>")
     );
-    // Notes that `<project>` accepts an id or a human name.
-    assert.match(worktrees, /<project>\` accepts either the project's id \(UUID\) or its human name/);
+    // Notes that `<project>` accepts an id or a human name, and how to discover it.
+    assert.match(worktrees, /Picking a project/);
+    assert.match(worktrees, /jq -r '\.\[\]\.name' ~\/.coding-orchestrator\/projects\.json/);
     // Reminds callers that `--message` must be the last flag, since the
     // parser rejects reserved flags that appear after it.
     assert.match(worktrees, /--message\` must be \*\*last\*\* on the command line/);
