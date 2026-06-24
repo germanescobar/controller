@@ -695,7 +695,7 @@ export function Sidebar({
       <ScrollArea className="flex-1 overflow-hidden px-3">
         <div className="flex items-center justify-between py-3">
           <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Pinned
+            In flight
           </span>
           {focusQueue.length > 0 ? (
             <button
@@ -717,7 +717,7 @@ export function Sidebar({
         <div className="flex flex-col gap-1 pb-3">
           {focusQueue.length === 0 ? (
             <span className="px-3 py-2 text-xs text-muted-foreground">
-              No pinned sessions
+              No sessions in flight
             </span>
           ) : (
             focusQueue.map((item) => (

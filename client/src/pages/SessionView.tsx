@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Pin, PinOff, Play, Sparkles, Globe2, RefreshCw, Pencil } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Radar, Play, Sparkles, Globe2, RefreshCw, Pencil } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -4890,7 +4890,7 @@ export function SessionView({
             <span className="ml-2">
               {focusPosition && focusPosition.total > 0
                 ? `${focusPosition.current || 1} / ${focusPosition.total}`
-                : "No pinned sessions"}
+                : "No sessions in flight"}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -5046,15 +5046,11 @@ export function SessionView({
               className={`rounded-md p-1.5 transition-colors ${
                 isFocusPinned
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  : "text-muted-foreground/50 opacity-50 hover:bg-transparent hover:text-muted-foreground/50"
               }`}
-              title={isFocusPinned ? "Remove from focus" : "Add to focus"}
+              title={isFocusPinned ? "Remove from in-flight" : "Add to in-flight"}
             >
-              {isFocusPinned ? (
-                <PinOff className="h-4 w-4" />
-              ) : (
-                <Pin className="h-4 w-4" />
-              )}
+              <Radar className="h-4 w-4" />
             </button>
           )}
           <button

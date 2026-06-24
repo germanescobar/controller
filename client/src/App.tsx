@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { Archive, ArrowRight, Menu, Pin, PinOff, X } from "lucide-react";
+import { Archive, ArrowRight, Menu, Radar, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -339,7 +339,7 @@ export function App() {
     }
     const firstItem = focusQueue[0];
     if (!firstItem) {
-      toast.info("Pin a session to use Controller Mode");
+      toast.info("Add a session to in-flight mode to use Controller Mode");
       return;
     }
     setControllerMode(true);
@@ -349,7 +349,7 @@ export function App() {
   const handleControllerModeEnter = useCallback(() => {
     const firstItem = focusQueue[0];
     if (!firstItem) {
-      toast.info("Pin a session to use Controller Mode");
+      toast.info("Add a session to in-flight mode to use Controller Mode");
       return;
     }
     setControllerMode(true);
@@ -696,15 +696,11 @@ export function App() {
               className={`ml-2 shrink-0 rounded-md p-1.5 transition-colors ${
                 currentFocusIndex >= 0
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  : "text-muted-foreground/50 opacity-50 hover:bg-transparent hover:text-muted-foreground/50"
               }`}
-              title={currentFocusIndex >= 0 ? "Remove from focus" : "Add to focus"}
+              title={currentFocusIndex >= 0 ? "Remove from in-flight" : "Add to in-flight"}
             >
-              {currentFocusIndex >= 0 ? (
-                <PinOff className="h-4 w-4" />
-              ) : (
-                <Pin className="h-4 w-4" />
-              )}
+              <Radar className="h-4 w-4" />
             </button>
           )}
           {activeView.page === "session" && activeView.sessionId && (
