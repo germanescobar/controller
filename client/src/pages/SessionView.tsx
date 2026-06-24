@@ -3803,25 +3803,14 @@ export function SessionView({
   >(null);
   useEffect(() => {
     if (!pendingSkillSubmit) return;
-    const rawText = pendingSkillSubmit.text.trim();
+    const { text } = pendingSkillSubmit;
     // Clear before submitting so a re-render from startAgentStream's
-    // state updates doesn't try to submit again.
+    // state updates doesn't try to submit again. `sendComposerMessage`
+    // validates/uploads attachments and clears the composer on success, so
+    // the add-and-submit path keeps any selected files (and the full skill
+    // stack now reflected in `activeSkills`).
     setPendingSkillSubmit(null);
-    if (rawText.length === 0 && composerAttachments.length === 0) return;
-    const skillNames = activeSkills.map((s) => s.name);
-    const finalText = rawText || "Please use the attached files as context.";
-    void startAgentStream(
-      buildSkillAgentText(skillNames, finalText),
-      buildSkillHistoryText(skillNames, finalText),
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    ).then((started) => {
-      // Reset the composer once the turn started, so the just-sent text and
-      // skill chips don't linger (matching the regular `handleSend` path).
-      if (started) clearComposer();
-    });
+    void sendComposerMessage(text);
   }, [pendingSkillSubmit]);
 
   useEffect(() => {
@@ -4355,11 +4344,17 @@ export function SessionView({
     setSkillPopoverOpen(false);
   };
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!message.trim() && composerAttachments.length === 0) return;
+  // Validate + upload composer attachments, then start the turn with the
+  // current composer text and active-skill stack, clearing the composer on a
+  // successful start. Shared by the Send button and the picker's
+  // add-and-submit path so attachment handling can't drift between them.
+  // `textOverride` lets the picker path submit the text it just stripped the
+  // `/<token>` from without depending on `message` state timing.
+  const sendComposerMessage = async (textOverride?: string): Promise<void> => {
+    const baseText = textOverride ?? message;
+    if (!baseText.trim() && composerAttachments.length === 0) return;
     if (!validateComposerAttachments()) return;
-    const rawText = message.trim() || "Please use the attached files as context.";
+    const rawText = baseText.trim() || "Please use the attached files as context.";
     const skillNames = activeSkills.map((s) => s.name);
     // `agentMessage` carries the trailing skills as markers (the first rides
     // through `skillName`); `visibleMessage` mirrors the full marker chain for
@@ -4388,6 +4383,11 @@ export function SessionView({
       setPendingMessage(null);
       setPendingAttachments([]);
     }
+  };
+
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    void sendComposerMessage();
   };
 
   // Enqueue the current composer contents to run after the active turn
@@ -5185,20 +5185,24 @@ export function SessionView({
 
               {/* Pending user message */}
               {pendingMessage && showPendingMessage && (() => {
-                const pendingMatch = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(pendingMessage);
-                const pendingSkillName = pendingMatch?.[1];
-                const pendingVisible = pendingMatch ? pendingMatch[2] : pendingMessage;
+                const { skillNames: pendingSkillNames, text: pendingVisible } =
+                  parseSkillMarkers(pendingMessage);
                 return (
                 <div className="flex justify-end mt-4">
                   <div className="max-w-[85%]">
                     <AttachmentStrip attachments={pendingAttachments} />
                     <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-                      {pendingSkillName && (
-                        <div className="mb-1.5 flex justify-end">
-                          <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                            <Sparkles className="h-3 w-3 text-primary" />
-                            <span>Skill: {pendingSkillName}</span>
-                          </span>
+                      {pendingSkillNames.length > 0 && (
+                        <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+                          {pendingSkillNames.map((skillName, index) => (
+                            <span
+                              key={`${skillName}-${index}`}
+                              className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                            >
+                              <Sparkles className="h-3 w-3 text-primary" />
+                              <span>Skill: {skillName}</span>
+                            </span>
+                          ))}
                         </div>
                       )}
                       <CollapsibleUserMessage text={pendingVisible} />
