@@ -466,13 +466,19 @@ Every command below is run as either \`${cliPath} worktrees <command>\` or
 
 ## Picking a project
 
-\`<project>\` accepts either the project's UUID or its human name. Match
-against the current working directory by reading the orchestrator's project
-list at the platform-appropriate home (e.g. \`~/Library/Application
-Support/Controller/projects.json\` on macOS, or \`$XDG_STATE_HOME/Controller/
-projects.json\` on Linux; set \`CONTROLLER_HOME\` to override). The shipped
-\`controller\` CLI resolves names automatically, so prefer passing the human
-name directly.
+\`<project>\` accepts either the project's UUID or its human name. To find the
+human name that matches the current working directory, read the orchestrator's
+project list. The file lives next to the CLI at \`<controller-install>/projects.json\`,
+so the path is derived from the CLI itself and follows the install if it
+ever moves:
+
+\`\`\`sh
+PROJECTS_JSON="\$(dirname "\$(dirname '${cliPath}')")/projects.json"
+jq -r --arg pwd "\$(pwd)" '.[] | select(.path == \$pwd) | .name' "\$PROJECTS_JSON"
+\`\`\`
+
+Match the entry whose \`path\` field equals the repo root (\`pwd\`), then pass
+that name directly to the CLI — no UUID lookup needed.
 
 ## Workflow
 

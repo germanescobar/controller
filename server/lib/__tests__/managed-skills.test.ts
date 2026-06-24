@@ -18,14 +18,12 @@ import {
 
 /**
  * Run `installManagedSkills` against temp homes so the test does not touch
- * the user's real Controller home (e.g. `~/Library/Application
- * Support/Controller/skills/` on macOS) or `~/.claude/skills/`,
- * `~/.codex/skills/`, `~/.anita/skills/`.
+ * the user's real `~/coding-orchestrator/skills/` directory or
+ * `~/.claude/skills/`, `~/.codex/skills/`, `~/.anita/skills/`.
  *
  * `os.homedir()` reads `HOME`, so setting it redirects the per-agent homes.
- * `CONTROLLER_HOME` (or its deprecated alias `CODING_ORCHESTRATOR_HOME`,
- * read by `paths.ts`) redirects the Controller home where the unified
- * catalog lives.
+ * `CODING_ORCHESTRATOR_HOME` (read by `paths.ts`) redirects the
+ * orchestrator home where the unified catalog lives.
  */
 function withIsolatedHomes(
   run: (homes: { orchestrator: string; user: string }) => Promise<void>
@@ -246,8 +244,14 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       cliCommandRegex(cliPath, "sessions start <project> --worktree <worktreeId>")
     );
     // Notes that `<project>` accepts an id or a human name, and how to discover it.
+    // The path is derived from the CLI itself so it follows the install.
     assert.match(worktrees, /Picking a project/);
-    assert.match(worktrees, /projects\.json/);
+    assert.match(worktrees, /PROJECTS_JSON=/);
+    assert.doesNotMatch(
+      worktrees,
+      /~\/\.coding-orchestrator\/projects\.json/,
+      "Picking-a-project snippet must not reference the stale home-dir path"
+    );
     // Reminds callers that `--message` must be the last flag, since the
     // parser rejects reserved flags that appear after it.
     assert.match(worktrees, /--message\` must be \*\*last\*\* on the command line/);

@@ -1,21 +1,21 @@
 import { useEffect, useRef } from "react";
 
 /**
- * Global keyboard shortcuts that drive the focus-mode loop from the keyboard.
+ * Global keyboard shortcuts that drive the controller-mode loop from the keyboard.
  *
- * - `N` advances to the next pinned session (only while focus mode is active).
- *   If a focus-advance countdown is pending, `N` commits it immediately to
+ * - `N` advances to the next pinned session (only while controller mode is active).
+ *   If a controller-mode advance countdown is pending, `N` commits it immediately to
  *   continue to the next session. The commit path fires even while the
  *   composer is focused (see issue #104).
- * - `S` cancels a pending focus-advance countdown and stays on the current
- *   session (only while focus mode is active).
- * - `D` marks the current session done (only while focus mode is active).
- * - `F` enters focus mode (no-op if already active).
- * - `E` exits focus mode (no-op if not active).
+ * - `S` cancels a pending controller-mode advance countdown and stays on the current
+ *   session (only while controller mode is active).
+ * - `D` marks the current session done (only while controller mode is active).
+ * - `F` enters controller mode (no-op if already active).
+ * - `E` exits controller mode (no-op if not active).
  * - `Esc` blurs the currently-focused input/textarea/contenteditable so the
  *   shortcuts above can fire afterwards. It is intentionally a no-op when the
- *   focus is inside a dialog or the embedded terminal. If a focus-advance
- *   countdown is pending and focus is *not* in an editable element, Esc
+ *   focus is inside a dialog or the embedded terminal. If a controller-mode
+ *   advance countdown is pending and focus is *not* in an editable element, Esc
  *   cancels the countdown (matches the **Stay** button).
  *
  * Shortcuts are suppressed when the user is typing (input, textarea, select,
@@ -23,24 +23,24 @@ import { useEffect, useRef } from "react";
  * the embedded terminal has focus, or when a modifier key is held. Keys with
  * auto-repeat are also ignored.
  */
-export interface UseFocusModeShortcutsOptions {
-  focusMode: boolean;
+export interface UseControllerModeShortcutsOptions {
+  controllerMode: boolean;
   onSkip: () => void;
   onDone: () => void;
   onEnter: () => void;
   onExit: () => void;
   /**
    * Optional. Called when the user presses Esc (and focus is not in
-   * an editable element) while a focus-advance countdown is
+   * an editable element) while a controller-mode advance countdown is
    * pending. Issue #104.
    */
   onCancelAdvance?: () => void;
   /**
-   * Optional. Called when the user presses `N` while a focus-advance
-   * countdown is pending, committing it immediately to continue to the
-   * next session. Set only when a countdown is pending so the early
-   * `N` path (which fires even while the composer is focused) is a no-op
-   * otherwise.
+   * Optional. Called when the user presses `N` while a controller-mode
+   * advance countdown is pending, committing it immediately to continue
+   * to the next session. Set only when a countdown is pending so the
+   * early `N` path (which fires even while the composer is focused) is a
+   * no-op otherwise.
    */
   onCommitAdvance?: () => void;
 }
@@ -66,18 +66,18 @@ function isInsideTerminal(target: EventTarget | null): boolean {
   return false;
 }
 
-export function useFocusModeShortcuts({
-  focusMode,
+export function useControllerModeShortcuts({
+  controllerMode,
   onSkip,
   onDone,
   onEnter,
   onExit,
   onCancelAdvance,
   onCommitAdvance,
-}: UseFocusModeShortcutsOptions): void {
+}: UseControllerModeShortcutsOptions): void {
   // Keep handler refs in sync so the keydown listener doesn't have to
   // re-attach on every render of the host component.
-  const focusModeRef = useRef(focusMode);
+  const controllerModeRef = useRef(controllerMode);
   const onSkipRef = useRef(onSkip);
   const onDoneRef = useRef(onDone);
   const onEnterRef = useRef(onEnter);
@@ -86,14 +86,14 @@ export function useFocusModeShortcuts({
   const onCommitAdvanceRef = useRef(onCommitAdvance);
 
   useEffect(() => {
-    focusModeRef.current = focusMode;
+    controllerModeRef.current = controllerMode;
     onSkipRef.current = onSkip;
     onDoneRef.current = onDone;
     onEnterRef.current = onEnter;
     onExitRef.current = onExit;
     onCancelAdvanceRef.current = onCancelAdvance;
     onCommitAdvanceRef.current = onCommitAdvance;
-  }, [focusMode, onSkip, onDone, onEnter, onExit, onCancelAdvance, onCommitAdvance]);
+  }, [controllerMode, onSkip, onDone, onEnter, onExit, onCancelAdvance, onCommitAdvance]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -104,10 +104,11 @@ export function useFocusModeShortcuts({
 
       // Esc handling has two paths:
       //   1. Focus is in an editable element: blur it so the user can
-      //      drive the focus-mode loop from the keyboard after typing.
-      //   2. Focus is elsewhere: if a focus-advance countdown is
-      //      pending, cancel it (matches the **Stay** button in the
-      //      focus-advance toast). If no countdown is pending, the Esc key
+      //      drive the controller-mode loop from the keyboard after
+      //      typing.
+      //   2. Focus is elsewhere: if a controller-mode advance countdown
+      //      is pending, cancel it (matches the **Stay** button in the
+      //      advance toast). If no countdown is pending, the Esc key
       //      is a no-op here.
       // Suppressed inside dialogs (let them close) and the terminal
       // (let it forward the key to the running process).
@@ -124,12 +125,12 @@ export function useFocusModeShortcuts({
       }
 
       const key = event.key.toLowerCase();
-      const inFocusMode = focusModeRef.current;
+      const inControllerMode = controllerModeRef.current;
 
       // Let the toast's "Press S to stay" shortcut work even while the
       // composer is focused. Because this path runs before editable-target
       // suppression, preventDefault keeps the literal "s" out of the textarea.
-      if (inFocusMode && key === "s" && onCancelAdvanceRef.current) {
+      if (inControllerMode && key === "s" && onCancelAdvanceRef.current) {
         event.preventDefault();
         onCancelAdvanceRef.current();
         return;
@@ -142,7 +143,7 @@ export function useFocusModeShortcuts({
       // preventDefault keeps the literal "n" out of the textarea. When no
       // countdown is pending, onCommitAdvance is undefined and the regular `N`
       // handler below takes over.
-      if (inFocusMode && key === "n" && onCommitAdvanceRef.current) {
+      if (inControllerMode && key === "n" && onCommitAdvanceRef.current) {
         event.preventDefault();
         onCommitAdvanceRef.current();
         return;
@@ -151,18 +152,18 @@ export function useFocusModeShortcuts({
       if (isEditableTarget(event.target)) return;
 
       if (key === "f") {
-        if (inFocusMode) return;
+        if (inControllerMode) return;
         event.preventDefault();
         onEnterRef.current();
         return;
       }
       if (key === "e") {
-        if (!inFocusMode) return;
+        if (!inControllerMode) return;
         event.preventDefault();
         onExitRef.current();
         return;
       }
-      if (!inFocusMode) return;
+      if (!inControllerMode) return;
       if (key === "n") {
         event.preventDefault();
         onSkipRef.current();
