@@ -73,6 +73,11 @@ interface SidebarProps {
   focusMode?: boolean;
   onFocusModeToggle?: () => void;
   focusRefreshKey?: number;
+  // Bumped by the App's project-event subscription when an out-of-band
+  // lifecycle change lands (worktree added/removed, session added,
+  // focus state changed, etc.). Triggers a fresh `loadAll` so the
+  // sidebar reflects the new state without polling. See issue #210.
+  eventsRefreshKey?: number;
 }
 
 interface WorktreeWithSessions extends Worktree {
@@ -208,6 +213,7 @@ export function Sidebar({
   focusMode = false,
   onFocusModeToggle,
   focusRefreshKey,
+  eventsRefreshKey,
   completedSessions,
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
@@ -337,7 +343,7 @@ export function Sidebar({
 
   useEffect(() => {
     loadAll().catch(() => {});
-  }, [loadAll, focusRefreshKey]);
+  }, [loadAll, focusRefreshKey, eventsRefreshKey]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0) return;

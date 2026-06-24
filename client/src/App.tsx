@@ -6,8 +6,10 @@ import {
   fetchProjects,
   markSessionFocusDone,
   pinSessionFocus,
+  subscribeProjectEvents,
   unpinSessionFocus,
   type Project,
+  type ProjectEvent,
   type Worktree,
 } from "./api.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
@@ -278,6 +280,45 @@ export function App() {
   }, []);
 
   useEffect(loadProjects, [loadProjects]);
+
+  // Project lifecycle event stream (issue #210). Subscribes when an
+  // active project is set, refetches the relevant slice of state when
+  // an event lands. The events themselves are "the data on disk
+  // changed" — debounce a burst (e.g. session-add + first user_message
+  // + a title pin) into a single refetch so the sidebar doesn't
+  // thrash.
+  const [eventsRefreshKey, setEventsRefreshKey] = useState(0);
+  const eventsDebounceRef = useRef<number | null>(null);
+  const scheduleEventsRefetch = useCallback((event: ProjectEvent) => {
+    if (eventsDebounceRef.current !== null) {
+      window.clearTimeout(eventsDebounceRef.current);
+    }
+    eventsDebounceRef.current = window.setTimeout(() => {
+      eventsDebounceRef.current = null;
+      // Project-lifecycle events change the sidebar's project list;
+      // the rest live under an active project so the sidebar's
+      // `loadAll` picks them up. Bumping one key drives both.
+      if (
+        event.type === "project_added" ||
+        event.type === "project_updated" ||
+        event.type === "project_removed"
+      ) {
+        loadProjects();
+      }
+      setEventsRefreshKey((key) => key + 1);
+    }, 50);
+  }, [loadProjects]);
+  useEffect(() => {
+    if (!activeProjectId) return;
+    const source = subscribeProjectEvents(activeProjectId, scheduleEventsRefetch);
+    return () => {
+      source.close();
+      if (eventsDebounceRef.current !== null) {
+        window.clearTimeout(eventsDebounceRef.current);
+        eventsDebounceRef.current = null;
+      }
+    };
+  }, [activeProjectId, scheduleEventsRefetch]);
 
   const handleFocusModeToggle = useCallback(() => {
     if (focusMode) {
@@ -606,6 +647,7 @@ export function App() {
           focusMode={focusMode}
           onFocusModeToggle={handleFocusModeToggle}
           focusRefreshKey={focusRefreshKey}
+          eventsRefreshKey={eventsRefreshKey}
         />
       </div>
 
