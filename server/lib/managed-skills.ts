@@ -472,7 +472,7 @@ The common shape is "worktree this conversation, then start a turn":
 \`\`\`sh
 ${cliPath} worktrees list <project>
 ${cliPath} worktrees create <project> --name issue-<n>-<slug> --branch issue-<n>
-${cliPath} sessions start <project> --worktree <worktreeId> --message "<prompt>" --provider <provider>
+${cliPath} sessions start <project> --worktree <worktreeId> --provider <provider> --message "<prompt>"
 \`\`\`
 
 The third command prints \`Started session <id>\` and a \`controller://...\`
