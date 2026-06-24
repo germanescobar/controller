@@ -123,20 +123,22 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
 
     // Each managed skill body must render every CLI line as
     // `<cliPath> <surface> <command>`. Never a bare subcommand, never a
-    // double-prefixed surface.
+    // double-prefixed surface. `controller-worktrees` covers two
+    // surfaces, so its lines must include one of them.
     const cases = [
-      { name: "controller-browser", surface: "browser" },
-      { name: "controller-integrations", surface: "integrations" },
-      { name: "controller-search-skills", surface: "skills" },
-      { name: "controller-skill-creator", surface: "skills" },
+      { name: "controller-browser", surfaces: ["browser"] },
+      { name: "controller-integrations", surfaces: ["integrations"] },
+      { name: "controller-search-skills", surfaces: ["skills"] },
+      { name: "controller-skill-creator", surfaces: ["skills"] },
+      { name: "controller-worktrees", surfaces: ["worktrees", "sessions"] },
     ] as const;
 
-    for (const { name, surface } of cases) {
+    for (const { name, surfaces } of cases) {
       const skillFile = unifiedSkillFile(orchestrator, name);
       const body = readFileSync(skillFile, "utf-8");
 
       // Collect every backtick-quoted CLI line and check each one embeds
-      // the surface.
+      // at least one of the skill's surfaces.
       const lineRegex = anyCliLineRegex(cliPath);
       const lines: string[] = body.match(lineRegex) ?? [];
       assert.ok(
@@ -145,25 +147,31 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
       );
 
       for (const line of lines) {
+        const matchedSurface = surfaces.find((s) =>
+          line.includes(`${cliPath} ${s} `)
+        );
         assert.ok(
-          line.includes(`${cliPath} ${surface} `),
-          `${skillFile} rendered a CLI line without the "${surface}" surface: ${line}`
+          matchedSurface !== undefined,
+          `${skillFile} rendered a CLI line without any of [${surfaces.join(", ")}]: ${line}`
         );
-        // Guard against `controller browser browser ...` double-prefix.
-        const doublePrefix = new RegExp(
-          "`" +
-            escapeRegex(cliPath) +
-            " " +
-            surface +
-            " " +
-            surface +
-            " "
-        );
-        assert.doesNotMatch(
-          line,
-          doublePrefix,
-          `${skillFile} double-prefixed the "${surface}" surface: ${line}`
-        );
+        // Guard against double-prefixed surfaces (e.g.
+        // `controller worktrees worktrees ...`).
+        for (const surface of surfaces) {
+          const doublePrefix = new RegExp(
+            "`" +
+              escapeRegex(cliPath) +
+              " " +
+              surface +
+              " " +
+              surface +
+              " "
+          );
+          assert.doesNotMatch(
+            line,
+            doublePrefix,
+            `${skillFile} double-prefixed the "${surface}" surface: ${line}`
+          );
+        }
       }
     }
   });
@@ -213,6 +221,33 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       skillCreator,
       cliCommandRegex(cliPath, "skills create --name <name>")
     );
+
+    // The worktrees skill replaces what used to be a static block in
+    // the agent preamble (issue #190). It must surface the full
+    // `worktrees` + `sessions` CLI surface so the agent can copy/paste
+    // every command from `controller skills describe controller-worktrees`.
+    const worktrees = readFileSync(
+      unifiedSkillFile(orchestrator, "controller-worktrees"),
+      "utf-8"
+    );
+    assert.match(worktrees, cliCommandRegex(cliPath, "worktrees list <project>"));
+    assert.match(
+      worktrees,
+      cliCommandRegex(cliPath, "worktrees create <project> --name <name>")
+    );
+    assert.match(
+      worktrees,
+      cliCommandRegex(cliPath, "worktrees delete <project> <worktreeId>")
+    );
+    assert.match(
+      worktrees,
+      cliCommandRegex(cliPath, "sessions start <project> --worktree <worktreeId>")
+    );
+    // Notes that `<project>` accepts an id or a human name.
+    assert.match(worktrees, /<project>\` accepts either the project's id \(UUID\) or its human name/);
+    // Reminds callers that `--message` must be the last flag, since the
+    // parser rejects reserved flags that appear after it.
+    assert.match(worktrees, /--message\` must be \*\*last\*\* on the command line/);
   });
 });
 

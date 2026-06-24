@@ -135,17 +135,20 @@ export async function buildAvailableIntegrationsBlock(): Promise<string> {
 
 /**
  * Build the full Controller preamble. The static identity line is always
- * present; the skills, integrations, and project-management blocks are
- * appended in parallel and their order is stable so the output is
- * reproducible.
+ * present; the skills and integrations blocks are appended in parallel and
+ * their order is stable so the output is reproducible. Project management
+ * (`worktrees` + `sessions` CLI surfaces) used to live here as its own
+ * block but moved to the `controller-worktrees` managed skill so the
+ * preamble only enumerates *what's available* and the skill carries the
+ * *how to use it*. The skills catalog still surfaces `controller-worktrees`
+ * to the agent with its description.
  */
 export async function buildControllerPreamble(
   _options?: ControllerPreambleOptions,
 ): Promise<string> {
-  const [skillsBlock, integrationsBlock, projectMgmtBlock] = await Promise.all([
+  const [skillsBlock, integrationsBlock] = await Promise.all([
     buildAvailableSkillsBlock(),
     buildAvailableIntegrationsBlock(),
-    buildAvailableProjectManagementBlock(),
   ]);
   return [
     "You are running inside Controller, a desktop orchestrator for coding agents.",
@@ -157,46 +160,7 @@ export async function buildControllerPreamble(
     integrationsIntro(),
     "",
     integrationsBlock,
-    "",
-    projectMgmtIntro(),
-    "",
-    projectMgmtBlock,
   ].join("\n");
-}
-
-/**
- * Build the project-management block for the preamble (issue #190). This
- * is static — the worktrees + sessions CLI surfaces don't have a
- * per-instance catalog like skills/integrations do — but it surfaces
- * the absolute CLI paths so the agent can copy/paste them. Listing
- * every command in the preamble would balloon its size; the agent that
- * needs the full surface area runs `controller --help`.
- */
-export function buildAvailableProjectManagementBlock(): Promise<string> {
-  const cliPath = controllerCliInstalledPath();
-  const lines = [
-    "Available project-management commands:",
-    `- \`${cliPath} worktrees list <project>\` — list the worktrees on a project.`,
-    `- \`${cliPath} worktrees create <project> --name <name> [--branch <branch>] [--base <baseBranch>]\` — create a new worktree (streams setup output).`,
-    `- \`${cliPath} worktrees delete <project> <worktreeId>\` — delete a worktree.`,
-    `- \`${cliPath} sessions start <project> --worktree <worktreeId> --message <text> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]\` — kick off a new agent turn on a worktree and print the session URL.`,
-    "",
-    "`<project>` accepts either the project's id or its human name. The CLI resolves names against the orchestrator's project list.",
-  ];
-  return Promise.resolve(lines.join("\n"));
-}
-
-function projectMgmtIntro(): string {
-  return (
-    controllerCliNote() +
-    "\n\n" +
-    "Controller exposes a small set of project-management commands on the same CLI " +
-    "for managing worktrees and starting new sessions. The commands below are " +
-    "also surfaced via `controller --help` and `controller <surface> --help`. Use " +
-    "`worktrees create` + `sessions start` to worktree a conversation and then " +
-    "kick off a turn on the new worktree — e.g. when the user says \"let's " +
-    "create a worktree and start working on issue X\"."
-  );
 }
 
 function formatSkillLine(skill: SkillMetadata): string {

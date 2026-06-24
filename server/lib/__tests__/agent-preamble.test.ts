@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildAvailableIntegrationsBlock,
-  buildAvailableProjectManagementBlock,
   buildAvailableSkillsBlock,
   buildControllerPreamble,
   framePreambleForPrompt,
@@ -123,41 +122,6 @@ test("integrations block renders (none configured) when no connections are enabl
 });
 
 // ---------------------------------------------------------------------------
-// Project-management block (issue #190)
-// ---------------------------------------------------------------------------
-
-test("project-management block lists the worktrees and sessions CLI surfaces", async () => {
-  await withTempHome(async () => {
-    const block = await buildAvailableProjectManagementBlock();
-    const cliPath = controllerCliInstalledPath();
-    // The block must surface every new CLI subcommand, with the
-    // absolute install path so the agent can copy/paste it.
-    assert.match(block, new RegExp(`\\\`${escapeForRegex(cliPath)} worktrees list`));
-    assert.match(block, new RegExp(`\\\`${escapeForRegex(cliPath)} worktrees create`));
-    assert.match(block, new RegExp(`\\\`${escapeForRegex(cliPath)} worktrees delete`));
-    assert.match(block, new RegExp(`\\\`${escapeForRegex(cliPath)} sessions start`));
-    // The block explicitly notes that <project> accepts id OR name.
-    assert.match(block, /<project>\` accepts either the project's id or its human name/);
-  });
-});
-
-test("full preamble includes the project-management block alongside skills and integrations", async () => {
-  await withTempHome(async () => {
-    const preamble = await buildControllerPreamble();
-    const cliPath = controllerCliInstalledPath();
-    assert.match(
-      preamble,
-      new RegExp(`\\\`${escapeForRegex(cliPath)} sessions start`)
-    );
-    // The project-management intro is present.
-    assert.match(
-      preamble,
-      /Controller exposes a small set of project-management commands/
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Populated catalogs: name + description only
 // ---------------------------------------------------------------------------
 
@@ -232,7 +196,6 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
     const preamble = await buildControllerPreamble();
     const cliPath = controllerCliInstalledPath();
     const note = `Invoke the Controller CLI by its absolute path \`${cliPath}\` — the bare \`controller\` command is not guaranteed to be on your PATH. Copy the full path verbatim from this preamble.`;
-    const projectMgmtBlock = await buildAvailableProjectManagementBlock();
     const expected = [
       "You are running inside Controller, a desktop orchestrator for coding agents.",
       "",
@@ -262,21 +225,6 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       "- github (openapi/tools) — OpenAPI (https://github.example) — run `tools`/`describe` to discover operations, then `call`.",
       "- tavily (cli/cli) — Native CLI `tavily` — run `status`, then invoke it directly.",
       "</additional_integrations>",
-      "",
-      // Project-management block (issue #190) is appended after the
-      // integrations block; it surfaces the new `worktrees` and
-      // `sessions` CLI surfaces with the absolute CLI path so the agent
-      // can copy/paste them.
-      note,
-      "",
-      "Controller exposes a small set of project-management commands on the same CLI " +
-        "for managing worktrees and starting new sessions. The commands below are " +
-        "also surfaced via `controller --help` and `controller <surface> --help`. Use " +
-        "`worktrees create` + `sessions start` to worktree a conversation and then " +
-        "kick off a turn on the new worktree — e.g. when the user says \"let's " +
-        "create a worktree and start working on issue X\".",
-      "",
-      projectMgmtBlock,
     ].join("\n");
     assert.equal(preamble, expected);
   });
@@ -305,6 +253,13 @@ test("full preamble inlines the absolute controller CLI path so agents can copy/
     assert.match(preamble, new RegExp(`\`${escaped} integrations call <name> <tool>\``));
     // And it warns that the bare `controller` command is unreliable on PATH.
     assert.match(preamble, /not guaranteed to be on your PATH/);
+    // The worktrees + sessions CLI surfaces moved into the managed
+    // `controller-worktrees` skill; the preamble no longer inlines
+    // them. Locking the negative assertion in keeps the layering
+    // intact (skills describe surfaces the new entry; the preamble
+    // doesn't duplicate it).
+    assert.doesNotMatch(preamble, /worktrees list/);
+    assert.doesNotMatch(preamble, /sessions start/);
   });
 });
 
