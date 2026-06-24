@@ -9,7 +9,9 @@ import {
   controllerAgentEnv,
   controllerCliBinDir,
   controllerCliInstalledPath,
+  controllerCliShellPath,
   removeLegacyControllerSymlinks,
+  shellQuote,
 } from "../controller-cli.js";
 import { orchestratorHome } from "../paths.js";
 
@@ -206,3 +208,63 @@ async function fileExists(target: string): Promise<boolean> {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Shell-quoting (issue #223 follow-up)
+//
+// The agent preamble and managed skill bodies interpolate the CLI's install
+// path into shell command examples. On the macOS default install the path
+// contains a literal space (`Application Support`); without quoting, the
+// shell splits the command at the space and fails before the CLI ever runs.
+// `shellQuote` wraps a path in single quotes (escaping internal `'` per
+// POSIX) and `controllerCliShellPath` is the pre-quoted form of the
+// orchestrator's install path.
+// ---------------------------------------------------------------------------
+
+test("shellQuote wraps a plain path in single quotes", () => {
+  assert.equal(shellQuote("/usr/local/bin/controller"), "'/usr/local/bin/controller'");
+});
+
+test("shellQuote preserves a path that already contains a space", () => {
+  // The macOS default home case the Codex P1 review flagged.
+  assert.equal(
+    shellQuote("/Users/x/Library/Application Support/Controller/bin/controller"),
+    "'/Users/x/Library/Application Support/Controller/bin/controller'",
+  );
+});
+
+test("shellQuote escapes internal single quotes per POSIX", () => {
+  // A `'` inside the path closes the quoting, the escaped form reopens it.
+  // This is the standard `'\''` idiom; the function should produce it
+  // verbatim so any consumer of the result can drop it into a shell.
+  assert.equal(shellQuote("/data/foo's/bar"), "'/data/foo'\\''s/bar'");
+});
+
+test("shellQuote handles a path that is just a single quote", () => {
+  assert.equal(shellQuote("'"), "''\\'''");
+});
+
+test("controllerCliShellPath is the shell-quoted install path", () => {
+  // The default test home is a temp dir set up by the test runner, so
+  // the absolute path it produces is exactly what `controllerCliInstalledPath`
+  // returns — just wrapped in single quotes.
+  assert.equal(
+    controllerCliShellPath(),
+    `'${controllerCliInstalledPath()}'`,
+  );
+});
+
+test("controllerCliShellPath contains the install path verbatim inside the quotes", () => {
+  // Stronger contract: the inner string between the leading `'` and the
+  // final `'` equals the raw install path. This guards against a future
+  // refactor that accidentally drops the inner path or escapes something
+  // it shouldn't.
+  const quoted = controllerCliShellPath();
+  const inner = quoted.slice(1, -1);
+  assert.equal(inner, controllerCliInstalledPath());
+  // And the outer wrapping is single quotes, not double — single quotes
+  // are the only POSIX form that disables *all* expansion inside the
+  // quoted region, which is what we want for an arbitrary user path.
+  assert.ok(quoted.startsWith("'"));
+  assert.ok(quoted.endsWith("'"));
+});

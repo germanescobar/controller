@@ -15,6 +15,7 @@ import {
   MANAGED_SKILL_DIRS,
   managedMarker,
 } from "../managed-skills.js";
+import { shellQuote } from "../controller-cli.js";
 
 /**
  * Run `installManagedSkills` against temp homes so the test does not touch
@@ -119,7 +120,10 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
   await withIsolatedHomes(async ({ orchestrator }) => {
     await installManagedSkills();
 
-    const cliPath = path.join(orchestrator, "bin", "controller");
+    // The body interpolates the shell-quoted CLI path so the macOS default
+    // home (which contains a space in `Application Support`) renders as a
+    // working command. Tests must match against the same quoted form.
+    const cliPath = shellQuote(path.join(orchestrator, "bin", "controller"));
 
     // Each managed skill body must render every CLI line as
     // `<cliPath> <surface> <command>`. Never a bare subcommand, never a
@@ -181,7 +185,9 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
   await withIsolatedHomes(async ({ orchestrator }) => {
     await installManagedSkills();
 
-    const cliPath = path.join(orchestrator, "bin", "controller");
+    // Quoted form, matching what the bodies interpolate. See the note on
+    // the "single `<cliPath>` convention" test above.
+    const cliPath = shellQuote(path.join(orchestrator, "bin", "controller"));
 
     const browser = readFileSync(
       unifiedSkillFile(orchestrator, "controller-browser"),

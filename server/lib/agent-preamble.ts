@@ -38,7 +38,7 @@
  *     system-prompt channel in their default modes today.
  */
 
-import { controllerCliInstalledPath } from "./controller-cli.js";
+import { controllerCliShellPath } from "./controller-cli.js";
 import { gatewayList, type ListedConnection } from "./integration-gateway.js";
 import { listUnifiedSkills } from "./unified-skills.js";
 import type { SkillMetadata } from "./skills.js";
@@ -55,11 +55,17 @@ export interface ControllerPreambleOptions {
 // `CONTROLLER_HOME` after module import) see the test temp home,
 // not the real install path. The path is stable across rebuilds — the
 // install step is idempotent (see `controller-cli.ts`).
+//
+// `controllerCliShellPath()` returns the same path wrapped in single quotes
+// so it survives the macOS default home (`~/Library/Application Support/
+// Controller`), which contains a literal space. Without the quotes, an agent
+// copying the example command verbatim would hit a shell split at the space
+// before the CLI ever runs.
 
 function controllerCliNote(): string {
   return (
     `Invoke the Controller CLI by its absolute path ` +
-    `\`${controllerCliInstalledPath()}\` — the bare \`controller\` command ` +
+    `\`${controllerCliShellPath()}\` — the bare \`controller\` command ` +
     `is not guaranteed to be on your PATH. Copy the full path verbatim ` +
     `from this preamble.`
   );
@@ -71,7 +77,7 @@ function skillsIntro(): string {
     "\n\n" +
     "In addition to your own skills, Controller exposes a catalog of " +
     "*additional* skills. To use one, call " +
-    `\`${controllerCliInstalledPath()} skills describe <name>\` for the ` +
+    `\`${controllerCliShellPath()} skills describe <name>\` for the ` +
     "full body and follow its instructions, or ask the user to invoke it " +
     "as `/<name>`. The `/<name>` picker accepts both your native skills and " +
     "Controller's."
@@ -85,8 +91,8 @@ function integrationsIntro(): string {
     "In addition to any native tooling your provider exposes, the following " +
     "third-party integrations are connected through Controller. To discover " +
     "their tools call " +
-    `\`${controllerCliInstalledPath()} integrations tools <name>\`; to invoke one call ` +
-    `\`${controllerCliInstalledPath()} integrations call <name> <tool>\` ` +
+    `\`${controllerCliShellPath()} integrations tools <name>\`; to invoke one call ` +
+    `\`${controllerCliShellPath()} integrations call <name> <tool>\` ` +
     "(or `request` for raw HTTP). These integrations are *additional* — " +
     "they do not replace any native capabilities you already have."
   );

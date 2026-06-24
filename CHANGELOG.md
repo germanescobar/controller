@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Quote the macOS CLI path before rendering commands.** The agent preamble
+  and the four managed skill bodies (browser, integrations, scripts,
+  search-skills, skill-creator, worktrees) now interpolate the Controller
+  CLI's install path wrapped in single quotes. On macOS the default home
+  is `~/Library/Application Support/Controller/` which contains a literal
+  space; without quoting, an agent that copies the documented "absolute
+  path" command verbatim hits a shell split at the space before the CLI
+  ever runs. The fix is in `controllerCliShellPath()` / `shellQuote()` in
+  `server/lib/controller-cli.ts`; the raw path is still exported as
+  `controllerCliInstalledPath()` for consumers that need the actual
+  filesystem path.
+
 ### Changed
 
 - **Move orchestrator state out of `$HOME` and reduce macOS TCC prompts** (#223).

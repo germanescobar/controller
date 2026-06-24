@@ -26,7 +26,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerCliInstalledPath } from "./controller-cli.js";
+import { controllerCliShellPath } from "./controller-cli.js";
 import { unifiedSkillDir } from "./paths.js";
 
 /**
@@ -765,8 +765,11 @@ fails on duplicate names so it cannot be used as an edit path.
 export async function installManagedSkills(): Promise<void> {
   // The unified CLI is invoked as `<path> <surface> <command>`. Each builder
   // embeds its own surface in the rendered commands, so we always pass the
-  // bare CLI path here.
-  const cli = controllerCliInstalledPath();
+  // shell-quoted path here. The skill bodies interpolate `cliPath` directly
+  // into shell examples (e.g. `${cliPath} integrations list`); quoting at
+  // the source means the macOS default home (`~/Library/Application Support/
+  // Controller/`, which contains a space) renders as a working command.
+  const cli = controllerCliShellPath();
   const skills: ManagedSkill[] = [
     { name: "controller-browser", body: buildBrowserSkillBody(cli) },
     { name: "controller-integrations", body: buildIntegrationsSkillBody(cli) },
