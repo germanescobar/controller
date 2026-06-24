@@ -417,3 +417,65 @@ exit 1
     }
   );
 });
+
+test("POST /api/projects/:projectId/sessions does not apply defaultModel when resumeSessionId is set (PR #218 review)", async () => {
+  // PR review from chatgpt-codex-connector on #218: the defaultModel
+  // fallback was firing for resume / follow-up / queue-replay turns,
+  // silently changing the model under an existing session when the user
+  // edited their Settings default. Gate the fallback to brand-new
+  // sessions: when `resumeSessionId` is set, the Settings default must
+  // be ignored even if no `model` is supplied on the wire.
+  const sessionId = "sess-resume-without-model";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir }) => {
+      await fs.writeFile(
+        path.join(homeDir, "agents.json"),
+        JSON.stringify({
+          anita: {
+            enabled: true,
+            path: null,
+            defaultModel: "ollama/glm-4.7-flash:latest",
+          },
+        })
+      );
+      const script = `#!/usr/bin/env bash
+set -e
+printf '%s\\n' "$*" > "${homeDir}/spawned-args.txt"
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Resume an existing session.",
+          // No `model` on the wire — the Settings default is the
+          // obvious temptation for the orchestrator, but the resume
+          // path must ignore it.
+          provider: "anita",
+          resumeSessionId: sessionId,
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(
+        res.status,
+        200,
+        `expected 200, got ${res.status}: ${JSON.stringify(body)}`
+      );
+      assert.equal(body.sessionId, sessionId);
+
+      const argv = (await fs.readFile(path.join(homeDir, "spawned-args.txt"), "utf-8")).trim();
+      const tokens = argv.split(/\s+/);
+      assert.ok(
+        !tokens.includes("--model"),
+        `resume must not apply Settings defaultModel, got argv: ${argv}`
+      );
+    }
+  );
+});

@@ -592,6 +592,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     attachmentIds?: string[];
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
+    resumeSessionId?: string;
   };
   const worktreeId = body.worktreeId;
   const message = body.message;
@@ -629,6 +630,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
         attachmentIds,
         reasoningEffort: body.reasoningEffort,
         serviceTier: body.serviceTier,
+        resumeSessionId: body.resumeSessionId,
       }),
       shim.res
     );
@@ -658,6 +660,7 @@ function makeHeadlessSessionStartRequest(
     attachmentIds: string[];
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
+    resumeSessionId?: string;
   }
 ): Request<{ projectId: string }> {
   const query: Record<string, string> = {
@@ -671,6 +674,11 @@ function makeHeadlessSessionStartRequest(
   if (body.attachmentIds.length) query.attachmentIds = body.attachmentIds.join(",");
   if (body.reasoningEffort) query.reasoningEffort = body.reasoningEffort;
   if (body.serviceTier) query.serviceTier = body.serviceTier;
+  // Optional so the headless POST endpoint can drive the resume / queue-
+  // replay branch through `handleSessionStream` for tests. Production
+  // callers should leave this undefined for the POST endpoint — it is
+  // a new-session-only API.
+  if (body.resumeSessionId) query.resumeSessionId = body.resumeSessionId;
   return {
     params: { projectId },
     query,
@@ -895,16 +903,24 @@ async function handleSessionStream(
   const providerId = canonicalProviderId(
     (req.query.provider as string) || DEFAULT_PROVIDER_ID
   );
-  // Resolve the requested model. A client-supplied `--model` always wins;
-  // otherwise fall back to the user's saved default for the resolved
-  // provider (Settings → Agents → Default model). Without this fallback
-  // the provider's `spawn` would receive `undefined` and emit
-  // `--model ""`, which the anita CLI rejects with a misleading
+  // Resolve the requested model. A client-supplied `--model` always wins.
+  // For brand-new sessions only, fall back to the user's saved default for
+  // the resolved provider (Settings → Agents → Default model). Without
+  // this fallback the provider's `spawn` would receive `undefined` and
+  // emit `--model ""`, which the anita CLI rejects with a misleading
   // "Invalid model format" error before any `run.started` event lands
   // (issue #213).
+  //
+  // Resume / follow-up / queue-replay turns deliberately skip the
+  // Settings default: those flows carry their own model intent (the
+  // session's stored model is preserved by the persistence layer via
+  // `model ?? existing?.model ?? ""`), and silently swapping in a
+  // different provider default when the user later changes Settings
+  // would change the model under an already-running session without
+  // any UI signal. PR review from chatgpt-codex-connector on #218.
   const queryModel = typeof req.query.model === "string" ? req.query.model.trim() : "";
   let model: string | undefined = queryModel || undefined;
-  if (!model) {
+  if (!model && !resumeSessionId) {
     const setting = await getAgentSetting(providerId);
     const fallback = setting.defaultModel;
     if (fallback && fallback.trim()) {
