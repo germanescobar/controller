@@ -9,6 +9,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { orchestratorHome } from "../paths.js";
 import {
   buildSkillHistoryMessage,
   buildSkillPrefix,
@@ -88,7 +89,23 @@ function withProviderHome(
   return withHome(async (home) => {
     const provider = getSkillProvider(providerId);
     assert.ok(provider, `${providerId} provider must be registered`);
-    await run(home, provider);
+    // Pin the Controller home to a temp dir under the test home so the
+    // platform default (e.g. `~/Library/Application Support/Controller` on
+    // macOS) doesn't leak into the developer's real home during the run.
+    const controllerHome = mkdtempSync(path.join(home, "controller-home-"));
+    const previousControllerHome = process.env.CONTROLLER_HOME;
+    const previousOrchHome = process.env.CODING_ORCHESTRATOR_HOME;
+    process.env.CONTROLLER_HOME = controllerHome;
+    delete process.env.CODING_ORCHESTRATOR_HOME;
+    try {
+      await run(home, provider);
+    } finally {
+      if (previousControllerHome === undefined) delete process.env.CONTROLLER_HOME;
+      else process.env.CONTROLLER_HOME = previousControllerHome;
+      if (previousOrchHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
+      else process.env.CODING_ORCHESTRATOR_HOME = previousOrchHome;
+      rmSync(controllerHome, { recursive: true, force: true });
+    }
   });
 }
 
@@ -419,8 +436,8 @@ test("mergeSkillMetadata dedupe is case-insensitive", () => {
 
 test("readBody resolves unified skill body over per-provider match", async () => {
   await withProviderHome("anita", async (home, provider) => {
-    const orchestratorHome = path.join(home, "coding-orchestrator");
-    const skillsDir = path.join(orchestratorHome, "skills");
+    const controllerHome = orchestratorHome();
+    const skillsDir = path.join(controllerHome, "skills");
 
     // Per-agent skill named "shared"
     makeSkillFile(
@@ -437,15 +454,13 @@ test("readBody resolves unified skill body over per-provider match", async () =>
     assert.ok(body);
     assert.equal(body.metadata.scope, "unified");
     assert.equal(body.body, "unified body");
-
-    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
 
 test("unified skills appear in listMetadata above per-agent skills", async () => {
   await withProviderHome("anita", async (home, provider) => {
-    const orchestratorHome = path.join(home, "coding-orchestrator");
-    const skillsDir = path.join(orchestratorHome, "skills");
+    const controllerHome = orchestratorHome();
+    const skillsDir = path.join(controllerHome, "skills");
 
     makeSkillFile(skillsDir, "shared", { name: "shared", description: "u" }, "body");
     makeSkillFile(path.join(home, ".anita/skills"), "anita-only", { name: "anita-only", description: "a" }, "body");
@@ -454,8 +469,6 @@ test("unified skills appear in listMetadata above per-agent skills", async () =>
     assert.equal(metadata[0].name, "shared");
     assert.equal(metadata[0].scope, "unified");
     assert.ok(metadata.some((entry) => entry.name === "anita-only"));
-
-    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
 
@@ -474,8 +487,8 @@ test("unified skills appear in listMetadata above per-agent skills", async () =>
 
 test("a SKILL.md in the unified catalog whose name is in MANAGED_SKILL_DIRS is tagged scope 'controller'", async () => {
   await withProviderHome("anita", async (home, provider) => {
-    const orchestratorHome = path.join(home, "coding-orchestrator");
-    const skillsDir = path.join(orchestratorHome, "skills");
+    const controllerHome = orchestratorHome();
+    const skillsDir = path.join(controllerHome, "skills");
     makeSkillFile(
       skillsDir,
       "controller-browser",
@@ -486,15 +499,13 @@ test("a SKILL.md in the unified catalog whose name is in MANAGED_SKILL_DIRS is t
     assert.equal(metadata.length, 1);
     assert.equal(metadata[0].name, "controller-browser");
     assert.equal(metadata[0].scope, "controller");
-
-    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
 
 test("a user-authored SKILL.md in the unified catalog keeps scope 'unified'", async () => {
-  await withProviderHome("anita", async (home, provider) => {
-    const orchestratorHome = path.join(home, "coding-orchestrator");
-    const skillsDir = path.join(orchestratorHome, "skills");
+  await withProviderHome("anita", async (_home, provider) => {
+    const controllerHome = orchestratorHome();
+    const skillsDir = path.join(controllerHome, "skills");
     makeSkillFile(
       skillsDir,
       "github-issues",
@@ -504,8 +515,6 @@ test("a user-authored SKILL.md in the unified catalog keeps scope 'unified'", as
     const metadata = await provider.listMetadata(os.tmpdir());
     assert.equal(metadata.length, 1);
     assert.equal(metadata[0].scope, "unified");
-
-    rmSync(orchestratorHome, { recursive: true, force: true });
   });
 });
 

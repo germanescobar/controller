@@ -146,8 +146,11 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
 
 /** Best-effort environment for agents that inherit it (Claude, Anita, Codex).
  *
- *  Layers two things on top of the inherited env:
+ *  Layers three things on top of the inherited env:
  *  - `CONTROLLER_SERVER_URL` so the CLI can skip the runtime-file lookup.
+ *  - `CONTROLLER_HOME` with the resolved Controller home, so the CLI (and
+ *    any future tool) can locate state without re-implementing the
+ *    platform-aware resolution from `paths.ts` (issue #223).
  *  - `PATH` with `<orchestratorHome>/bin` prepended so a bare `controller`
  *    invocation resolves inside the agent's shell (issue #187). Existing
  *    entries are kept first and the bin dir is appended only if missing,
@@ -162,6 +165,7 @@ export function controllerAgentEnv(): Record<string, string> {
   const mergedPath = mergePathEntries(basePath, controllerCliBinDir());
   return {
     CONTROLLER_SERVER_URL: serverUrl(),
+    CONTROLLER_HOME: orchestratorHome(),
     PATH: mergedPath,
   };
 }

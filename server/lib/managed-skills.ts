@@ -1,8 +1,10 @@
 /*
  * Installs Controller-managed skills into the unified skill catalog.
  *
- * The skills are written into `~/coding-orchestrator/skills/<name>/SKILL.md`
- * (the same place user-authored unified skills live) on startup. They are
+ * The skills are written into the Controller home's `skills/<name>/SKILL.md`
+ * directory (e.g. `~/Library/Application Support/Controller/skills/<name>/SKILL.md`
+ * on macOS, `$XDG_STATE_HOME/Controller/skills/<name>/SKILL.md` on Linux; the
+ * same place user-authored unified skills live) on startup. They are
  * surfaced to agents through the orchestrator's `/<name>` picker rather than
  * each provider's per-agent skills home — the agents themselves don't need
  * to see these skills natively, because they're only meaningful when the
@@ -50,9 +52,10 @@ export function isManagedSkillName(name: string): boolean {
  * Legacy alias. The previous design owned these skills by *directory name
  * inside a provider's user home* (e.g. `~/.claude/skills/controller-browser/`).
  * The new design owns them by *directory name inside the unified catalog*
- * (e.g. `~/coding-orchestrator/skills/controller-browser/`). The two checks
- * are equivalent today, but new code should prefer {@link isManagedSkillName}
- * for clarity.
+ * under the Controller home (e.g.
+ * `~/Library/Application Support/Controller/skills/controller-browser/`
+ * on macOS). The two checks are equivalent today, but new code should
+ * prefer {@link isManagedSkillName} for clarity.
  *
  * @deprecated Use {@link isManagedSkillName}.
  */
@@ -463,16 +466,13 @@ Every command below is run as either \`${cliPath} worktrees <command>\` or
 
 ## Picking a project
 
-\`<project>\` accepts either the project's UUID or its human name. To find the
-human name that matches the current working directory, read the orchestrator's
-project list:
-
-\`\`\`sh
-jq -r '.[].name' ~/.coding-orchestrator/projects.json
-\`\`\`
-
-Match the entry whose \`path\` field equals the repo root (\`pwd\`), then pass
-that name directly to the CLI — no UUID lookup needed.
+\`<project>\` accepts either the project's UUID or its human name. Match
+against the current working directory by reading the orchestrator's project
+list at the platform-appropriate home (e.g. \`~/Library/Application
+Support/Controller/projects.json\` on macOS, or \`$XDG_STATE_HOME/Controller/
+projects.json\` on Linux; set \`CONTROLLER_HOME\` to override). The shipped
+\`controller\` CLI resolves names automatically, so prefer passing the human
+name directly.
 
 ## Workflow
 
@@ -616,8 +616,10 @@ to replace. The server returns one status per skill (\`imported\` / \`skipped\` 
 - Activation is scoped to the current turn; it does not permanently change the
   session's behavior.
 - Importing copies a per-agent \`SKILL.md\` into the unified catalog under
-  \`~/coding-orchestrator/skills/\`. The original per-agent file is left in
-  place; the unified copy takes precedence by name.
+  the Controller home (e.g. \`~/Library/Application Support/Controller/skills/\`
+  on macOS; the exact path is platform-dependent — see "State location" in
+  the README). The original per-agent file is left in place; the unified
+  copy takes precedence by name.
 - If a command reports that no skill matches, you can still fall back to normal
   prompting.
 `;
@@ -645,9 +647,10 @@ it like any other skill: type \`/controller-skill-creator <task>\` or pick it
 from the autocomplete.
 
 You help the user create a new unified skill in Controller's app-owned
-catalog at \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Skills created
-here are available to every agent immediately and surface in the \`/\`
-picker.
+catalog at the Controller home's \`skills/<name>/SKILL.md\` (e.g.
+\`~/Library/Application Support/Controller/skills/<name>/SKILL.md\` on
+macOS; the exact path is platform-dependent). Skills created here are
+available to every agent immediately and surface in the \`/\` picker.
 
 Use the Controller CLI to validate, write, and verify the skill:
 
@@ -736,8 +739,10 @@ fails on duplicate names so it cannot be used as an edit path.
   so creating a skill called \`browser\` would shadow the managed
   \`controller-browser\` skill. Confirm with the user before claiming a name
   that might collide with a built-in.
-- The CLI writes to \`~/coding-orchestrator/skills/<name>/SKILL.md\`. Do
-  not try to write the file directly — let the CLI perform validation.
+- The CLI writes to the Controller home's \`skills/<name>/SKILL.md\` (e.g.
+  \`~/Library/Application Support/Controller/skills/<name>/SKILL.md\` on
+  macOS). Do not try to write the file directly — let the CLI perform
+  validation.
 - Skill activation (\`/name\`) prepends the body to the user's next
   message, so the body should read as instructions *to the agent*, not
   prose for the user.
@@ -745,11 +750,11 @@ fails on duplicate names so it cannot be used as an edit path.
 }
 
 /**
- * Write the managed skills into the unified skill catalog
- * (`~/coding-orchestrator/skills/<name>/SKILL.md`). Idempotent: rewrites
- * every directory in `MANAGED_SKILL_DIRS` (we own them) and skips any
- * other directory the user might have dropped into the same parent
- * (we don't own those).
+ * Write the managed skills into the unified skill catalog under the
+ * Controller home (e.g. `~/Library/Application Support/Controller/skills/<name>/SKILL.md`
+ * on macOS). Idempotent: rewrites every directory in `MANAGED_SKILL_DIRS`
+ * (we own them) and skips any other directory the user might have dropped
+ * into the same parent (we don't own those).
  */
 export async function installManagedSkills(): Promise<void> {
   // The unified CLI is invoked as `<path> <surface> <command>`. Each builder

@@ -27,9 +27,11 @@ import { projectStoreDir } from "../paths.js";
 /*
  * Runs `run` against a fresh temp project directory and an isolated
  * Controller home. Focus sidecars now live under the Controller home
- * (`~/coding-orchestrator/focus/`), so each test gets its own home
- * via `CODING_ORCHESTRATOR_HOME` to keep focus state from leaking
- * between tests or into the real user directory.
+ * (`<controllerHome>/focus/`, e.g.
+ * `~/Library/Application Support/Controller/focus/` on macOS), so each
+ * test gets its own home via `CONTROLLER_HOME` (or its deprecated alias
+ * `CODING_ORCHESTRATOR_HOME`) to keep focus state from leaking between
+ * tests or into the real user directory.
  */
 function withTempProject(run: (projectPath: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "sessions-"));

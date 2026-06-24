@@ -38,6 +38,31 @@ Embedded terminal tabs are backed by deterministic `tmux` sessions. The Express 
 
 Electron is an additional shell around the same app. In development it loads the Vite dev server. In packaged builds it starts the compiled Express backend locally and loads the built client from that backend, so browser and desktop modes keep the same API, SSE, and WebSocket contracts.
 
+### State location
+
+Controller keeps all of its runtime state (project list, API keys, worktrees, session transcripts, unified skill catalog, installed CLI) in a single **Controller home** directory, resolved in this order:
+
+1. `CONTROLLER_HOME` — the canonical override. If set, everything lands under it and no migration runs.
+2. `CODING_ORCHESTRATOR_HOME` — deprecated alias (issue #223). The server logs a one-line warning and continues to use it. Set `CONTROLLER_HOME` instead.
+3. Platform default:
+   - **macOS** — `~/Library/Application Support/Controller/`
+   - **Linux** — `$XDG_STATE_HOME/Controller/`, falling back to `~/.local/state/Controller/`
+   - **Other** — `~/coding-orchestrator/` (legacy fallback; future work will add `%LOCALAPPDATA%` for Windows)
+
+On first launch after upgrading to a build that knows about the new location, the server moves any existing `~/coding-orchestrator/` directory into the new home in a single `fs.rename` (atomic on the same volume) and writes a `migrated-from-legacy-home.json` marker. Subsequent launches no-op. The migration is silent — only the server log line is emitted.
+
+### macOS privacy prompts
+
+macOS shows "Allow access to..." dialogs when a process reads `~/Desktop`, `~/Documents`, `~/Downloads`, or `~/Music`. Controller's *own* state lives under `~/Library/Application Support/Controller/`, which is exempt — that path never triggers TCC. Prompts you can still see in normal use:
+
+| Trigger | First-time effect | How to reset |
+|---|---|---|
+| Add a project whose path lives under a protected folder (e.g. `~/Downloads/foo`) and then run a worktree or session on it | "Controller wants to access ~/Downloads" the first time the process reads inside the chosen path | System Settings → Privacy & Security → Files and Folders → Controller. Toggle off and on to re-prompt. |
+| Use the **Browse…** button on the *Add a project* card while running inside the packaged Electron app | The native picker grants access implicitly; no separate prompt fires | n/a |
+| Import a skill from a per-agent home (`~/.codex/skills/`, `~/.claude/skills/`, `~/.anita/skills/`) that's on a protected volume | Prompt for the agent's home folder | Same panel |
+
+The prompts fire at most once per (process × folder) and persist across launches as long as the app's code signature is stable. For development builds the signature changes on every rebuild, which is the main reason a clean install shows the prompt more often than a packaged build does.
+
 ## Getting Started
 
 ### Prerequisites

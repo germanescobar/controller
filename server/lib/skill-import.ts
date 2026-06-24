@@ -11,10 +11,12 @@
  *   - <project>/.codex/skills/<name>/SKILL.md
  *   - <project>/.claude/skills/<name>/SKILL.md
  *
- * The unified catalog (issue #134) lives under the orchestrator home
- * (`~/coding-orchestrator/skills/<name>/SKILL.md`). Importing copies a
- * per-agent skill's content into the unified catalog so it is owned by the
- * app and wins by name over per-provider matches for all sessions.
+ * The unified catalog (issue #134) lives under the Controller home
+ * (`<controllerHome>/skills/<name>/SKILL.md`, e.g.
+ * `~/Library/Application Support/Controller/skills/<name>/SKILL.md` on
+ * macOS). Importing copies a per-agent skill's content into the unified
+ * catalog so it is owned by the app and wins by name over per-provider
+ * matches for all sessions.
  *
  * Collision policy (default): **skip** duplicates. The user can manually
  * rename the existing unified skill before re-importing, or the import

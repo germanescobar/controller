@@ -25,6 +25,7 @@ import { integrationsRouter } from "./routes/integrations.js";
 import { unifiedSkillsRouter } from "./routes/unified-skills.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
 import { installControllerCli, controllerCliInstalledPath } from "./lib/controller-cli.js";
+import { migrateLegacyHomeIfNeeded } from "./lib/paths.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -206,6 +207,11 @@ async function start(): Promise<void> {
   if (process.env.NODE_ENV === "production") {
     await restoreLoginShellPath();
   }
+  // Move any legacy `~/coding-orchestrator` state into the platform-default
+  // home (issue #223). Idempotent and silent on subsequent boots.
+  await migrateLegacyHomeIfNeeded().catch((error: unknown) => {
+    console.error("Failed to migrate legacy orchestrator home:", error);
+  });
   // Sync managed skills (browser, controller-scripts, etc.) into each agent's
   // user skills home so they are available across Anita, Codex, and Claude.
   await installManagedSkills().catch((error: unknown) => {

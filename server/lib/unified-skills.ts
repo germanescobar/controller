@@ -1,10 +1,11 @@
 /*
  * App-owned unified skill catalog (issue #134).
  *
- * Unified skills live under the orchestrator home
- * (`~/coding-orchestrator/skills/<name>/SKILL.md`) and are fully managed by
- * the app through Settings. They are discovered alongside per-provider skills
- * and win by name when a duplicate exists.
+ * Unified skills live under the Controller home
+ * (`<controllerHome>/skills/<name>/SKILL.md`, e.g.
+ * `~/Library/Application Support/Controller/skills/<name>/SKILL.md` on macOS)
+ * and are fully managed by the app through Settings. They are discovered
+ * alongside per-provider skills and win by name when a duplicate exists.
  */
 
 import fs from "node:fs/promises";

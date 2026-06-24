@@ -9,11 +9,13 @@
  *   controller worktrees <action> ...       Manage worktrees on a project.
  *   controller sessions <action> ...        Start a session pinned to a worktree.
  *
- * Invoked by its absolute install path (`~/coding-orchestrator/bin/controller`)
- * because sanitized/login shells drop injected env vars and PATH entries. The
- * server URL comes from CONTROLLER_SERVER_URL when present, otherwise from the
- * runtime file the server publishes next to this script. Dependency-free (no
- * build step) so it runs identically in dev and packaged builds.
+ * Invoked by its absolute install path (`<controllerHome>/bin/controller`,
+ * resolved from CONTROLLER_HOME or the platform default — see `paths.ts`)
+ * because sanitized/login shells drop injected env vars and PATH entries.
+ * The server URL comes from CONTROLLER_SERVER_URL when present, otherwise
+ * from the runtime file the server publishes next to this script.
+ * Dependency-free (no build step) so it runs identically in dev and
+ * packaged builds.
  */
 
 const USAGE = `Usage:
@@ -83,14 +85,28 @@ async function getServerUrl() {
   const fs = await import("node:fs/promises");
 
   const candidates = [];
+  // 1. Sibling to the installed CLI script (most robust handle — survives
+  //    env-stripping providers and works regardless of the home's location).
   try {
     const scriptPath = await fs.realpath(process.argv[1]);
     candidates.push(path.join(path.dirname(scriptPath), "..", "controller-runtime.json"));
   } catch {}
-  if (process.env.CODING_ORCHESTRATOR_HOME) {
-    candidates.push(path.join(process.env.CODING_ORCHESTRATOR_HOME, "controller-runtime.json"));
+  // 2. Explicit env-var overrides (canonical CONTROLLER_HOME wins over the
+  //    deprecated alias).
+  const overrideHome =
+    process.env.CONTROLLER_HOME?.trim() ||
+    process.env.CODING_ORCHESTRATOR_HOME?.trim();
+  if (overrideHome) {
+    candidates.push(path.join(overrideHome, "controller-runtime.json"));
   }
-  candidates.push(path.join(os.homedir(), "coding-orchestrator", "controller-runtime.json"));
+  // 3. Platform-default home (issue #223): macOS `Application Support`,
+  //    Linux `XDG_STATE_HOME`, otherwise the legacy top-level dot-less dir.
+  candidates.push(defaultHomeRuntimeFile(os, path));
+  // 4. Legacy fallback for already-installed CLIs during the migration
+  //    window. Removed in a future minor version.
+  candidates.push(
+    path.join(os.homedir(), "coding-orchestrator", "controller-runtime.json"),
+  );
 
   for (const candidate of candidates) {
     try {
@@ -99,6 +115,33 @@ async function getServerUrl() {
     } catch {}
   }
   fail("Could not determine the Controller server URL. Is the Controller app running?");
+}
+
+// Mirror of `defaultHomeForPlatform` in `server/lib/paths.ts`. The CLI runs
+// outside the server process (it may be invoked from a sanitized agent
+// shell), so it can't import the server module and re-implements the
+// resolution here. Keep the two in sync.
+function defaultHomeRuntimeFile(os, path) {
+  const platform = process.platform;
+  if (platform === "darwin") {
+    return path.join(
+      os.homedir(),
+      "Library",
+      "Application Support",
+      "Controller",
+      "controller-runtime.json",
+    );
+  }
+  if (platform === "linux") {
+    const xdg = process.env.XDG_STATE_HOME?.trim();
+    const base = xdg && xdg !== "" ? xdg : path.join(os.homedir(), ".local", "state");
+    return path.join(base, "Controller", "controller-runtime.json");
+  }
+  return path.join(
+    os.homedir(),
+    "coding-orchestrator",
+    "controller-runtime.json",
+  );
 }
 
 async function postJson(serverUrl, route, body) {
