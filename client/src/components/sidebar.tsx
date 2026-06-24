@@ -45,6 +45,16 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
@@ -218,6 +228,11 @@ export function Sidebar({
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<
     Record<string, number>
   >({});
+  const [confirmArchiveSession, setConfirmArchiveSession] = useState<{
+    projectId: string;
+    sessionId: string;
+    worktreeId: string;
+  } | null>(null);
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<
     string | null
   >(null);
@@ -993,42 +1008,13 @@ export function Sidebar({
                                           <span
                                             role="button"
                                             tabIndex={0}
-                                            onClick={async (e) => {
+                                            onClick={(e) => {
                                               e.stopPropagation();
-                                              setArchivedIds((prev) =>
-                                                new Set(prev).add(session.id),
-                                              );
-                                              setProjectData((prev) =>
-                                                prev.map((p) =>
-                                                  p.id === project.id
-                                                    ? {
-                                                        ...p,
-                                                        worktrees:
-                                                          p.worktrees.map(
-                                                            (w) =>
-                                                              w.id ===
-                                                              worktree.id
-                                                                ? {
-                                                                    ...w,
-                                                                    sessions:
-                                                                      w.sessions.filter(
-                                                                        (s) =>
-                                                                          s.id !==
-                                                                          session.id,
-                                                                      ),
-                                                                  }
-                                                                : w,
-                                                          ),
-                                                      }
-                                                    : p,
-                                                ),
-                                              );
-                                              toast.success("Session archived");
-                                              await archiveSession(
-                                                project.id,
-                                                session.id,
-                                                worktree.id,
-                                              );
+                                              setConfirmArchiveSession({
+                                                projectId: project.id,
+                                                sessionId: session.id,
+                                                worktreeId: worktree.id,
+                                              });
                                             }}
                                             className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
                                             title="Archive session"
@@ -1277,6 +1263,57 @@ export function Sidebar({
           )}
         </DialogContent>
       </Dialog>
+
+      <AlertDialog
+        open={!!confirmArchiveSession}
+        onOpenChange={(open) => {
+          if (!open) setConfirmArchiveSession(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive this session?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You can find it later in the archived sessions view.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={async () => {
+                if (!confirmArchiveSession) return;
+                const { projectId, sessionId, worktreeId } = confirmArchiveSession;
+                setArchivedIds((prev) => new Set(prev).add(sessionId));
+                setProjectData((prev) =>
+                  prev.map((p) =>
+                    p.id === projectId
+                      ? {
+                          ...p,
+                          worktrees: p.worktrees.map((w) =>
+                            w.id === worktreeId
+                              ? {
+                                  ...w,
+                                  sessions: w.sessions.filter(
+                                    (s) => s.id !== sessionId,
+                                  ),
+                                }
+                              : w,
+                          ),
+                        }
+                      : p,
+                  ),
+                );
+                setConfirmArchiveSession(null);
+                toast.success("Session archived");
+                await archiveSession(projectId, sessionId, worktreeId);
+              }}
+            >
+              Archive
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </aside>
   );
 }
