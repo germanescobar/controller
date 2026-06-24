@@ -47,6 +47,7 @@ import {
   type ClaudeApprovalRequest,
   type ClaudePermissionSuggestion,
 } from "../lib/agents.js";
+import { getAgentSetting } from "../lib/agent-settings.js";
 import { codexAppServerManager } from "../lib/codex-app-server.js";
 import { canonicalProviderId, DEFAULT_PROVIDER_ID } from "../lib/provider-id.js";
 import {
@@ -596,6 +597,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     attachmentIds?: string[];
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
+    resumeSessionId?: string;
   };
   const worktreeId = body.worktreeId;
   const message = body.message;
@@ -633,6 +635,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
         attachmentIds,
         reasoningEffort: body.reasoningEffort,
         serviceTier: body.serviceTier,
+        resumeSessionId: body.resumeSessionId,
       }),
       shim.res
     );
@@ -662,6 +665,7 @@ function makeHeadlessSessionStartRequest(
     attachmentIds: string[];
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
+    resumeSessionId?: string;
   }
 ): Request<{ projectId: string }> {
   const query: Record<string, string> = {
@@ -675,6 +679,11 @@ function makeHeadlessSessionStartRequest(
   if (body.attachmentIds.length) query.attachmentIds = body.attachmentIds.join(",");
   if (body.reasoningEffort) query.reasoningEffort = body.reasoningEffort;
   if (body.serviceTier) query.serviceTier = body.serviceTier;
+  // Optional so the headless POST endpoint can drive the resume / queue-
+  // replay branch through `handleSessionStream` for tests. Production
+  // callers should leave this undefined for the POST endpoint — it is
+  // a new-session-only API.
+  if (body.resumeSessionId) query.resumeSessionId = body.resumeSessionId;
   return {
     params: { projectId },
     query,
@@ -768,6 +777,17 @@ function makeSessionStartShim(
             lastError = event.text;
             startedEmitted = true;
             return;
+          } else if (event && event.type === "stderr" && typeof event.text === "string" && event.text.trim()) {
+            // Capture raw stderr forwarded by the handler so a silent
+            // startup crash (e.g. anita rejecting `--model ""`) shows up
+            // in the preflight error message instead of the generic
+            // "Agent exited before reporting a sessionId" fallback
+            // (issue #213). We deliberately do NOT set `startedEmitted`
+            // here — stderr is informational, and the agent may still
+            // recover and emit a real `run.started`. If it never does,
+            // the most recent stderr line is what the user sees in the
+            // preflight error.
+            lastError = event.text;
           }
         } catch {
           // Ignore unparseable lines — the persistence layer handles them.
@@ -876,7 +896,6 @@ async function handleSessionStream(
 
   const message = req.query.message as string;
   const resumeSessionId = req.query.resumeSessionId as string | undefined;
-  const model = req.query.model as string | undefined;
   const reasoningEffort = req.query.reasoningEffort as
     | "none"
     | "minimal"
@@ -889,6 +908,30 @@ async function handleSessionStream(
   const providerId = canonicalProviderId(
     (req.query.provider as string) || DEFAULT_PROVIDER_ID
   );
+  // Resolve the requested model. A client-supplied `--model` always wins.
+  // For brand-new sessions only, fall back to the user's saved default for
+  // the resolved provider (Settings → Agents → Default model). Without
+  // this fallback the provider's `spawn` would receive `undefined` and
+  // emit `--model ""`, which the anita CLI rejects with a misleading
+  // "Invalid model format" error before any `run.started` event lands
+  // (issue #213).
+  //
+  // Resume / follow-up / queue-replay turns deliberately skip the
+  // Settings default: those flows carry their own model intent (the
+  // session's stored model is preserved by the persistence layer via
+  // `model ?? existing?.model ?? ""`), and silently swapping in a
+  // different provider default when the user later changes Settings
+  // would change the model under an already-running session without
+  // any UI signal. PR review from chatgpt-codex-connector on #218.
+  const queryModel = typeof req.query.model === "string" ? req.query.model.trim() : "";
+  let model: string | undefined = queryModel || undefined;
+  if (!model && !resumeSessionId) {
+    const setting = await getAgentSetting(providerId);
+    const fallback = setting.defaultModel;
+    if (fallback && fallback.trim()) {
+      model = fallback.trim();
+    }
+  }
   const mode = (req.query.mode as "default" | "plan" | undefined) || "default";
   const attachmentIds = (req.query.attachmentIds as string | undefined)
     ?.split(",")

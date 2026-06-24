@@ -304,3 +304,178 @@ exit 1
     }
   );
 });
+
+test("POST /api/projects/:projectId/sessions falls back to the agent's configured defaultModel when no --model is sent (issue #213)", async () => {
+  const sessionId = "sess-issue-213-default-model";
+  // The settings file lives at ${CODING_ORCHESTRATOR_HOME}/agents.json —
+  // the fixture sets CODING_ORCHESTRATOR_HOME to `homeDir`, so we can
+  // pre-seed it before the request fires.
+  await withSessionStartEnv(
+    async ({ binDir, homeDir }) => {
+      await fs.writeFile(
+        path.join(homeDir, "agents.json"),
+        JSON.stringify({
+          anita: {
+            enabled: true,
+            path: null,
+            defaultModel: "ollama/glm-4.7-flash:latest",
+          },
+        })
+      );
+      // Fake anita that dumps its argv to a file the test reads back,
+      // then emits run.started + run.completed and exits. The orchestrator
+      // resolves the `anita` binary via PATH (with our shim prepended),
+      // and `provider.spawn` receives the absolute path, so the shim
+      // will see its own argv as `process.argv` only if we use `$@`.
+      // Easier path: have the shim echo `$@` into a file at a known
+      // location the test fixture knows about.
+      const script = `#!/usr/bin/env bash
+set -e
+# Record the exact argv the orchestrator passed so the test can assert
+# which flags made it through (issue #213).
+printf '%s\\n' "$*" > "${homeDir}/spawned-args.txt"
+# Emit run.started so the preflight shim flushes {sessionId, url}.
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Test the defaultModel fallback.",
+          // Note: no `model` field — the orchestrator must look it up.
+          provider: "anita",
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(
+        res.status,
+        200,
+        `expected 200, got ${res.status}: ${JSON.stringify(body)}`
+      );
+      assert.equal(body.sessionId, sessionId);
+
+      const argvFile = path.join(homeDir, "spawned-args.txt");
+      const argv = (await fs.readFile(argvFile, "utf-8")).trim();
+      // The recorded argv is a shell-flattened string; tokenize on
+      // whitespace to recover the original argv slots.
+      const tokens = argv.split(/\s+/);
+      const modelIndex = tokens.indexOf("--model");
+      assert.ok(
+        modelIndex >= 0,
+        `expected --model in argv (defaultModel fallback), got: ${argv}`
+      );
+      assert.equal(
+        tokens[modelIndex + 1],
+        "ollama/glm-4.7-flash:latest",
+        `defaultModel from settings should be forwarded as --model value, got: ${argv}`
+      );
+    }
+  );
+});
+
+test("POST /api/projects/:projectId/sessions surfaces a stderr line in the preflight error when the agent crashes before reporting run.started (issue #213)", async () => {
+  // Pre-fix, this case returned the generic "Agent exited before reporting
+  // a sessionId" — useless for debugging. The fix records the most recent
+  // stderr line into `lastError` so the user sees the actual diagnostic.
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      // The shim writes a recognizable stderr line and exits without ever
+      // emitting a `run.started` event. Mirrors the real anita failure
+      // mode (model validation error on startup).
+      const script = `#!/usr/bin/env bash
+set -e
+printf '%s\\n' 'Invalid model format: "". Expected "provider/model" (e.g. "ollama/glm-4.7-flash:latest")' >&2
+cat >/dev/null || true
+exit 1
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Trigger the stderr-surfacing path.",
+          provider: "anita",
+        }),
+      });
+      const body = (await res.json()) as { error?: string };
+      assert.equal(res.status, 500);
+      assert.match(
+        body.error ?? "",
+        /Invalid model format/,
+        `expected stderr text in preflight error, got: ${JSON.stringify(body)}`
+      );
+    }
+  );
+});
+
+test("POST /api/projects/:projectId/sessions does not apply defaultModel when resumeSessionId is set (PR #218 review)", async () => {
+  // PR review from chatgpt-codex-connector on #218: the defaultModel
+  // fallback was firing for resume / follow-up / queue-replay turns,
+  // silently changing the model under an existing session when the user
+  // edited their Settings default. Gate the fallback to brand-new
+  // sessions: when `resumeSessionId` is set, the Settings default must
+  // be ignored even if no `model` is supplied on the wire.
+  const sessionId = "sess-resume-without-model";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir }) => {
+      await fs.writeFile(
+        path.join(homeDir, "agents.json"),
+        JSON.stringify({
+          anita: {
+            enabled: true,
+            path: null,
+            defaultModel: "ollama/glm-4.7-flash:latest",
+          },
+        })
+      );
+      const script = `#!/usr/bin/env bash
+set -e
+printf '%s\\n' "$*" > "${homeDir}/spawned-args.txt"
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Resume an existing session.",
+          // No `model` on the wire — the Settings default is the
+          // obvious temptation for the orchestrator, but the resume
+          // path must ignore it.
+          provider: "anita",
+          resumeSessionId: sessionId,
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(
+        res.status,
+        200,
+        `expected 200, got ${res.status}: ${JSON.stringify(body)}`
+      );
+      assert.equal(body.sessionId, sessionId);
+
+      const argv = (await fs.readFile(path.join(homeDir, "spawned-args.txt"), "utf-8")).trim();
+      const tokens = argv.split(/\s+/);
+      assert.ok(
+        !tokens.includes("--model"),
+        `resume must not apply Settings defaultModel, got argv: ${argv}`
+      );
+    }
+  );
+});

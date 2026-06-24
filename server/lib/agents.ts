@@ -477,7 +477,14 @@ const anitaProvider: AgentProvider = {
   command: "anita",
 
   spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, systemPrompt }) {
-    const cmdArgs = ["--stream-json", "--auto-approve", "--model", model || ""];
+    const cmdArgs = ["--stream-json", "--auto-approve"];
+    // Only emit `--model` when the caller actually supplied a value. The
+    // anita CLI rejects empty model strings with "Invalid model format"
+    // before any `run.started` event lands (issue #213); omit the flag
+    // so anita can pick its own default.
+    if (model && model.trim()) {
+      cmdArgs.push("--model", model);
+    }
     if (reasoningEffort) {
       cmdArgs.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
     }
@@ -535,8 +542,15 @@ const codexProvider: AgentProvider = {
   command: "codex",
 
   spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
-    // Flags must come before the prompt argument
-    const flags = ["--json", "--full-auto", "--skip-git-repo-check", "--model", model || ""];
+    // Flags must come before the prompt argument. Same belt-and-suspenders
+    // guard as the anita provider: only emit `--model` when the caller
+    // supplied a non-empty value (issue #213). Codex is more permissive
+    // than anita with empty model strings, but emitting `--model ""`
+    // still risks it picking a default the user didn't intend.
+    const flags = ["--json", "--full-auto", "--skip-git-repo-check"];
+    if (model && model.trim()) {
+      flags.push("--model", model);
+    }
     if (reasoningEffort) {
       flags.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
     }
