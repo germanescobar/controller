@@ -1117,11 +1117,7 @@ async function handleSessionStream(
     // Only auto-generate a title for brand-new sessions; for existing ones we keep
     // whatever the title is — including an intentional absence the user cleared.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing
-      ? existing.title
-      : historyText.length > 60
-        ? historyText.slice(0, 60) + "..."
-        : historyText;
+    const title = existing ? existing.title : deriveAutoTitle(historyText);
     // Focus state lives in a Controller-owned sidecar, not on the
     // session file: any provider that writes the session file
     // (e.g. Anita on legacy resumed sessions) would silently drop
@@ -1743,11 +1739,7 @@ async function streamCodexPlanSession(
     // Only auto-generate a title for brand-new sessions; for existing ones we keep
     // whatever the title is — including an intentional absence the user cleared.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing
-      ? existing.title
-      : historyText.length > 60
-        ? `${historyText.slice(0, 60)}...`
-        : historyText;
+    const title = existing ? existing.title : deriveAutoTitle(historyText);
     // Focus state lives in a Controller-owned sidecar; see the
     // SSE-stream persistSessionStart for the rationale (issue #139).
     const existingFocus = await readSessionFocus(sessionId);
@@ -2659,4 +2651,14 @@ export function parseSkillMarker(
   const match = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(text);
   if (!match) return null;
   return { skillName: match[1], rest: match[2] };
+}
+
+/**
+ * Derive a session's auto-title from the persisted history text. A leading
+ * `[/skill: name]` marker is an implementation detail of how skill
+ * invocations are stored, so it is stripped before the title is truncated.
+ */
+export function deriveAutoTitle(historyText: string): string {
+  const source = parseSkillMarker(historyText)?.rest ?? historyText;
+  return source.length > 60 ? `${source.slice(0, 60)}...` : source;
 }
