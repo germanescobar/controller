@@ -103,7 +103,7 @@ interface SessionViewProps {
   project?: Project;
   onSessionCreated: (sessionId: string) => void;
   onBackgroundComplete?: (sessionId: string) => void;
-  focusMode?: boolean;
+  controllerMode?: boolean;
   focusPosition?: { current: number; total: number };
   onFocusDone?: () => void;
   onFocusSkip?: () => void;
@@ -113,14 +113,14 @@ interface SessionViewProps {
   // other views (sidebar, focus queue) that cache the title separately.
   onTitleChange?: () => void;
   // Fires right after the user sends a message (or answers an agent
-  // prompt) in focus mode, with the id of the session the message was
-  // sent from. The parent can use this to advance to the next focus
-  // item. See issue #81 follow-up: "respond and advance to the next
-  // conversation".
+  // prompt) in controller mode, with the id of the session the message
+  // was sent from. The parent can use this to advance to the next
+  // focus item. See issue #81 follow-up: "respond and advance to the
+  // next conversation".
   onFocusAdvanceAfterSend?: (sessionId: string) => void;
   /**
-   * When non-null, a focus-mode advance has been scheduled after a
-   * send. While this is set, SessionView preserves the in-flight
+   * When non-null, a controller-mode advance has been scheduled after
+   * a send. While this is set, SessionView preserves the in-flight
    * user-message bubble in the originating session (we skip the
    * session-change cleanup that would otherwise wipe it) so the user
    * always has time to see the message they just sent. Typing in the
@@ -2613,7 +2613,7 @@ export function SessionView({
   project,
   onSessionCreated,
   onBackgroundComplete,
-  focusMode = false,
+  controllerMode = false,
   focusPosition,
   onFocusDone,
   onFocusSkip,
@@ -2978,18 +2978,18 @@ export function SessionView({
     };
   }, [projectId, worktreeId, sessionId]);
 
-  // While focus mode is active, drop the user straight into the composer
-  // whenever the active session changes (entering focus mode, skipping to
+  // While controller mode is active, drop the user straight into the composer
+  // whenever the active session changes (entering controller mode, skipping to
   // the next pinned session, or marking the current one done). This keeps
-  // the focus-mode triage loop keyboard-driven: the user can `Esc` out of
-  // the input to fire a shortcut and is placed back at the keyboard the
+  // the controller-mode triage loop keyboard-driven: the user can `Esc` out
+  // of the input to fire a shortcut and is placed back at the keyboard the
   // moment the new session is ready.
   useEffect(() => {
-    if (!focusMode || !sessionId) return;
+    if (!controllerMode || !sessionId) return;
     const textarea = textareaRef.current;
     if (!textarea || textarea.disabled) return;
     textarea.focus();
-  }, [sessionId, focusMode]);
+  }, [sessionId, controllerMode]);
 
   useEffect(() => {
     const isOriginatingCountdown =
@@ -3007,7 +3007,7 @@ export function SessionView({
 
     if (
       hadVisibleFocusAdvanceRef.current &&
-      focusMode &&
+      controllerMode &&
       sessionId &&
       textarea &&
       !textarea.disabled
@@ -3015,7 +3015,7 @@ export function SessionView({
       textarea.focus();
     }
     hadVisibleFocusAdvanceRef.current = false;
-  }, [focusAdvanceCountdown, focusMode, sessionId]);
+  }, [focusAdvanceCountdown, controllerMode, sessionId]);
 
   useEffect(() => {
     const isOriginatingCountdown =
@@ -3831,7 +3831,7 @@ export function SessionView({
       return false;
     }
 
-    // In focus mode, signal the parent to advance to the next focus
+    // In controller mode, signal the parent to advance to the next focus
     // item as soon as the user commits to a message. The parent owns
     // the navigation logic and the "stay put if the only pinned item
     // is the one we just sent to" rule (issue #81 follow-up).
@@ -3839,7 +3839,7 @@ export function SessionView({
     // For an existing session we can advance immediately; for a send from
     // the new-thread composer (no `sessionId` yet) we defer until the
     // stream attaches and the new session id is known (issue #120).
-    if (focusMode && onFocusAdvanceAfterSend && !runOverrides) {
+    if (controllerMode && onFocusAdvanceAfterSend && !runOverrides) {
       if (sessionId) {
         onFocusAdvanceAfterSend(sessionId);
       } else {
@@ -4828,10 +4828,10 @@ export function SessionView({
 
   return (
     <>
-      {focusMode && (
+      {controllerMode && (
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-blue-500/20 bg-blue-500/15 px-3 py-2 text-blue-200 md:px-4">
           <div className="min-w-0 text-xs text-blue-200/80">
-            <span className="font-medium text-blue-200">Focus Mode</span>
+            <span className="font-medium text-blue-200">Controller Mode</span>
             <span className="ml-2">
               {focusPosition && focusPosition.total > 0
                 ? `${focusPosition.current || 1} / ${focusPosition.total}`
@@ -4864,7 +4864,7 @@ export function SessionView({
               type="button"
               onClick={onFocusExit}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
-              title="Exit focus mode (E)"
+              title="Exit Controller Mode (E)"
             >
               <LogOut className="h-3.5 w-3.5" />
               Exit
