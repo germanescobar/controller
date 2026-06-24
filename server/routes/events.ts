@@ -19,16 +19,24 @@ export const eventsRouter = Router({ mergeParams: true });
 const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
 
 /**
- * Extract the `projectId` for a given event. Project-lifecycle events
- * carry a full `project`; everything else carries a top-level
- * `projectId`. Keeping the discrimination here means callers can stay
- * agnostic of the union shape.
+ * Returns true when the event should be delivered to a stream
+ * subscribed for `projectId`. Per-project events (`worktree_*`,
+ * `session_*`) are scoped to the project that owns them. Project-
+ * lifecycle events (`project_added/updated/removed`) are broadcast on
+ * every project's stream: the app shell needs to learn about
+ * out-of-band project creates/renames/deletes happening on *other*
+ * projects too, and `App.tsx` already routes those events through
+ * `loadProjects()` (issue #210 review feedback).
  */
-function projectIdFor(event: ProjectEvent): string {
-  if (event.type === "project_added" || event.type === "project_updated") {
-    return event.project.id;
+function shouldDeliver(event: ProjectEvent, projectId: string): boolean {
+  if (
+    event.type === "project_added" ||
+    event.type === "project_updated" ||
+    event.type === "project_removed"
+  ) {
+    return true;
   }
-  return event.projectId;
+  return event.projectId === projectId;
 }
 
 eventsRouter.get("/:projectId/events", async (req, res) => {
@@ -62,7 +70,7 @@ eventsRouter.get("/:projectId/events", async (req, res) => {
   });
 
   const unsubscribe = subscribeProjectEvents((event) => {
-    if (projectIdFor(event) !== projectId) return;
+    if (!shouldDeliver(event, projectId)) return;
     send(event);
   });
 

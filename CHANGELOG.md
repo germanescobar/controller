@@ -15,11 +15,15 @@ All notable changes to this project are documented here.
   `controller` CLI from another terminal (including by an agent in
   another session), by a second app window, or by a backgrounded
   headless run all show up in the running app without a manual
-  refresh. The bus is an in-process `EventEmitter` (`server/lib/events.ts`),
-  wired into the worktree create/delete/setup handlers, the session
-  start/archive/focus handlers, and the project add/update/delete
-  handlers. The existing per-session `EventSource` in
-  `SessionView.tsx` is unchanged — the new stream is additive.
+  refresh. Project-level events (`project_added/updated/removed`)
+  are broadcast on every project's stream so the sidebar's project
+  list refreshes when a *different* project is created, renamed,
+  or removed out of band. The bus is an in-process `EventEmitter`
+  (`server/lib/events.ts`), wired into the worktree create/delete/
+  setup handlers, the session start/archive/focus handlers, and the
+  project add/update/delete handlers. The existing per-session
+  `EventSource` in `SessionView.tsx` is unchanged — the new stream
+  is additive.
 
 - **Browser CLI: locator-style selectors + accessibility snapshot** (#170).
   The `controller browser click`/`type` commands now accept a

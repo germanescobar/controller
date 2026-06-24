@@ -187,13 +187,14 @@ test("GET /events delivers worktree and session lifecycle events for the active 
     const added = delivered[0] as { worktree: { id: string } };
     assert.equal(added.worktree.id, "wt-1");
 
-    // Sanity check: the unrelated project_lifecycle event from the
-    // other project never made it.
+    // Per-project events (worktree/session) from another project must
+    // not be delivered — only project-lifecycle events are broadcast.
     assert.ok(
       !delivered.some(
-        (event) => (event as { project?: { id: string } }).project?.id === otherProjectId
+        (event) =>
+          "projectId" in event && (event as { projectId: string }).projectId === otherProjectId
       ),
-      "events from other projects should not be delivered"
+      "per-project events from other projects should not be delivered"
     );
   });
 });
@@ -227,5 +228,64 @@ test("subscribeProjectEvents throws-safe: a broken subscriber does not kill the 
       unsubscribeBad();
       unsubscribeGood();
     }
+  });
+});
+
+test("GET /events broadcasts project-lifecycle events from other projects", async () => {
+  // Review feedback (issue #210): a client subscribed to project A
+  // must still learn about project_added/updated/removed on project B,
+  // otherwise the sidebar's project list goes stale when another
+  // window/CLI creates or renames a different project.
+  await withEventsEnv(async ({ baseUrl, projectId }) => {
+    const events = await import("../../lib/events.js");
+
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/${projectId}/events`, {
+      signal: controller.signal,
+      headers: { Accept: "text/event-stream" },
+    });
+    assert.equal(res.status, 200);
+
+    const delivered: Array<Record<string, unknown>> = [];
+    const readerPromise = readSse(res)
+      .then((streamed) => {
+        for (const event of streamed) delivered.push(event as Record<string, unknown>);
+      })
+      .catch((err: unknown) => {
+        if (err && typeof err === "object" && "name" in err && (err as { name?: string }).name === "AbortError") {
+          return;
+        }
+        throw err;
+      });
+
+    const otherProjectId = "proj-other";
+    events.emitProjectEvent({
+      type: "project_added",
+      project: {
+        id: otherProjectId,
+        name: "other",
+        path: "/tmp/other",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    events.emitProjectEvent({ type: "project_removed", projectId: otherProjectId });
+
+    // A per-project event from another project must still be filtered
+    // — only project-lifecycle events are broadcast.
+    events.emitWorktreeAdded(otherProjectId, {
+      id: "wt-noise",
+      projectId: otherProjectId,
+      name: "noise",
+      path: "/tmp/noise",
+      isMain: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    controller.abort();
+    await readerPromise;
+
+    const types = delivered.map((event) => event.type as string);
+    assert.deepEqual(types, ["project_added", "project_removed"]);
   });
 });
