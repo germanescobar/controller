@@ -45,6 +45,24 @@ All notable changes to this project are documented here.
   Dev-binary signature stability (the other half of why TCC consent
   doesn't stick across rebuilds) is deferred to a follow-up PR.
 
+- **Sidebar rename and Controller Mode prominence.** The sidebar's
+  "In flight" section is now **On radar**, and the copy in the
+  focus-queue empty state, the Controller Mode banner inside the
+  session view, and the "Add/Remove from in-flight" tooltips on the
+  radar pin buttons (header and mobile) all use the new "On radar"
+  wording. The "New project" entry that used to sit at the top of
+  the sidebar moved to a small **New** button on the right of the
+  **Projects** label. Controller Mode now sits inline next to the
+  **ON RADAR** label (only when the focus queue has items), showing
+  a play icon and the "Controller Mode" label (the `F`/`E` keyboard
+  hint was dropped to keep the button visually quiet), with an
+  active blue/ringed state when on and a neutral hover state when
+  off. The completion toast
+  ("Session completed — A background session has finished. [View]")
+  and the green-dot badge on completed sessions in the sidebar were
+  removed; the `completedSessions` state and prop were deleted
+  since nothing reads them anymore.
+
 ### Added
 
 - **App shell auto-refresh on out-of-band changes** (#210). The app
