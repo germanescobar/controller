@@ -19,10 +19,10 @@ async function withTempHome(
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "preamble-test-"));
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
-  const previousOrchHome = process.env.CODING_ORCHESTRATOR_HOME;
+  const previousOrchHome = process.env.CONTROLLER_HOME;
   process.env.HOME = dir;
   process.env.USERPROFILE = dir;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  process.env.CONTROLLER_HOME = dir;
   try {
     await fn();
   } finally {
@@ -30,8 +30,8 @@ async function withTempHome(
     else process.env.HOME = previousHome;
     if (previousUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = previousUserProfile;
-    if (previousOrchHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previousOrchHome;
+    if (previousOrchHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousOrchHome;
     await fs.rm(dir, { recursive: true, force: true });
   }
 }

@@ -94,16 +94,16 @@ function withProviderHome(
     // macOS) doesn't leak into the developer's real home during the run.
     const controllerHome = mkdtempSync(path.join(home, "controller-home-"));
     const previousControllerHome = process.env.CONTROLLER_HOME;
-    const previousOrchHome = process.env.CODING_ORCHESTRATOR_HOME;
+    const previousOrchHome = process.env.CONTROLLER_HOME;
     process.env.CONTROLLER_HOME = controllerHome;
-    delete process.env.CODING_ORCHESTRATOR_HOME;
+    delete process.env.CONTROLLER_HOME;
     try {
       await run(home, provider);
     } finally {
       if (previousControllerHome === undefined) delete process.env.CONTROLLER_HOME;
       else process.env.CONTROLLER_HOME = previousControllerHome;
-      if (previousOrchHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-      else process.env.CODING_ORCHESTRATOR_HOME = previousOrchHome;
+      if (previousOrchHome === undefined) delete process.env.CONTROLLER_HOME;
+      else process.env.CONTROLLER_HOME = previousOrchHome;
       rmSync(controllerHome, { recursive: true, force: true });
     }
   });

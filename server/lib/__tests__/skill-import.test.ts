@@ -234,8 +234,8 @@ test("importSkills rejects a source path that points to a managed skill director
   // existing "refuses a source path outside the known skill roots" check.
   const home = makeTempDir("import-managed-reject-");
   const orchestratorHome = makeTempDir("orch-managed-reject-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
       path.join(home, ".anita", "skills"),
@@ -261,8 +261,8 @@ test("importSkills rejects a source path that points to a managed skill director
     const { listUnifiedSkills } = await import("../unified-skills.js");
     assert.equal((await listUnifiedSkills()).length, 0);
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -271,8 +271,8 @@ test("importSkills rejects a source path that points to a managed skill director
 test("importSkills copies a user skill into the unified catalog", async () => {
   const home = makeTempDir("import-run-");
   const orchestratorHome = makeTempDir("orch-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
       path.join(home, ".anita", "skills"),
@@ -305,8 +305,8 @@ test("importSkills copies a user skill into the unified catalog", async () => {
     assert.match(raw, /description: Review PRs/);
     assert.match(raw, /Review carefully/);
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -317,8 +317,8 @@ test("importSkills still accepts the legacy `ada` provider id", async () => {
   // resolve it the same way the rest of the app does (issue #151).
   const home = makeTempDir("import-legacy-id-");
   const orchestratorHome = makeTempDir("orch-legacy-id-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
       path.join(home, ".ada", "skills"),
@@ -334,8 +334,8 @@ test("importSkills still accepts the legacy `ada` provider id", async () => {
     assert.equal(result.results[0].status, "imported");
     assert.equal(result.results[0].name, "legacy");
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -344,8 +344,8 @@ test("importSkills still accepts the legacy `ada` provider id", async () => {
 test("importSkills skips a selection whose name collides with a unified skill", async () => {
   const home = makeTempDir("import-skip-");
   const orchestratorHome = makeTempDir("orch-skip-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
       path.join(home, ".anita", "skills"),
@@ -375,8 +375,8 @@ test("importSkills skips a selection whose name collides with a unified skill", 
     assert.ok(existing);
     assert.equal(existing.body, "old body");
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -385,8 +385,8 @@ test("importSkills skips a selection whose name collides with a unified skill", 
 test("importSkills overwrites when the caller asks for it", async () => {
   const home = makeTempDir("import-overwrite-");
   const orchestratorHome = makeTempDir("orch-overwrite-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const { createUnifiedSkill } = await import("../unified-skills.js");
     await createUnifiedSkill({
@@ -418,8 +418,8 @@ test("importSkills overwrites when the caller asks for it", async () => {
     assert.equal(updated.body, "new body");
     assert.equal(updated.metadata.description, "new");
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -432,8 +432,8 @@ test("importSkills does not delete a colliding unified skill when the candidate 
   // new skill when the source was malformed.
   const home = makeTempDir("import-overwrite-bad-");
   const orchestratorHome = makeTempDir("orch-overwrite-bad-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const { createUnifiedSkill } = await import("../unified-skills.js");
     await createUnifiedSkill({
@@ -469,8 +469,8 @@ test("importSkills does not delete a colliding unified skill when the candidate 
     assert.equal(existing.body, "original body");
     assert.equal(existing.metadata.description, "original");
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -482,8 +482,8 @@ test("importSkills rejects a source whose name fails the unified-skill character
   // pre-validation step should catch it before we try to delete anything.
   const home = makeTempDir("import-bad-name-");
   const orchestratorHome = makeTempDir("orch-bad-name-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const { createUnifiedSkill } = await import("../unified-skills.js");
     await createUnifiedSkill({
@@ -516,8 +516,8 @@ test("importSkills rejects a source whose name fails the unified-skill character
     assert.ok(existing);
     assert.equal(existing.body, "original body");
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -526,8 +526,8 @@ test("importSkills rejects a source whose name fails the unified-skill character
 test("importSkills returns an error for an unknown provider", async () => {
   const home = makeTempDir("import-bad-provider-");
   const orchestratorHome = makeTempDir("orch-bad-provider-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const result = await importSkills(
       {
@@ -540,8 +540,8 @@ test("importSkills returns an error for an unknown provider", async () => {
     assert.equal(result.results[0].status, "error");
     assert.match(result.results[0].reason ?? "", /Unknown agent provider/);
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -550,8 +550,8 @@ test("importSkills returns an error for an unknown provider", async () => {
 test("importSkills returns an error for a missing source file", async () => {
   const home = makeTempDir("import-missing-");
   const orchestratorHome = makeTempDir("orch-missing-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const result = await importSkills(
       {
@@ -564,8 +564,8 @@ test("importSkills returns an error for a missing source file", async () => {
     assert.equal(result.results[0].status, "error");
     assert.match(result.results[0].reason ?? "", /not found|unreadable/);
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }
@@ -578,8 +578,8 @@ test("importSkills refuses a source path outside the known skill roots", async (
   const home = makeTempDir("import-outside-");
   const outside = makeTempDir("import-arbitrary-");
   const orchestratorHome = makeTempDir("orch-outside-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const sourcePath = writeSkillFile(
       outside,
@@ -600,8 +600,8 @@ test("importSkills refuses a source path outside the known skill roots", async (
     const { listUnifiedSkills } = await import("../unified-skills.js");
     assert.equal((await listUnifiedSkills()).length, 0);
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
@@ -611,8 +611,8 @@ test("importSkills refuses a source path outside the known skill roots", async (
 test("importSkills processes multiple selections in one call", async () => {
   const home = makeTempDir("import-multi-");
   const orchestratorHome = makeTempDir("orch-multi-");
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   try {
     const anitaSkill = writeSkillFile(
       path.join(home, ".anita", "skills"),
@@ -646,8 +646,8 @@ test("importSkills processes multiple selections in one call", async () => {
     const unified = await listUnifiedSkills();
     assert.equal(unified.length, 2);
   } finally {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
   }

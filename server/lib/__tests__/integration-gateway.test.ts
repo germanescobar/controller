@@ -11,16 +11,16 @@ async function withTempHome(
   }) => Promise<void>
 ): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-test-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = dir;
   try {
     await fn({
       integrations: await import("../integrations.js"),
       gateway: await import("../integration-gateway.js"),
     });
   } finally {
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(dir, { recursive: true, force: true });
   }
 }

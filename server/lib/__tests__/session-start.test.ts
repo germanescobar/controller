@@ -16,7 +16,7 @@ import path from "node:path";
  * to follow along in the UI.
  *
  * These tests mount the real `sessionsRouter` against a temp
- * `CODING_ORCHESTRATOR_HOME` and stand up a fake `anita` agent on PATH
+ * `CONTROLLER_HOME` and stand up a fake `anita` agent on PATH
  * that emits a single `run.started` line and exits. The session file
  * the persistence pipeline writes is then inspected on disk to confirm
  * the side effects the real endpoint is supposed to produce.
@@ -28,9 +28,9 @@ async function withSessionStartEnv<T>(
 ): Promise<T> {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "session-start-test-"));
   const binDir = await fs.mkdtemp(path.join(os.tmpdir(), "session-start-bin-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
+  const previous = process.env.CONTROLLER_HOME;
   const previousPath = process.env.PATH;
-  process.env.CODING_ORCHESTRATOR_HOME = homeDir;
+  process.env.CONTROLLER_HOME = homeDir;
   // Prepend the fake-agent bin dir to PATH so the unified `controller` CLI's
   // bare `anita` invocation resolves to our fake script. `spawn(command)` walks
   // PATH itself, but `provider.spawn` passes an absolute path when one is
@@ -101,8 +101,8 @@ async function withSessionStartEnv<T>(
     });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
     await fs.rm(homeDir, { recursive: true, force: true });
@@ -243,8 +243,8 @@ test("POST /api/projects/:projectId/sessions returns 404 for unknown project", a
   // No real setup needed: a request with an unknown project id should fail
   // before any work happens, returning a clean 404.
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "session-start-404-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = homeDir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = homeDir;
   const { clearCommandResolverCache } = await import("../../lib/command-resolver.js");
   clearCommandResolverCache();
   let server: http.Server | null = null;
@@ -268,8 +268,8 @@ test("POST /api/projects/:projectId/sessions returns 404 for unknown project", a
     if (server) {
       await new Promise<void>((resolve) => server!.close(() => resolve()));
     }
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(homeDir, { recursive: true, force: true });
   }
 });
@@ -307,8 +307,8 @@ exit 1
 
 test("POST /api/projects/:projectId/sessions falls back to the agent's configured defaultModel when no --model is sent (issue #213)", async () => {
   const sessionId = "sess-issue-213-default-model";
-  // The settings file lives at ${CODING_ORCHESTRATOR_HOME}/agents.json —
-  // the fixture sets CODING_ORCHESTRATOR_HOME to `homeDir`, so we can
+  // The settings file lives at ${CONTROLLER_HOME}/agents.json —
+  // the fixture sets CONTROLLER_HOME to `homeDir`, so we can
   // pre-seed it before the request fires.
   await withSessionStartEnv(
     async ({ binDir, homeDir }) => {

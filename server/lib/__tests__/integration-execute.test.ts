@@ -9,7 +9,7 @@ import path from "node:path";
  * End-to-end execution: create a connection in a temp home, then run a request
  * against a local server and assert Controller injected the auth (query key)
  * plus the transport's constant header — without the caller supplying either.
- * Uses normal imports; paths.ts reads CODING_ORCHESTRATOR_HOME at call time.
+ * Uses normal imports; paths.ts reads CONTROLLER_HOME at call time.
  */
 async function withTempHomeAndServer(
   handler: (req: http.IncomingMessage, body: string) => { status: number; body: string },
@@ -20,8 +20,8 @@ async function withTempHomeAndServer(
   }) => Promise<void>
 ): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "exec-test-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = dir;
 
   const captured: { url?: string; headers?: http.IncomingHttpHeaders; body?: string } = {};
   const server = http.createServer((req, res) => {
@@ -46,8 +46,8 @@ async function withTempHomeAndServer(
     await fn({ integrations, execute, baseUrl: `http://127.0.0.1:${port}` });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(dir, { recursive: true, force: true });
   }
 }

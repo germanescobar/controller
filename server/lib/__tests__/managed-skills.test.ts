@@ -22,7 +22,7 @@ import {
  * `~/.claude/skills/`, `~/.codex/skills/`, `~/.anita/skills/`.
  *
  * `os.homedir()` reads `HOME`, so setting it redirects the per-agent homes.
- * `CODING_ORCHESTRATOR_HOME` (read by `paths.ts`) redirects the
+ * `CONTROLLER_HOME` (read by `paths.ts`) redirects the
  * orchestrator home where the unified catalog lives.
  */
 function withIsolatedHomes(
@@ -33,16 +33,16 @@ function withIsolatedHomes(
     path.join(os.tmpdir(), "managed-skills-orch-")
   );
   const originalHome = process.env.HOME;
-  const originalOrchHome = process.env.CODING_ORCHESTRATOR_HOME;
+  const originalOrchHome = process.env.CONTROLLER_HOME;
   process.env.HOME = userHome;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   return run({ orchestrator: orchestratorHome, user: userHome }).finally(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     if (originalOrchHome === undefined) {
-      delete process.env.CODING_ORCHESTRATOR_HOME;
+      delete process.env.CONTROLLER_HOME;
     } else {
-      process.env.CODING_ORCHESTRATOR_HOME = originalOrchHome;
+      process.env.CONTROLLER_HOME = originalOrchHome;
     }
     rmSync(userHome, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });

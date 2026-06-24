@@ -52,7 +52,7 @@ export interface ControllerPreambleOptions {
 // PATH inside the agent's shell. The preamble inlines the absolute install
 // path so the agent can copy/paste a working command. The path is resolved
 // lazily at preamble-build time so the tests (which override
-// `CODING_ORCHESTRATOR_HOME` after module import) see the test temp home,
+// `CONTROLLER_HOME` after module import) see the test temp home,
 // not the real install path. The path is stable across rebuilds — the
 // install step is idempotent (see `controller-cli.ts`).
 

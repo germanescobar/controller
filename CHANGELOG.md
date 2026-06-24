@@ -7,26 +7,29 @@ All notable changes to this project are documented here.
 ### Changed
 
 - **Move orchestrator state out of `$HOME` and reduce macOS TCC prompts** (#223).
-  The orchestrator's home directory now lives in the platform-appropriate
-  location:
+  This is a **breaking change for existing installs**: the orchestrator's home
+  directory moved to the platform-appropriate location:
   - **macOS:** `~/Library/Application Support/Controller/`
   - **Linux:** `$XDG_STATE_HOME/Controller/` (falls back to `~/.local/state/Controller/`)
   - **Other:** legacy `~/coding-orchestrator/` until a follow-up adds a native convention
 
-  A one-shot migration runs on first launch after the upgrade, moving any
-  existing `~/coding-orchestrator/` directory into the new home in a
-  single atomic `fs.rename` and writing a `migrated-from-legacy-home.json`
-  marker so it never re-runs. The migration is silent on the client; the
-  server logs the move once.
+  If you're upgrading from a pre-223 install with state under
+  `~/coding-orchestrator/`, move that directory to the new location by hand
+  before starting the new build (see the README's "State location" section
+  for the exact `mv` per platform). The new build does not read or write
+  the old path; leaving state behind means the new build starts empty.
 
-  New env-var contract: `CONTROLLER_HOME` is the canonical override
-  (documented in the README). `CODING_ORCHESTRATOR_HOME` is kept as a
-  deprecated alias; using it logs a one-line warning. The CLI now also
-  receives `CONTROLLER_HOME` in the env injected for spawned agents, and
-  its `controller-runtime.json` lookup checks the platform-default home
-  before the legacy path. Net effect: `~/coding-orchestrator/` is no
-  longer created or read on macOS, and the new home is exempt from TCC
-  prompts because it lives under `Application Support`.
+  Env-var contract: `CONTROLLER_HOME` overrides the home for the current
+  process. There is no `CODING_ORCHESTRATOR_HOME` alias — tests and dev
+  shells set `CONTROLLER_HOME` directly. The CLI now also receives
+  `CONTROLLER_HOME` in the env injected for spawned agents, and its
+  `controller-runtime.json` lookup uses the platform-default home. Net
+  effect: `~/coding-orchestrator/` is no longer created or read on macOS,
+  and the new home is exempt from TCC prompts because it lives under
+  `Application Support`.
+
+  Dev-binary signature stability (the other half of why TCC consent
+  doesn't stick across rebuilds) is deferred to a follow-up PR.
 
 ### Added
 

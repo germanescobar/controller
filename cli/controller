@@ -91,22 +91,14 @@ async function getServerUrl() {
     const scriptPath = await fs.realpath(process.argv[1]);
     candidates.push(path.join(path.dirname(scriptPath), "..", "controller-runtime.json"));
   } catch {}
-  // 2. Explicit env-var overrides (canonical CONTROLLER_HOME wins over the
-  //    deprecated alias).
-  const overrideHome =
-    process.env.CONTROLLER_HOME?.trim() ||
-    process.env.CODING_ORCHESTRATOR_HOME?.trim();
+  // 2. Explicit CONTROLLER_HOME override.
+  const overrideHome = process.env.CONTROLLER_HOME?.trim();
   if (overrideHome) {
     candidates.push(path.join(overrideHome, "controller-runtime.json"));
   }
   // 3. Platform-default home (issue #223): macOS `Application Support`,
   //    Linux `XDG_STATE_HOME`, otherwise the legacy top-level dot-less dir.
   candidates.push(defaultHomeRuntimeFile(os, path));
-  // 4. Legacy fallback for already-installed CLIs during the migration
-  //    window. Removed in a future minor version.
-  candidates.push(
-    path.join(os.homedir(), "coding-orchestrator", "controller-runtime.json"),
-  );
 
   for (const candidate of candidates) {
     try {

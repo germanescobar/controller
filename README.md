@@ -42,14 +42,26 @@ Electron is an additional shell around the same app. In development it loads the
 
 Controller keeps all of its runtime state (project list, API keys, worktrees, session transcripts, unified skill catalog, installed CLI) in a single **Controller home** directory, resolved in this order:
 
-1. `CONTROLLER_HOME` — the canonical override. If set, everything lands under it and no migration runs.
-2. `CODING_ORCHESTRATOR_HOME` — deprecated alias (issue #223). The server logs a one-line warning and continues to use it. Set `CONTROLLER_HOME` instead.
-3. Platform default:
+1. `CONTROLLER_HOME` — the canonical override. If set, everything lands under it.
+2. Platform default:
    - **macOS** — `~/Library/Application Support/Controller/`
    - **Linux** — `$XDG_STATE_HOME/Controller/`, falling back to `~/.local/state/Controller/`
    - **Other** — `~/coding-orchestrator/` (legacy fallback; future work will add `%LOCALAPPDATA%` for Windows)
 
-On first launch after upgrading to a build that knows about the new location, the server moves any existing `~/coding-orchestrator/` directory into the new home in a single `fs.rename` (atomic on the same volume) and writes a `migrated-from-legacy-home.json` marker. Subsequent launches no-op. The migration is silent — only the server log line is emitted.
+If you're upgrading from a pre-223 install that had state under `~/coding-orchestrator/`, move the directory to the new platform-appropriate home by hand before starting the new build:
+
+```sh
+# macOS
+mv ~/coding-orchestrator ~/Library/Application\ Support/Controller
+
+# Linux (with XDG_STATE_HOME set)
+mv ~/coding-orchestrator "$XDG_STATE_HOME/Controller"
+
+# Linux (without XDG_STATE_HOME)
+mv ~/coding-orchestrator ~/.local/state/Controller
+```
+
+There is no automatic migration: the new build does not read or write the old path, so leaving state behind means the new build starts empty.
 
 ### macOS privacy prompts
 
