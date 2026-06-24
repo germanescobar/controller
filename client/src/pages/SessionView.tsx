@@ -94,6 +94,13 @@ import {
   type ToolApprovalDecision,
 } from "../api.ts";
 import { canonicalProviderId } from "../lib/provider-id.ts";
+import {
+  parseSkillTokenAtCaret,
+  removeSkillToken,
+  buildSkillHistoryText,
+  buildSkillAgentText,
+  parseSkillMarkers,
+} from "../lib/skill-picker.ts";
 import { modelProviderLabel } from "../lib/model-labels.ts";
 
 interface SessionViewProps {
@@ -1257,26 +1264,29 @@ const EventBlock = memo(function EventBlock({
   const [expanded, setExpanded] = useState(false);
   const data = event.data;
 
-  // user_message: show as chat bubble. If a skill was active, render a
-  // small `Skill: <name>` badge in the bubble header and strip the
-  // `[/skill: name] ` marker from the visible text.
+  // user_message: show as chat bubble. If one or more skills were active,
+  // render a `Skill: <name>` badge per marker (in declaration order) and
+  // strip the leading `[/skill: name]` chain from the visible text.
   if (event.type === "user_message" && data.text) {
     const attachments = (data.attachments as SessionAttachment[] | undefined) ?? [];
     const rawText = normalizeMarkdownText(data.text);
-    const skillMatch = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(rawText);
-    const skillName = skillMatch?.[1];
-    const visibleText = skillMatch ? skillMatch[2] : rawText;
+    const { skillNames, text: visibleText } = parseSkillMarkers(rawText);
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%]">
           <AttachmentStrip attachments={attachments} />
           <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-            {skillName && (
-              <div className="mb-1.5 flex justify-end">
-                <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                  <Sparkles className="h-3 w-3 text-primary" />
-                  <span>Skill: {skillName}</span>
-                </span>
+            {skillNames.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+                {skillNames.map((skillName, index) => (
+                  <span
+                    key={`${skillName}-${index}`}
+                    className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  >
+                    <Sparkles className="h-3 w-3 text-primary" />
+                    <span>Skill: {skillName}</span>
+                  </span>
+                ))}
               </div>
             )}
             <CollapsibleUserMessage text={visibleText} />
@@ -2700,12 +2710,19 @@ export function SessionView({
   // by `PreviewPanel` only while the Preview tab is visible (issue #158).
   const [previewPlaceholder, setPreviewPlaceholder] = useState<HTMLDivElement | null>(null);
   // Slash-command skills. The list is fetched for the current provider +
-  // worktree; `activeSkill` is what gets sent as `skillName` on the next
-  // message (the chip + autocomplete popover UI is driven by these).
+  // worktree; `activeSkills` is the ordered stack that gets sent on the next
+  // message (the chip row + autocomplete popover UI is driven by these). The
+  // first skill rides through the single-valued `skillName` transport; the
+  // rest ride as `[/skill: name]` markers prepended to the message text.
   const [availableSkills, setAvailableSkills] = useState<AgentSkill[]>([]);
-  const [activeSkill, setActiveSkill] = useState<AgentSkill | null>(null);
+  const [activeSkills, setActiveSkills] = useState<AgentSkill[]>([]);
   const [skillPopoverOpen, setSkillPopoverOpen] = useState(false);
   const [skillHighlightIndex, setSkillHighlightIndex] = useState(0);
+  // Caret position in the composer, used to scan the token under the caret so
+  // the `/` picker opens from any position (not only the start of the input).
+  const [caretPos, setCaretPos] = useState(0);
+  // Caret to restore after a chip is applied and the textarea value changes.
+  const pendingCaretRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -3206,7 +3223,7 @@ export function SessionView({
   useEffect(() => {
     if (!providerReady) {
       setAvailableSkills([]);
-      setActiveSkill(null);
+      setActiveSkills([]);
       return;
     }
     const cwd = activeWorktree?.path ?? project?.path ?? "";
@@ -3215,19 +3232,18 @@ export function SessionView({
       .then((skills) => {
         if (cancelled) return;
         setAvailableSkills(skills);
-        // If the active skill no longer exists in the new catalog (provider
-        // switch, worktree switch), drop it so we don't send a stale name.
-        setActiveSkill((current) => {
-          if (!current) return null;
-          return skills.some((entry) => entry.name === current.name)
-            ? current
-            : null;
-        });
+        // Drop any active skills that no longer exist in the new catalog
+        // (provider switch, worktree switch) so we don't send a stale name.
+        setActiveSkills((current) =>
+          current.filter((skill) =>
+            skills.some((entry) => entry.name === skill.name)
+          )
+        );
       })
       .catch(() => {
         if (cancelled) return;
         setAvailableSkills([]);
-        setActiveSkill(null);
+        setActiveSkills([]);
       });
     return () => {
       cancelled = true;
@@ -3695,16 +3711,19 @@ export function SessionView({
     return uploadSessionAttachments(projectId, uploads, worktreeId);
   };
 
-  // Slash-command filtering. The popover is open while the input starts
-  // with `/` and we have a list of candidate skills. Typing more after
-  // `/` narrows the list to skills whose name *starts with* the typed
-  // token; an empty filter shows every skill.
-  const skillQuery = useMemo(() => {
-    if (!message.startsWith("/")) return null;
-    const match = /^\/([A-Za-z0-9._-]*)/.exec(message);
-    if (!match) return null;
-    return { token: match[1], rest: message.slice(match[0].length) };
-  }, [message]);
+  // Slash-command filtering. The popover opens whenever the token under the
+  // caret looks like a `/<skill>` invocation (any position, not only the
+  // start of the input). Typing more after `/` narrows the list to skills
+  // whose name *starts with* the typed token; an empty filter shows every
+  // skill.
+  const skillQuery = useMemo(
+    () => parseSkillTokenAtCaret(message, caretPos),
+    [message, caretPos]
+  );
+  const isSkillActive = useCallback(
+    (skill: AgentSkill) => activeSkills.some((s) => s.name === skill.name),
+    [activeSkills]
+  );
   const filteredSkills = useMemo(() => {
     if (skillQuery === null) return [];
     // Every skill in `availableSkills` is now user-invokable. The
@@ -3732,51 +3751,66 @@ export function SessionView({
   }, [skillQuery, filteredSkills.length]);
 
   /**
-   * Promote the chosen skill to the active chip and strip its leading
-   * `/<token>` from the textarea. The chip is the single visible
-   * representation of the active skill — the textarea just shows the rest
-   * of the user's text.
+   * Add the chosen skill to the active stack and strip the in-progress
+   * `/<token>` from the textarea. Adding the same skill twice is a no-op.
+   * Returns the cleaned message so the keyboard handler can reuse it for the
+   * exact-match submit path.
    */
-  const applySkillChoice = useCallback(
-    (skill: AgentSkill) => {
-      if (skillQuery === null) return;
-      const rest = skillQuery.rest.replace(/^\s+/, "");
-      setMessage(rest);
-      setActiveSkill(skill);
+  const addSkillToStack = useCallback(
+    (skill: AgentSkill): string | null => {
+      if (skillQuery === null) return null;
+      const { message: newMessage, caret } = removeSkillToken(message, skillQuery);
+      setMessage(newMessage);
+      pendingCaretRef.current = caret;
+      setActiveSkills((prev) =>
+        prev.some((s) => s.name === skill.name) ? prev : [...prev, skill]
+      );
       setSkillPopoverOpen(false);
       textareaRef.current?.focus();
+      return newMessage;
     },
-    [skillQuery]
+    [skillQuery, message]
   );
 
-  const clearActiveSkill = useCallback(() => {
-    setActiveSkill(null);
+  const removeSkill = useCallback((index: number) => {
+    setActiveSkills((prev) => prev.filter((_, i) => i !== index));
     textareaRef.current?.focus();
   }, []);
 
-  // Submit-after-chip effect: when the user hits Enter on an exact
-  // `/<skill>` match, the keyboard handler applies the chip, sets
-  // `pendingSkillSubmit`, and React re-renders. This effect then runs
-  // after the render so `message` and `activeSkill` reflect the chip,
-  // and submits the turn in one keystroke.
+  const clearAllSkills = useCallback(() => {
+    setActiveSkills([]);
+    textareaRef.current?.focus();
+  }, []);
+
+  // Restore the caret after a chip is applied: `addSkillToStack` updates the
+  // textarea value, so the cursor must be repositioned once React re-renders.
+  useEffect(() => {
+    const pos = pendingCaretRef.current;
+    if (pos === null || !textareaRef.current) return;
+    pendingCaretRef.current = null;
+    textareaRef.current.selectionStart = pos;
+    textareaRef.current.selectionEnd = pos;
+    setCaretPos(pos);
+  }, [message]);
+
+  // Submit-after-chip effect: when the user adds a skill via an exact
+  // `/<skill>` match (or Shift+Enter), the keyboard handler adds the skill to
+  // the stack, sets `pendingSkillSubmit`, and React re-renders. This effect
+  // then runs after the render so `activeSkills` and `message` reflect the
+  // updated stack, and submits the turn in one keystroke.
   const [pendingSkillSubmit, setPendingSkillSubmit] = useState<
-    { rest: string; skill: AgentSkill } | null
+    { text: string } | null
   >(null);
   useEffect(() => {
     if (!pendingSkillSubmit) return;
-    const { rest, skill } = pendingSkillSubmit;
+    const { text } = pendingSkillSubmit;
     // Clear before submitting so a re-render from startAgentStream's
-    // state updates doesn't try to submit again.
+    // state updates doesn't try to submit again. `sendComposerMessage`
+    // validates/uploads attachments and clears the composer on success, so
+    // the add-and-submit path keeps any selected files (and the full skill
+    // stack now reflected in `activeSkills`).
     setPendingSkillSubmit(null);
-    if (rest.length === 0 && composerAttachments.length === 0) return;
-    void startAgentStream(
-      rest,
-      `[/skill: ${skill.name}] ${rest}`,
-      undefined,
-      undefined,
-      undefined,
-      undefined
-    );
+    void sendComposerMessage(text);
   }, [pendingSkillSubmit]);
 
   useEffect(() => {
@@ -3862,8 +3896,11 @@ export function SessionView({
       runOverrides?.reasoningEffort ?? selectedReasoningEffort;
     const runServiceTier = runOverrides?.serviceTier ?? selectedServiceTier;
     // For continuations the skill is whatever the queued item carried
-    // (possibly none); for fresh sends it's the active composer skill.
-    const runSkillName = runOverrides ? runOverrides.skillName : activeSkill?.name;
+    // (possibly none); for fresh sends it's the first skill in the stack — the
+    // remaining skills travel as `[/skill: name]` markers inside the message.
+    const runSkillName = runOverrides
+      ? runOverrides.skillName
+      : activeSkills[0]?.name;
 
     // Track which session this stream belongs to
     sendContextRef.current = { projectId, worktreeId, sessionId: streamSessionId };
@@ -4303,26 +4340,33 @@ export function SessionView({
     });
     setComposerAttachments([]);
     setMessage("");
-    setActiveSkill(null);
+    setActiveSkills([]);
     setSkillPopoverOpen(false);
   };
 
-  /** Local history mirror of `[/skill: name] <text>` for the transcript. */
-  const buildVisibleMessage = (text: string): string =>
-    activeSkill ? `[/skill: ${activeSkill.name}] ${text}` : text;
-
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!message.trim() && composerAttachments.length === 0) return;
+  // Validate + upload composer attachments, then start the turn with the
+  // current composer text and active-skill stack, clearing the composer on a
+  // successful start. Shared by the Send button and the picker's
+  // add-and-submit path so attachment handling can't drift between them.
+  // `textOverride` lets the picker path submit the text it just stripped the
+  // `/<token>` from without depending on `message` state timing.
+  const sendComposerMessage = async (textOverride?: string): Promise<void> => {
+    const baseText = textOverride ?? message;
+    if (!baseText.trim() && composerAttachments.length === 0) return;
     if (!validateComposerAttachments()) return;
-    const sentMessage = message.trim() || "Please use the attached files as context.";
-    const visibleMessage = buildVisibleMessage(sentMessage);
+    const rawText = baseText.trim() || "Please use the attached files as context.";
+    const skillNames = activeSkills.map((s) => s.name);
+    // `agentMessage` carries the trailing skills as markers (the first rides
+    // through `skillName`); `visibleMessage` mirrors the full marker chain for
+    // the local transcript, matching what the server persists.
+    const agentMessage = buildSkillAgentText(skillNames, rawText);
+    const visibleMessage = buildSkillHistoryText(skillNames, rawText);
     setAttachmentError(null);
     try {
       const uploadedAttachments = await uploadComposerAttachments();
       if (
         await startAgentStream(
-          sentMessage,
+          agentMessage,
           visibleMessage,
           undefined,
           undefined,
@@ -4341,6 +4385,11 @@ export function SessionView({
     }
   };
 
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    void sendComposerMessage();
+  };
+
   // Enqueue the current composer contents to run after the active turn
   // completes (the default action for Enter while streaming). Requires a
   // known session to attach to.
@@ -4350,12 +4399,14 @@ export function SessionView({
     if (!targetSessionId) return;
     if (!validateComposerAttachments()) return;
     setAttachmentError(null);
-    const sentMessage = message.trim() || "Please use the attached files as context.";
-    const visibleMessage = buildVisibleMessage(sentMessage);
+    const rawText = message.trim() || "Please use the attached files as context.";
+    const skillNames = activeSkills.map((s) => s.name);
+    const agentMessage = buildSkillAgentText(skillNames, rawText);
+    const visibleMessage = buildSkillHistoryText(skillNames, rawText);
     try {
       const uploadedAttachments = await uploadComposerAttachments();
       const input: QueuedMessageInput = {
-        text: sentMessage,
+        text: agentMessage,
         visibleText: visibleMessage,
         provider: selectedProvider,
         model: selectedModel,
@@ -4368,7 +4419,7 @@ export function SessionView({
             : undefined,
         mode: providerSupportsPlanMode ? selectedMode : "default",
         attachmentIds: uploadedAttachments.map((attachment) => attachment.id),
-        skillName: activeSkill?.name,
+        skillName: activeSkills[0]?.name,
       };
       const queued = await enqueueSessionMessage(projectId, targetSessionId, input);
       setQueue((prev) => [...prev, queued]);
@@ -4488,31 +4539,35 @@ export function SessionView({
       if (e.key === "Tab") {
         e.preventDefault();
         const choice = filteredSkills[skillHighlightIndex];
-        if (choice) applySkillChoice(choice);
+        // Already-active skills are a no-op (the picker shows them disabled).
+        // Plain Tab adds and keeps typing; Shift+Tab adds and submits.
+        if (!choice || isSkillActive(choice)) return;
+        const newMessage = addSkillToStack(choice);
+        if (e.shiftKey && newMessage !== null) {
+          setPendingSkillSubmit({ text: newMessage });
+        }
         return;
       }
       if (e.key === "Enter" && skillQuery !== null) {
         e.preventDefault();
         const choice = filteredSkills[skillHighlightIndex];
-        // When the typed `/<token>` is an exact (case-insensitive)
-        // match for a known skill, Enter both applies the chip and
-        // submits the turn in a single keystroke — that's the
-        // documented `/skill text` flow. Partial matches (fuzzy picks)
-        // only set the chip, so the user can keep typing after the
-        // autocompleted prefix and submit on a follow-up Enter.
+        if (!choice || isSkillActive(choice)) return;
+        // Enter adds the highlighted skill to the stack. It also submits the
+        // turn in the same keystroke when the typed `/<token>` is an exact
+        // (case-insensitive) match for a known skill — the documented
+        // `/skill text` flow — or when the user holds Shift. Partial matches
+        // only add the chip, so the user can keep typing (e.g. to stack a
+        // second skill) and submit on a follow-up Enter.
         const exactMatch = filteredSkills.some(
           (entry) =>
             entry.name.toLowerCase() === skillQuery.token.toLowerCase()
         );
-        if (exactMatch && choice) {
-          const rest = skillQuery.rest.replace(/^\s+/, "");
-          // Apply the chip immediately so the bubble picks up the
-          // `[/skill: name] <rest>` marker on render, and queue the
-          // submit for the post-render effect (see `pendingSkillSubmit`).
-          applySkillChoice(choice);
-          setPendingSkillSubmit({ rest, skill: choice });
-        } else if (choice) {
-          applySkillChoice(choice);
+        // Add the chip immediately so the bubble picks up the marker chain on
+        // render, and queue the submit for the post-render effect (see
+        // `pendingSkillSubmit`) once `activeSkills` reflects the new skill.
+        const newMessage = addSkillToStack(choice);
+        if ((exactMatch || e.shiftKey) && newMessage !== null) {
+          setPendingSkillSubmit({ text: newMessage });
         }
         return;
       }
@@ -5130,20 +5185,24 @@ export function SessionView({
 
               {/* Pending user message */}
               {pendingMessage && showPendingMessage && (() => {
-                const pendingMatch = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(pendingMessage);
-                const pendingSkillName = pendingMatch?.[1];
-                const pendingVisible = pendingMatch ? pendingMatch[2] : pendingMessage;
+                const { skillNames: pendingSkillNames, text: pendingVisible } =
+                  parseSkillMarkers(pendingMessage);
                 return (
                 <div className="flex justify-end mt-4">
                   <div className="max-w-[85%]">
                     <AttachmentStrip attachments={pendingAttachments} />
                     <div className="rounded-2xl bg-secondary px-4 py-3 text-sm">
-                      {pendingSkillName && (
-                        <div className="mb-1.5 flex justify-end">
-                          <span className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                            <Sparkles className="h-3 w-3 text-primary" />
-                            <span>Skill: {pendingSkillName}</span>
-                          </span>
+                      {pendingSkillNames.length > 0 && (
+                        <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+                          {pendingSkillNames.map((skillName, index) => (
+                            <span
+                              key={`${skillName}-${index}`}
+                              className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+                            >
+                              <Sparkles className="h-3 w-3 text-primary" />
+                              <span>Skill: {skillName}</span>
+                            </span>
+                          ))}
                         </div>
                       )}
                       <CollapsibleUserMessage text={pendingVisible} />
@@ -5386,24 +5445,36 @@ export function SessionView({
                       event.currentTarget.value = "";
                     }}
                   />
-                  {activeSkill && !skillPopoverOpen && (
+                  {activeSkills.length > 0 && !skillPopoverOpen && (
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                      <span
-                        data-testid="active-skill-chip"
-                        className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-1 text-xs font-medium text-foreground"
-                        title={activeSkill.description || activeSkill.name}
-                      >
-                        <Sparkles className="h-3 w-3 text-primary" />
-                        <span>/{activeSkill.name}</span>
+                      {activeSkills.map((skill, index) => (
+                        <span
+                          key={skill.name}
+                          data-testid="active-skill-chip"
+                          className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-1 text-xs font-medium text-foreground"
+                          title={skill.description || skill.name}
+                        >
+                          <Sparkles className="h-3 w-3 text-primary" />
+                          <span>/{skill.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => removeSkill(index)}
+                            className="ml-1 flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                            aria-label={`Remove skill ${skill.name}`}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
+                      {activeSkills.length > 1 && (
                         <button
                           type="button"
-                          onClick={clearActiveSkill}
-                          className="ml-1 flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                          aria-label="Clear active skill"
+                          onClick={clearAllSkills}
+                          className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                         >
-                          <X className="h-3 w-3" />
+                          Clear all
                         </button>
-                      </span>
+                      )}
                     </div>
                   )}
                   <div className="relative">
@@ -5412,6 +5483,7 @@ export function SessionView({
                       value={message}
                       onChange={(e) => {
                         setMessage(e.target.value);
+                        setCaretPos(e.target.selectionStart ?? e.target.value.length);
                         // Typing in the composer of the originating
                         // session signals "I want to keep working
                         // here" — cancel any pending auto-advance
@@ -5431,6 +5503,9 @@ export function SessionView({
                         }
                       }}
                       onKeyDown={handleKeyDown}
+                      onSelect={(e) =>
+                        setCaretPos(e.currentTarget.selectionStart ?? 0)
+                      }
                       placeholder={
                         steerInProgress
                           ? "Steering…"
@@ -5460,16 +5535,22 @@ export function SessionView({
                           Skills
                         </div>
                         <div className="max-h-64 overflow-y-auto">
-                          {filteredSkills.map((entry, index) => (
+                          {filteredSkills.map((entry, index) => {
+                            const active = isSkillActive(entry);
+                            return (
                             <button
                               key={entry.path}
                               type="button"
                               role="option"
                               aria-selected={index === skillHighlightIndex}
-                              onClick={() => applySkillChoice(entry)}
+                              aria-disabled={active}
+                              disabled={active}
+                              onClick={() => addSkillToStack(entry)}
                               onMouseEnter={() => setSkillHighlightIndex(index)}
                               className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-                                index === skillHighlightIndex
+                                active
+                                  ? "cursor-not-allowed opacity-50"
+                                  : index === skillHighlightIndex
                                   ? "bg-accent text-accent-foreground"
                                   : "text-popover-foreground hover:bg-accent/60"
                               }`}
@@ -5481,6 +5562,11 @@ export function SessionView({
                                   <Badge variant="outline" className="text-[10px]">
                                     {entry.scope}
                                   </Badge>
+                                  {active && (
+                                    <span className="text-[10px] font-normal text-muted-foreground">
+                                      added
+                                    </span>
+                                  )}
                                 </div>
                                 {entry.description && (
                                   <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
@@ -5489,14 +5575,15 @@ export function SessionView({
                                 )}
                               </div>
                             </button>
-                          ))}
+                            );
+                          })}
                         </div>
                         <div className="mt-1 flex items-center justify-between border-t border-border/60 px-2 py-1 text-[10px] text-muted-foreground">
                           <span>
                             <Kbd>↑</Kbd> <Kbd>↓</Kbd> to navigate
                           </span>
                           <span>
-                            <Kbd>Tab</Kbd> / <Kbd>Enter</Kbd> to select · <Kbd>Esc</Kbd> to dismiss
+                            <Kbd>Tab</Kbd> to add · <Kbd>⇧Enter</Kbd> to add &amp; send · <Kbd>Esc</Kbd> to dismiss
                           </span>
                         </div>
                       </div>
