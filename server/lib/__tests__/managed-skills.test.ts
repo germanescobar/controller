@@ -244,8 +244,14 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       cliCommandRegex(cliPath, "sessions start <project> --worktree <worktreeId>")
     );
     // Notes that `<project>` accepts an id or a human name, and how to discover it.
+    // The path is derived from the CLI itself so it follows the install.
     assert.match(worktrees, /Picking a project/);
-    assert.match(worktrees, /jq -r '\.\[\]\.name' ~\/.coding-orchestrator\/projects\.json/);
+    assert.match(worktrees, /PROJECTS_JSON=/);
+    assert.doesNotMatch(
+      worktrees,
+      /~\/\.coding-orchestrator\/projects\.json/,
+      "Picking-a-project snippet must not reference the stale home-dir path"
+    );
     // Reminds callers that `--message` must be the last flag, since the
     // parser rejects reserved flags that appear after it.
     assert.match(worktrees, /--message\` must be \*\*last\*\* on the command line/);
