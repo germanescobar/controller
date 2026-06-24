@@ -1,5 +1,15 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { Archive, ArrowRight, Menu, Pin, PinOff, X } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import {
   archiveSession,
@@ -175,6 +185,7 @@ export function App() {
   // (S, Esc, manual nav, unmount). See issue #104.
   const [pendingFocusAdvance, setPendingFocusAdvance] =
     useState<PendingFocusAdvance | null>(null);
+  const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false);
   const pendingFocusAdvanceRef = useRef<PendingFocusAdvance | null>(null);
   const advanceTimerRef = useRef<number | null>(null);
   const advanceToastIdRef = useRef<string | number | null>(null);
@@ -415,7 +426,12 @@ export function App() {
     }
   };
 
-  const handleArchiveCurrentSession = async () => {
+  const handleArchiveCurrentSession = () => {
+    if (activeView.page !== "session" || !activeView.sessionId) return;
+    setArchiveConfirmOpen(true);
+  };
+
+  const confirmArchiveCurrentSession = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
     const { projectId, worktreeId, sessionId } = activeView;
 
@@ -764,6 +780,26 @@ export function App() {
 
         <StatusBar />
       </main>
+
+      <AlertDialog open={archiveConfirmOpen} onOpenChange={setArchiveConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive this session?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You can find it later in the archived sessions view.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={confirmArchiveCurrentSession}
+            >
+              Archive
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
