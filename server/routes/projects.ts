@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getProjects, addProject, updateProject, deleteProject } from "../lib/projects.js";
 import { ensureMainWorktree } from "../lib/worktrees.js";
+import { emitProjectEvent } from "../lib/events.js";
 
 export const projectsRouter = Router();
 
@@ -23,6 +24,9 @@ projectsRouter.post("/", async (req, res) => {
     }
     const project = await addProject(name, path, setupCommands);
     await ensureMainWorktree(project);
+    // Sidebar in other windows refreshes the project list when it sees
+    // this (issue #210).
+    emitProjectEvent({ type: "project_added", project });
     res.status(201).json(project);
   } catch (err) {
     console.error("POST /projects error:", err);
@@ -38,6 +42,7 @@ projectsRouter.put("/:id", async (req, res) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    emitProjectEvent({ type: "project_updated", project: updated });
     res.json(updated);
   } catch (err) {
     console.error("PUT /projects/:id error:", err);
@@ -52,6 +57,7 @@ projectsRouter.delete("/:id", async (req, res) => {
       res.status(404).json({ error: "Project not found" });
       return;
     }
+    emitProjectEvent({ type: "project_removed", projectId: req.params.id });
     res.json({ ok: true });
   } catch (err) {
     console.error("DELETE /projects error:", err);

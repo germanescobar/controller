@@ -77,6 +77,25 @@ export type WorktreeCreateEvent =
   | { type: "error"; text: string }
   | { type: "done"; exitCode: number; worktree?: Worktree };
 
+/**
+ * Project-scoped lifecycle event delivered by the
+ * `GET /api/projects/:projectId/events` SSE stream (issue #210).
+ *
+ * Mirrors the server's `ProjectEvent` union. The app shell subscribes
+ * to this stream and refetches the relevant slice of state when an
+ * event lands (instead of polling).
+ */
+export type ProjectEvent =
+  | { type: "worktree_added"; projectId: string; worktree: Worktree }
+  | { type: "worktree_removed"; projectId: string; worktreeId: string }
+  | { type: "worktree_updated"; projectId: string; worktree: Worktree }
+  | { type: "session_added"; projectId: string; worktreeId: string; sessionId: string }
+  | { type: "session_removed"; projectId: string; worktreeId: string; sessionId: string }
+  | { type: "session_updated"; projectId: string; worktreeId: string; sessionId: string }
+  | { type: "project_added"; project: Project }
+  | { type: "project_updated"; project: Project }
+  | { type: "project_removed"; projectId: string };
+
 export interface WorktreeSetupLogResponse {
   log: string | null;
   exitCode: number | null;
@@ -1060,6 +1079,34 @@ export function startSession(
   return new EventSource(
     `${BASE}/projects/${projectId}/sessions/stream?${params}`
   );
+}
+
+/**
+ * Subscribe to project-scoped lifecycle events (issue #210).
+ *
+ * Returns the raw `EventSource` so callers can `.close()` it. The
+ * server emits heartbeats as `: ping` comment lines; the browser's
+ * `EventSource` ignores those, but a stalled connection will trigger
+ * the standard `error` event, which the app shell uses to retry with
+ * backoff.
+ */
+export function subscribeProjectEvents(
+  projectId: string,
+  onEvent: (event: ProjectEvent) => void
+): EventSource {
+  const source = new EventSource(
+    `${BASE}/projects/${projectId}/events`
+  );
+  source.addEventListener("message", (ev: MessageEvent) => {
+    try {
+      const parsed = JSON.parse(ev.data) as ProjectEvent;
+      onEvent(parsed);
+    } catch {
+      // Ignore malformed payloads — the server is the source of truth
+      // and a refetch will reconcile.
+    }
+  });
+  return source;
 }
 
 export async function uploadSessionAttachments(

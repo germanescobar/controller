@@ -64,6 +64,11 @@ import {
   stopSessionRuntime,
 } from "../lib/session-runtime.js";
 import {
+  emitSessionAdded,
+  emitSessionRemoved,
+  emitSessionUpdated,
+} from "../lib/events.js";
+import {
   enqueue as enqueueMessage,
   listQueue,
   removeFromQueue,
@@ -1098,6 +1103,13 @@ async function handleSessionStream(
       lastActiveAt: new Date().toISOString(),
       status: "active",
     });
+    // Notify other clients (sidebar in another window) about the new
+    // session so they can add it to the tree without polling. Only
+    // emitted for brand-new sessions — resumed sessions don't need a
+    // sidebar insert (issue #210).
+    if (!existing) {
+      emitSessionAdded(req.params.projectId, worktreeId, sessionId);
+    }
     // Notify the client if the session was auto-pinned so it can update
     // the focus-queue indicator without a full page reload.
     if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
@@ -1713,6 +1725,9 @@ async function streamCodexPlanSession(
       lastActiveAt: new Date().toISOString(),
       status: "active",
     });
+    if (!existing) {
+      emitSessionAdded(projectId, worktreeId, sessionId);
+    }
     if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
       sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
     }
@@ -2318,6 +2333,10 @@ function registerFocusActionRoute(
       return;
     }
 
+    // Sidebar in other windows watches for `session_updated` to keep its
+    // focus-queue metadata in sync (issue #210).
+    emitSessionUpdated(projectId, worktree.id, sessionId);
+
     res.json(session);
   });
 }
@@ -2351,6 +2370,9 @@ sessionsRouter.post(
     // Drop any pending enqueued messages so an archived session leaves no
     // orphaned queue file behind.
     await clearQueue(req.params.sessionId);
+    // Notify the sidebar in other windows so the row disappears without
+    // polling (issue #210).
+    emitSessionRemoved(req.params.projectId, worktree.id, req.params.sessionId);
     res.json({ ok: true });
   }
 );

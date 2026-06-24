@@ -6,6 +6,25 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **App shell auto-refresh on out-of-band changes** (#210). The app
+  shell now subscribes to a project-scoped SSE stream at
+  `GET /api/projects/:projectId/events` and the sidebar refreshes
+  itself (with a 50ms debounce) when a worktree is added/removed,
+  a session is added/removed, the focus queue changes, or a setup
+  script finishes. Worktrees or sessions created via the
+  `controller` CLI from another terminal (including by an agent in
+  another session), by a second app window, or by a backgrounded
+  headless run all show up in the running app without a manual
+  refresh. Project-level events (`project_added/updated/removed`)
+  are broadcast on every project's stream so the sidebar's project
+  list refreshes when a *different* project is created, renamed,
+  or removed out of band. The bus is an in-process `EventEmitter`
+  (`server/lib/events.ts`), wired into the worktree create/delete/
+  setup handlers, the session start/archive/focus handlers, and the
+  project add/update/delete handlers. The existing per-session
+  `EventSource` in `SessionView.tsx` is unchanged — the new stream
+  is additive.
+
 - **Browser CLI: locator-style selectors + accessibility snapshot** (#170).
   The `controller browser click`/`type` commands now accept a
   `selector=` prefix in addition to plain CSS: `text=...`,

@@ -32,6 +32,12 @@ import {
   type ProjectScriptCommand,
 } from "../lib/project-scripts.js";
 import { childProcessEnv } from "../lib/shell-env.js";
+import {
+  emitSessionRemoved,
+  emitWorktreeAdded,
+  emitWorktreeRemoved,
+  emitWorktreeUpdated,
+} from "../lib/events.js";
 
 export const worktreesRouter = Router();
 
@@ -615,6 +621,12 @@ worktreesRouter.post(
         exitCode: timedOut ? -1 : exitCode,
         worktree: finalWorktree,
       });
+      // Notify other windows that the worktree's setup state changed so
+      // their sidebar can drop the "running setup" indicator without
+      // polling. `finalWorktree` is the source of truth — fall back to
+      // the pre-call worktree so the event still has the new fields if
+      // persistence failed mid-flight.
+      emitWorktreeUpdated(project.id, finalWorktree ?? worktree);
     } finally {
       activeSetupRuns.delete(runKey);
       if (!responseEnded && clientConnected) {
@@ -734,6 +746,10 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
   });
 
   emit({ type: "worktree_created", worktree });
+  // Notify other clients (sidebar in another window) that a new worktree
+  // exists. The in-stream `worktree_created` above is the per-tab signal
+  // for the worktree picker that initiated the create (issue #210).
+  emitWorktreeAdded(project.id, worktree);
 
   const scripts = await resolveProjectScripts(project.path);
   if (scripts.setup.length > 0) {
@@ -755,11 +771,24 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
       (chunk, stream) => emit({ type: "log", stream, text: chunk })
     );
 
-    await updateWorktree(worktree.id, {
+    const updated = await updateWorktree(worktree.id, {
       setupRanAt: new Date().toISOString(),
       setupExitCode: timedOut ? -1 : exitCode,
       setupLogPath,
     });
+    // Sidebar in other windows watches for `worktree_updated` to drop the
+    // "running setup" indicator without polling (issue #210). Prefer the
+    // persisted record; fall back to a synthesized copy so the event
+    // still carries the new fields if persistence failed.
+    emitWorktreeUpdated(
+      project.id,
+      updated ?? {
+        ...worktree,
+        setupRanAt: new Date().toISOString(),
+        setupExitCode: timedOut ? -1 : exitCode,
+        setupLogPath,
+      }
+    );
 
     if (timedOut) {
       emit({
@@ -817,6 +846,20 @@ worktreesRouter.delete(
 
     ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
 
+    // Notify listeners (e.g. the sidebar in another window) that the
+    // sessions on this worktree are going away, so they can drop the
+    // corresponding rows from the tree before the worktree itself is
+    // unregistered (issue #210). Best-effort: if a session file is
+    // missing or unreadable we still continue with the archive/delete.
+    try {
+      const sessionsToRemove = await getSessions(worktree.path);
+      for (const session of sessionsToRemove) {
+        emitSessionRemoved(project.id, worktree.id, session.id);
+      }
+    } catch (err) {
+      console.error("Failed to enumerate sessions before worktree delete:", err);
+    }
+
     const scripts = await resolveProjectScripts(project.path);
     if (scripts.archive.length > 0) {
       const codingAgentDir = path.join(worktree.path, ".coding-agent");
@@ -854,6 +897,7 @@ worktreesRouter.delete(
 
     await removeWorktree(worktree.id);
     await removeTerminalTabsForWorktree(project.id, worktree.id);
+    emitWorktreeRemoved(project.id, worktree.id);
     res.json({ ok: true });
   }
 );
