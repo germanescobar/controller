@@ -15,6 +15,7 @@ import {
   MANAGED_SKILL_DIRS,
   managedMarker,
 } from "../managed-skills.js";
+import { shellQuote } from "../controller-cli.js";
 
 /**
  * Run `installManagedSkills` against temp homes so the test does not touch
@@ -22,7 +23,7 @@ import {
  * `~/.claude/skills/`, `~/.codex/skills/`, `~/.anita/skills/`.
  *
  * `os.homedir()` reads `HOME`, so setting it redirects the per-agent homes.
- * `CODING_ORCHESTRATOR_HOME` (read by `paths.ts`) redirects the
+ * `CONTROLLER_HOME` (read by `paths.ts`) redirects the
  * orchestrator home where the unified catalog lives.
  */
 function withIsolatedHomes(
@@ -33,16 +34,16 @@ function withIsolatedHomes(
     path.join(os.tmpdir(), "managed-skills-orch-")
   );
   const originalHome = process.env.HOME;
-  const originalOrchHome = process.env.CODING_ORCHESTRATOR_HOME;
+  const originalOrchHome = process.env.CONTROLLER_HOME;
   process.env.HOME = userHome;
-  process.env.CODING_ORCHESTRATOR_HOME = orchestratorHome;
+  process.env.CONTROLLER_HOME = orchestratorHome;
   return run({ orchestrator: orchestratorHome, user: userHome }).finally(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     if (originalOrchHome === undefined) {
-      delete process.env.CODING_ORCHESTRATOR_HOME;
+      delete process.env.CONTROLLER_HOME;
     } else {
-      process.env.CODING_ORCHESTRATOR_HOME = originalOrchHome;
+      process.env.CONTROLLER_HOME = originalOrchHome;
     }
     rmSync(userHome, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
@@ -119,7 +120,10 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
   await withIsolatedHomes(async ({ orchestrator }) => {
     await installManagedSkills();
 
-    const cliPath = path.join(orchestrator, "bin", "controller");
+    // The body interpolates the shell-quoted CLI path so the macOS default
+    // home (which contains a space in `Application Support`) renders as a
+    // working command. Tests must match against the same quoted form.
+    const cliPath = shellQuote(path.join(orchestrator, "bin", "controller"));
 
     // Each managed skill body must render every CLI line as
     // `<cliPath> <surface> <command>`. Never a bare subcommand, never a
@@ -181,7 +185,9 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
   await withIsolatedHomes(async ({ orchestrator }) => {
     await installManagedSkills();
 
-    const cliPath = path.join(orchestrator, "bin", "controller");
+    // Quoted form, matching what the bodies interpolate. See the note on
+    // the "single `<cliPath>` convention" test above.
+    const cliPath = shellQuote(path.join(orchestrator, "bin", "controller"));
 
     const browser = readFileSync(
       unifiedSkillFile(orchestrator, "controller-browser"),

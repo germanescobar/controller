@@ -6,13 +6,15 @@ import { sessionFocusDir, sessionFocusFile } from "./paths.js";
  * Controller-owned focus-queue state for a session.
  *
  * Lives in a sidecar file under the Controller home at
- * `~/coding-orchestrator/focus/<sessionId>.json` rather than on
- * the orchestrator-owned `.coding-agent/sessions/<sessionId>.json`
- * file. After the Ada→Anita rename (#152) the `anita` CLI writes
- * its own session to `.anita/sessions/`, so the
- * `.coding-agent/sessions/<id>.json` file is Controller-only for
- * new sessions — but any future provider that re-introduces an
- * on-disk writer would silently drop unknown top-level fields,
+ * `<controllerHome>/focus/<sessionId>.json` (e.g.
+ * `~/Library/Application Support/Controller/focus/<sessionId>.json` on
+ * macOS) rather than on the orchestrator-owned
+ * `.coding-agent/sessions/<sessionId>.json` file. After the Ada→Anita
+ * rename (#152) the `anita` CLI writes its own session to
+ * `.anita/sessions/`, so the `.coding-agent/sessions/<id>.json` file
+ * is Controller-only for new sessions — but any future provider that
+ * re-introduces an on-disk writer would silently drop unknown
+ * top-level fields,
  * and legacy resumed sessions can still be co-written by the
  * agent (which falls back to `.coding-agent/sessions/`). Keeping
  * focus state in a separate Controller-owned file decouples it

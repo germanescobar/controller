@@ -27,12 +27,14 @@ export interface SessionState {
   lastActiveAt: string;
   status: string;
   // The three focus-queue fields below are populated by `getSession`
-  // and `getSessions` by merging in the Controller-owned sidecar at
-  // `~/coding-orchestrator/focus/<sessionId>.json`. They are *not*
-  // persisted on the orchestrator-owned `.coding-agent/sessions/<id>.json`
-  // file: `saveSession` strips them before writing so the session
-  // file stays in a shape any provider can round-trip. After the
-  // Ada→Anita rename (#152) the `anita` CLI writes its own session
+  // and `getSessions` by merging in the Controller-owned sidecar under
+  // `<controllerHome>/focus/<sessionId>.json` (e.g.
+  // `~/Library/Application Support/Controller/focus/<sessionId>.json` on
+  // macOS). They are *not* persisted on the orchestrator-owned
+  // `.coding-agent/sessions/<id>.json` file: `saveSession` strips them
+  // before writing so the session file stays in a shape any provider can
+  // round-trip. After the Ada→Anita rename (#152) the `anita` CLI writes
+  // its own session
   // to `.anita/sessions/`, so for new sessions the
   // `.coding-agent/sessions/<id>.json` file is Controller-only —
   // but legacy sessions can still be resumed through the agent
@@ -381,7 +383,7 @@ export async function updateSessionTitle(
   // session file should keep the shape any provider can round-trip.
   // Strip the focus fields defensively in case a future change
   // accidentally re-introduces them — focus state lives in the
-  // sidecar at `~/coding-orchestrator/focus/<sessionId>.json`.
+  // sidecar at `<controllerHome>/focus/<sessionId>.json`.
   delete session.focusPinnedAt;
   delete session.focusDoneAt;
   delete session.userUnpinned;
@@ -452,8 +454,9 @@ export async function getEvents(
  * falls back to `.coding-agent/sessions/`), and any future
  * provider that re-introduces an on-disk writer would silently
  * drop unknown fields. Focus state is persisted separately in
- * `~/coding-orchestrator/focus/<sessionId>.json` via
- * `writeSessionFocus`. See #139 / #165.
+ * `<controllerHome>/focus/<sessionId>.json` (e.g.
+ * `~/Library/Application Support/Controller/focus/<sessionId>.json` on
+ * macOS) via `writeSessionFocus`. See #139 / #165.
  */
 export async function saveSession(
   projectPath: string,
@@ -464,8 +467,7 @@ export async function saveSession(
   const filePath = path.join(sessions, `${session.id}.json`);
   // Strip Controller-managed focus fields before writing so the
   // session file stays in a shape any provider can round-trip.
-  // Focus state lives separately in
-  // `~/coding-orchestrator/focus/<sessionId>.json`.
+  // Focus state lives separately in `<controllerHome>/focus/<sessionId>.json`.
   const persisted: SessionState = { ...session };
   delete persisted.focusPinnedAt;
   delete persisted.focusDoneAt;

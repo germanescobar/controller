@@ -8,7 +8,7 @@ import path from "node:path";
 
 /*
  * Issue #138: GET /setup-log and POST /run-setup for a worktree. We mount
- * the router against a temp `CODING_ORCHESTRATOR_HOME`, pre-seed a project +
+ * the router against a temp `CONTROLLER_HOME`, pre-seed a project +
  * worktree, and exercise both endpoints with raw HTTP. The setup script we
  * write is a real shell script so the success/failure paths run the real
  * `runScriptCommands` machinery.
@@ -55,8 +55,8 @@ async function withSetupEnv<T>(
   fn: (ctx: { baseUrl: string; projectId: string; worktreeId: string }) => Promise<T>
 ): Promise<T> {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-setup-test-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = homeDir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = homeDir;
 
   const projectId = "proj-1";
   const worktreeId = "wt-1";
@@ -108,8 +108,8 @@ async function withSetupEnv<T>(
     return await fn({ baseUrl, projectId, worktreeId });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(homeDir, { recursive: true, force: true });
   }
 }
@@ -138,7 +138,7 @@ test("GET /setup-log reads the captured log + exit code + ranAt after a run", as
     await fs.mkdir(codingAgentDir, { recursive: true });
     await fs.writeFile(path.join(codingAgentDir, "setup.log"), "hello\nworld\n");
     // Persist the matching fields on the worktree record.
-    const wtPath = path.join(process.env.CODING_ORCHESTRATOR_HOME!, "worktrees.json");
+    const wtPath = path.join(process.env.CONTROLLER_HOME!, "worktrees.json");
     const wt = JSON.parse(await fs.readFile(wtPath, "utf-8")) as Array<Record<string, unknown>>;
     wt[0] = {
       ...wt[0],
@@ -165,7 +165,7 @@ test("GET /setup-log returns null when the log file is missing on disk", async (
   await withSetupEnv(async ({ worktreePath }) => {
     const codingAgentDir = path.join(worktreePath, ".coding-agent");
     await fs.mkdir(codingAgentDir, { recursive: true });
-    const wtPath = path.join(process.env.CODING_ORCHESTRATOR_HOME!, "worktrees.json");
+    const wtPath = path.join(process.env.CONTROLLER_HOME!, "worktrees.json");
     const wt = JSON.parse(await fs.readFile(wtPath, "utf-8")) as Array<Record<string, unknown>>;
     wt[0] = {
       ...wt[0],

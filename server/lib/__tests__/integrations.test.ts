@@ -9,7 +9,7 @@ const QUERY = (name: string): Attachment => ({ kind: "query", name });
 const BEARER: Attachment = { kind: "header", name: "Authorization", prefix: "Bearer " };
 
 /*
- * The integrations store derives its file paths from CODING_ORCHESTRATOR_HOME
+ * The integrations store derives its file paths from CONTROLLER_HOME
  * (via paths.ts), so each test points it at a fresh temp dir. The module is
  * imported dynamically after the env var is set. Outside Electron, safeStorage
  * is unavailable, so secrets fall back to the plaintext envelope — which is
@@ -19,14 +19,14 @@ async function withTempHome<T>(
   fn: (mod: typeof import("../integrations.js")) => Promise<T>
 ): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "integrations-test-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = dir;
   try {
     const mod = await import(`../integrations.js?t=${Date.now()}-${Math.random()}`);
     return await fn(mod);
   } finally {
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(dir, { recursive: true, force: true });
   }
 }

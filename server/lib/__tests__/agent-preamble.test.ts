@@ -9,7 +9,7 @@ import {
   buildControllerPreamble,
   framePreambleForPrompt,
 } from "../agent-preamble.js";
-import { controllerCliInstalledPath } from "../controller-cli.js";
+import { controllerCliShellPath } from "../controller-cli.js";
 import { createConnection } from "../integrations.js";
 import { orchestratorHome } from "../paths.js";
 
@@ -19,10 +19,10 @@ async function withTempHome(
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "preamble-test-"));
   const previousHome = process.env.HOME;
   const previousUserProfile = process.env.USERPROFILE;
-  const previousOrchHome = process.env.CODING_ORCHESTRATOR_HOME;
+  const previousOrchHome = process.env.CONTROLLER_HOME;
   process.env.HOME = dir;
   process.env.USERPROFILE = dir;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  process.env.CONTROLLER_HOME = dir;
   try {
     await fn();
   } finally {
@@ -30,8 +30,8 @@ async function withTempHome(
     else process.env.HOME = previousHome;
     if (previousUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = previousUserProfile;
-    if (previousOrchHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previousOrchHome;
+    if (previousOrchHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousOrchHome;
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
@@ -194,7 +194,10 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
     await makeConnection("tavily", "cli");
 
     const preamble = await buildControllerPreamble();
-    const cliPath = controllerCliInstalledPath();
+    // The preamble inlines the shell-quoted path so the macOS default
+    // home (which contains a space in `Application Support`) renders as a
+    // working command — see `controllerCliShellPath` in controller-cli.ts.
+    const cliPath = controllerCliShellPath();
     const note = `Invoke the Controller CLI by its absolute path \`${cliPath}\` — the bare \`controller\` command is not guaranteed to be on your PATH. Copy the full path verbatim from this preamble.`;
     const expected = [
       "You are running inside Controller, a desktop orchestrator for coding agents.",
@@ -236,7 +239,10 @@ test("full preamble inlines the absolute controller CLI path so agents can copy/
   // agent's shell. The preamble must include the absolute install path so
   // agents can invoke the CLI verbatim.
   await withTempHome(async () => {
-    const cliPath = controllerCliInstalledPath();
+    // Match the shell-quoted form that the preamble interpolates, so the
+    // occurrence count and the example-command regexes below line up with
+    // what the agent actually sees in the prompt.
+    const cliPath = controllerCliShellPath();
     const escaped = escapeForRegex(cliPath);
     const preamble = await buildControllerPreamble();
     // The path is introduced once at the top of the skills intro and again

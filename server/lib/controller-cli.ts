@@ -47,6 +47,39 @@ export function controllerCliInstalledPath(): string {
   return path.join(orchestratorHome(), "bin", "controller");
 }
 
+/**
+ * The CLI's install path wrapped in single quotes for safe interpolation
+ * into shell command strings — the documented "absolute-path fallback"
+ * for providers that drop `PATH` (issue #187, issue #223 follow-up).
+ *
+ * macOS's default home is `~/Library/Application Support/Controller/`,
+ * which contains a literal space. Without quoting, an agent that copies
+ * the preamble's example command verbatim runs
+ *   `/Users/x/Library/Application Support/Controller/bin/controller …`
+ * and the shell splits at `Application`, failing before reaching the CLI.
+ * Quoting here makes the same example work on every supported platform
+ * and any `CONTROLLER_HOME` the user picks.
+ *
+ * Internal single quotes are escaped per POSIX (`'…'\''…'`) so the
+ * function is safe to use regardless of what the home resolves to. Pure
+ * path string — no shell metacharacters are interpreted; consumers that
+ * need to *execute* the path should still do so via a shell that handles
+ * quoting at the boundary (most CLI invocations through `bash -lc …` or
+ * `child_process.spawn` already do).
+ */
+export function controllerCliShellPath(): string {
+  return shellQuote(controllerCliInstalledPath());
+}
+
+/**
+ * Wrap a path in single quotes for safe interpolation into a shell
+ * command. Internal `'` are escaped as `'\''` per POSIX. Exported for
+ * testing and for any future caller that needs the same treatment.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Directory the CLI is installed to. Prepending it to PATH makes the bare
  *  `controller` command resolvable from agent and terminal shells (issue #187). */
 export function controllerCliBinDir(): string {
@@ -146,8 +179,11 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
 
 /** Best-effort environment for agents that inherit it (Claude, Anita, Codex).
  *
- *  Layers two things on top of the inherited env:
+ *  Layers three things on top of the inherited env:
  *  - `CONTROLLER_SERVER_URL` so the CLI can skip the runtime-file lookup.
+ *  - `CONTROLLER_HOME` with the resolved Controller home, so the CLI (and
+ *    any future tool) can locate state without re-implementing the
+ *    platform-aware resolution from `paths.ts` (issue #223).
  *  - `PATH` with `<orchestratorHome>/bin` prepended so a bare `controller`
  *    invocation resolves inside the agent's shell (issue #187). Existing
  *    entries are kept first and the bin dir is appended only if missing,
@@ -162,6 +198,7 @@ export function controllerAgentEnv(): Record<string, string> {
   const mergedPath = mergePathEntries(basePath, controllerCliBinDir());
   return {
     CONTROLLER_SERVER_URL: serverUrl(),
+    CONTROLLER_HOME: orchestratorHome(),
     PATH: mergedPath,
   };
 }

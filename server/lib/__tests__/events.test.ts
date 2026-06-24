@@ -8,7 +8,7 @@ import path from "node:path";
 
 /*
  * Issue #210: project-scoped event stream. We mount the new
- * `eventsRouter` against a temp `CODING_ORCHESTRATOR_HOME`, pre-seed a
+ * `eventsRouter` against a temp `CONTROLLER_HOME`, pre-seed a
  * project, subscribe two clients (one for the seeded project, one for a
  * non-existent project — expect 404), and exercise the in-process bus by
  * emitting lifecycle events from the test. The stream should filter
@@ -65,8 +65,8 @@ async function withEventsEnv<T>(
   fn: (ctx: { baseUrl: string; projectId: string }) => Promise<T>
 ): Promise<T> {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "events-test-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = homeDir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = homeDir;
 
   const projectId = "proj-1";
   await fs.writeFile(
@@ -94,8 +94,8 @@ async function withEventsEnv<T>(
     return await fn({ baseUrl, projectId });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(homeDir, { recursive: true, force: true });
   }
 }

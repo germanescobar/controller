@@ -12,12 +12,12 @@ import { apiKeysFile } from "../paths.js";
 
 function withTempHome(seed: Record<string, string>, run: () => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "api-keys-"));
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = dir;
   writeFileSync(path.join(dir, "api-keys.json"), JSON.stringify(seed, null, 2));
   return run().finally(() => {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(dir, { recursive: true, force: true });
   });
 }

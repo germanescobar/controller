@@ -11,7 +11,7 @@ import path from "node:path";
  * Issue #172: creating a worktree from the orchestrator should base off
  * `origin/<branch>` by default, falling back to the local ref when the
  * fetch fails or the remote tracking ref is unavailable. We mount the
- * router against a temp `CODING_ORCHESTRATOR_HOME`, build a real git
+ * router against a temp `CONTROLLER_HOME`, build a real git
  * repo with a fake `origin` remote, and exercise `POST /worktrees` over
  * real HTTP/SSE.
  *
@@ -128,8 +128,8 @@ async function withCreateEnv<T>(
   fn: (env: CreateEnv) => Promise<T>
 ): Promise<T> {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-create-test-"));
-  const previous = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = homeDir;
+  const previous = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = homeDir;
 
   const projectId = "proj-1";
   const projectPath = path.join(homeDir, "source");
@@ -162,8 +162,8 @@ async function withCreateEnv<T>(
     return await fn({ homeDir, projectId, projectPath, baseUrl });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (previous === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = previous;
+    if (previous === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previous;
     await fs.rm(homeDir, { recursive: true, force: true });
   }
 }
@@ -231,7 +231,7 @@ test("bases new worktree on origin/main when local main is behind", async () => 
 
     // The new worktree should be at origin/main's tip, not local main's tip.
     const newWorktreePath = path.join(
-      process.env.CODING_ORCHESTRATOR_HOME!,
+      process.env.CONTROLLER_HOME!,
       "worktrees",
       "proj-1",
       "issue-172"
@@ -283,7 +283,7 @@ test("explicit baseBranch is resolved against origin when it exists remotely", a
     // The new worktree is at origin/feature's tip, not local feature's tip.
     const newTip = await getTip(
       path.join(
-        process.env.CODING_ORCHESTRATOR_HOME!,
+        process.env.CONTROLLER_HOME!,
         "worktrees",
         "proj-1",
         "issue-172"
@@ -332,7 +332,7 @@ test("falls back to local ref when baseBranch does not exist on origin", async (
     // The new worktree is at the local-only commit.
     const newTip = await getTip(
       path.join(
-        process.env.CODING_ORCHESTRATOR_HOME!,
+        process.env.CONTROLLER_HOME!,
         "worktrees",
         "proj-1",
         "issue-172"
@@ -374,7 +374,7 @@ test("falls back to local ref when no origin remote is configured", async () => 
     // The new worktree is at the local main tip (only thing available).
     const newTip = await getTip(
       path.join(
-        process.env.CODING_ORCHESTRATOR_HOME!,
+        process.env.CONTROLLER_HOME!,
         "worktrees",
         "proj-1",
         "issue-172"
@@ -443,7 +443,7 @@ test("resolves to remote tip via FETCH_HEAD when the fetch refspec is narrow", a
     // not at the stale local feature tip.
     const newTip = await getTip(
       path.join(
-        process.env.CODING_ORCHESTRATOR_HOME!,
+        process.env.CONTROLLER_HOME!,
         "worktrees",
         "proj-1",
         "issue-172"

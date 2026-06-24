@@ -27,18 +27,20 @@ import { projectStoreDir } from "../paths.js";
 /*
  * Runs `run` against a fresh temp project directory and an isolated
  * Controller home. Focus sidecars now live under the Controller home
- * (`~/coding-orchestrator/focus/`), so each test gets its own home
- * via `CODING_ORCHESTRATOR_HOME` to keep focus state from leaking
- * between tests or into the real user directory.
+ * (`<controllerHome>/focus/`, e.g.
+ * `~/Library/Application Support/Controller/focus/` on macOS), so each
+ * test gets its own home via `CONTROLLER_HOME` (or its deprecated alias
+ * `CONTROLLER_HOME`) to keep focus state from leaking between
+ * tests or into the real user directory.
  */
 function withTempProject(run: (projectPath: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "sessions-"));
   const home = mkdtempSync(path.join(os.tmpdir(), "orch-home-"));
-  const prevHome = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = home;
+  const prevHome = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = home;
   return run(dir).finally(() => {
-    if (prevHome === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = prevHome;
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   });
@@ -85,7 +87,7 @@ test("session and event storage lives under the Controller home, not the project
 
     const store = projectStoreDir(projectPath);
     assert.ok(
-      store.startsWith(process.env.CODING_ORCHESTRATOR_HOME!),
+      store.startsWith(process.env.CONTROLLER_HOME!),
       "store must live under the Controller home"
     );
     assert.ok(

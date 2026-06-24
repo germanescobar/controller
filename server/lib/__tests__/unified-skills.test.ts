@@ -20,11 +20,11 @@ import { unifiedSkillFile } from "../paths.js";
 
 function withTempHome(run: () => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "unified-skills-"));
-  const original = process.env.CODING_ORCHESTRATOR_HOME;
-  process.env.CODING_ORCHESTRATOR_HOME = dir;
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = dir;
   return run().finally(() => {
-    if (original === undefined) delete process.env.CODING_ORCHESTRATOR_HOME;
-    else process.env.CODING_ORCHESTRATOR_HOME = original;
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
     rmSync(dir, { recursive: true, force: true });
   });
 }

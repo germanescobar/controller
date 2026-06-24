@@ -2,11 +2,51 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
+/*
+ * Centralizes every Controller-owned path on disk.
+ *
+ * The orchestrator's home directory lives in the platform-appropriate
+ * location (issue #223):
+ *
+ *   1. `process.env.CONTROLLER_HOME` — canonical override (documented in README)
+ *   2. Platform default:
+ *        macOS  → ~/Library/Application Support/Controller
+ *        Linux  → ${XDG_STATE_HOME:-~/.local/state}/Controller
+ *        other  → ~/coding-orchestrator (legacy fallback; future work will
+ *                 add a native convention for Windows)
+ *
+ * macOS's `Application Support` and Linux's `XDG_STATE_HOME` are the
+ * platform-sanctioned homes for app state; neither triggers TCC prompts.
+ *
+ * Pre-223 installs had state in `~/coding-orchestrator/`. There is no
+ * automatic migration — users with an existing install move the directory
+ * to the new home by hand before starting the new build (see the README).
+ * The path is computed the same way everywhere, so as long as the move
+ * lands the contents at the new location, the server picks them up.
+ */
+
 export function orchestratorHome(): string {
-  return (
-    process.env.CODING_ORCHESTRATOR_HOME ??
-    path.join(os.homedir(), "coding-orchestrator")
-  );
+  const override = process.env.CONTROLLER_HOME?.trim();
+  if (override) return override;
+  return defaultHomeForPlatform();
+}
+
+/**
+ * Platform-appropriate default home. macOS gets `Application Support`,
+ * Linux follows `XDG_STATE_HOME`, everything else falls back to the
+ * legacy top-level dot-less directory so the change is contained.
+ */
+export function defaultHomeForPlatform(): string {
+  const platform = process.platform;
+  if (platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "Controller");
+  }
+  if (platform === "linux") {
+    const xdgState = process.env.XDG_STATE_HOME?.trim();
+    const base = xdgState && xdgState !== "" ? xdgState : path.join(os.homedir(), ".local", "state");
+    return path.join(base, "Controller");
+  }
+  return path.join(os.homedir(), "coding-orchestrator");
 }
 
 /** Ensure the orchestrator home directory exists. */
