@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Radar, Play, Sparkles, Globe2, RefreshCw, Pencil } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Radar, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -116,6 +116,19 @@ interface SessionViewProps {
   onFocusSkip?: () => void;
   onFocusExit?: () => void;
   onFocusPinnedChange?: () => void;
+  // Opens the archive confirmation dialog for the current session.
+  // Owned by the parent because it shares its `archiveConfirmOpen`
+  // state with the mobile header archive button (App.tsx) so a single
+  // dialog covers both surfaces. No-op if the parent doesn't provide it.
+  onArchive?: () => void;
+  /**
+   * Reports the live git/branch diff totals so the parent can mirror
+   * the desktop header's `+X -Y` chip in surfaces that aren't owned
+   * by this component (e.g. the mobile top header in App.tsx). The
+   * callback fires when the summary actually changes; pass `null`
+   * when there are no changes to report or no session is open.
+   */
+  onDiffSummary?: (summary: { added: number; deleted: number } | null) => void;
   // Fires after the session title is renamed so the parent can refresh
   // other views (sidebar, focus queue) that cache the title separately.
   onTitleChange?: () => void;
@@ -2632,6 +2645,8 @@ export function SessionView({
   onTitleChange,
   onFocusAdvanceAfterSend,
   focusAdvanceCountdown = null,
+  onArchive,
+  onDiffSummary,
 }: SessionViewProps) {
   const [message, setMessage] = useState("");
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
@@ -2701,6 +2716,23 @@ export function SessionView({
   const [gitDiffFiles, setGitDiffFiles] = useState<DiffFile[]>([]);
   const [gitDiffLoaded, setGitDiffLoaded] = useState(false);
   const [branchDiffFiles, setBranchDiffFiles] = useState<DiffFile[]>([]);
+  // Mirror the diff totals to the parent so it can render the same
+  // `+X -Y` chip in surfaces SessionView doesn't own (the mobile top
+  // header in App.tsx). Null when there's no session or no changes.
+  const diffSummary = useMemo(
+    () => {
+      if (!sessionId) return null;
+      const { added, deleted } = summarizeDiffFiles(
+        gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles,
+      );
+      if (added === 0 && deleted === 0) return null;
+      return { added, deleted };
+    },
+    [sessionId, gitDiffFiles, branchDiffFiles],
+  );
+  useEffect(() => {
+    onDiffSummary?.(diffSummary);
+  }, [diffSummary, onDiffSummary]);
   const [userInputDraft, setUserInputDraft] = useState<Record<string, string>>({});
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null);
@@ -4879,11 +4911,11 @@ export function SessionView({
       if (isFocusPinned) {
         await unpinSessionFocus(projectId, sessionId, worktreeId);
         setIsFocusPinned(false);
-        toast.success("Session removed from focus");
+        toast.success("Session removed from radar");
       } else {
         await pinSessionFocus(projectId, sessionId, worktreeId);
         setIsFocusPinned(true);
-        toast.success("Session added to focus");
+        toast.success("Session added to radar");
       }
       onFocusPinnedChange?.();
     } catch (err) {
@@ -4900,7 +4932,7 @@ export function SessionView({
             <span className="ml-2">
               {focusPosition && focusPosition.total > 0
                 ? `${focusPosition.current || 1} / ${focusPosition.total}`
-                : "No sessions in flight"}
+                : "No sessions on radar"}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -5049,20 +5081,33 @@ export function SessionView({
               </span>
             );
           })()}
-          {sessionId && (
-            <button
-              type="button"
-              onClick={handleHeaderFocusPin}
-              className={`rounded-md p-1.5 transition-colors ${
-                isFocusPinned
-                  ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground/50 opacity-50 hover:bg-transparent hover:text-muted-foreground/50"
-              }`}
-              title={isFocusPinned ? "Remove from in-flight" : "Add to in-flight"}
-            >
-              <Radar className="h-4 w-4" />
-            </button>
-          )}
+          <div className="ml-3 flex items-center gap-1">
+            {sessionId && (
+              <button
+                type="button"
+                onClick={handleHeaderFocusPin}
+                className={`rounded-md p-1.5 transition-colors ${
+                  isFocusPinned
+                    ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
+                title={isFocusPinned ? "Remove from Radar" : "Add to Radar"}
+              >
+                <Radar className="h-4 w-4" />
+              </button>
+            )}
+            {sessionId && onArchive && (
+              <button
+                type="button"
+                onClick={onArchive}
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                title="Archive session"
+                aria-label="Archive session"
+              >
+                <Archive className="h-4 w-4" />
+              </button>
+            )}
+          </div>
           <button
             onClick={() => setTerminalOpen(!terminalOpen)}
             className={`ml-2 rounded-md p-1.5 transition-colors ${

@@ -176,7 +176,6 @@ export function App() {
     return saved.page === "session" ? saved.projectId : null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [completedSessions, setCompletedSessions] = useState<Set<string>>(new Set());
   const [controllerMode, setControllerMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
@@ -188,6 +187,12 @@ export function App() {
   const [pendingFocusAdvance, setPendingFocusAdvance] =
     useState<PendingFocusAdvance | null>(null);
   const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false);
+  // Live diff totals mirrored up from SessionView so the mobile top
+  // header can show the same `+X -Y` chip the desktop header renders.
+  // Null while no session is open or no files have changed.
+  const [mobileDiffSummary, setMobileDiffSummary] = useState<
+    { added: number; deleted: number } | null
+  >(null);
   const pendingFocusAdvanceRef = useRef<PendingFocusAdvance | null>(null);
   const advanceTimerRef = useRef<number | null>(null);
   const advanceToastIdRef = useRef<string | number | null>(null);
@@ -339,7 +344,7 @@ export function App() {
     }
     const firstItem = focusQueue[0];
     if (!firstItem) {
-      toast.info("Add a session to in-flight mode to use Controller Mode");
+      toast.info("Add a session to On radar to use Controller Mode");
       return;
     }
     setControllerMode(true);
@@ -349,7 +354,7 @@ export function App() {
   const handleControllerModeEnter = useCallback(() => {
     const firstItem = focusQueue[0];
     if (!firstItem) {
-      toast.info("Add a session to in-flight mode to use Controller Mode");
+      toast.info("Add a session to On radar to use Controller Mode");
       return;
     }
     setControllerMode(true);
@@ -381,12 +386,6 @@ export function App() {
   ) => {
     setActiveProjectId(projectId);
     setView({ page: "session", projectId, worktreeId, sessionId });
-    setCompletedSessions((prev) => {
-      if (!prev.has(sessionId)) return prev;
-      const next = new Set(prev);
-      next.delete(sessionId);
-      return next;
-    });
     closeSidebar();
   };
 
@@ -424,6 +423,15 @@ export function App() {
             item.session.id === activeView.sessionId
         )
       : -1;
+
+  // Clear the mobile diff summary whenever the active session changes
+  // (or closes). SessionView re-syncs it via `onDiffSummary` once the
+  // new session's diffs finish loading, so we just need to wipe the
+  // stale value immediately on navigation.
+  useEffect(() => {
+    setMobileDiffSummary(null);
+  }, [activeView.page === "session" ? activeView.sessionId : null]);
+
   const focusPosition =
     currentFocusIndex >= 0
       ? { current: currentFocusIndex + 1, total: focusQueue.length }
@@ -638,7 +646,6 @@ export function App() {
           activeProjectId={activeProjectId}
           activeWorktreeId={activeView.page === "session" ? activeView.worktreeId : undefined}
           activeSessionId={activeView.page === "session" ? activeView.sessionId : undefined}
-          completedSessions={completedSessions}
           onSelectProject={handleSelectProject}
           onSelectSession={handleSelectSession}
           onNewThread={handleNewThread}
@@ -676,10 +683,10 @@ export function App() {
       />
 
       <main className="flex flex-1 flex-col min-h-0 min-w-0">
-        <div className="flex h-12 shrink-0 items-center border-b border-border bg-background px-3 md:hidden">
+        <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border bg-background px-3 md:hidden">
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="rounded-md p-2 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            className="shrink-0 rounded-md border-l border-border p-2 pl-3 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
             {sidebarOpen ? (
               <X className="h-5 w-5" />
@@ -690,15 +697,21 @@ export function App() {
           <span className="ml-3 min-w-0 flex-1 truncate text-sm font-medium">
             {mobileHeaderTitle}
           </span>
+          {mobileDiffSummary && (
+            <span className="shrink-0 font-mono text-xs">
+              <span className="text-green-400/90">+{mobileDiffSummary.added}</span>{" "}
+              <span className="text-red-400/90">-{mobileDiffSummary.deleted}</span>
+            </span>
+          )}
           {activeView.page === "session" && activeView.sessionId && (
             <button
               onClick={handleToggleCurrentSessionPin}
-              className={`ml-2 shrink-0 rounded-md p-1.5 transition-colors ${
+              className={`shrink-0 rounded-md p-1.5 transition-colors ${
                 currentFocusIndex >= 0
                   ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground/50 opacity-50 hover:bg-transparent hover:text-muted-foreground/50"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
               }`}
-              title={currentFocusIndex >= 0 ? "Remove from in-flight" : "Add to in-flight"}
+              title={currentFocusIndex >= 0 ? "Remove from Radar" : "Add to Radar"}
             >
               <Radar className="h-4 w-4" />
             </button>
@@ -706,7 +719,7 @@ export function App() {
           {activeView.page === "session" && activeView.sessionId && (
             <button
               onClick={handleArchiveCurrentSession}
-              className="ml-2 shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+              className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
               title="Archive session"
             >
               <Archive className="h-4 w-4" />
@@ -773,16 +786,7 @@ export function App() {
               loadProjects();
             }}
             onBackgroundComplete={(sessionId) => {
-              setCompletedSessions((prev) => new Set(prev).add(sessionId));
               loadProjects();
-              toast.success("Session completed", {
-                description: "A background session has finished.",
-                action: {
-                  label: "View",
-                  onClick: () =>
-                    handleSelectSession(activeView.projectId, sessionId, activeView.worktreeId),
-                },
-              });
             }}
             controllerMode={controllerMode}
             focusPosition={focusPosition}
@@ -791,6 +795,8 @@ export function App() {
             onFocusExit={handleControllerModeExit}
             onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
             onTitleChange={() => setFocusRefreshKey((key) => key + 1)}
+            onArchive={handleArchiveCurrentSession}
+            onDiffSummary={setMobileDiffSummary}
             onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
             focusAdvanceCountdown={
               pendingFocusAdvance

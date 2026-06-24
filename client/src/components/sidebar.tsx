@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   RotateCw,
   AlertTriangle,
+  Play,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -66,7 +67,6 @@ interface SidebarProps {
   activeProjectId: string | null;
   activeWorktreeId?: string;
   activeSessionId?: string;
-  completedSessions?: Set<string>;
   onSelectProject: (projectId: string) => void;
   onSelectSession: (
     projectId: string,
@@ -224,7 +224,6 @@ export function Sidebar({
   onControllerModeToggle,
   focusRefreshKey,
   eventsRefreshKey,
-  completedSessions,
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
@@ -680,36 +679,30 @@ export function Sidebar({
 
   return (
     <aside className="flex h-full flex-col border-r border-border bg-sidebar" style={{ width: "100%" }}>
-      <div className="flex flex-col gap-1 p-3">
-        <button
-          onClick={onNewProject}
-          className="flex items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
-        >
-          <FolderPlus className="h-4 w-4" />
-          <span>New project</span>
-        </button>
-      </div>
-
-      <Separator />
-
       <ScrollArea className="flex-1 overflow-hidden px-3">
         <div className="flex items-center justify-between py-3">
           <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            In flight
+            On radar
           </span>
           {focusQueue.length > 0 ? (
             <button
               type="button"
               onClick={onControllerModeToggle}
               className={cn(
-                "cursor-pointer rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
                 controllerMode
-                  ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
+                  ? "bg-blue-500/15 text-blue-300 ring-1 ring-inset ring-blue-400/30 hover:bg-blue-500/25 hover:text-blue-200"
                   : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
               )}
-              title={controllerMode ? "Exit Controller Mode (E)" : "Start Controller Mode (F)"}
+              title={controllerMode ? "Exit Controller Mode" : "Start Controller Mode"}
             >
-              Controller Mode
+              <Play
+                className={cn(
+                  "h-3.5 w-3.5",
+                  controllerMode ? "text-blue-300" : "text-muted-foreground",
+                )}
+              />
+              <span>Controller Mode</span>
             </button>
           ) : null}
         </div>
@@ -717,7 +710,7 @@ export function Sidebar({
         <div className="flex flex-col gap-1 pb-3">
           {focusQueue.length === 0 ? (
             <span className="px-3 py-2 text-xs text-muted-foreground">
-              No sessions in flight
+              No sessions on radar
             </span>
           ) : (
             focusQueue.map((item) => (
@@ -781,6 +774,16 @@ export function Sidebar({
           <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             Projects
           </span>
+          <button
+            type="button"
+            onClick={onNewProject}
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+            title="New project"
+            aria-label="New project"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            <span>New</span>
+          </button>
         </div>
 
         <div className="flex flex-col gap-1 pb-3">
@@ -982,11 +985,6 @@ export function Sidebar({
                                               {session.title ||
                                                 session.id.slice(0, 8)}
                                             </span>
-                                            {completedSessions?.has(
-                                              session.id,
-                                            ) && (
-                                              <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" />
-                                            )}
                                           </span>
                                           {activeSessionIds.has(session.id) ? (
                                             <Loader2 className="hidden h-3 w-3 shrink-0 animate-spin text-muted-foreground md:inline md:group-hover/session:hidden" />
