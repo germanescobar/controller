@@ -13,6 +13,7 @@
     "build:electron-runtime": "tsc -p electron/tsconfig.json && npm run build:electron-assets",
     "build:electron-assets": "node electron/copy-assets.mjs",
     "package:electron": "npm run build && electron-builder --dir",
+    "package:electron:dist": "npm run build && electron-builder --mac --linux",
     "test": "node --import tsx --test 'server/lib/__tests__/**/*.test.ts' 'client/src/lib/**/*.test.ts' 'client/src/components/__tests__/**/*.test.tsx' 'cli/__tests__/**/*.test.mjs'"
   },
   "build": {
@@ -34,8 +35,17 @@
     "mac": {
       "icon": "build/icon.icns",
       "target": [
-        "dir"
-      ]
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
     }
   },
   "dependencies": {
