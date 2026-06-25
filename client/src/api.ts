@@ -5,6 +5,7 @@ export interface Project {
   name: string;
   path: string;
   setupCommands?: string;
+  runCommands?: string;
   createdAt: string;
 }
 
@@ -266,19 +267,20 @@ export async function fetchProjects(): Promise<Project[]> {
 export async function createProject(
   name: string,
   path: string,
-  setupCommands?: string
+  setupCommands?: string,
+  runCommands?: string
 ): Promise<Project> {
   const res = await fetch(`${BASE}/projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, path, setupCommands }),
+    body: JSON.stringify({ name, path, setupCommands, runCommands }),
   });
   return res.json();
 }
 
 export async function updateProject(
   id: string,
-  patch: { name?: string; setupCommands?: string }
+  patch: { name?: string; setupCommands?: string; runCommands?: string }
 ): Promise<Project> {
   const res = await fetch(`${BASE}/projects/${id}`, {
     method: "PUT",

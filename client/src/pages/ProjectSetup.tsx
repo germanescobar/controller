@@ -12,13 +12,19 @@ export function ProjectSetup({ onCreated, onCancel }: ProjectSetupProps) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [setupCommands, setSetupCommands] = useState("");
+  const [runCommands, setRunCommands] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !path.trim()) return;
     setLoading(true);
-    await createProject(name.trim(), path.trim(), setupCommands.trim() || undefined);
+    await createProject(
+      name.trim(),
+      path.trim(),
+      setupCommands.trim() || undefined,
+      runCommands.trim() || undefined,
+    );
     setLoading(false);
     onCreated();
   };
@@ -96,12 +102,29 @@ export function ProjectSetup({ onCreated, onCancel }: ProjectSetupProps) {
               onChange={(e) => setSetupCommands(e.target.value)}
               placeholder={"npm install\nnpm run build"}
               rows={4}
-              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
+              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
             />
             <p className="mt-1.5 text-xs text-muted-foreground">
-              Runs in each worktree directory. Available env vars:{" "}
-              <code>$WORKTREE_PATH</code>, <code>$SOURCE_PATH</code> (project root),{" "}
-              <code>$WORKTREE_NAME</code>, <code>$BRANCH</code>, <code>$PORT_OFFSET</code>.
+              Runs once when a worktree is created (e.g. install dependencies).
+              Available env vars: <code>$WORKTREE_PATH</code>,{" "}
+              <code>$SOURCE_PATH</code> (project root), <code>$WORKTREE_NAME</code>,{" "}
+              <code>$BRANCH</code>, <code>$PORT_OFFSET</code>.
+            </p>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm text-muted-foreground">
+              Run commands <span className="text-xs">(optional)</span>
+            </label>
+            <textarea
+              value={runCommands}
+              onChange={(e) => setRunCommands(e.target.value)}
+              placeholder={"npm run dev"}
+              rows={3}
+              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
+            />
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Starts the dev server for a worktree on demand. Same env vars as
+              setup commands.
             </p>
           </div>
           <div className="flex gap-2 pt-2">

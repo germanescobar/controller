@@ -17,12 +17,17 @@ projectsRouter.get("/", async (_req, res) => {
 
 projectsRouter.post("/", async (req, res) => {
   try {
-    const { name, path, setupCommands } = req.body as { name: string; path: string; setupCommands?: string };
+    const { name, path, setupCommands, runCommands } = req.body as {
+      name: string;
+      path: string;
+      setupCommands?: string;
+      runCommands?: string;
+    };
     if (!name || !path) {
       res.status(400).json({ error: "name and path are required" });
       return;
     }
-    const project = await addProject(name, path, setupCommands);
+    const project = await addProject(name, path, setupCommands, runCommands);
     await ensureMainWorktree(project);
     // Sidebar in other windows refreshes the project list when it sees
     // this (issue #210).
@@ -36,8 +41,12 @@ projectsRouter.post("/", async (req, res) => {
 
 projectsRouter.put("/:id", async (req, res) => {
   try {
-    const { name, setupCommands } = req.body as { name?: string; setupCommands?: string };
-    const updated = await updateProject(req.params.id, { name, setupCommands });
+    const { name, setupCommands, runCommands } = req.body as {
+      name?: string;
+      setupCommands?: string;
+      runCommands?: string;
+    };
+    const updated = await updateProject(req.params.id, { name, setupCommands, runCommands });
     if (!updated) {
       res.status(404).json({ error: "Project not found" });
       return;

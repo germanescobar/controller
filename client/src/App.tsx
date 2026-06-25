@@ -750,6 +750,7 @@ export function App() {
           if (!project) return null;
           return (
             <EditProject
+              key={project.id}
               project={project}
               onSaved={handleProjectSaved}
               onCancel={() => setView({ page: "session", projectId: activeView.projectId })}
