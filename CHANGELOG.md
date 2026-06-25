@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.1.0] - 2026-06-25
+
+The first public release of **Controller** (formerly Coding Orchestrator).
+This is an early preview — expect rough edges.
+
+### Highlights
+
+- **Multi-provider support** for the Anita, Codex, and Claude coding agent
+  CLIs, with per-session model selection and provider-aware defaults.
+- **Project & session management** with a sidebar UI, persistent on-disk
+  transcripts (JSON/JSONL), archive/unarchive, and inline file diffs.
+- **Real-time streaming** of agent output (text, reasoning, tool calls,
+  tool results) over SSE.
+- **Persistent embedded terminals** backed by `tmux` sessions that survive
+  browser refreshes and backend restarts.
+- **Slash-command skills** managed by the orchestrator, with a unified
+  catalog sourced from each agent's skill home.
+- **Worktrees & on-radar focus queue** (Controller Mode) for steering
+  multiple parallel sessions from one window.
+- **Desktop shell** that ships the same UI and backend as the browser app,
+  including a first-run welcome screen for picking the local backend port.
+- **App shell auto-refresh** on out-of-band worktree/session changes
+  (CLI, second window, headless run).
+- **macOS TCC hygiene**: state moved to
+  `~/Library/Application Support/Controller/`, which is exempt from
+  Files-and-Folders prompts (see the *State location* section of the
+  README for the migration step from pre-223 installs).
+
+### Downloads
+
+- **macOS** — `Controller-0.1.0-mac.zip` (Apple Silicon and Intel; see
+  the *macOS Gatekeeper* section of the README for the first-launch
+  steps on an unsigned build).
+- **Linux** — `Controller-0.1.0.AppImage` (x86_64).
+
+The macOS build is **unsigned and unnotarized** for this release; a
+follow-up will add Developer ID signing and notarization. Linux ships as
+an AppImage — make it executable (`chmod +x Controller-0.1.0.AppImage`)
+and run it; no install required.
+
+### Known gaps
+
+- No code signing / notarization (macOS shows the "unidentified developer"
+  prompt on first launch — see README for the workaround).
+- No auto-update channel.
+- No Windows build (state-location path falls back to the legacy
+  `~/coding-orchestrator/` directory on Windows; a native
+  `%LOCALAPPDATA%` path is tracked as follow-up work).
+- The `node-pty` prebuilds are pinned to the Electron version declared
+  in `package.json` (`^42.3.0`); if you run against a different
+  Electron you'll need to rebuild locally.
+
 ## [Unreleased]
 
 ### Fixed

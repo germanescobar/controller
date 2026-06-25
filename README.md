@@ -123,6 +123,69 @@ The same window shows a "Listening on port N" footer in the main app shell, with
 
 Coding Orchestrator can manage local paths, spawn agent CLIs, run terminal sessions, and store API keys. Treat the backend as privileged. For access from phones or other devices, prefer trusted networks, VPNs, or secure tunnels such as Tailscale. Do not expose the server directly to the public internet without adding an authentication layer.
 
+## Releases
+
+Tagged releases are published on the
+[GitHub Releases page](https://github.com/germanescobar/controller/releases).
+Each release attaches the distributables for that tag.
+
+### Installing a prebuilt release
+
+#### macOS (`Controller-<version>-mac.zip`)
+
+1. Download `Controller-<version>-mac.zip` from the latest release.
+2. Unzip and drag **Controller.app** into `/Applications`.
+3. On first launch macOS will block the app with an "unidentified
+   developer" warning because this release is **unsigned**. Two ways
+   through it:
+   - **Right-click → Open** on `Controller.app` the first time. The
+     Gatekeeper dialog will offer an **Open** button. Subsequent
+     launches work normally.
+   - Or strip the quarantine attribute from the terminal:
+     ```sh
+     xattr -dr com.apple.quarantine "/Applications/Controller.app"
+     ```
+4. The first launch shows the **Welcome to Controller** screen — pick
+   the local backend port (default `4500`) and click **Continue**.
+
+Code signing and notarization are tracked as follow-up work; once they
+ship, the right-click dance goes away.
+
+#### Linux (`Controller-<version>.AppImage`)
+
+The Linux build ships as an AppImage (x86_64). No install required.
+
+```sh
+chmod +x Controller-<version>.AppImage
+./Controller-<version>.AppImage
+```
+
+If your desktop doesn't integrate AppImages automatically, install
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) or
+run it from the command line as above. The backend listens on the
+port you pick on the welcome screen; the same welcome screen appears
+on first launch.
+
+### Building a release locally
+
+```sh
+# Unpacked current-OS build (fast, for smoke testing)
+npm run package:electron
+
+# Distributable artifacts (DMG + ZIP on macOS, AppImage on Linux)
+npm run package:electron:dist
+```
+
+`package:electron:dist` outputs into `release/`. On macOS you get
+`release/Controller-<version>-mac.zip` and `release/Controller-<version>-arm64.dmg`
+(or `x64.dmg` on Intel). On Linux you get
+`release/Controller-<version>.AppImage`.
+
+Cross-building Linux AppImages from macOS is supported by
+`electron-builder` but `node-pty`'s native bindings are the riskiest
+piece — the most reliable path is to build Linux artifacts on a Linux
+runner (or in CI). The macOS artifacts are best built on macOS.
+
 ## Usage
 
 1. Open the app in your browser.
