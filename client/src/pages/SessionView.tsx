@@ -23,7 +23,7 @@ import yaml from "highlight.js/lib/languages/yaml";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit, SKIP } from "unist-util-visit";
-import type { Root, Text, Link } from "mdast";
+import type { Root, Text, Link, InlineCode } from "mdast";
 import {
   CONTROLLER_URI_PATTERN,
   parseControllerUri,
@@ -675,12 +675,18 @@ const OpenConversationContext = createContext<
 const PreviewContext = createContext<PreviewActions>({ available: false, open: () => {} });
 
 /*
- * remark plugin: turn bare `controller://` URIs in text into link nodes so
- * they render through `MarkdownLink` and become clickable. remark-gfm only
- * autolinks http(s)/www/email, so these internal URIs would otherwise stay
- * inert plain text. Text inside code spans/blocks isn't visited (it lives on
- * `code`/`inlineCode` nodes, not `text`), and we skip text already nested in
- * a link.
+ * remark plugin: turn bare `controller://` URIs into link nodes so they render
+ * through `MarkdownLink` and become clickable. remark-gfm only autolinks
+ * http(s)/www/email, so these internal URIs would otherwise stay inert.
+ *
+ * Two cases are handled:
+ *  - plain `text` nodes: any embedded URIs are split out into link nodes.
+ *  - `inlineCode` nodes that are *exactly* a URI: agents routinely wrap the
+ *    link in backticks (e.g. `` `controller://...` ``), which renders as a
+ *    code span. We turn the whole span into a link, keeping the monospace
+ *    `<code>` text so it still reads like a URI.
+ * Fenced code blocks and code spans that merely contain a URI alongside other
+ * text are left untouched.
  */
 function remarkControllerLinks() {
   return (tree: Root) => {
@@ -715,6 +721,19 @@ function remarkControllerLinks() {
       parent.children.splice(index, 1, ...replacement);
       // Continue after the nodes we just inserted.
       return [SKIP, index + replacement.length];
+    });
+
+    visit(tree, "inlineCode", (node: InlineCode, index, parent) => {
+      if (!parent || index === undefined || parent.type === "link") return;
+      if (!parseControllerUri(node.value)) return;
+
+      const link: Link = {
+        type: "link",
+        url: node.value,
+        children: [{ type: "inlineCode", value: node.value }],
+      };
+      parent.children.splice(index, 1, link);
+      return SKIP;
     });
   };
 }
