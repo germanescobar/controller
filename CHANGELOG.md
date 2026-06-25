@@ -14,16 +14,12 @@ This is an early preview — expect rough edges.
 > --deep --sign -` the bundle after `electron-builder` finishes,
 > producing a properly-formed ad-hoc signature.
 >
-> **Important caveat about Gatekeeper on modern macOS:** ad-hoc-signed
-> arm64 + hardened-runtime bundles are unconditionally rejected by
-> Gatekeeper on **macOS 14.4 (Sonoma) and later (15 Sequoia, 26
-> Tahoe)** with a dead-end "Apple could not verify … Move to Trash /
-> Done" dialog that has no Open button. Right-click → Open does not
-> help on those versions, and `xattr -d com.apple.quarantine` does
-> not help either. The only practical workarounds without Developer
-> ID are: (1) launch the inner binary directly
-> (`/Applications/Controller.app/Contents/MacOS/Controller`), or
-> (2) wait for Developer ID signing in a follow-up release.
+> **Important caveat about Gatekeeper on modern macOS:** the macOS
+> app is ad-hoc-signed and not notarized. On first launch, macOS may
+> show "Controller" Not Opened with an "Apple could not verify..."
+> warning. Open **System Settings → Privacy & Security**, scroll to
+> **Security**, and click **Open Anyway** for Controller. After this
+> first approval, Controller opens normally.
 
 ### Highlights
 
@@ -65,12 +61,11 @@ and run it; no install required.
 ### Known gaps
 
 - **No Developer ID signing.** The macOS build is ad-hoc-signed and
-  not notarized. On macOS ≤ 14.3 it launches via the right-click →
-  Open flow. On macOS 14.4+ (Sonoma), 15+ (Sequoia), and 26+
-  (Tahoe), Gatekeeper rejects it on first launch with a dead-end
-  dialog. Workaround: launch the inner binary directly
-  (`/Applications/Controller.app/Contents/MacOS/Controller`) until
-  Developer ID signing lands.
+  not notarized. On first launch, macOS may block it with an "Apple
+  could not verify..." warning. Workaround: open **System Settings →
+  Privacy & Security**, scroll to **Security**, and click **Open
+  Anyway** for Controller. After this first approval, Controller opens
+  normally.
 - No auto-update channel.
 - No Windows build (state-location path falls back to the legacy
   `~/coding-orchestrator/` directory on Windows; a native
