@@ -32,10 +32,12 @@ This is an early preview — expect rough edges.
 
 ### Downloads
 
-- **macOS** — `Controller-0.1.0-mac.zip` (Apple Silicon and Intel; see
-  the *macOS Gatekeeper* section of the README for the first-launch
-  steps on an unsigned build).
-- **Linux** — `Controller-0.1.0.AppImage` (x86_64).
+- **macOS** — `Controller-0.1.0-arm64-mac.zip` and
+  `Controller-0.1.0-arm64.dmg` (Apple Silicon). For Intel Macs, build
+  from source (`npm run package:electron:dist`) or wait for v0.1.1,
+  which will add an x64 build via CI.
+- **Linux** — `Controller-0.1.0-arm64.AppImage` (aarch64). An x86_64
+  AppImage is also targeted for v0.1.1.
 
 The macOS build is **unsigned and unnotarized** for this release; a
 follow-up will add Developer ID signing and notarization. Linux ships as

@@ -131,10 +131,14 @@ Each release attaches the distributables for that tag.
 
 ### Installing a prebuilt release
 
-#### macOS (`Controller-<version>-mac.zip`)
+#### macOS (`Controller-0.1.0-arm64-mac.zip` / `.dmg`)
 
-1. Download `Controller-<version>-mac.zip` from the latest release.
-2. Unzip and drag **Controller.app** into `/Applications`.
+1. Download `Controller-0.1.0-arm64-mac.zip` (or the `.dmg`) from the
+   latest release. These are **arm64 / Apple Silicon** builds; for
+   Intel Macs build from source (`npm run package:electron:dist` on
+   an Intel Mac) or wait for v0.1.1, which will add an x64 build.
+2. Unzip and drag **Controller.app** into `/Applications` (or
+   double-click the DMG and drag it the same way).
 3. On first launch macOS will block the app with an "unidentified
    developer" warning because this release is **unsigned**. Two ways
    through it:
@@ -151,14 +155,16 @@ Each release attaches the distributables for that tag.
 Code signing and notarization are tracked as follow-up work; once they
 ship, the right-click dance goes away.
 
-#### Linux (`Controller-<version>.AppImage`)
+#### Linux (`Controller-0.1.0-arm64.AppImage`)
 
-The Linux build ships as an AppImage (x86_64). No install required.
+The Linux build ships as an AppImage (aarch64). No install required.
 
 ```sh
-chmod +x Controller-<version>.AppImage
-./Controller-<version>.AppImage
+chmod +x Controller-0.1.0-arm64.AppImage
+./Controller-0.1.0-arm64.AppImage
 ```
+
+An x86_64 AppImage is targeted for v0.1.1.
 
 If your desktop doesn't integrate AppImages automatically, install
 [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) or
@@ -176,10 +182,13 @@ npm run package:electron
 npm run package:electron:dist
 ```
 
-`package:electron:dist` outputs into `release/`. On macOS you get
-`release/Controller-<version>-mac.zip` and `release/Controller-<version>-arm64.dmg`
-(or `x64.dmg` on Intel). On Linux you get
-`release/Controller-<version>.AppImage`.
+`package:electron:dist` outputs into `release/`. By default it
+produces **arm64** artifacts (because it's running on an Apple Silicon
+Mac). On macOS you get `release/Controller-<version>-arm64-mac.zip`
+and `release/Controller-<version>-arm64.dmg`. On Linux you get
+`release/Controller-<version>-arm64.AppImage`. To force x64 builds,
+append `--x64` to the electron-builder invocation, or run on an Intel
+Mac / x86_64 Linux host.
 
 Cross-building Linux AppImages from macOS is supported by
 `electron-builder` but `node-pty`'s native bindings are the riskiest
