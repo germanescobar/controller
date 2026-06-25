@@ -139,22 +139,44 @@ Each release attaches the distributables for that tag.
    an Intel Mac) or wait for v0.1.1, which will add an x64 build.
 2. Unzip and drag **Controller.app** into `/Applications` (or
    double-click the DMG and drag it the same way).
-3. On first launch macOS will block the app with a "developer cannot
-   be verified" warning because this release is **ad-hoc signed** (not
-   Developer-ID-signed and not notarized). The bundle is signed
-   correctly, so the dialog has the standard **Open** button:
-   - **Right-click → Open** on `Controller.app` the first time. The
-     Gatekeeper dialog will offer an **Open** button. Subsequent
-     launches work normally.
-   - Or strip the quarantine attribute from the terminal:
+3. **First-launch caveat (read this):** this release is **ad-hoc
+   signed, not Developer-ID-signed, and not notarized**. Gatekeeper's
+   behavior depends on your macOS version:
+   - **macOS ≤ 14.3 (Sonoma):** double-clicking shows the regular
+     "developer cannot be verified" dialog with an **Open** button.
+     Right-click → Open also works.
+   - **macOS 14.4+ (Sonoma) and 15+ (Sequoia) and 26+ (Tahoe):**
+     double-clicking shows the dead-end **"Apple could not verify
+     Controller is free of malware… Move to Trash / Done"** dialog
+     with no Open button. Right-click → Open does not help on these
+     versions. To launch the app, run its inner binary directly:
      ```sh
-     xattr -dr com.apple.quarantine "/Applications/Controller.app"
+     /Applications/Controller.app/Contents/MacOS/Controller
+     ```
+     The bundle is fine; only the Gatekeeper assessment path is
+     broken on these macOS versions for unsigned arm64 + hardened-
+     runtime bundles. Subsequent launches (including from Spotlight
+     once the first launch has registered the binary path) work the
+     same way.
+   - If you'd rather build the launch into your shell, add an alias:
+     ```sh
+     echo 'alias controller="/Applications/Controller.app/Contents/MacOS/Controller"' >> ~/.zshrc
      ```
 4. The first launch shows the **Welcome to Controller** screen — pick
    the local backend port (default `4500`) and click **Continue**.
 
-Code signing with a real Developer ID and notarization are tracked
-as follow-up work; once they ship, the right-click dance goes away.
+> **Note on the `xattr` workaround:** the older recipe
+> ```sh
+> xattr -dr com.apple.quarantine "/Applications/Controller.app"
+> ```
+> strips the quarantine xattr but does **not** make Gatekeeper accept
+> the bundle on macOS 14.4+ — those versions reject ad-hoc + arm64 +
+> hardened-runtime bundles regardless of quarantine state. Use the
+> direct-binary launch above instead.
+
+Developer ID signing and notarization are tracked as follow-up work.
+Once we ship a Developer-ID-signed build, the dead-end dialog goes
+away on all macOS versions and the bundle becomes double-clickable.
 
 #### Linux (`Controller-0.1.0-arm64.AppImage`)
 

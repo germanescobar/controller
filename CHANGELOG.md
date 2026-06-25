@@ -9,12 +9,21 @@ This is an early preview — expect rough edges.
 
 > **Note (revised 2026-06-25):** the original `Controller-0.1.0-mac.zip`
 > and `Controller-0.1.0-arm64.dmg` were replaced on the same release
-> page with re-signed artifacts that Gatekeeper accepts on first launch
-> (right-click → Open). The fix is the new `electron/resign-mac.mjs`
-> post-build step, which `codesign --force --deep --sign -` the bundle
-> after `electron-builder` finishes, producing a properly-formed ad-hoc
-> signature. Code signing and notarization remain tracked as follow-up
-> work.
+> page with re-signed artifacts. The fix is the new
+> `electron/resign-mac.mjs` post-build step, which `codesign --force
+> --deep --sign -` the bundle after `electron-builder` finishes,
+> producing a properly-formed ad-hoc signature.
+>
+> **Important caveat about Gatekeeper on modern macOS:** ad-hoc-signed
+> arm64 + hardened-runtime bundles are unconditionally rejected by
+> Gatekeeper on **macOS 14.4 (Sonoma) and later (15 Sequoia, 26
+> Tahoe)** with a dead-end "Apple could not verify … Move to Trash /
+> Done" dialog that has no Open button. Right-click → Open does not
+> help on those versions, and `xattr -d com.apple.quarantine` does
+> not help either. The only practical workarounds without Developer
+> ID are: (1) launch the inner binary directly
+> (`/Applications/Controller.app/Contents/MacOS/Controller`), or
+> (2) wait for Developer ID signing in a follow-up release.
 
 ### Highlights
 
@@ -55,10 +64,13 @@ and run it; no install required.
 
 ### Known gaps
 
-- **Ad-hoc signing only** (macOS). Gatekeeper accepts the app via the
-  right-click → Open flow, but it is not Developer-ID-signed and not
-  notarized. Double-clicking the .app on a fresh Mac will still show a
-  "developer cannot be verified" dialog the first time.
+- **No Developer ID signing.** The macOS build is ad-hoc-signed and
+  not notarized. On macOS ≤ 14.3 it launches via the right-click →
+  Open flow. On macOS 14.4+ (Sonoma), 15+ (Sequoia), and 26+
+  (Tahoe), Gatekeeper rejects it on first launch with a dead-end
+  dialog. Workaround: launch the inner binary directly
+  (`/Applications/Controller.app/Contents/MacOS/Controller`) until
+  Developer ID signing lands.
 - No auto-update channel.
 - No Windows build (state-location path falls back to the legacy
   `~/coding-orchestrator/` directory on Windows; a native
