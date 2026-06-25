@@ -62,6 +62,21 @@ test("addProject omits run.sh when no run commands are provided", async () => {
   });
 });
 
+test("addProject preserves pre-existing scripts when fields are blank", async () => {
+  await withSandbox(async ({ projectPath }) => {
+    // Onboarding a repo that already ships Controller scripts.
+    await fs.mkdir(path.dirname(scriptPath(projectPath, "setup.sh")), { recursive: true });
+    const existing = "#!/bin/bash\nset -e\n\npnpm install\n";
+    await fs.writeFile(scriptPath(projectPath, "setup.sh"), existing);
+    await fs.writeFile(scriptPath(projectPath, "run.sh"), existing);
+
+    await addProject("demo", projectPath);
+
+    assert.equal(await fs.readFile(scriptPath(projectPath, "setup.sh"), "utf-8"), existing);
+    assert.equal(await fs.readFile(scriptPath(projectPath, "run.sh"), "utf-8"), existing);
+  });
+});
+
 test("updateProject adds, updates, and clears run.sh", async () => {
   await withSandbox(async ({ projectPath }) => {
     const project = await addProject("demo", projectPath, "npm install");

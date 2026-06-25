@@ -56,8 +56,11 @@ export async function addProject(
   };
   records.push(record);
   await writeRecords(records);
-  await syncScript(projectPath, "setup.sh", setupCommands);
-  await syncScript(projectPath, "run.sh", runCommands);
+  // Only write supplied commands. A blank field on creation means "leave it
+  // alone" — never the delete branch of syncScript, which would clobber a
+  // script that already exists in an onboarded repo.
+  if (setupCommands?.trim()) await syncScript(projectPath, "setup.sh", setupCommands);
+  if (runCommands?.trim()) await syncScript(projectPath, "run.sh", runCommands);
   return hydrate(record);
 }
 
