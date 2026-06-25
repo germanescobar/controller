@@ -140,43 +140,29 @@ Each release attaches the distributables for that tag.
 2. Unzip and drag **Controller.app** into `/Applications` (or
    double-click the DMG and drag it the same way).
 3. **First-launch caveat (read this):** this release is **ad-hoc
-   signed, not Developer-ID-signed, and not notarized**. Gatekeeper's
-   behavior depends on your macOS version:
-   - **macOS ≤ 14.3 (Sonoma):** double-clicking shows the regular
-     "developer cannot be verified" dialog with an **Open** button.
-     Right-click → Open also works.
-   - **macOS 14.4+ (Sonoma) and 15+ (Sequoia) and 26+ (Tahoe):**
-     double-clicking shows the dead-end **"Apple could not verify
-     Controller is free of malware… Move to Trash / Done"** dialog
-     with no Open button. Right-click → Open does not help on these
-     versions. To launch the app, run its inner binary directly:
-     ```sh
-     /Applications/Controller.app/Contents/MacOS/Controller
-     ```
-     The bundle is fine; only the Gatekeeper assessment path is
-     broken on these macOS versions for unsigned arm64 + hardened-
-     runtime bundles. Subsequent launches (including from Spotlight
-     once the first launch has registered the binary path) work the
-     same way.
-   - If you'd rather build the launch into your shell, add an alias:
-     ```sh
-     echo 'alias controller="/Applications/Controller.app/Contents/MacOS/Controller"' >> ~/.zshrc
-     ```
+   signed, not Developer-ID-signed, and not notarized**. On first
+   launch, macOS may show **"Controller" Not Opened** with a message
+   that Apple could not verify Controller is free of malware.
+   To allow the app:
+   1. Click **Done** on the warning dialog.
+   2. Open **System Settings**.
+   3. Go to **Privacy & Security**.
+   4. Scroll down to the **Security** section.
+   5. Click **Open Anyway** next to the message about Controller being
+      blocked.
+   6. Confirm with Touch ID, password, or administrator approval if
+      macOS asks.
+   7. Click **Open Anyway** in the final confirmation dialog.
+
+   After this first approval, Controller opens normally from Finder,
+   Spotlight, or Launchpad.
 4. The first launch shows the **Welcome to Controller** screen — pick
    the local backend port (default `4500`) and click **Continue**.
 
-> **Note on the `xattr` workaround:** the older recipe
-> ```sh
-> xattr -dr com.apple.quarantine "/Applications/Controller.app"
-> ```
-> strips the quarantine xattr but does **not** make Gatekeeper accept
-> the bundle on macOS 14.4+ — those versions reject ad-hoc + arm64 +
-> hardened-runtime bundles regardless of quarantine state. Use the
-> direct-binary launch above instead.
-
 Developer ID signing and notarization are tracked as follow-up work.
-Once we ship a Developer-ID-signed build, the dead-end dialog goes
-away on all macOS versions and the bundle becomes double-clickable.
+Once we ship a Developer-ID-signed build, the Gatekeeper warning goes
+away and the bundle becomes double-clickable without the first-launch
+approval step.
 
 #### Linux (`Controller-0.1.0-arm64.AppImage`)
 
