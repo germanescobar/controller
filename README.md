@@ -139,9 +139,10 @@ Each release attaches the distributables for that tag.
    an Intel Mac) or wait for v0.1.1, which will add an x64 build.
 2. Unzip and drag **Controller.app** into `/Applications` (or
    double-click the DMG and drag it the same way).
-3. On first launch macOS will block the app with an "unidentified
-   developer" warning because this release is **unsigned**. Two ways
-   through it:
+3. On first launch macOS will block the app with a "developer cannot
+   be verified" warning because this release is **ad-hoc signed** (not
+   Developer-ID-signed and not notarized). The bundle is signed
+   correctly, so the dialog has the standard **Open** button:
    - **Right-click → Open** on `Controller.app` the first time. The
      Gatekeeper dialog will offer an **Open** button. Subsequent
      launches work normally.
@@ -152,8 +153,8 @@ Each release attaches the distributables for that tag.
 4. The first launch shows the **Welcome to Controller** screen — pick
    the local backend port (default `4500`) and click **Continue**.
 
-Code signing and notarization are tracked as follow-up work; once they
-ship, the right-click dance goes away.
+Code signing with a real Developer ID and notarization are tracked
+as follow-up work; once they ship, the right-click dance goes away.
 
 #### Linux (`Controller-0.1.0-arm64.AppImage`)
 

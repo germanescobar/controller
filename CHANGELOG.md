@@ -7,6 +7,15 @@ All notable changes to this project are documented here.
 The first public release of **Controller** (formerly Coding Orchestrator).
 This is an early preview — expect rough edges.
 
+> **Note (revised 2026-06-25):** the original `Controller-0.1.0-mac.zip`
+> and `Controller-0.1.0-arm64.dmg` were replaced on the same release
+> page with re-signed artifacts that Gatekeeper accepts on first launch
+> (right-click → Open). The fix is the new `electron/resign-mac.mjs`
+> post-build step, which `codesign --force --deep --sign -` the bundle
+> after `electron-builder` finishes, producing a properly-formed ad-hoc
+> signature. Code signing and notarization remain tracked as follow-up
+> work.
+
 ### Highlights
 
 - **Multi-provider support** for the Anita, Codex, and Claude coding agent
@@ -46,8 +55,10 @@ and run it; no install required.
 
 ### Known gaps
 
-- No code signing / notarization (macOS shows the "unidentified developer"
-  prompt on first launch — see README for the workaround).
+- **Ad-hoc signing only** (macOS). Gatekeeper accepts the app via the
+  right-click → Open flow, but it is not Developer-ID-signed and not
+  notarized. Double-clicking the .app on a fresh Mac will still show a
+  "developer cannot be verified" dialog the first time.
 - No auto-update channel.
 - No Windows build (state-location path falls back to the legacy
   `~/coding-orchestrator/` directory on Windows; a native
