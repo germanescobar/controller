@@ -2331,6 +2331,20 @@ function FileTree({
       });
   };
 
+  // Re-fetch every directory the user currently has expanded while keeping
+  // their navigation state intact. Issue #177.
+  const refresh = useCallback(() => {
+    setError(null);
+    setEntriesByPath({});
+    setLoadingPaths(new Set());
+    entriesByPathRef.current = {};
+    loadingPathsRef.current = new Set();
+    setExpandedPaths((current) => {
+      current.forEach((path) => loadDirectory(path));
+      return current;
+    });
+  }, []);
+
   useEffect(() => {
     entriesByPathRef.current = {};
     loadingPathsRef.current = new Set();
@@ -2408,10 +2422,24 @@ function FileTree({
     });
   };
 
+  const isLoading = loadingPaths.size > 0;
+
   return (
     <div>
-      <div className="px-3 pb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-        Explorer
+      <div className="flex items-center justify-between px-3 pb-2">
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          Explorer
+        </div>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={isLoading}
+          className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-accent/20 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          title="Refresh file tree"
+          aria-label="Refresh file tree"
+        >
+          <RefreshCw className={`h-3 w-3 ${isLoading ? "animate-spin" : ""}`} />
+        </button>
       </div>
       {error ? (
         <div className="mx-2 mb-2 rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
