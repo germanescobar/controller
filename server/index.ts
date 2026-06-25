@@ -12,6 +12,7 @@ import { modelsRouter } from "./routes/models.js";
 import { apiKeysRouter } from "./routes/api-keys.js";
 import { agentsRouter } from "./routes/agents.js";
 import { skillsRouter } from "./routes/skills.js";
+import { linksRouter } from "./routes/links.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
 import { listSessionRuntimes } from "./lib/session-runtime.js";
 import { getProject } from "./lib/projects.js";
@@ -48,6 +49,7 @@ app.use("/api/agents", agentsRouter);
 app.use("/api/agents", skillsRouter);
 app.use("/api/browser", browserRouter);
 app.use("/api/integrations", integrationsRouter);
+app.use("/api/links", linksRouter);
 app.use("/api", unifiedSkillsRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session

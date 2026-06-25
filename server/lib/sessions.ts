@@ -11,6 +11,7 @@ import {
   type SessionFocus,
 } from "./focus-state.js";
 import { projectStoreDir } from "./paths.js";
+import { getProjects } from "./projects.js";
 
 export interface SessionState {
   id: string;
@@ -261,6 +262,37 @@ export async function getSession(
   delete session.userUnpinned;
   const focus = await readSessionFocus(sessionId);
   return applyFocus(session, focus);
+}
+
+export interface SessionLocation {
+  projectId: string;
+  worktreeId?: string;
+  sessionId: string;
+}
+
+/**
+ * Resolve a bare session id to the project (and worktree) that owns it.
+ *
+ * Used by the short-form `controller://session/<id>` link: the URI names only
+ * the session, so we scan every project's store for a session file with that
+ * id. `getSession` reads `<id>.json` directly, so each project is a single
+ * stat/read rather than a full directory listing. Returns null when no
+ * (non-archived) session with that id exists.
+ */
+export async function findSessionLocation(
+  sessionId: string
+): Promise<SessionLocation | null> {
+  const projects = await getProjects();
+  for (const project of projects) {
+    const session = await getSession(project.path, sessionId);
+    if (!session || session.status === "archived") continue;
+    return {
+      projectId: project.id,
+      worktreeId: session.worktreeId,
+      sessionId: session.id,
+    };
+  }
+  return null;
 }
 
 export async function archiveSession(

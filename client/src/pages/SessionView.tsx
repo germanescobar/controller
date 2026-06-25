@@ -20,8 +20,15 @@ import swift from "highlight.js/lib/languages/swift";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { visit, SKIP } from "unist-util-visit";
+import type { Root, Text, Link } from "mdast";
+import {
+  CONTROLLER_URI_PATTERN,
+  parseControllerUri,
+  type ControllerLinkTarget,
+} from "../../../shared/conversation-links.ts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -110,6 +117,10 @@ interface SessionViewProps {
   project?: Project;
   onSessionCreated: (sessionId: string) => void;
   onBackgroundComplete?: (sessionId: string) => void;
+  // Navigates to another conversation referenced by a `controller://` link in
+  // the transcript. Resolves the short form (session-only) to its owning
+  // project/worktree before navigating. No-op if the parent doesn't provide it.
+  onOpenConversation?: (target: ControllerLinkTarget) => void;
   controllerMode?: boolean;
   focusPosition?: { current: number; total: number };
   onFocusDone?: () => void;
@@ -655,7 +666,70 @@ type MobilePanel = "agent" | RightPanelTab;
 const OpenSourceReferenceContext = createContext<
   ((reference: OpenSourceReferenceOptions) => void) | undefined
 >(undefined);
+// Navigates to another conversation referenced by a `controller://` link in
+// the transcript. Provided by SessionView, wired up the tree to App's
+// session navigation. Undefined in surfaces that can't navigate.
+const OpenConversationContext = createContext<
+  ((target: ControllerLinkTarget) => void) | undefined
+>(undefined);
 const PreviewContext = createContext<PreviewActions>({ available: false, open: () => {} });
+
+/*
+ * remark plugin: turn bare `controller://` URIs in text into link nodes so
+ * they render through `MarkdownLink` and become clickable. remark-gfm only
+ * autolinks http(s)/www/email, so these internal URIs would otherwise stay
+ * inert plain text. Text inside code spans/blocks isn't visited (it lives on
+ * `code`/`inlineCode` nodes, not `text`), and we skip text already nested in
+ * a link.
+ */
+function remarkControllerLinks() {
+  return (tree: Root) => {
+    visit(tree, "text", (node: Text, index, parent) => {
+      if (!parent || index === undefined || parent.type === "link") return;
+
+      const value = node.value;
+      CONTROLLER_URI_PATTERN.lastIndex = 0;
+      if (!CONTROLLER_URI_PATTERN.test(value)) return;
+
+      const replacement: Array<Text | Link> = [];
+      let lastIndex = 0;
+      CONTROLLER_URI_PATTERN.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = CONTROLLER_URI_PATTERN.exec(value)) !== null) {
+        const start = match.index;
+        const end = start + match[0].length;
+        if (start > lastIndex) {
+          replacement.push({ type: "text", value: value.slice(lastIndex, start) });
+        }
+        replacement.push({
+          type: "link",
+          url: match[0],
+          children: [{ type: "text", value: match[0] }],
+        });
+        lastIndex = end;
+      }
+      if (lastIndex < value.length) {
+        replacement.push({ type: "text", value: value.slice(lastIndex) });
+      }
+
+      parent.children.splice(index, 1, ...replacement);
+      // Continue after the nodes we just inserted.
+      return [SKIP, index + replacement.length];
+    });
+  };
+}
+
+const remarkPlugins = [remarkGfm, remarkControllerLinks];
+
+/*
+ * react-markdown's default url sanitizer strips unknown protocols, which would
+ * blank out the `href` of our `controller://` links before `MarkdownLink` ever
+ * sees it. Preserve those URIs and defer to the default for everything else.
+ */
+function controllerUrlTransform(url: string): string {
+  if (parseControllerUri(url)) return url;
+  return defaultUrlTransform(url);
+}
 
 const PREVIEW_URL_PATTERN =
   /\b(?:https?:\/\/[^\s"'`<>)\]]+|(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)[^\s"'`<>)\]]*|file:\/\/[^\s"'`<>)\]]+)/gi;
@@ -1453,6 +1527,28 @@ function MarkdownLink({
   ...props
 }: React.AnchorHTMLAttributes<HTMLAnchorElement>) {
   const openSourceReference = useContext(OpenSourceReferenceContext);
+  const openConversation = useContext(OpenConversationContext);
+
+  const conversationTarget = parseControllerUri(href);
+  if (conversationTarget) {
+    return (
+      <a
+        href={href}
+        {...props}
+        onClick={(event) => {
+          event.preventDefault();
+          if (openConversation) {
+            openConversation(conversationTarget);
+          } else {
+            toast.error("Conversation links are not available in this view");
+          }
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
+
   const sourceReference = parseLocalCodeReference(href);
 
   if (!sourceReference) {
@@ -1526,7 +1622,7 @@ const AssistantBlock = memo(function AssistantBlock({
   return (
     <div className="space-y-2">
       <div className="prose prose-invert prose-sm max-w-none overflow-x-auto break-words">
-        <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
+        <ReactMarkdown components={markdownComponents} remarkPlugins={remarkPlugins} urlTransform={controllerUrlTransform}>
           {normalizedText}
         </ReactMarkdown>
       </div>
@@ -1564,7 +1660,7 @@ const ReasoningBlock = memo(function ReasoningBlock({ text }: { text: unknown })
       {expanded && (
         <div className="px-4 py-2 bg-background/30">
           <div className="prose prose-invert prose-sm max-w-none overflow-x-auto break-words text-muted-foreground/80 text-[13px]">
-            <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown components={markdownComponents} remarkPlugins={remarkPlugins} urlTransform={controllerUrlTransform}>
               {normalizedText}
             </ReactMarkdown>
           </div>
@@ -2636,6 +2732,7 @@ export function SessionView({
   project,
   onSessionCreated,
   onBackgroundComplete,
+  onOpenConversation,
   controllerMode = false,
   focusPosition,
   onFocusDone,
@@ -5175,6 +5272,7 @@ export function SessionView({
           >
             <ProjectRootContext.Provider value={activeWorktree?.path ?? project?.path}>
             <OpenSourceReferenceContext.Provider value={openSourceReference}>
+            <OpenConversationContext.Provider value={onOpenConversation}>
             <PreviewContext.Provider value={previewActions}>
             <div className="mx-auto max-w-3xl px-3 py-4 md:px-4 md:py-6">
               {!sessionId && events.length === 0 && streamItems.length === 0 && (
@@ -5431,6 +5529,7 @@ export function SessionView({
               <div ref={bottomRef} />
             </div>
             </PreviewContext.Provider>
+            </OpenConversationContext.Provider>
             </OpenSourceReferenceContext.Provider>
             </ProjectRootContext.Provider>
           </div>

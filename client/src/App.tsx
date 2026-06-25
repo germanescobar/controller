@@ -16,12 +16,14 @@ import {
   fetchProjects,
   markSessionFocusDone,
   pinSessionFocus,
+  resolveSessionLink,
   subscribeProjectEvents,
   unpinSessionFocus,
   type Project,
   type ProjectEvent,
   type Worktree,
 } from "./api.ts";
+import type { ControllerLinkTarget } from "../../shared/conversation-links.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
@@ -388,6 +390,33 @@ export function App() {
     setView({ page: "session", projectId, worktreeId, sessionId });
     closeSidebar();
   };
+
+  /**
+   * Open a conversation referenced by a `controller://` link in transcript
+   * output. The full form carries project/worktree/session and navigates
+   * directly; the short form names only the session, so we resolve it to its
+   * owning project/worktree first. Stale or unknown targets surface a toast
+   * rather than breaking navigation.
+   */
+  const handleOpenConversation = useCallback(
+    async (target: ControllerLinkTarget) => {
+      if (target.projectId) {
+        handleSelectSession(target.projectId, target.sessionId, target.worktreeId);
+        return;
+      }
+      try {
+        const location = await resolveSessionLink(target.sessionId);
+        if (!location) {
+          toast.error("That conversation could not be found");
+          return;
+        }
+        handleSelectSession(location.projectId, location.sessionId, location.worktreeId);
+      } catch {
+        toast.error("Failed to open that conversation");
+      }
+    },
+    []
+  );
 
   const handleNewThread = (projectId: string, worktreeId?: string) => {
     setActiveProjectId(projectId);
@@ -788,6 +817,7 @@ export function App() {
             onBackgroundComplete={(sessionId) => {
               loadProjects();
             }}
+            onOpenConversation={handleOpenConversation}
             controllerMode={controllerMode}
             focusPosition={focusPosition}
             onFocusDone={handleFocusDone}

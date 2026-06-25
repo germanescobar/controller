@@ -340,6 +340,26 @@ export async function fetchSession(
   return res.json();
 }
 
+export interface SessionLocation {
+  projectId: string;
+  worktreeId?: string;
+  sessionId: string;
+}
+
+/*
+ * Resolve a bare session id (the short-form `controller://session/<id>` link)
+ * to its owning project/worktree. Returns null when the session can't be
+ * found so the caller can fall back to a toast.
+ */
+export async function resolveSessionLink(
+  sessionId: string
+): Promise<SessionLocation | null> {
+  const res = await fetch(`${BASE}/links/sessions/${sessionId}`);
+  if (res.status === 404) return null;
+  await throwIfNotOk(res, "Failed to resolve conversation link");
+  return res.json();
+}
+
 export async function updateSessionTitle(
   projectId: string,
   sessionId: string,

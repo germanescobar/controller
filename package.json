@@ -14,7 +14,7 @@
     "build:electron-assets": "node electron/copy-assets.mjs",
     "package:electron": "npm run build && electron-builder --dir && node electron/resign-mac.mjs",
     "package:electron:dist": "npm run build && electron-builder --mac --linux && node electron/resign-mac.mjs",
-    "test": "node --import tsx --test 'server/lib/__tests__/**/*.test.ts' 'client/src/lib/**/*.test.ts' 'client/src/components/__tests__/**/*.test.tsx' 'cli/__tests__/**/*.test.mjs'"
+    "test": "node --import tsx --test 'shared/**/*.test.ts' 'server/lib/__tests__/**/*.test.ts' 'client/src/lib/**/*.test.ts' 'client/src/components/__tests__/**/*.test.tsx' 'cli/__tests__/**/*.test.mjs'"
   },
   "build": {
     "appId": "com.germanescobar.controller",
