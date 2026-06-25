@@ -77,7 +77,7 @@ export function EditProject({ project, onSaved, onCancel }: EditProjectProps) {
               onChange={(e) => setSetupCommands(e.target.value)}
               placeholder={"npm install\nnpm run build"}
               rows={5}
-              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
+              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
             />
             <p className="mt-1.5 text-xs text-muted-foreground">
               Runs once when a worktree is created (e.g. install dependencies).
@@ -95,7 +95,7 @@ export function EditProject({ project, onSaved, onCancel }: EditProjectProps) {
               onChange={(e) => setRunCommands(e.target.value)}
               placeholder={"npm run dev"}
               rows={4}
-              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
+              className="w-full rounded-lg border border-border bg-input px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring font-mono resize-y"
             />
             <p className="mt-1.5 text-xs text-muted-foreground">
               Starts the dev server for a worktree on demand. Same env vars as
