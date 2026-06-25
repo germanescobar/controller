@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
 import { projectsFile, ensureOrchestratorHome } from "./paths.js";
@@ -7,82 +8,143 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  /* Commands hydrated from `.coding-orchestrator/setup.sh` on read. The
+   * script file is the source of truth; this is not persisted in the
+   * registry. */
   setupCommands?: string;
+  /* Commands hydrated from `.coding-orchestrator/run.sh` on read. */
+  runCommands?: string;
   createdAt: string;
 }
 
-async function writeSetupScript(projectPath: string, commands: string): Promise<void> {
-  const dir = path.join(projectPath, ".coding-orchestrator");
-  await fs.mkdir(dir, { recursive: true });
-  const scriptPath = path.join(dir, "setup.sh");
-  const content = `#!/bin/bash\nset -e\n\n${commands.trimEnd()}\n`;
-  await fs.writeFile(scriptPath, content, { mode: 0o755 });
+/* Shape persisted in `projects.json`. Script commands live in the
+ * `.coding-orchestrator/*.sh` files (which is what actually runs), so they
+ * are deliberately not stored here — keeping them would let the registry
+ * drift out of sync with the files on disk. */
+interface ProjectRecord {
+  id: string;
+  name: string;
+  path: string;
+  createdAt: string;
 }
 
+const SCRIPT_HEADER = "#!/bin/bash\nset -e\n\n";
+
 export async function getProjects(): Promise<Project[]> {
-  try {
-    const content = await fs.readFile(projectsFile(), "utf-8");
-    return JSON.parse(content) as Project[];
-  } catch {
-    return [];
-  }
+  const records = await readRecords();
+  return Promise.all(records.map(hydrate));
+}
+
+export async function getProject(id: string): Promise<Project | null> {
+  const record = (await readRecords()).find((p) => p.id === id);
+  return record ? hydrate(record) : null;
 }
 
 export async function addProject(
   name: string,
   projectPath: string,
-  setupCommands?: string
+  setupCommands?: string,
+  runCommands?: string
 ): Promise<Project> {
   await ensureOrchestratorHome();
-  const projects = await getProjects();
-  const project: Project = {
+  const records = await readRecords();
+  const record: ProjectRecord = {
     id: uuidv4(),
     name,
     path: projectPath,
-    setupCommands,
     createdAt: new Date().toISOString(),
   };
-  projects.push(project);
-  await fs.writeFile(projectsFile(), JSON.stringify(projects, null, 2));
-  if (setupCommands?.trim()) {
-    await writeSetupScript(projectPath, setupCommands);
-  }
-  return project;
-}
-
-export async function getProject(id: string): Promise<Project | null> {
-  const projects = await getProjects();
-  return projects.find((p) => p.id === id) ?? null;
+  records.push(record);
+  await writeRecords(records);
+  await syncScript(projectPath, "setup.sh", setupCommands);
+  await syncScript(projectPath, "run.sh", runCommands);
+  return hydrate(record);
 }
 
 export async function updateProject(
   id: string,
-  patch: { name?: string; setupCommands?: string }
+  patch: { name?: string; setupCommands?: string; runCommands?: string }
 ): Promise<Project | null> {
-  const projects = await getProjects();
-  const idx = projects.findIndex((p) => p.id === id);
+  const records = await readRecords();
+  const idx = records.findIndex((p) => p.id === id);
   if (idx === -1) return null;
-  const updated: Project = { ...projects[idx], ...patch };
-  projects[idx] = updated;
+  if (patch.name !== undefined) records[idx].name = patch.name;
   await ensureOrchestratorHome();
-  await fs.writeFile(projectsFile(), JSON.stringify(projects, null, 2));
+  await writeRecords(records);
   if (patch.setupCommands !== undefined) {
-    if (patch.setupCommands.trim()) {
-      await writeSetupScript(updated.path, patch.setupCommands);
-    } else {
-      // Remove setup.sh if commands cleared
-      const scriptPath = path.join(updated.path, ".coding-orchestrator", "setup.sh");
-      await fs.rm(scriptPath, { force: true });
-    }
+    await syncScript(records[idx].path, "setup.sh", patch.setupCommands);
   }
-  return updated;
+  if (patch.runCommands !== undefined) {
+    await syncScript(records[idx].path, "run.sh", patch.runCommands);
+  }
+  return hydrate(records[idx]);
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
-  const projects = await getProjects();
-  const filtered = projects.filter((p) => p.id !== id);
-  if (filtered.length === projects.length) return false;
+  const records = await readRecords();
+  const filtered = records.filter((p) => p.id !== id);
+  if (filtered.length === records.length) return false;
   await ensureOrchestratorHome();
-  await fs.writeFile(projectsFile(), JSON.stringify(filtered, null, 2));
+  await writeRecords(filtered);
   return true;
+}
+
+/* Reads the persisted registry, tolerating a missing file. Older registries
+ * may still carry `setupCommands`/`runCommands` keys; they are ignored since
+ * the script files are authoritative and a later write drops them. */
+async function readRecords(): Promise<ProjectRecord[]> {
+  try {
+    const content = await fs.readFile(projectsFile(), "utf-8");
+    const parsed = JSON.parse(content) as ProjectRecord[];
+    return parsed.map((p) => ({ id: p.id, name: p.name, path: p.path, createdAt: p.createdAt }));
+  } catch {
+    return [];
+  }
+}
+
+async function writeRecords(records: ProjectRecord[]): Promise<void> {
+  await fs.writeFile(projectsFile(), JSON.stringify(records, null, 2));
+}
+
+/* Builds the public `Project` by reading the commands back from the script
+ * files on disk, so the create/edit form always reflects what will run. */
+async function hydrate(record: ProjectRecord): Promise<Project> {
+  return {
+    ...record,
+    setupCommands: await readScriptCommands(record.path, "setup.sh"),
+    runCommands: await readScriptCommands(record.path, "run.sh"),
+  };
+}
+
+/* Reads `.coding-orchestrator/<fileName>` and strips the generated
+ * `#!/bin/bash` / `set -e` header so the form shows just the commands.
+ * Returns undefined when the script does not exist. */
+async function readScriptCommands(
+  projectPath: string,
+  fileName: string
+): Promise<string | undefined> {
+  const scriptPath = path.join(projectPath, ".coding-orchestrator", fileName);
+  if (!existsSync(scriptPath)) return undefined;
+  const content = await fs.readFile(scriptPath, "utf-8");
+  const body = content.startsWith(SCRIPT_HEADER)
+    ? content.slice(SCRIPT_HEADER.length)
+    : content;
+  return body.trimEnd();
+}
+
+/* Writes a `.coding-orchestrator/<fileName>` script when commands are
+ * provided, or removes it when the commands are empty. */
+async function syncScript(
+  projectPath: string,
+  fileName: string,
+  commands: string | undefined
+): Promise<void> {
+  const scriptPath = path.join(projectPath, ".coding-orchestrator", fileName);
+  if (commands?.trim()) {
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    const content = `${SCRIPT_HEADER}${commands.trimEnd()}\n`;
+    await fs.writeFile(scriptPath, content, { mode: 0o755 });
+  } else {
+    await fs.rm(scriptPath, { force: true });
+  }
 }
