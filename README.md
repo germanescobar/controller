@@ -2,6 +2,10 @@
 
 A web-based UI for managing and interacting with AI coding agents. It provides a chat-like interface to send prompts to coding agents (such as Anita, Codex, and Claude), stream their responses in real time, and organize work into projects and sessions.
 
+📖 Full documentation lives at <https://germanescobar.github.io/controller/docs>
+(architecture, installation, state-location, macOS privacy prompts, and a
+machine-readable `/llms.txt`).
+
 ## Features
 
 - **Multi-provider support** — plug in different AI coding agents (Anita, Codex, Claude) and switch between them per session.

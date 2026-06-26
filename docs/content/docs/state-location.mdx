@@ -1,0 +1,32 @@
+---
+title: State location
+description: Where Controller keeps its runtime state, and how to migrate from a pre-223 install.
+---
+
+Controller keeps all of its runtime state (project list, API keys, worktrees,
+session transcripts, unified skill catalog, installed CLI) in a single
+**Controller home** directory, resolved in this order:
+
+1. `CONTROLLER_HOME` — the canonical override. If set, everything lands under it.
+2. Platform default:
+   - **macOS** — `~/Library/Application Support/Controller/`
+   - **Linux** — `$XDG_STATE_HOME/Controller/`, falling back to `~/.local/state/Controller/`
+   - **Other** — `~/coding-orchestrator/` (legacy fallback; future work will add `%LOCALAPPDATA%` for Windows)
+
+If you're upgrading from a pre-223 install that had state under
+`~/coding-orchestrator/`, move the directory to the new platform-appropriate
+home by hand before starting the new build:
+
+```sh
+# macOS
+mv ~/coding-orchestrator ~/Library/Application\ Support/Controller
+
+# Linux (with XDG_STATE_HOME set)
+mv ~/coding-orchestrator "$XDG_STATE_HOME/Controller"
+
+# Linux (without XDG_STATE_HOME)
+mv ~/coding-orchestrator ~/.local/state/Controller
+```
+
+There is no automatic migration: the new build does not read or write the old
+path, so leaving state behind means the new build starts empty.
