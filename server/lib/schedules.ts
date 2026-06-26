@@ -17,7 +17,8 @@ import {
  * Schedule store + tick consumer (issue #243).
  *
  * A schedule is a user-created request to start a *new* session on a worktree
- * at a future time, optionally repeating on a cron expression. Each schedule
+ * later — either once at a specific time (one-shot `runAt`) or on a recurring
+ * cron expression. The two triggers are mutually exclusive. Each schedule
  * is one JSON file under `<projectStore>/schedules/<id>.json`; a sibling
  * `index.json` carries `{ id, nextRunAt, enabled }` for every schedule so a
  * cold-start tick can find due items without reading every file.

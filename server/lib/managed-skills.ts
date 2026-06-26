@@ -554,7 +554,7 @@ is provider-dependent and not a worktree problem. Recovery steps:
 function buildSchedulesSkillBody(cliPath: string): string {
   return `---
 name: controller-schedules
-description: Schedule a session to start at a future time, optionally repeating on a cron expression, from the CLI. Use when the user asks to run a prompt later, on a recurring basis, every weekday/morning, at a specific time, or "tomorrow at 8am".
+description: Schedule a session to run later from the CLI — either once at a specific time or on a recurring cron schedule. Use when the user asks to run a prompt later, on a repeating schedule, every weekday/morning, at a specific time, or "tomorrow at 8am".
 ---
 
 ${managedMarker("controller-schedules")}
@@ -567,12 +567,12 @@ This skill is managed by the Controller app (directory name
 it like any other skill: type \`/controller-schedules <task>\` or pick it from
 the autocomplete.
 
-A **schedule** starts a *new* session on a worktree at a future time,
-optionally repeating on a cron expression. Use it when the user says things
-like "run the morning health check every weekday at 9am", "schedule this for
-tomorrow at 8am", or "kick this off in two hours". The scheduler survives
-restarts and fires on the next tick (every 30s by default) after the target
-time.
+A **schedule** starts a *new* session on a worktree later — either once at a
+specific time or on a recurring cron schedule (one trigger, not both). Use it
+when the user says things like "run the morning health check every weekday at
+9am", "schedule this for tomorrow at 8am", or "kick this off in two hours". The
+scheduler survives restarts and fires on the next tick (every 30s by default)
+after the target time.
 
 Schedules created on the user's behalf are user schedules — only create one
 when the user explicitly asks to defer or repeat work.

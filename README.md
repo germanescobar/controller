@@ -7,7 +7,7 @@ A web-based UI for managing and interacting with AI coding agents. It provides a
 - **Multi-provider support** — plug in different AI coding agents (Anita, Codex, Claude) and switch between them per session.
 - **Project management** — register local project directories and manage them from a sidebar.
 - **Session management** — create, resume, and archive coding sessions within each project. Sessions persist their event history to disk.
-- **Scheduled sessions** — schedule a session to start at a future time, optionally repeating on a cron expression, via `controller schedules` (see Usage). Schedules survive restarts and fire on the next scheduler tick after their target time.
+- **Scheduled sessions** — schedule a session to run later via `controller schedules` (see Usage): either once at a specific time or on a recurring cron schedule. Schedules survive restarts and fire on the next scheduler tick after their target time.
 - **Real-time streaming** — agent output (text, reasoning, tool calls, tool results) is streamed to the browser via SSE.
 - **Model selection** — choose which model to use for each session.
 - **Slash-command skills** — type `/<skill-name>` in the chat input to activate an installed skill for Anita, Codex, or Claude. The orchestrator is the only source of truth for slash commands; it prepends the `SKILL.md` body at send time and turns off the agent CLIs' own slash-command paths so the two never compete.
