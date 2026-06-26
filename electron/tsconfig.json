@@ -9,5 +9,6 @@
     "outDir": "../dist",
     "rootDir": ".."
   },
-  "include": ["*.ts", "../shared/*.ts"]
+  "include": ["*.ts", "../shared/*.ts"],
+  "exclude": ["../shared/**/*.test.ts", "node_modules"]
 }
