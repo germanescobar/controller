@@ -39,6 +39,7 @@ import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import { isControllerAvailable } from "@/lib/controller";
+import { formatChord, matchesEvent, parseChord } from "@/lib/shortcut-match";
 import {
   usePreviewPane,
   useActivePreviewPane,
@@ -111,6 +112,13 @@ interface SessionViewProps {
   onSessionCreated: (sessionId: string) => void;
   onBackgroundComplete?: (sessionId: string) => void;
   controllerMode?: boolean;
+  /**
+   * Effective shortcut bindings for Controller Mode chords. `null` while
+   * the settings hook is still loading. SessionView reads these so the
+   * `<Kbd>` chips and the inline "press S to stay" listener reflect the
+   * user's rebinds. See issue #235.
+   */
+  shortcutBindings?: import("../../../shared/shortcuts.ts").ShortcutBindings | null;
   focusPosition?: { current: number; total: number };
   onFocusDone?: () => void;
   onFocusSkip?: () => void;
@@ -2637,6 +2645,7 @@ export function SessionView({
   onSessionCreated,
   onBackgroundComplete,
   controllerMode = false,
+  shortcutBindings = null,
   focusPosition,
   onFocusDone,
   onFocusSkip,
@@ -3075,10 +3084,18 @@ export function SessionView({
       focusAdvanceCountdown?.sentFromSessionId === sessionId;
     if (!isOriginatingCountdown || !focusAdvanceCountdown) return;
 
+    // Mirror the central `useControllerModeShortcuts` "stay" chord so the
+    // user can cancel a pending advance with their (possibly rebound)
+    // Cmd/Ctrl+S even when focus is inside this session's composer. The
+    // central hook also fires this path, but stopping propagation here
+    // keeps the textarea free of literal `s` characters in case the
+    // event reaches us first. See issue #235.
+    const stayChord = parseChord(shortcutBindings?.controllerModeStay ?? "cmd-s");
+
     const handleStayShortcut = (event: KeyboardEvent) => {
       if (event.repeat) return;
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
-      if (event.key.toLowerCase() !== "s") return;
+      if (!stayChord) return;
+      if (!matchesEvent(stayChord, event)) return;
       event.preventDefault();
       event.stopPropagation();
       focusAdvanceCountdown.onCancel();
@@ -3086,7 +3103,7 @@ export function SessionView({
 
     window.addEventListener("keydown", handleStayShortcut, true);
     return () => window.removeEventListener("keydown", handleStayShortcut, true);
-  }, [focusAdvanceCountdown, sessionId]);
+  }, [focusAdvanceCountdown, sessionId, shortcutBindings]);
 
 
   useEffect(() => {
@@ -4940,32 +4957,32 @@ export function SessionView({
               type="button"
               onClick={onFocusSkip}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title="Next (N)"
+              title={`Next (${formatChord(shortcutBindings?.controllerModeNext ?? "cmd-n", IS_MAC)})`}
             >
               <StepForward className="h-3.5 w-3.5" />
               Next
-              <Kbd>N</Kbd>
+              <Kbd>{formatChord(shortcutBindings?.controllerModeNext ?? "cmd-n", IS_MAC)}</Kbd>
             </button>
             <button
               type="button"
               onClick={onFocusDone}
               disabled={!sessionId}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title="Mark done (D)"
+              title={`Mark done (${formatChord(shortcutBindings?.controllerModeDone ?? "cmd-d", IS_MAC)})`}
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
               Done
-              <Kbd>D</Kbd>
+              <Kbd>{formatChord(shortcutBindings?.controllerModeDone ?? "cmd-d", IS_MAC)}</Kbd>
             </button>
             <button
               type="button"
               onClick={onFocusExit}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
-              title="Exit Controller Mode (E)"
+              title={`Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "cmd-t", IS_MAC)})`}
             >
               <LogOut className="h-3.5 w-3.5" />
               Exit
-              <Kbd>E</Kbd>
+              <Kbd>{formatChord(shortcutBindings?.controllerModeToggle ?? "cmd-t", IS_MAC)}</Kbd>
             </button>
           </div>
         </div>

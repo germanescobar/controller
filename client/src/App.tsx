@@ -31,6 +31,7 @@ import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useControllerModeShortcuts } from "./lib/useControllerModeShortcuts.ts";
+import { useShortcutBindings } from "./lib/useShortcutBindings.ts";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
@@ -599,11 +600,14 @@ export function App() {
     maxWidth: 480,
   });
 
-  // Controller Mode keyboard shortcuts (N / D / F / E). While an advance is
-  // pending, S (or Esc) stays and N continues immediately (even while the
-  // composer is focused). Esc only cancels when focus is not in an editable
-  // element (issue #104).
+  // Controller Mode keyboard shortcuts (defaults: ⌘T toggle, ⌘N next,
+  // ⌘D done, ⌘S stay; ⌘ = Ctrl off-mac). The chord for each action is
+  // read from `useShortcutBindings`, so users can rebind them in
+  // Settings (issue #235). Esc still blurs and (when not in an
+  // editable) cancels a pending advance.
+  const shortcutBindings = useShortcutBindings();
   useControllerModeShortcuts({
+    bindings: shortcutBindings.bindings,
     controllerMode,
     onSkip: handleFocusSkip,
     onDone: handleFocusDone,
@@ -669,6 +673,7 @@ export function App() {
           onFocusQueueChange={handleFocusQueueChange}
           controllerMode={controllerMode}
           onControllerModeToggle={handleControllerModeToggle}
+          shortcutBindings={shortcutBindings.bindings}
           focusRefreshKey={focusRefreshKey}
           eventsRefreshKey={eventsRefreshKey}
         />
@@ -789,6 +794,7 @@ export function App() {
               loadProjects();
             }}
             controllerMode={controllerMode}
+            shortcutBindings={shortcutBindings.bindings}
             focusPosition={focusPosition}
             onFocusDone={handleFocusDone}
             onFocusSkip={handleFocusSkip}

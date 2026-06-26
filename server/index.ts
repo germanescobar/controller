@@ -22,6 +22,7 @@ import { restoreLoginShellPath } from "./lib/shell-env.js";
 import { previewBrowserBridge } from "./lib/preview-browser.js";
 import { browserRouter } from "./routes/browser.js";
 import { integrationsRouter } from "./routes/integrations.js";
+import { shortcutsRouter } from "./routes/shortcuts.js";
 import { unifiedSkillsRouter } from "./routes/unified-skills.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
 import { installControllerCli, controllerCliInstalledPath } from "./lib/controller-cli.js";
@@ -48,6 +49,7 @@ app.use("/api/agents", agentsRouter);
 app.use("/api/agents", skillsRouter);
 app.use("/api/browser", browserRouter);
 app.use("/api/integrations", integrationsRouter);
+app.use("/api/shortcuts", shortcutsRouter);
 app.use("/api", unifiedSkillsRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session

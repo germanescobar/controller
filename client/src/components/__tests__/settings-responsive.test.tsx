@@ -5,7 +5,7 @@ import { SettingsPage } from "../../pages/Settings.tsx";
 
 /*
  * Regression test for the responsive contract of the Settings page
- * (issue #179). The page renders the three sections twice:
+ * (issue #179). The page renders the sections twice:
  *
  *   - A `md:hidden` mobile tab strip with horizontally-scrollable tabs.
  *   - A `hidden md:flex` desktop side nav.
@@ -14,9 +14,12 @@ import { SettingsPage } from "../../pages/Settings.tsx";
  * #167) so existing browser-driven automation keeps working regardless of
  * the active viewport. The active section is also marked with
  * `aria-current="page"` in both renderings for assistive tech.
+ *
+ * `shortcuts` was added in issue #235; we assert it surfaces in both
+ * layouts too so the tab isn't accidentally hidden on mobile.
  */
 
-const SECTIONS = ["agents", "integrations", "skills"] as const;
+const SECTIONS = ["agents", "integrations", "skills", "shortcuts"] as const;
 
 function render(): string {
   return renderToStaticMarkup(
