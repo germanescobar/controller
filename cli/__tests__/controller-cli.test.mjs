@@ -371,3 +371,140 @@ test("runSessions start POSTs to the new sessions endpoint and prints the URL", 
   assert.match(out, /Started session sess-xyz/);
   assert.match(out, /controller:\/\/project\/proj-uuid-1\/worktree\/wt-1\/session\/sess-xyz/);
 });
+// --- schedules surface (issue #243) ---
+
+test("presetToCron maps structured presets to cron (mirror of server)", async () => {
+  const cli = await loadCli();
+  assert.equal(cli.presetToCron({ every: "minute" }), "* * * * *");
+  assert.equal(cli.presetToCron({ every: "weekday", atHour: 9 }), "0 9 * * 1-5");
+  assert.equal(cli.presetToCron({ every: "day", atHour: 8, atMinute: 15 }), "15 8 * * *");
+  assert.equal(cli.presetToCron({ onDay: 1, atHour: 7 }), "0 7 * * 1");
+  assert.equal(cli.presetToCron({}), null);
+});
+
+test("parseSchedules add builds a one-shot payload from --at", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSchedules([
+    "add",
+    "demo",
+    "--worktree",
+    "wt-1",
+    "--prompt",
+    "Run the morning health check",
+    "--at",
+    "2026-06-26T08:00:00.000Z",
+  ]);
+  assert.equal(parsed.action, "add");
+  assert.deepEqual(parsed.body, {
+    worktreeId: "wt-1",
+    prompt: "Run the morning health check",
+    runAt: "2026-06-26T08:00:00.000Z",
+    createdBy: "cli",
+  });
+});
+
+test("parseSchedules add derives cron from --every/--on-day and forwards an explicit --cron", async () => {
+  const cli = await loadCli();
+  const derived = cli.parseSchedules([
+    "add",
+    "demo",
+    "--worktree",
+    "wt-1",
+    "--prompt",
+    "standup",
+    "--every",
+    "weekday",
+    "--timezone",
+    "America/New_York",
+  ]);
+  assert.equal(derived.body.cron, "0 9 * * 1-5");
+  assert.equal(derived.body.timezone, "America/New_York");
+
+  const explicit = cli.parseSchedules([
+    "add",
+    "demo",
+    "--worktree",
+    "wt-1",
+    "--prompt",
+    "standup",
+    "--cron",
+    "0 6 * * *",
+  ]);
+  assert.equal(explicit.body.cron, "0 6 * * *");
+});
+
+test("parseSchedules add requires a trigger (--at or --cron/--every)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSchedules(["add", "demo", "--worktree", "wt-1", "--prompt", "x"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /requires --at .* or --cron/);
+});
+
+test("parseSchedules list defaults to including disabled", async () => {
+  const cli = await loadCli();
+  assert.equal(cli.parseSchedules(["list", "demo"]).includeDisabled, true);
+  assert.equal(cli.parseSchedules(["list", "demo", "--enabled-only"]).includeDisabled, false);
+});
+
+test("runSchedules add resolves the project and POSTs to the schedules endpoint", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-1", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/schedules")) {
+      return {
+        status: 201,
+        json: async () => ({ id: "sched-1", nextRunAt: "2026-06-26T08:00:00.000Z" }),
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSchedules(
+      ["add", "demo", "--worktree", "wt-1", "--prompt", "hi", "--at", "2026-06-26T08:00:00.000Z"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const postCall = calls.find(
+    (c) => c.url === "http://controller.test/api/projects/proj-uuid-1/schedules" && c.init?.method === "POST"
+  );
+  assert.ok(postCall, "expected a POST to the schedules endpoint");
+  const body = JSON.parse(postCall.init.body);
+  assert.equal(body.worktreeId, "wt-1");
+  assert.equal(body.runAt, "2026-06-26T08:00:00.000Z");
+  assert.match(stdoutChunks.join(""), /Created schedule sched-1/);
+});
