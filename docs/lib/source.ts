@@ -23,7 +23,15 @@ const fumadocsSource = loader({
 export const source = fumadocsSource;
 
 export function getPage(slug: string[] | undefined) {
-  return fumadocsSource.getPage(slug);
+  // The empty-slug case (`/docs`) should resolve to the overview
+  // page so the docs site has a real landing route. Fumadocs' loader
+  // only matches slugs that exist in the content collection, so an
+  // empty array returns undefined. The optional catch-all route
+  // (`[[...slug]]`) passes `[]` (not `undefined`) at runtime, which
+  // is why this fallback has to live here and not in the page.
+  return fumadocsSource.getPage(
+    slug && slug.length > 0 ? slug : ["overview"],
+  );
 }
 
 export function getPages() {

@@ -47,9 +47,11 @@ export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
 }) {
   const params = await props.params;
-  // `/docs` (no slug) renders the overview page directly so the
-  // site root for documentation has content without a redirect hop.
-  const page = getPage(params.slug ?? ["overview"]);
+  // `/docs` (empty slug) resolves to the overview page via the
+  // shared `getPage` helper. We don't add the fallback here because
+  // the helper is also called from `generateMetadata`, and a single
+  // source of truth keeps both paths in sync.
+  const page = getPage(params.slug);
   if (!page) notFound();
 
   const MDXContent = page.data.body;
