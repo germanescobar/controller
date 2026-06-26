@@ -132,6 +132,7 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
     const cases = [
       { name: "controller-browser", surfaces: ["browser"] },
       { name: "controller-integrations", surfaces: ["integrations"] },
+      { name: "controller-schedules", surfaces: ["schedules"] },
       { name: "controller-search-skills", surfaces: ["skills"] },
       { name: "controller-skill-creator", surfaces: ["skills"] },
       { name: "controller-worktrees", surfaces: ["worktrees", "sessions"] },
@@ -218,6 +219,17 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       searchSkills,
       cliCommandRegex(cliPath, "skills import --provider <id>")
     );
+
+    const schedules = readFileSync(
+      unifiedSkillFile(orchestrator, "controller-schedules"),
+      "utf-8"
+    );
+    assert.match(schedules, cliCommandRegex(cliPath, "schedules list <project>"));
+    assert.match(
+      schedules,
+      cliCommandRegex(cliPath, "schedules add <project> --worktree <worktreeId>")
+    );
+    assert.match(schedules, cliCommandRegex(cliPath, "schedules runs <project> <scheduleId>"));
 
     const skillCreator = readFileSync(
       unifiedSkillFile(orchestrator, "controller-skill-creator"),

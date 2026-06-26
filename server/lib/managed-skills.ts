@@ -38,6 +38,7 @@ export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-browser",
   "controller-integrations",
   "controller-scripts",
+  "controller-schedules",
   "controller-search-skills",
   "controller-skill-creator",
   "controller-worktrees",
@@ -550,6 +551,97 @@ is provider-dependent and not a worktree problem. Recovery steps:
 `;
 }
 
+function buildSchedulesSkillBody(cliPath: string): string {
+  return `---
+name: controller-schedules
+description: Schedule a session to start at a future time, optionally repeating on a cron expression, from the CLI. Use when the user asks to run a prompt later, on a recurring basis, every weekday/morning, at a specific time, or "tomorrow at 8am".
+---
+
+${managedMarker("controller-schedules")}
+
+# Schedules
+
+This skill is managed by the Controller app (directory name
+\`controller-schedules\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-schedules <task>\` or pick it from
+the autocomplete.
+
+A **schedule** starts a *new* session on a worktree at a future time,
+optionally repeating on a cron expression. Use it when the user says things
+like "run the morning health check every weekday at 9am", "schedule this for
+tomorrow at 8am", or "kick this off in two hours". The scheduler survives
+restarts and fires on the next tick (every 30s by default) after the target
+time.
+
+Schedules created on the user's behalf are user schedules — only create one
+when the user explicitly asks to defer or repeat work.
+
+Invoke the Controller CLI by its absolute path — it is not on your PATH. Every
+command below is run as \`${cliPath} schedules <command>\`.
+
+## Commands
+
+- \`${cliPath} schedules list <project> [--enabled-only]\` — list a project's schedules (includes disabled by default).
+- \`${cliPath} schedules show <project> <scheduleId>\` — print one schedule's full JSON (next run, last run, last error).
+- \`${cliPath} schedules add <project> --worktree <worktreeId> --prompt <text> [--at <iso>] [--cron <expr>] [--every minute|hour|day|weekday] [--on-day <0-6>] [--at-hour <0-23>] [--at-minute <0-59>] [--timezone <tz>] [--provider codex|claude|anita] [--model <model>] [--mode default|plan]\` — register a schedule.
+- \`${cliPath} schedules enable <project> <scheduleId>\` — re-enable a paused schedule.
+- \`${cliPath} schedules disable <project> <scheduleId>\` — pause a schedule without deleting it.
+- \`${cliPath} schedules remove <project> <scheduleId>\` — delete a schedule.
+- \`${cliPath} schedules runs <project> <scheduleId>\` — list the sessions a schedule has materialized so far.
+
+## Choosing the trigger
+
+\`schedules add\` needs exactly one trigger:
+
+- **One-shot** — pass \`--at <iso>\` (e.g. \`--at 2026-06-27T08:00:00\`). It fires
+  once on the next tick after that instant, then disables itself. An \`--at\` in
+  the past fires immediately (eager catch-up).
+- **Recurring** — pass either an explicit \`--cron "<expr>"\` (5-field cron) or a
+  structured preset: \`--every minute|hour|day|weekday\`, optionally with
+  \`--at-hour\` / \`--at-minute\` (default 09:00) and \`--timezone\` (default the
+  server's). For a weekly schedule use \`--on-day <0-6>\` (0 = Sunday).
+
+Cron is evaluated in \`--timezone\` (IANA, e.g. \`America/New_York\`), so a
+\`--every weekday --at-hour 9\` schedule keeps firing at 09:00 wall-clock across
+daylight-saving transitions.
+
+## Picking the project and worktree
+
+\`<project>\` accepts the project's UUID or its human name. \`--worktree\` is the
+worktree's UUID. Both come from the worktrees surface — see the
+\`controller-worktrees\` skill for resolving the current project name and
+listing worktree ids. \`--prompt\` must be a single quoted argument.
+
+## Workflow
+
+End-to-end example for "every weekday at 9am New York time, triage overnight issues":
+
+\`\`\`sh
+${cliPath} schedules add "Coding Orchestrator" \\
+  --worktree f1247ed6-3a1b-4c9d-b8e2-9f0a1c2d3e4f \\
+  --every weekday --at-hour 9 --timezone "America/New_York" \\
+  --provider claude \\
+  --prompt "Triage overnight issues and summarize what needs attention"
+# → Created schedule <id>
+#   next run: 2026-06-29T13:00:00.000Z
+\`\`\`
+
+## Notes
+
+- A schedule starts a brand-new session when it fires; it shows in the sidebar
+  like any other session. \`schedules runs\` lists those sessions after the fact.
+- Editing or disabling a schedule does not cancel a session that has already
+  started.
+- A run that fails (the agent can't start) records \`lastError\` on the schedule
+  and leaves the schedule intact — recurring schedules keep their next run,
+  one-shots stay disabled.
+- The unified CLI is invoked by its absolute path. The bare \`controller\`
+  command may not resolve on PATH — copy the full path verbatim from this
+  skill body.
+`;
+}
+
 function buildSearchSkillsBody(cliPath: string): string {
   return `---
 name: controller-search-skills
@@ -773,6 +865,7 @@ export async function installManagedSkills(): Promise<void> {
   const skills: ManagedSkill[] = [
     { name: "controller-browser", body: buildBrowserSkillBody(cli) },
     { name: "controller-integrations", body: buildIntegrationsSkillBody(cli) },
+    { name: "controller-schedules", body: buildSchedulesSkillBody(cli) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },
     { name: "controller-search-skills", body: buildSearchSkillsBody(cli) },
     { name: "controller-skill-creator", body: buildSkillCreatorSkillBody(cli) },
