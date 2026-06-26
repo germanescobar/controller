@@ -119,10 +119,13 @@ export function matchesEvent(
     if (onMac && ctrl) return false;
     if (!onMac && meta) return false;
   } else {
-    const held = onMac ? ctrl : meta;
-    if (!held) return false;
-    if (onMac && meta) return false;
-    if (!onMac && ctrl) return false;
+    // "Ctrl" always reads `ctrlKey` on both platforms — that is the
+    // physical Control key everywhere, including on macOS where it
+    // surfaces as ⌃. The opposite modifier (Meta) is rejected on
+    // both platforms; the strict-per-platform flag is irrelevant
+    // here. (The `cmd` branch above is what differs per-platform.)
+    if (!ctrl) return false;
+    if (meta) return false;
   }
 
   const eventKey = normaliseEventKey(event);

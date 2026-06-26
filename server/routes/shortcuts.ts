@@ -4,7 +4,10 @@ import {
   getShortcutBindings,
   setShortcutBindings,
 } from "../lib/shortcut-settings.js";
-import type { ShortcutActionId } from "../../shared/shortcuts.js";
+// ShortcutActionId is defined in `server/lib/shortcut-settings.ts`
+// (kept in sync with `shared/shortcuts.ts`; see the comment there for
+// the rationale). We re-import the type for the request body shape.
+import type { ShortcutActionId } from "../lib/shortcut-settings.js";
 
 /**
  * Controller Mode keyboard shortcut bindings.

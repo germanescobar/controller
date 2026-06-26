@@ -31,7 +31,10 @@ import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useControllerModeShortcuts } from "./lib/useControllerModeShortcuts.ts";
-import { useShortcutBindings } from "./lib/useShortcutBindings.ts";
+import {
+  ShortcutBindingsProvider,
+  useShortcutBindingsContext,
+} from "./lib/useShortcutBindings.tsx";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
@@ -170,6 +173,14 @@ function loadSavedView(): View {
 }
 
 export function App() {
+  return (
+    <ShortcutBindingsProvider>
+      <AppBody />
+    </ShortcutBindingsProvider>
+  );
+}
+
+function AppBody() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setViewState] = useState<View>(loadSavedView);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
@@ -609,7 +620,7 @@ export function App() {
   // a stored "ctrl-n" only fires on ⌃N on macOS, never on ⌘N. Esc
   // still blurs and (when not in an editable) cancels a pending
   // advance.
-  const shortcutBindings = useShortcutBindings();
+  const shortcutBindings = useShortcutBindingsContext();
   useControllerModeShortcuts({
     bindings: shortcutBindings.bindings,
     controllerMode,
@@ -643,7 +654,7 @@ export function App() {
         />
       )}
 
-      <div
+        <div
         className={`fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}

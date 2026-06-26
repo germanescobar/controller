@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { RotateCcw, AlertTriangle, Loader2, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
-import { useShortcutBindings, bindingFor } from "@/lib/useShortcutBindings";
+import {
+  bindingFor,
+  setRecordingChord,
+  useShortcutBindingsContext,
+} from "@/lib/useShortcutBindings";
 import {
   formatChord,
   isMacPlatform,
@@ -30,7 +34,7 @@ import {
  * (or platform equivalent) — see issue #235.
  */
 export function ShortcutsSection() {
-  const { bindings, save, reset } = useShortcutBindings();
+  const { bindings, save, reset } = useShortcutBindingsContext();
   const [drafts, setDrafts] = useState<ShortcutBindings | null>(null);
   const [recording, setRecording] = useState<ShortcutActionId | null>(null);
   const [saving, setSaving] = useState(false);
@@ -191,6 +195,17 @@ function Recorder({
   // Listens for the next meaningful keydown. Esc cancels. We mount the
   // listener directly on the window because the user is mid-flow and
   // focus might be anywhere (a button, the page body).
+  //
+  // We also set the `recordingChord` module flag while recording so the
+  // global App-level listener (registered on window capture too) skips
+  // its handler — otherwise Ctrl+T / Ctrl+N / Ctrl+D / Ctrl+S would
+  // actually toggle / navigate / mark-done instead of being captured
+  // for the new binding (issue #235 P2 review).
+  useEffect(() => {
+    setRecordingChord(true);
+    return () => setRecordingChord(false);
+  }, []);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -203,6 +218,7 @@ function Recorder({
       if (!chord) return;
       if (!parseChord(chord)) return;
       event.preventDefault();
+      event.stopImmediatePropagation();
       onCapture(chord);
     };
     window.addEventListener("keydown", handler, true);

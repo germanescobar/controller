@@ -8,6 +8,7 @@ import {
   matchesEvent,
   parseChord,
 } from "./shortcut-match.ts";
+import { isRecordingChord } from "./useShortcutBindings.tsx";
 
 /**
  * Global keyboard shortcuts that drive the controller-mode loop from the
@@ -145,6 +146,12 @@ export function useControllerModeShortcuts({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      // While the Settings recorder is mid-capture, the App-level
+      // listener must stay out of the way — otherwise a recorded
+      // Ctrl+T / Ctrl+N / Ctrl+D / Ctrl+S would actually toggle /
+      // navigate / mark-done instead of being captured for the new
+      // binding (issue #235 P2 review).
+      if (isRecordingChord()) return;
       if (event.repeat) return;
       if (isInsideDialog(event.target)) return;
       if (isInsideTerminal(event.target)) return;

@@ -128,6 +128,35 @@ test("matchesEvent does NOT match Cmd+N on macOS for a stored ctrl-n chord", () 
   );
 });
 
+test("matchesEvent recognises Ctrl+N off-mac for a stored ctrl-n chord", () => {
+  // The strict-per-platform flag is irrelevant for the `ctrl` branch:
+  // the physical Control key reads `ctrlKey` on every OS. Off-mac
+  // Ctrl+N must match a stored "ctrl-n" — that's the path the default
+  // chords (Ctrl+T/N/D/S) take for every Linux/Windows user. The
+  // previous implementation rejected this case (issue #235 P1 review).
+  const parsed = parseChord("ctrl-n")!;
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", ctrlKey: true }), false),
+    true,
+  );
+  // Meta shouldn't fire a ctrl chord off-mac either.
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true }), false),
+    false,
+  );
+});
+
+test("matchesEvent recognises Ctrl+T off-mac for the default toggle chord", () => {
+  // Direct regression for the bug Codex flagged: the default toggle
+  // chord is 'ctrl-t', and on Linux a user pressing Ctrl+T must
+  // trigger it.
+  const parsed = parseChord("ctrl-t")!;
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "t", ctrlKey: true }), false),
+    true,
+  );
+});
+
 test("matchesEvent requires the modifier for a non-escape chord", () => {
   const parsed = parseChord("cmd-n")!;
   // No modifier held at all → not a match.

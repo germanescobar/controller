@@ -15,13 +15,11 @@ import path from "node:path";
 
 import {
   clearShortcutBindings,
+  DEFAULT_SHORTCUT_BINDINGS,
   getShortcutBindings,
   setShortcutBindings,
-} from "../shortcut-settings.js";
-import {
-  DEFAULT_SHORTCUT_BINDINGS,
   type ShortcutBindings,
-} from "../../../shared/shortcuts.js";
+} from "../shortcut-settings.js";
 
 function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const previous = process.env.CONTROLLER_HOME;
