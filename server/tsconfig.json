@@ -9,5 +9,6 @@
     "outDir": "../dist/server",
     "rootDir": "."
   },
-  "include": ["."]
+  "include": ["."],
+  "exclude": ["**/__tests__/**", "node_modules"]
 }

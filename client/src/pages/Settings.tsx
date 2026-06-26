@@ -3,8 +3,9 @@ import { Button } from "@/components/ui/button";
 import { AgentsSection } from "../components/agents-section.tsx";
 import { IntegrationsSection } from "../components/integrations-section.tsx";
 import { SkillsSection } from "../components/skills-section.tsx";
+import { ShortcutsSection } from "../components/shortcuts-section.tsx";
 
-export type SettingsSection = "agents" | "integrations" | "skills";
+export type SettingsSection = "agents" | "integrations" | "skills" | "shortcuts";
 
 interface SectionSpec {
   id: SettingsSection;
@@ -31,6 +32,12 @@ const SECTIONS: SectionSpec[] = [
     label: "Skills",
     shortLabel: "Skills",
     description: "Create and edit app-owned skills available to all agents.",
+  },
+  {
+    id: "shortcuts",
+    label: "Shortcuts",
+    shortLabel: "Shortcuts",
+    description: "Customise Controller Mode keyboard shortcuts.",
   },
 ];
 
@@ -141,6 +148,7 @@ export function SettingsPage({ section, onSectionChange, onClose }: SettingsPage
           {active.id === "agents" && <AgentsSection />}
           {active.id === "integrations" && <IntegrationsSection />}
           {active.id === "skills" && <SkillsSection />}
+          {active.id === "shortcuts" && <ShortcutsSection />}
         </div>
       </div>
     </div>

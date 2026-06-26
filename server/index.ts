@@ -22,7 +22,17 @@ import { restoreLoginShellPath } from "./lib/shell-env.js";
 import { previewBrowserBridge } from "./lib/preview-browser.js";
 import { browserRouter } from "./routes/browser.js";
 import { integrationsRouter } from "./routes/integrations.js";
+import { shortcutsRouter } from "./routes/shortcuts.js";
 import { unifiedSkillsRouter } from "./routes/unified-skills.js";
+import { schedulesRouter } from "./routes/schedules.js";
+import { getProjects } from "./lib/projects.js";
+import {
+  fireAndForget,
+  registerConsumer,
+  startScheduler,
+} from "./lib/scheduler.js";
+import { makeSchedulesConsumer } from "./lib/schedules.js";
+import { startSessionInProcess } from "./lib/session-start.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
 import { installControllerCli, controllerCliInstalledPath } from "./lib/controller-cli.js";
 
@@ -42,12 +52,14 @@ app.use("/api/projects", projectsRouter);
 app.use("/api/projects", worktreesRouter);
 app.use("/api/projects", sessionsRouter);
 app.use("/api/projects", eventsRouter);
+app.use("/api/projects", schedulesRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/agents", agentsRouter);
 app.use("/api/agents", skillsRouter);
 app.use("/api/browser", browserRouter);
 app.use("/api/integrations", integrationsRouter);
+app.use("/api/shortcuts", shortcutsRouter);
 app.use("/api", unifiedSkillsRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session
@@ -222,6 +234,22 @@ async function start(): Promise<void> {
   server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // Start the shared wakeup loop (issue #243) and register the schedules
+  // consumer. The consumer scans every project for due schedules each tick
+  // and starts a new session in-process for each, race-protected by the
+  // per-project lock in `schedules.ts`.
+  registerConsumer(
+    makeSchedulesConsumer(
+      {
+        listProjects: async () =>
+          (await getProjects()).map((p) => ({ id: p.id, path: p.path })),
+        startSession: startSessionInProcess,
+      },
+      fireAndForget
+    )
+  );
+  startScheduler();
 }
 
 void start();
