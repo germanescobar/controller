@@ -254,12 +254,6 @@ ${managedMarker("controller-scripts")}
 
 # Controller Scripts
 
-This skill is managed by the Controller app (directory name
-\`controller-scripts\`). It is surfaced in the \`/\` picker with the
-\`controller\` tag alongside Controller's other built-in skills. Users invoke
-it like any other skill: type \`/controller-scripts <task>\` or pick it from
-the autocomplete.
-
 Controller resolves native scripts from the project's root
 \`.coding-orchestrator/\` directory:
 
@@ -436,23 +430,12 @@ When migrating, translate those JSON commands into native shell scripts at
 function buildWorktreesSkillBody(cliPath: string): string {
   return `---
 name: controller-worktrees
-description: Worktree the current conversation and start an agent turn on the new worktree from the CLI, without going through the in-app picker. Use when the user asks to create a worktree, work on an issue in a fresh worktree, or kick off a turn on an existing worktree.
+description: Use when the user asks to create a worktree, work on an issue in a fresh worktree, or kick off a turn on an existing worktree.
 ---
 
 ${managedMarker("controller-worktrees")}
 
 # Worktrees
-
-This skill is managed by the Controller app (directory name
-\`controller-worktrees\`). It is surfaced in the \`/\` picker with the
-\`controller\` tag alongside Controller's other built-in skills. Users invoke
-it like any other skill: type \`/controller-worktrees <task>\` or pick it from
-the autocomplete.
-
-You can worktree the current conversation and start a turn on the new
-worktree from the shell, without going through the in-app picker. Use it when
-the user says "let's create a worktree and start working on issue X", or when
-you want to scope a long task to an isolated branch without leaving the CLI.
 
 Invoke the Controller CLI by its absolute path — it is not on your PATH.
 Every command below is run as either \`${cliPath} worktrees <command>\` or
@@ -561,12 +544,6 @@ ${managedMarker("controller-schedules")}
 
 # Schedules
 
-This skill is managed by the Controller app (directory name
-\`controller-schedules\`). It is surfaced in the \`/\` picker with the
-\`controller\` tag alongside Controller's other built-in skills. Users invoke
-it like any other skill: type \`/controller-schedules <task>\` or pick it from
-the autocomplete.
-
 A **schedule** starts a *new* session on a worktree later — either once at a
 specific time or on a recurring cron schedule (one trigger, not both). Use it
 when the user says things like "run the morning health check every weekday at
@@ -652,12 +629,6 @@ ${managedMarker("controller-search-skills")}
 
 # Search Skills
 
-This skill is managed by the Controller app (directory name
-\`controller-search-skills\`). It is surfaced in the \`/\` picker with the
-\`controller\` tag alongside Controller's other built-in skills. Users invoke
-it like any other skill: type \`/controller-search-skills <query>\` or pick it
-from the autocomplete.
-
 Controller hosts an app-owned catalog of unified skills in Settings → Skills.
 These skills are available to every agent and take precedence over per-agent
 skills with the same name. You can search the catalog and activate a skill so
@@ -737,12 +708,6 @@ description: Create a new unified skill in the Controller catalog by interviewin
 ${managedMarker("controller-skill-creator")}
 
 # Skill Creator
-
-This skill is managed by the Controller app (directory name
-\`controller-skill-creator\`). It is surfaced in the \`/\` picker with the
-\`controller\` tag alongside Controller's other built-in skills. Users invoke
-it like any other skill: type \`/controller-skill-creator <task>\` or pick it
-from the autocomplete.
 
 You help the user create a new unified skill in Controller's app-owned
 catalog at the Controller home's \`skills/<name>/SKILL.md\` (e.g.
