@@ -59,15 +59,18 @@ export const SHORTCUT_ACTIONS: ShortcutActionSpec[] = [
 ];
 
 /**
- * The platform-neutral default chord for an action. The matcher accepts
- * either the `cmd-*` or `ctrl-*` form at runtime depending on the
- * user's OS, so we only need one entry per action.
+ * Default chords. We use `ctrl-*` everywhere (not `cmd-*`) because
+ * Cmd collides with too many macOS system shortcuts (Cmd+W, Cmd+Q,
+ * Cmd+R, …) and the user is more likely to want a fresh binding than
+ * to override one of those. The matcher is strict per-platform
+ * (see `client/src/lib/shortcut-match.ts`), so a stored `ctrl-n`
+ * matches ⌃N on macOS and Ctrl+N everywhere else — never both.
  */
 export const DEFAULT_SHORTCUT_BINDINGS: Record<ShortcutActionId, string> = {
-  controllerModeToggle: "cmd-t",
-  controllerModeNext: "cmd-n",
-  controllerModeDone: "cmd-d",
-  controllerModeStay: "cmd-s",
+  controllerModeToggle: "ctrl-t",
+  controllerModeNext: "ctrl-n",
+  controllerModeDone: "ctrl-d",
+  controllerModeStay: "ctrl-s",
 };
 
 /** Reserved OS / browser chords we warn about (but don't block). */

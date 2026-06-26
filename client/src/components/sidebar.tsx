@@ -705,8 +705,8 @@ export function Sidebar({
               )}
               title={
                 controllerMode
-                  ? `Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "cmd-t", isMacPlatform())})`
-                  : `Start Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "cmd-t", isMacPlatform())})`
+                  ? `Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", isMacPlatform())})`
+                  : `Start Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", isMacPlatform())})`
               }
             >
               <Play

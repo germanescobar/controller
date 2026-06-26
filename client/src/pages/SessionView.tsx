@@ -3090,7 +3090,7 @@ export function SessionView({
     // central hook also fires this path, but stopping propagation here
     // keeps the textarea free of literal `s` characters in case the
     // event reaches us first. See issue #235.
-    const stayChord = parseChord(shortcutBindings?.controllerModeStay ?? "cmd-s");
+    const stayChord = parseChord(shortcutBindings?.controllerModeStay ?? "ctrl-s");
 
     const handleStayShortcut = (event: KeyboardEvent) => {
       if (event.repeat) return;
@@ -4957,32 +4957,32 @@ export function SessionView({
               type="button"
               onClick={onFocusSkip}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title={`Next (${formatChord(shortcutBindings?.controllerModeNext ?? "cmd-n", IS_MAC)})`}
+              title={`Next (${formatChord(shortcutBindings?.controllerModeNext ?? "ctrl-n", IS_MAC)})`}
             >
               <StepForward className="h-3.5 w-3.5" />
               Next
-              <Kbd>{formatChord(shortcutBindings?.controllerModeNext ?? "cmd-n", IS_MAC)}</Kbd>
+              <Kbd>{formatChord(shortcutBindings?.controllerModeNext ?? "ctrl-n", IS_MAC)}</Kbd>
             </button>
             <button
               type="button"
               onClick={onFocusDone}
               disabled={!sessionId}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title={`Mark done (${formatChord(shortcutBindings?.controllerModeDone ?? "cmd-d", IS_MAC)})`}
+              title={`Mark done (${formatChord(shortcutBindings?.controllerModeDone ?? "ctrl-d", IS_MAC)})`}
             >
               <CheckCircle2 className="h-3.5 w-3.5" />
               Done
-              <Kbd>{formatChord(shortcutBindings?.controllerModeDone ?? "cmd-d", IS_MAC)}</Kbd>
+              <Kbd>{formatChord(shortcutBindings?.controllerModeDone ?? "ctrl-d", IS_MAC)}</Kbd>
             </button>
             <button
               type="button"
               onClick={onFocusExit}
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
-              title={`Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "cmd-t", IS_MAC)})`}
+              title={`Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", IS_MAC)})`}
             >
               <LogOut className="h-3.5 w-3.5" />
               Exit
-              <Kbd>{formatChord(shortcutBindings?.controllerModeToggle ?? "cmd-t", IS_MAC)}</Kbd>
+              <Kbd>{formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", IS_MAC)}</Kbd>
             </button>
           </div>
         </div>

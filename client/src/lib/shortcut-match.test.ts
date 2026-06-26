@@ -7,6 +7,7 @@ import {
   parseChord,
   serialiseEvent,
 } from "./shortcut-match.ts";
+import { DEFAULT_SHORTCUT_BINDINGS } from "../../../shared/shortcuts.ts";
 
 /**
  * Build a fake KeyboardEvent with the given key + modifier state. The
@@ -74,51 +75,96 @@ test("parseChord accepts '+' as a separator as well as '-'", () => {
   assert.deepEqual(parsed, { primary: "cmd", shift: true, alt: false, key: "n" });
 });
 
-test("matchesEvent recognises Cmd+N when metaKey is held", () => {
+test("matchesEvent recognises Cmd+N on macOS when metaKey is held", () => {
   const parsed = parseChord("cmd-n")!;
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true })), true);
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true }), true),
+    true,
+  );
 });
 
-test("matchesEvent recognises Cmd+N even when ctrlKey is held (portable)", () => {
+test("matchesEvent does NOT match Ctrl+N on macOS for a stored cmd-n chord", () => {
+  // Strict per-platform: a user who explicitly picks Cmd+N on macOS
+  // should not have it accidentally fire when they press Ctrl+N. That
+  // would defeat the purpose of avoiding Cmd-system-chord collisions.
   const parsed = parseChord("cmd-n")!;
-  // A user on Linux who pressed Ctrl+N should still fire a "cmd-n"
-  // binding so the persisted file stays portable across machines.
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n", ctrlKey: true })), true);
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", ctrlKey: true }), true),
+    false,
+  );
+});
+
+test("matchesEvent recognises Ctrl+N on Linux for a stored cmd-n chord", () => {
+  // Off-mac, "cmd" maps to the Ctrl key (the OS sends ctrlKey for
+  // what users call "Cmd" on Mac). Strict per-platform means we
+  // accept ctrlKey and reject metaKey.
+  const parsed = parseChord("cmd-n")!;
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", ctrlKey: true }), false),
+    true,
+  );
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true }), false),
+    false,
+  );
+});
+
+test("matchesEvent recognises Ctrl+N on macOS when ctrlKey is held", () => {
+  const parsed = parseChord("ctrl-n")!;
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", ctrlKey: true }), true),
+    true,
+  );
+});
+
+test("matchesEvent does NOT match Cmd+N on macOS for a stored ctrl-n chord", () => {
+  // Strict per-platform: a stored "ctrl-n" should never fire on the
+  // metaKey on macOS, otherwise the user couldn't pick a clean ⌃N
+  // binding without worrying about the OS sending metaKey events.
+  const parsed = parseChord("ctrl-n")!;
+  assert.equal(
+    matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true }), true),
+    false,
+  );
 });
 
 test("matchesEvent requires the modifier for a non-escape chord", () => {
   const parsed = parseChord("cmd-n")!;
   // No modifier held at all → not a match.
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" })), false);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" }), true), false);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" }), false), false);
 });
 
 test("matchesEvent requires the exact shift state", () => {
   const parsed = parseChord("cmd-shift-n")!;
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true, shiftKey: true })), true);
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true })), false);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true, shiftKey: true }), true), true);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n", metaKey: true }), true), false);
 });
 
 test("matchesEvent requires the exact alt state", () => {
   const parsed = parseChord("cmd-alt-d")!;
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "d", metaKey: true, altKey: true })), true);
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "d", metaKey: true })), false);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "d", metaKey: true, altKey: true }), true), true);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "d", metaKey: true }), true), false);
 });
 
 test("matchesEvent normalises Escape alias to lowercase 'escape'", () => {
   const parsed = parseChord("escape")!;
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "Escape" })), true);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "Escape" }), true), true);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "Escape" }), false), true);
 });
 
 test("matchesEvent rejects a 'cmd-n' chord when only a letter is pressed", () => {
   const parsed = parseChord("cmd-n")!;
   // No modifier held at all → not a match for a chord that requires one.
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" })), false);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" }), true), false);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" }), false), false);
 });
 
 test("matchesEvent accepts a modifier-less chord when no modifier is held", () => {
   const parsed = parseChord("n")!;
   assert.equal(parsed.primary, null);
-  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" })), true);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" }), true), true);
+  assert.equal(matchesEvent(parsed, fakeEvent({ key: "n" }), false), true);
 });
 
 test("formatChord renders ⌘N on macOS", () => {
@@ -146,14 +192,37 @@ test("formatChord falls back to the raw string when the chord is invalid", () =>
 
 test("findMatchingAction returns the bound action for a matching event", () => {
   const bindings = { next: "cmd-n", done: "cmd-d", stay: "cmd-s" };
-  const action = findMatchingAction(bindings, fakeEvent({ key: "d", metaKey: true }));
+  const action = findMatchingAction(
+    bindings,
+    fakeEvent({ key: "d", metaKey: true }),
+    true,
+  );
   assert.equal(action, "done");
 });
 
 test("findMatchingAction returns null when no chord matches", () => {
   const bindings = { next: "cmd-n", done: "cmd-d" };
-  const action = findMatchingAction(bindings, fakeEvent({ key: "k", metaKey: true }));
+  const action = findMatchingAction(
+    bindings,
+    fakeEvent({ key: "k", metaKey: true }),
+    true,
+  );
   assert.equal(action, null);
+});
+
+test("findMatchingAction treats ctrl and cmd as different on macOS", () => {
+  // A binding for "cmd-n" must NOT match an event with ctrlKey held
+  // on macOS. Otherwise a user who picked ⌘N to avoid Cmd-system-chord
+  // collisions would have it fire on Ctrl+N too.
+  const bindings = { next: "cmd-n" };
+  assert.equal(
+    findMatchingAction(bindings, fakeEvent({ key: "n", ctrlKey: true }), true),
+    null,
+  );
+  assert.equal(
+    findMatchingAction(bindings, fakeEvent({ key: "n", metaKey: true }), true),
+    "next",
+  );
 });
 
 test("serialiseEvent returns null for a bare letter (no modifiers)", () => {
@@ -174,4 +243,16 @@ test("serialiseEvent captures Ctrl+Enter off-mac", () => {
     serialiseEvent(fakeEvent({ key: "Enter", ctrlKey: true })),
     "ctrl-enter",
   );
+});
+
+test("DEFAULT_SHORTCUT_BINDINGS use ctrl-* (Cmd collides with too many macOS chords)", () => {
+  // Guard against an accidental revert: a Cmd-default on macOS would
+  // collide with Cmd+W / Cmd+Q / Cmd+R / Cmd+T (the last one is the
+  // browser's "new tab" shortcut). See issue #235.
+  for (const [action, chord] of Object.entries(DEFAULT_SHORTCUT_BINDINGS)) {
+    assert.ok(
+      chord.startsWith("ctrl-"),
+      `default for ${action} should be ctrl-* but was ${chord}`,
+    );
+  }
 });

@@ -20,16 +20,6 @@
  * portable (issue #235).
  */
 
-const MODIFIER_TOKENS = new Set(["cmd", "meta", "ctrl", "control", "shift", "alt", "option"]);
-
-/** Tokens that map to "primary modifier" on the current platform. */
-function platformPrimaryTokens(): { mac: string; other: string } {
-  // `navigator` is undefined during SSR; default to non-mac.
-  const isMac =
-    typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
-  return isMac ? { mac: "cmd", other: "ctrl" } : { mac: "ctrl", other: "cmd" };
-}
-
 export interface ParsedChord {
   /**
    * "cmd" / "ctrl" when the stored chord explicitly named one; null when
@@ -88,28 +78,51 @@ export function parseChord(input: string): ParsedChord | null {
 /**
  * True iff the given KeyboardEvent matches the stored chord.
  *
- * Modifier policy:
- *   - `event.metaKey`  matches the "cmd" token
- *   - `event.ctrlKey`  matches the "ctrl" token
- *   - The "opposite" modifier (ctrl when the chord says cmd, or vice
- *     versa) is allowed so a stored "cmd-n" still fires on Linux where
- *     the OS sends `ctrlKey`. This is intentional: the file is portable.
+ * Modifier policy is **strict per-platform** so the persisted chord
+ * behaves predictably on the machine it lives on:
+ *   - On macOS / iOS, a stored `cmd-*` chord matches `metaKey` only,
+ *     and a stored `ctrl-*` chord matches `ctrlKey` only.
+ *   - Off mac, the same `cmd-*` matches `ctrlKey` only, and `ctrl-*`
+ *     matches `ctrlKey` only (Cmd is rarely sent off-mac).
  *   - `altKey` and `shiftKey` must match exactly.
  *   - If the chord has no primary modifier (rare — e.g. just "escape"),
  *     neither metaKey nor ctrlKey may be held.
+ *
+ * This means a binding the user picks on one OS will only fire for the
+ * same physical chord on a different OS if they rebind it. That's
+ * intentional — see the `RESERVED_SHORTCUTS` list in
+ * `shared/shortcuts.ts`; the goal is to avoid Cmd-system-chord
+ * collisions on macOS, not to make the file magically portable.
+ *
+ * `onMac` defaults to `isMacPlatform()` and is exposed primarily so
+ * tests can drive both branches deterministically.
  */
-export function matchesEvent(parsed: ParsedChord, event: KeyboardEvent): boolean {
+export function matchesEvent(
+  parsed: ParsedChord,
+  event: KeyboardEvent,
+  onMac: boolean = isMacPlatform(),
+): boolean {
   if (parsed.shift !== event.shiftKey) return false;
   if (parsed.alt !== event.altKey) return false;
 
   const meta = event.metaKey;
   const ctrl = event.ctrlKey;
+
   if (parsed.primary === null) {
     if (meta || ctrl) return false;
+  } else if (parsed.primary === "cmd") {
+    const held = onMac ? meta : ctrl;
+    if (!held) return false;
+    // Reject the off-platform modifier so a binding is unambiguous:
+    // a stored "cmd-n" never accidentally fires when the user presses
+    // Ctrl+N on macOS.
+    if (onMac && ctrl) return false;
+    if (!onMac && meta) return false;
   } else {
-    const primaryHeld =
-      parsed.primary === "cmd" ? meta || ctrl : ctrl || meta;
-    if (!primaryHeld) return false;
+    const held = onMac ? ctrl : meta;
+    if (!held) return false;
+    if (onMac && meta) return false;
+    if (!onMac && ctrl) return false;
   }
 
   const eventKey = normaliseEventKey(event);
@@ -202,18 +215,26 @@ function prettyKey(key: string): string {
 export function findMatchingAction(
   bindings: Record<string, string>,
   event: KeyboardEvent,
+  onMac: boolean = isMacPlatform(),
 ): string | null {
   for (const [action, chord] of Object.entries(bindings)) {
     const parsed = parseChord(chord);
     if (!parsed) continue;
-    if (matchesEvent(parsed, event)) return action;
+    if (matchesEvent(parsed, event, onMac)) return action;
   }
   return null;
 }
 
 /** Detect whether the current platform is macOS / iOS. */
 export function isMacPlatform(): boolean {
-  return platformPrimaryTokens().mac === "cmd";
+  return platformPrimaryIsMac();
+}
+
+function platformPrimaryIsMac(): boolean {
+  // `navigator` is undefined during SSR; default to non-mac.
+  return (
+    typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
+  );
 }
 
 /**

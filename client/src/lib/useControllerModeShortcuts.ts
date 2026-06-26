@@ -14,22 +14,27 @@ import {
  * keyboard. Bindings are sourced from the shared `useShortcutBindings`
  * hook so the user can rebind them in Settings (issue #235).
  *
- * Default actions:
- *   - `Cmd/Ctrl+T`  → toggle controller mode (enter if off, exit if on).
- *   - `Cmd/Ctrl+N`  → next pinned session. If a controller-mode advance
- *                    countdown is pending, this commits it immediately to
- *                    continue to the next session. The commit path fires
- *                    even while the composer is focused.
- *   - `Cmd/Ctrl+D`  → mark current session done (only while controller mode
- *                    is active).
- *   - `Cmd/Ctrl+S`  → cancel a pending controller-mode advance countdown
- *                    and stay on the current session. Fires even while the
- *                    composer is focused so the user can dismiss the toast
- *                    without blurring first.
- *   - `Esc`         → blurs the currently-focused input/textarea/
- *                    contenteditable. If no countdown is pending, it's a
- *                    no-op. Intentionally a no-op inside dialogs and the
- *                    embedded terminal.
+ * Default actions (strict per-platform: ⌃ on macOS, Ctrl elsewhere):
+ *   - `Ctrl+T`       → toggle controller mode (enter if off, exit if on).
+ *   - `Ctrl+N`       → next pinned session. If a controller-mode advance
+ *                      countdown is pending, this commits it immediately to
+ *                      continue to the next session. The commit path fires
+ *                      even while the composer is focused.
+ *   - `Ctrl+D`       → mark current session done (only while controller
+ *                      mode is active).
+ *   - `Ctrl+S`       → cancel a pending controller-mode advance countdown
+ *                      and stay on the current session. Fires even while
+ *                      the composer is focused so the user can dismiss
+ *                      the toast without blurring first.
+ *   - `Esc`          → blurs the currently-focused input/textarea/
+ *                      contenteditable. If no countdown is pending, it's
+ *                      a no-op. Intentionally a no-op inside dialogs and
+ *                      the embedded terminal.
+ *
+ * Defaults use Ctrl (not Cmd) because Cmd collides with too many macOS
+ * system shortcuts (Cmd+W, Cmd+Q, Cmd+R, …) and the matcher is strict
+ * per-platform — a stored "ctrl-n" will not fire on Cmd+N on macOS and
+ * vice-versa.
  *
  * Shortcuts are suppressed inside dialogs (role="dialog" / <dialog>), the
  * embedded terminal, or when an auto-repeat fires. `Esc` is always
@@ -239,11 +244,15 @@ export function labelForAction(
   bindings: ShortcutBindings | null,
   action: keyof ShortcutBindings
 ): string {
+  // Mirror DEFAULT_SHORTCUT_BINDINGS so callers get a label even
+  // before the server fetch resolves. Keeping this in sync with the
+  // shared defaults is enforced by the DEFAULT_SHORTCUT_BINDINGS test
+  // in shortcut-match.test.ts.
   const fallback = {
-    controllerModeToggle: "cmd-t",
-    controllerModeNext: "cmd-n",
-    controllerModeDone: "cmd-d",
-    controllerModeStay: "cmd-s",
+    controllerModeToggle: "ctrl-t",
+    controllerModeNext: "ctrl-n",
+    controllerModeDone: "ctrl-d",
+    controllerModeStay: "ctrl-s",
   }[action];
   return formatChord(bindings?.[action] ?? fallback, isMacPlatform());
 }

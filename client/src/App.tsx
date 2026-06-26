@@ -600,11 +600,15 @@ export function App() {
     maxWidth: 480,
   });
 
-  // Controller Mode keyboard shortcuts (defaults: ⌘T toggle, ⌘N next,
-  // ⌘D done, ⌘S stay; ⌘ = Ctrl off-mac). The chord for each action is
-  // read from `useShortcutBindings`, so users can rebind them in
-  // Settings (issue #235). Esc still blurs and (when not in an
-  // editable) cancels a pending advance.
+  // Controller Mode keyboard shortcuts (defaults: ⌃T toggle, ⌃N next,
+  // ⌃D done, ⌃S stay; ⌃ on macOS, Ctrl off-mac). We default to Ctrl
+  // rather than Cmd because Cmd collides with too many macOS system
+  // shortcuts (Cmd+W, Cmd+Q, Cmd+R, Cmd+T, …). The chord for each
+  // action is read from `useShortcutBindings`, so users can rebind
+  // them in Settings (issue #235). The matcher is strict per-platform:
+  // a stored "ctrl-n" only fires on ⌃N on macOS, never on ⌘N. Esc
+  // still blurs and (when not in an editable) cancels a pending
+  // advance.
   const shortcutBindings = useShortcutBindings();
   useControllerModeShortcuts({
     bindings: shortcutBindings.bindings,
