@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { RotateCcw, AlertTriangle, Loader2, Check } from "lucide-react";
+import { RotateCcw, AlertTriangle } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import {
-  bindingFor,
   setRecordingChord,
   useShortcutBindingsContext,
 } from "@/lib/useShortcutBindings";
@@ -24,69 +24,66 @@ import {
 /*
  * Settings panel for Controller Mode keyboard shortcuts.
  *
- * Each action shows its current chord, the platform-correct label, and a
- * "Record" button that captures the next chord the user presses. Conflicts
- * (chord already bound to another action, or reserved OS chord) are
- * surfaced inline as warnings — the user can save anyway, but can't
- * accidentally shadow Cmd+W without seeing the warning first.
+ * Each action shows its current chord and a "Record" button. Clicking
+ * Record waits for the next key chord, then auto-saves it (no separate
+ * Save button — every Record persists immediately). Conflicts are
+ * surfaced inline as warnings; the user can re-record to override.
+ *
+ * "Restore defaults" is the one explicit action: it wipes all overrides
+ * and is gated behind a confirm so an accidental click doesn't blow
+ * away a carefully tuned set of rebinds.
  *
  * Overrides are persisted to `~/.local/state/Controller/shortcuts.json`
  * (or platform equivalent) — see issue #235.
  */
 export function ShortcutsSection() {
   const { bindings, save, reset } = useShortcutBindingsContext();
-  const [drafts, setDrafts] = useState<ShortcutBindings | null>(null);
   const [recording, setRecording] = useState<ShortcutActionId | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [pendingAction, setPendingAction] = useState<ShortcutActionId | null>(
+    null,
+  );
 
-  // Keep the draft in sync with the server until the user starts
-  // editing. Once they've changed at least one field we own the draft
-  // until they hit "Restore defaults" or save.
-  useEffect(() => {
-    if (bindings && !drafts) setDrafts({ ...bindings });
-  }, [bindings, drafts]);
-
-  const effective = drafts ?? bindings ?? { ...DEFAULT_SHORTCUT_BINDINGS };
-  const isDirty =
-    drafts !== null &&
-    bindings !== null &&
-    !equalRecord(drafts, bindings);
-
+  const effective: ShortcutBindings =
+    bindings ?? { ...DEFAULT_SHORTCUT_BINDINGS };
   const conflict = detectConflict(effective);
 
-  const updateChord = (action: ShortcutActionId, chord: string) => {
-    setDrafts((prev) => {
-      const base = prev ?? bindings ?? { ...DEFAULT_SHORTCUT_BINDINGS };
-      return { ...base, [action]: chord };
-    });
-  };
-
-  const handleResetDrafts = async () => {
-    const next = await reset();
-    setDrafts({ ...next });
-    setSavedAt(Date.now());
-  };
-
-  const handleSave = async () => {
-    if (!drafts) return;
-    setSaving(true);
-    try {
-      // Only send the actions that differ from the bundled defaults —
-      // keeps the on-disk shape minimal.
-      const overrides: Partial<ShortcutBindings> = {};
-      for (const [action, chord] of Object.entries(drafts)) {
-        const id = action as ShortcutActionId;
-        if (chord !== DEFAULT_SHORTCUT_BINDINGS[id]) {
-          overrides[id] = chord;
-        }
+  // Persist a chord change for one action. We always send only the diff
+  // against the bundled defaults so the on-disk file stays minimal.
+  // Errors roll back the chord in the local view (the server is the
+  // source of truth via the provider state).
+  const persistChord = async (action: ShortcutActionId, chord: string) => {
+    const next: Partial<ShortcutBindings> = {};
+    const current = bindings ?? { ...DEFAULT_SHORTCUT_BINDINGS };
+    for (const id of SHORTCUT_ACTIONS.map((a) => a.id)) {
+      const value = id === action ? chord : current[id];
+      if (value !== DEFAULT_SHORTCUT_BINDINGS[id]) {
+        next[id] = value;
       }
-      const next = await save(overrides);
-      setDrafts({ ...next });
-      setSavedAt(Date.now());
-      setRecording(null);
-    } finally {
-      setSaving(false);
+    }
+    try {
+      await save(next);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to save shortcut",
+      );
+    }
+  };
+
+  const handleResetDefaults = async () => {
+    if (
+      !window.confirm(
+        "Restore default shortcuts? Any custom bindings you've set will be removed.",
+      )
+    ) {
+      return;
+    }
+    try {
+      await reset();
+      toast.success("Shortcuts restored to defaults");
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to restore defaults",
+      );
     }
   };
 
@@ -104,6 +101,7 @@ export function ShortcutsSection() {
         {SHORTCUT_ACTIONS.map((action) => {
           const chord = effective[action.id] ?? DEFAULT_SHORTCUT_BINDINGS[action.id];
           const isRecording = recording === action.id;
+          const isPending = pendingAction === action.id;
           const label = formatChord(chord, isMacPlatform());
           return (
             <div
@@ -130,12 +128,19 @@ export function ShortcutsSection() {
               </div>
               {isRecording ? (
                 <Recorder
-                  onCapture={(chord) => {
-                    updateChord(action.id, chord);
+                  onCapture={async (chord) => {
                     setRecording(null);
+                    setPendingAction(action.id);
+                    await persistChord(action.id, chord);
+                    setPendingAction(null);
                   }}
                   onCancel={() => setRecording(null)}
                 />
+              ) : null}
+              {isPending ? (
+                <div className="md:hidden text-xs text-muted-foreground">
+                  Saving…
+                </div>
               ) : null}
             </div>
           );
@@ -153,32 +158,12 @@ export function ShortcutsSection() {
       ) : null}
 
       <div className="flex flex-wrap items-center justify-end gap-2">
-        {savedAt ? (
-          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-            <Check className="h-3 w-3" />
-            Saved
-          </span>
-        ) : null}
         <Button
           variant="outline"
-          onClick={() => void handleResetDrafts()}
-          disabled={saving}
+          onClick={() => void handleResetDefaults()}
         >
           <RotateCcw className="h-3.5 w-3.5" />
           Restore defaults
-        </Button>
-        <Button
-          onClick={() => void handleSave()}
-          disabled={!isDirty || saving}
-        >
-          {saving ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Saving…
-            </>
-          ) : (
-            "Save"
-          )}
         </Button>
       </div>
     </div>
@@ -232,13 +217,6 @@ function Recorder({
   );
 }
 
-function equalRecord(a: ShortcutBindings, b: ShortcutBindings): boolean {
-  for (const id of Object.keys(DEFAULT_SHORTCUT_BINDINGS) as ShortcutActionId[]) {
-    if ((a[id] ?? "") !== (b[id] ?? "")) return false;
-  }
-  return true;
-}
-
 interface Conflict {
   title: string;
   body: string;
@@ -280,7 +258,3 @@ function detectConflict(bindings: ShortcutBindings): Conflict | null {
 
   return null;
 }
-
-// Exposed so unit tests can exercise the conflict detector without
-// mounting the full settings UI.
-export const __testing = { detectConflict, equalRecord, bindingFor };
