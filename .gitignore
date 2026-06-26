@@ -6,3 +6,5 @@ release
 .coding-agent/
 .anita/
 .data/
+docs/out/
+docs/.next/

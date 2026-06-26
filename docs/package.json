@@ -1,0 +1,26 @@
+{
+  "name": "docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "postbuild": "node scripts/copy-404.mjs"
+  },
+  "dependencies": {
+    "fumadocs-core": "16.10.5",
+    "fumadocs-mdx": "15.0.12",
+    "fumadocs-ui": "16.10.5",
+    "next": "16.2.9",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/mdx": "^2.0.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
