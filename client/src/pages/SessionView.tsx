@@ -64,6 +64,7 @@ import {
   fetchTerminalTabs,
   fetchAgentProviders,
   fetchSession,
+  fetchSessionTitle,
   fetchWorktrees,
   dismissSessionUserInput,
   fetchAgentSkills,
@@ -1540,31 +1541,89 @@ const EventBlock = memo(function EventBlock({
   );
 });
 
+// Resolved `controller://` link titles, cached by session id so repeated
+// links in a transcript (and re-renders) don't refetch. `null` records a
+// session that has no title / couldn't be resolved.
+const sessionTitleCache = new Map<string, string | null>();
+
+/*
+ * Resolve the current title of the session a `controller://` link points at.
+ * Returns null while loading, when the session has no title, or on failure —
+ * callers fall back to a neutral label.
+ */
+function useSessionTitle(target: ControllerLinkTarget): string | null {
+  const { sessionId } = target;
+  const [title, setTitle] = useState<string | null>(
+    () => sessionTitleCache.get(sessionId) ?? null
+  );
+
+  useEffect(() => {
+    if (sessionTitleCache.has(sessionId)) {
+      setTitle(sessionTitleCache.get(sessionId) ?? null);
+      return;
+    }
+    let cancelled = false;
+    fetchSessionTitle(target.projectId, sessionId, target.worktreeId).then(
+      (resolved) => {
+        sessionTitleCache.set(sessionId, resolved);
+        if (!cancelled) setTitle(resolved);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, target.projectId, target.worktreeId]);
+
+  return title;
+}
+
+/*
+ * A clickable `controller://` link. Shows the referenced session's title
+ * (resolved lazily) with a neutral "conversation" fallback while loading or
+ * when the session has none, and navigates in-app on click. The full URI is
+ * kept as the hover title.
+ */
+function ControllerConversationLink({
+  href,
+  linkTarget,
+  ...props
+}: React.AnchorHTMLAttributes<HTMLAnchorElement> & {
+  linkTarget: ControllerLinkTarget;
+}) {
+  const openConversation = useContext(OpenConversationContext);
+  const title = useSessionTitle(linkTarget);
+
+  return (
+    <a
+      href={href}
+      title={href}
+      {...props}
+      onClick={(event) => {
+        event.preventDefault();
+        if (openConversation) {
+          openConversation(linkTarget);
+        } else {
+          toast.error("Conversation links are not available in this view");
+        }
+      }}
+    >
+      <MessageSquare className="inline-block h-3 w-3 align-[-0.125em]" />{" "}
+      {title || "conversation"}
+    </a>
+  );
+}
+
 function MarkdownLink({
   children,
   href,
   ...props
 }: React.AnchorHTMLAttributes<HTMLAnchorElement>) {
   const openSourceReference = useContext(OpenSourceReferenceContext);
-  const openConversation = useContext(OpenConversationContext);
 
   const conversationTarget = parseControllerUri(href);
   if (conversationTarget) {
     return (
-      <a
-        href={href}
-        {...props}
-        onClick={(event) => {
-          event.preventDefault();
-          if (openConversation) {
-            openConversation(conversationTarget);
-          } else {
-            toast.error("Conversation links are not available in this view");
-          }
-        }}
-      >
-        {children}
-      </a>
+      <ControllerConversationLink href={href} linkTarget={conversationTarget} {...props} />
     );
   }
 

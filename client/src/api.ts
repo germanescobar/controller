@@ -340,6 +340,29 @@ export async function fetchSession(
   return res.json();
 }
 
+/*
+ * Lightweight lookup of a session's current title, used to label
+ * `controller://` conversation links without fetching the full transcript.
+ * Returns null when the session has no title, doesn't exist, or the request
+ * fails — callers fall back to a neutral label.
+ */
+export async function fetchSessionTitle(
+  projectId: string,
+  sessionId: string,
+  worktreeId?: string
+): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${BASE}/projects/${projectId}/sessions/${sessionId}/title${withWorktree(worktreeId)}`
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { title?: string | null };
+    return body.title ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function updateSessionTitle(
   projectId: string,
   sessionId: string,

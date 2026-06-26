@@ -2457,6 +2457,37 @@ sessionsRouter.get("/:projectId/sessions/:sessionId", async (req, res) => {
   res.json(session);
 });
 
+/*
+ * Lightweight title lookup for a session. Powers the `controller://` link
+ * label: the renderer resolves the referenced session's current title without
+ * pulling the full transcript. Returns `{ title }` (null when the session has
+ * no title yet), or 404 when the session/worktree doesn't exist.
+ */
+sessionsRouter.get(
+  "/:projectId/sessions/:sessionId/title",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const worktree = await resolveWorktree(
+      req.params.projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+    const session = await getSession(worktree.path, req.params.sessionId);
+    if (!session) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    res.json({ title: session.title ?? null });
+  }
+);
+
 // Update a session's editable fields (currently just the title).
 sessionsRouter.patch("/:projectId/sessions/:sessionId", async (req, res) => {
   const project = await getProject(req.params.projectId);
