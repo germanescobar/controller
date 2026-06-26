@@ -38,6 +38,30 @@ interface SupersetScriptExtension {
 
 const DEFAULT_RUN_MODE: ProjectRunMode = "concurrent";
 
+/* Current native-script directory. New projects write here. */
+export const NATIVE_SCRIPT_DIR = ".controller";
+/* Legacy native-script directory used before the coding-orchestrator →
+ * Controller rename. Still read (and written back to, for already-onboarded
+ * repos) so the rename doesn't strand existing projects. */
+export const LEGACY_NATIVE_SCRIPT_DIR = ".coding-orchestrator";
+
+/*
+ * Resolves which native-script directory a project uses. Prefers the current
+ * `.controller/` directory; falls back to the legacy `.coding-orchestrator/`
+ * directory only when that is the one present on disk. A project with neither
+ * (a brand-new project) resolves to `.controller/`, so all fresh writes land
+ * in the new location while an already-onboarded `.coding-orchestrator/` repo
+ * keeps reading and writing its existing directory. Mirrors the read-both /
+ * no-auto-move shape of the macOS-home migration in #223.
+ */
+export function resolveNativeScriptDir(projectPath: string): string {
+  const current = path.join(projectPath, NATIVE_SCRIPT_DIR);
+  if (existsSync(current)) return current;
+  const legacy = path.join(projectPath, LEGACY_NATIVE_SCRIPT_DIR);
+  if (existsSync(legacy)) return legacy;
+  return current;
+}
+
 export async function resolveProjectScripts(projectPath: string): Promise<ProjectScripts> {
   const native = await readNativeScripts(projectPath);
   const external =
@@ -103,7 +127,7 @@ function emptyProjectScripts(): ProjectScripts {
 }
 
 async function readNativeScripts(projectPath: string): Promise<ProjectScripts> {
-  const dir = path.join(projectPath, ".coding-orchestrator");
+  const dir = resolveNativeScriptDir(projectPath);
   const scripts: NativeScripts = {
     setup: await commandForScriptFile(dir, "setup.sh"),
     run: await commandForScriptFile(dir, "run.sh"),

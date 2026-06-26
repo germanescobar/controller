@@ -10,7 +10,12 @@ interface PtySession {
 }
 
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB per session buffer
-const TMUX_SESSION_PREFIX = "coding-orchestrator-";
+const TMUX_SESSION_PREFIX = "controller-";
+/* Sessions created by builds before the coding-orchestrator → Controller
+ * rename used this prefix. New sessions use TMUX_SESSION_PREFIX; cleanup still
+ * matches the legacy prefix so in-flight sessions from an older build aren't
+ * orphaned. */
+const LEGACY_TMUX_SESSION_PREFIX = "coding-orchestrator-";
 
 function sanitizeTmuxName(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -26,8 +31,11 @@ function tmuxFirstPaneTarget(sessionName: string): string {
   return `${sessionName}:0.0`;
 }
 
-function tmuxPrefix(prefix: string): string {
-  return `${TMUX_SESSION_PREFIX}${sanitizeTmuxName(prefix)}`;
+/* Both the current and legacy session-name prefixes for a logical prefix, so
+ * cleanup matches sessions created by older builds too. */
+function tmuxPrefixes(prefix: string): string[] {
+  const safe = sanitizeTmuxName(prefix);
+  return [`${TMUX_SESSION_PREFIX}${safe}`, `${LEGACY_TMUX_SESSION_PREFIX}${safe}`];
 }
 
 function listTmuxSessions(): string[] {
@@ -253,9 +261,9 @@ class PtyManager {
         this.kill(sessionId);
       }
     }
-    const targetPrefix = tmuxPrefix(prefix);
+    const targetPrefixes = tmuxPrefixes(prefix);
     for (const sessionName of listTmuxSessions()) {
-      if (sessionName.startsWith(targetPrefix)) {
+      if (targetPrefixes.some((target) => sessionName.startsWith(target))) {
         killTmuxSession(sessionName);
       }
     }

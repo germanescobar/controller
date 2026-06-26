@@ -3,24 +3,25 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
 import { projectsFile, ensureOrchestratorHome } from "./paths.js";
+import { resolveNativeScriptDir } from "./project-scripts.js";
 
 export interface Project {
   id: string;
   name: string;
   path: string;
-  /* Commands hydrated from `.coding-orchestrator/setup.sh` on read. The
+  /* Commands hydrated from the project's `<scriptDir>/setup.sh` on read. The
    * script file is the source of truth; this is not persisted in the
    * registry. */
   setupCommands?: string;
-  /* Commands hydrated from `.coding-orchestrator/run.sh` on read. */
+  /* Commands hydrated from the project's `<scriptDir>/run.sh` on read. */
   runCommands?: string;
   createdAt: string;
 }
 
-/* Shape persisted in `projects.json`. Script commands live in the
- * `.coding-orchestrator/*.sh` files (which is what actually runs), so they
- * are deliberately not stored here — keeping them would let the registry
- * drift out of sync with the files on disk. */
+/* Shape persisted in `projects.json`. Script commands live in the project's
+ * native `<scriptDir>/*.sh` files (which is what actually runs), so they are
+ * deliberately not stored here — keeping them would let the registry drift
+ * out of sync with the files on disk. */
 interface ProjectRecord {
   id: string;
   name: string;
@@ -119,14 +120,15 @@ async function hydrate(record: ProjectRecord): Promise<Project> {
   };
 }
 
-/* Reads `.coding-orchestrator/<fileName>` and strips the generated
- * `#!/bin/bash` / `set -e` header so the form shows just the commands.
- * Returns undefined when the script does not exist. */
+/* Reads the project's native `<scriptDir>/<fileName>` and strips the generated
+ * `#!/bin/bash` / `set -e` header so the form shows just the commands. Uses the
+ * resolved script directory so an already-onboarded `.coding-orchestrator/`
+ * repo still hydrates. Returns undefined when the script does not exist. */
 async function readScriptCommands(
   projectPath: string,
   fileName: string
 ): Promise<string | undefined> {
-  const scriptPath = path.join(projectPath, ".coding-orchestrator", fileName);
+  const scriptPath = path.join(resolveNativeScriptDir(projectPath), fileName);
   if (!existsSync(scriptPath)) return undefined;
   const content = await fs.readFile(scriptPath, "utf-8");
   const body = content.startsWith(SCRIPT_HEADER)
@@ -135,14 +137,18 @@ async function readScriptCommands(
   return body.trimEnd();
 }
 
-/* Writes a `.coding-orchestrator/<fileName>` script when commands are
- * provided, or removes it when the commands are empty. */
+/* Writes the project's native `<scriptDir>/<fileName>` script when commands are
+ * provided, or removes it when the commands are empty. Writes to the resolved
+ * script directory: `.controller/` for new projects, or the existing
+ * `.coding-orchestrator/` directory for already-onboarded repos so editing
+ * doesn't silently move their scripts. The empty-delete branch removes only the
+ * file in that same directory. */
 async function syncScript(
   projectPath: string,
   fileName: string,
   commands: string | undefined
 ): Promise<void> {
-  const scriptPath = path.join(projectPath, ".coding-orchestrator", fileName);
+  const scriptPath = path.join(resolveNativeScriptDir(projectPath), fileName);
   if (commands?.trim()) {
     await fs.mkdir(path.dirname(scriptPath), { recursive: true });
     const content = `${SCRIPT_HEADER}${commands.trimEnd()}\n`;

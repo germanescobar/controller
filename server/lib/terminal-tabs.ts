@@ -11,7 +11,11 @@ const DEFAULT_TERMINAL_TAB: TerminalTab = {
   id: "default",
   label: "Terminal 1",
 };
-const TMUX_SESSION_PREFIX = "coding-orchestrator-";
+const TMUX_SESSION_PREFIX = "controller-";
+/* Sessions created by builds before the coding-orchestrator → Controller
+ * rename used this prefix. Discovery matches it too so terminals from an older
+ * build still surface as tabs. */
+const LEGACY_TMUX_SESSION_PREFIX = "coding-orchestrator-";
 
 type Registry = Record<string, TerminalTab[]>;
 
@@ -38,13 +42,16 @@ function listTmuxTerminalIds(projectId: string, worktreeId: string): string[] {
     return [];
   }
 
-  const prefix = `${TMUX_SESSION_PREFIX}${sanitizeTmuxName(`${projectId}:${worktreeId}:`)}`;
+  const suffix = sanitizeTmuxName(`${projectId}:${worktreeId}:`);
+  const prefixes = [`${TMUX_SESSION_PREFIX}${suffix}`, `${LEGACY_TMUX_SESSION_PREFIX}${suffix}`];
   const seen = new Set<string>();
   return output
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.startsWith(prefix))
-    .map((line) => line.slice(prefix.length).replace(/-[0-9a-f]{12}$/, ""))
+    .map((line) => {
+      const prefix = prefixes.find((candidate) => line.startsWith(candidate));
+      return prefix ? line.slice(prefix.length).replace(/-[0-9a-f]{12}$/, "") : "";
+    })
     .filter((id) => id && /^[a-zA-Z0-9._-]+$/.test(id) && !seen.has(id) && seen.add(id));
 }
 
