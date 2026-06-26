@@ -1,7 +1,9 @@
+import { createMDX } from "fumadocs-mdx/next";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
-  basePath: '/controller',
+  output: "export",
+  basePath: "/controller",
   trailingSlash: true,
   images: {
     unoptimized: true,
@@ -9,4 +11,6 @@ const nextConfig = {
   reactStrictMode: true,
 };
 
-export default nextConfig;
+const withMDX = createMDX();
+
+export default withMDX(nextConfig);

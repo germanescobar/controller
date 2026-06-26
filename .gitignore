@@ -8,3 +8,4 @@ release
 .data/
 docs/out/
 docs/.next/
+docs/.source/

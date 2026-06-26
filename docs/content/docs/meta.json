@@ -1,0 +1,6 @@
+{
+  "title": "Controller",
+  "description": "Public documentation for Controller.",
+  "root": true,
+  "pages": ["---Overview---", "overview", "installation", "architecture"]
+}
