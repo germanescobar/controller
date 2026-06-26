@@ -16,7 +16,6 @@ import {
   fetchProjects,
   markSessionFocusDone,
   pinSessionFocus,
-  resolveSessionLink,
   subscribeProjectEvents,
   unpinSessionFocus,
   type Project,
@@ -393,30 +392,14 @@ export function App() {
 
   /**
    * Open a conversation referenced by a `controller://` link in transcript
-   * output. The full form carries project/worktree/session and navigates
-   * directly; the short form names only the session, so we resolve it to its
-   * owning project/worktree first. Stale or unknown targets surface a toast
-   * rather than breaking navigation.
+   * output. The URI always carries project/worktree/session, so navigation is
+   * a direct, synchronous switch — no server resolution. If the target no
+   * longer exists, SessionView renders an empty session view rather than
+   * breaking.
    */
-  const handleOpenConversation = useCallback(
-    async (target: ControllerLinkTarget) => {
-      if (target.projectId) {
-        handleSelectSession(target.projectId, target.sessionId, target.worktreeId);
-        return;
-      }
-      try {
-        const location = await resolveSessionLink(target.sessionId);
-        if (!location) {
-          toast.error("That conversation could not be found");
-          return;
-        }
-        handleSelectSession(location.projectId, location.sessionId, location.worktreeId);
-      } catch {
-        toast.error("Failed to open that conversation");
-      }
-    },
-    []
-  );
+  const handleOpenConversation = useCallback((target: ControllerLinkTarget) => {
+    handleSelectSession(target.projectId, target.sessionId, target.worktreeId);
+  }, []);
 
   const handleNewThread = (projectId: string, worktreeId?: string) => {
     setActiveProjectId(projectId);

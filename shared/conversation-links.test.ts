@@ -16,22 +16,22 @@ test("parseControllerUri parses the full form", () => {
   });
 });
 
-test("parseControllerUri parses the short form", () => {
-  assert.deepEqual(parseControllerUri("controller://session/abc123"), {
-    sessionId: "abc123",
-  });
-});
-
-test("parseControllerUri accepts the plural short form", () => {
-  assert.deepEqual(parseControllerUri("controller://sessions/abc123"), {
-    sessionId: "abc123",
-  });
+test("parseControllerUri accepts the plural session segment", () => {
+  assert.deepEqual(
+    parseControllerUri(
+      "controller://project/p1/worktree/w1/sessions/s1"
+    ),
+    { projectId: "p1", worktreeId: "w1", sessionId: "s1" }
+  );
 });
 
 test("parseControllerUri trims surrounding whitespace", () => {
-  assert.deepEqual(parseControllerUri("  controller://session/abc123  "), {
-    sessionId: "abc123",
-  });
+  assert.deepEqual(
+    parseControllerUri(
+      "  controller://project/p1/worktree/w1/session/s1  "
+    ),
+    { projectId: "p1", worktreeId: "w1", sessionId: "s1" }
+  );
 });
 
 test("parseControllerUri rejects malformed and unrelated values", () => {
@@ -40,24 +40,30 @@ test("parseControllerUri rejects malformed and unrelated values", () => {
   assert.equal(parseControllerUri(null), null);
   assert.equal(parseControllerUri("https://example.com"), null);
   assert.equal(parseControllerUri("controller://"), null);
+  // Short form is no longer supported — links must carry the full path.
+  assert.equal(parseControllerUri("controller://session/abc123"), null);
   assert.equal(parseControllerUri("controller://project/p/session/s"), null);
   assert.equal(
-    parseControllerUri("controller://session/abc/extra"),
+    parseControllerUri(
+      "controller://project/p/worktree/w/session/s/extra"
+    ),
     null
   );
   // A URI embedded in surrounding text is not a standalone link.
   assert.equal(
-    parseControllerUri("see controller://session/abc123 for details"),
+    parseControllerUri(
+      "see controller://project/p/worktree/w/session/s for details"
+    ),
     null
   );
 });
 
 test("CONTROLLER_URI_PATTERN finds URIs embedded in text", () => {
   const text =
-    "Full controller://project/p1/worktree/w1/session/s1 and short controller://session/s2.";
+    "First controller://project/p1/worktree/w1/session/s1 and second controller://project/p2/worktree/w2/session/s2.";
   const matches = [...text.matchAll(CONTROLLER_URI_PATTERN)].map((m) => m[0]);
   assert.deepEqual(matches, [
     "controller://project/p1/worktree/w1/session/s1",
-    "controller://session/s2",
+    "controller://project/p2/worktree/w2/session/s2",
   ]);
 });
