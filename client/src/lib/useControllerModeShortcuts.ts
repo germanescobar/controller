@@ -36,9 +36,14 @@ import {
  * per-platform — a stored "ctrl-n" will not fire on Cmd+N on macOS and
  * vice-versa.
  *
+ * Every chord fires regardless of which element has focus (textarea,
+ * contenteditable, button, …). `preventDefault` blocks the literal key
+ * from reaching the textarea so typing isn't corrupted. `Esc` is the
+ * one exception: it still blurs an editable element so the user can
+ * resume typing without their keys being intercepted.
+ *
  * Shortcuts are suppressed inside dialogs (role="dialog" / <dialog>), the
- * embedded terminal, or when an auto-repeat fires. `Esc` is always
- * permitted (the same dialog/terminal suppressions apply).
+ * embedded terminal, or when an auto-repeat fires.
  */
 export interface UseControllerModeShortcutsOptions {
   bindings: ShortcutBindings | null;
@@ -167,10 +172,15 @@ export function useControllerModeShortcuts({
       if (!currentBindings) return;
       const inControllerMode = controllerModeRef.current;
 
-      // The "stay" chord (default Cmd/Ctrl+S) fires even while the
-      // composer is focused. Because this path runs before editable-target
-      // suppression, preventDefault keeps the literal "s" out of the
-      // textarea.
+      // All Controller Mode chords (default Ctrl+T / Ctrl+N / Ctrl+D /
+      // Ctrl+S) fire regardless of where focus is — that's the whole
+      // reason the issue switched them to modifier-based (issue #235).
+      // preventDefault keeps the literal character out of the textarea
+      // when one is focused. Esc is intentionally not in this group
+      // because the user still wants Esc to blur the input.
+
+      // The "stay" chord (default Ctrl+S) only matters while an
+      // advance is pending; no-op otherwise.
       const stayChord = getParsedChord(currentBindings, "controllerModeStay");
       if (
         stayChord &&
@@ -182,11 +192,9 @@ export function useControllerModeShortcuts({
         return;
       }
 
-      // Mirror the "stay" path for "next": when a countdown is pending, the
-      // next chord commits it immediately. Runs before editable-target
-      // suppression so it works while the composer is focused. When no
-      // countdown is pending, onCommitAdvance is undefined and the regular
-      // next handler below takes over.
+      // "Next" while a countdown is pending commits the advance
+      // immediately. When no countdown is pending the regular next
+      // handler below takes over.
       const nextChord = getParsedChord(currentBindings, "controllerModeNext");
       if (
         nextChord &&
@@ -198,12 +206,9 @@ export function useControllerModeShortcuts({
         return;
       }
 
-      if (isEditableTarget(event.target)) return;
-
-      // Toggle chord (default Cmd/Ctrl+T) is the unified enter/exit
-      // binding. No priority over the editable target check — toggling
-      // while typing would be surprising, so require the cursor to be
-      // outside the composer first.
+      // Toggle chord (default Ctrl+T) is the unified enter/exit
+      // binding. Runs before the controller-mode gate so the user can
+      // leave controller mode even if they're typing in the composer.
       const toggleChord = getParsedChord(currentBindings, "controllerModeToggle");
       if (toggleChord && matchesEvent(toggleChord, event)) {
         event.preventDefault();

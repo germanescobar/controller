@@ -186,6 +186,13 @@ test("formatChord pretty-prints Enter / Escape / Arrow keys", () => {
   assert.equal(formatChord("cmd-arrowup", true), "⌘↑");
 });
 
+test("formatChord renders ⌃N on macOS for a stored ctrl-n chord", () => {
+  // Regression: the previous implementation used the literal word
+  // "Ctrl" on macOS, which glued onto the key letter ("CtrlN").
+  assert.equal(formatChord("ctrl-n", true), "⌃N");
+  assert.equal(formatChord("ctrl-shift-n", true), "⌃⇧N");
+});
+
 test("formatChord falls back to the raw string when the chord is invalid", () => {
   assert.equal(formatChord("not-a-real-chord", true), "not-a-real-chord");
 });

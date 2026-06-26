@@ -158,19 +158,24 @@ function normaliseEventKey(event: KeyboardEvent): string {
 
 /**
  * Format a parsed chord for display. `metaMac` controls whether the
- * primary modifier renders as ⌘ (true) or Ctrl (false).
+ * primary modifier renders as a macOS glyph (true) or the literal word
+ * "Ctrl" (false).
+ *
+ * On macOS we render every modifier as a symbol so they join cleanly
+ * without separators (the macOS HIG convention: ⌃⌥D, not Ctrl+Alt+D).
+ * We use `⌃` for Control specifically because "Ctrl" as a word would
+ * otherwise glue onto the key letter ("CtrlN").
  */
 export function formatChord(chord: string, metaMac: boolean): string {
   const parsed = parseChord(chord);
   if (!parsed) return chord;
   const tokens: string[] = [];
   if (parsed.primary === "cmd") tokens.push(metaMac ? "⌘" : "Ctrl");
-  else if (parsed.primary === "ctrl") tokens.push(metaMac ? "Ctrl" : "⌘");
+  else if (parsed.primary === "ctrl") tokens.push(metaMac ? "⌃" : "Ctrl");
   if (parsed.shift) tokens.push(metaMac ? "⇧" : "Shift");
   if (parsed.alt) tokens.push(metaMac ? "⌥" : "Alt");
   tokens.push(prettyKey(parsed.key));
   if (metaMac) {
-    // macOS convention: symbols joined without "+".
     return tokens.join("");
   }
   return tokens.join("+");
