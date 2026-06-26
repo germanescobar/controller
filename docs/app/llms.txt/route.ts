@@ -9,11 +9,18 @@
 // in sync with the actual content. The route runs at build time —
 // Next.js pre-renders the response as a static file at
 // `out/llms.txt`, served as plain text by GitHub Pages.
+//
+// URLs are emitted as absolute (SITE_ORIGIN + SITE_BASE_PATH) so an
+// agent that resolves `/docs/...` against the public origin lands
+// on the right page. Without this, a `/docs/overview` link in
+// llms.txt resolves to `https://germanescobar.github.io/docs/overview`
+// — one path segment short of where the page actually lives.
 import { source, getPage } from "@/lib/source";
+import { SITE_ORIGIN, SITE_BASE_PATH } from "@/site-config";
 
 export const revalidate = false;
 
-const BASE_URL = "/docs";
+const DOCS_PREFIX = `${SITE_ORIGIN}${SITE_BASE_PATH}/docs`;
 
 export async function GET(): Promise<Response> {
   const entries: { name: string; description: string; url: string }[] = [];
@@ -25,7 +32,7 @@ export async function GET(): Promise<Response> {
     entries.push({
       name: page.data.title ?? slug.join("/"),
       description: page.data.description ?? "",
-      url: `${BASE_URL}/${slug.join("/")}`,
+      url: `${DOCS_PREFIX}/${slug.join("/")}`,
     });
   }
 
