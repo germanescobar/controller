@@ -17,6 +17,7 @@ import {
   RotateCw,
   AlertTriangle,
   Play,
+  HelpCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -59,6 +60,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
+import { DOCS_URL } from "@/lib/links";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -203,6 +205,35 @@ export function DestructiveConfirmButton({
         "Delete"
       )}
     </Button>
+  );
+}
+
+// Footer row of the sidebar: Settings button on the left, a help link
+// to the public docs site on the right. Extracted from the main
+// Sidebar so the link can be unit-tested without rendering the whole
+// tree (which fans out to the projects API).
+export function SidebarBottomBar({ onSettings }: { onSettings: () => void }) {
+  return (
+    <div className="flex items-center p-3">
+      <button
+        data-testid="sidebar-settings"
+        onClick={onSettings}
+        className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
+      >
+        <Settings className="h-4 w-4" />
+        <span>Settings</span>
+      </button>
+      <a
+        href={DOCS_URL}
+        target="_blank"
+        rel="noreferrer"
+        data-testid="sidebar-help"
+        aria-label="Open Controller docs in browser"
+        className="ml-auto flex h-8 w-8 items-center justify-center rounded-md text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
+      >
+        <HelpCircle className="h-4 w-4" />
+      </a>
+    </div>
   );
 }
 
@@ -1059,16 +1090,7 @@ export function Sidebar({
       </ScrollArea>
 
       <Separator />
-      <div className="p-3">
-        <button
-          data-testid="sidebar-settings"
-          onClick={onSettings}
-          className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
-        >
-          <Settings className="h-4 w-4" />
-          <span>Settings</span>
-        </button>
-      </div>
+      <SidebarBottomBar onSettings={onSettings} />
 
       <Dialog
         open={!!confirmDeleteProjectId}
