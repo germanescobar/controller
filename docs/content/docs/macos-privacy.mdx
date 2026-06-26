@@ -1,0 +1,20 @@
+---
+title: macOS privacy prompts
+description: TCC prompts Controller can surface and how to reset them.
+---
+
+macOS shows "Allow access to..." dialogs when a process reads `~/Desktop`,
+`~/Documents`, `~/Downloads`, or `~/Music`. Controller's *own* state lives under
+`~/Library/Application Support/Controller/`, which is exempt — that path never
+triggers TCC. Prompts you can still see in normal use:
+
+| Trigger | First-time effect | How to reset |
+|---|---|---|
+| Add a project whose path lives under a protected folder (e.g. `~/Downloads/foo`) and then run a worktree or session on it | "Controller wants to access ~/Downloads" the first time the process reads inside the chosen path | System Settings → Privacy & Security → Files and Folders → Controller. Toggle off and on to re-prompt. |
+| Use the **Browse…** button on the *Add a project* card while running inside the packaged Electron app | The native picker grants access implicitly; no separate prompt fires | n/a |
+| Import a skill from a per-agent home (`~/.codex/skills/`, `~/.claude/skills/`, `~/.anita/skills/`) that's on a protected volume | Prompt for the agent's home folder | Same panel |
+
+The prompts fire at most once per (process × folder) and persist across launches
+as long as the app's code signature is stable. For development builds the
+signature changes on every rebuild, which is the main reason a clean install
+shows the prompt more often than a packaged build does.

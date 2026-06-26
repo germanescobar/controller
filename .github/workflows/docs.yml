@@ -1,0 +1,88 @@
+name: Deploy docs site to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+# Allow the Pages deployment action to publish by granting the
+# `github-pages` environment write permissions. The `pages: write`
+# permission is also needed to upload artifacts and create
+# deployments against the `github-pages` environment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Avoid two concurrent runs stepping on each other when pushes land in
+# quick succession.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the docs build can resolve workspace
+          # package versions if they ever need to inspect the tree.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build static export
+        run: npm --workspace docs run build
+
+      # Search index guard. Fumadocs serializes the Orama index to
+      # `docs/out/api/search.json` via the /api/search.json route.
+      # The index grows linearly with content; we refuse to ship an
+      # index larger than 1 MB so the first-paint cost stays
+      # bounded. A regression typically means someone dropped a
+      # binary blob into content/ or the index generator changed
+      # defaults.
+      - name: Verify search index size (<= 1 MB)
+        run: |
+          set -euo pipefail
+          file="docs/out/api/search.json"
+          if [ ! -f "$file" ]; then
+            echo "::warning::$file was not generated; skipping size check"
+            exit 0
+          fi
+          size=$(stat -c %s "$file")
+          limit=$((1024 * 1024))
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::$file is $size bytes, exceeds $limit byte limit"
+            exit 1
+          fi
+          echo "$file is $size bytes (limit: $limit)"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/out
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
