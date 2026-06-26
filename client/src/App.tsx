@@ -22,6 +22,7 @@ import {
   type ProjectEvent,
   type Worktree,
 } from "./api.ts";
+import type { ControllerLinkTarget } from "../../shared/conversation-links.ts";
 import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
@@ -388,6 +389,17 @@ export function App() {
     setView({ page: "session", projectId, worktreeId, sessionId });
     closeSidebar();
   };
+
+  /**
+   * Open a conversation referenced by a `controller://` link in transcript
+   * output. The URI always carries project/worktree/session, so navigation is
+   * a direct, synchronous switch — no server resolution. If the target no
+   * longer exists, SessionView renders an empty session view rather than
+   * breaking.
+   */
+  const handleOpenConversation = useCallback((target: ControllerLinkTarget) => {
+    handleSelectSession(target.projectId, target.sessionId, target.worktreeId);
+  }, []);
 
   const handleNewThread = (projectId: string, worktreeId?: string) => {
     setActiveProjectId(projectId);
@@ -789,6 +801,7 @@ export function App() {
             onBackgroundComplete={(sessionId) => {
               loadProjects();
             }}
+            onOpenConversation={handleOpenConversation}
             controllerMode={controllerMode}
             focusPosition={focusPosition}
             onFocusDone={handleFocusDone}

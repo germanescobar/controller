@@ -495,7 +495,7 @@ ${cliPath} sessions start "Coding Orchestrator" \\
   --provider claude \\
   --skill github-issues \\
   --message "Work on GitHub issue #42 in the germanescobar/controller repo"
-# → Started session abc123 — controller://sessions/abc123
+# → Started session abc123 — controller://project/<projectId>/worktree/f1247ed6-3a1b-4c9d-b8e2-9f0a1c2d3e4f/session/abc123
 \`\`\`
 
 Key ordering rules shown above:
