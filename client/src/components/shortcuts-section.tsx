@@ -89,13 +89,11 @@ export function ShortcutsSection() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground">
-        Controller Mode shortcuts now use platform modifiers so they fire
-        even while the composer has focus. On macOS, ⌘ is the primary
-        modifier; on Linux / Windows, Ctrl is. The chord you see matches
-        the keys your browser actually receives. Press{" "}
-        <Kbd>Esc</Kbd> to cancel recording.
-      </div>
+      <p className="text-xs text-muted-foreground">
+        Click <span className="font-medium text-foreground">Record</span>{" "}
+        next to an action, then press the new chord. Press{" "}
+        <Kbd>Esc</Kbd> to cancel.
+      </p>
 
       <div className="rounded-lg border border-border divide-y divide-border">
         {SHORTCUT_ACTIONS.map((action) => {
