@@ -2,5 +2,13 @@
   "title": "Controller",
   "description": "Public documentation for Controller.",
   "root": true,
-  "pages": ["---Overview---", "overview", "installation", "architecture"]
+  "pages": [
+    "---Overview---",
+    "overview",
+    "installation",
+    "architecture",
+    "---State---",
+    "state-location",
+    "macos-privacy"
+  ]
 }

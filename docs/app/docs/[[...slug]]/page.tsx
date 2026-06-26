@@ -18,7 +18,16 @@ import { getMDXComponents } from "@/mdx-components";
 export const dynamicParams = false;
 
 export function generateStaticParams() {
-  return source.generateParams("slug");
+  // `/docs` (empty slug) is a real route — it should redirect or render
+  // the same content as `/docs/overview`. We include the empty-slug
+  // entry explicitly so Next.js pre-renders both `/docs` and the
+  // nested doc routes. The page-level redirect happens in the Page
+  // component below when `params.slug` is undefined.
+  const params = source.generateParams("slug");
+  // The typed return requires a `lang` field; we don't use i18n so
+  // it's always the empty string.
+  params.push({ slug: [], lang: "" });
+  return params;
 }
 
 export async function generateMetadata(props: {
@@ -38,7 +47,9 @@ export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
 }) {
   const params = await props.params;
-  const page = getPage(params.slug);
+  // `/docs` (no slug) renders the overview page directly so the
+  // site root for documentation has content without a redirect hop.
+  const page = getPage(params.slug ?? ["overview"]);
   if (!page) notFound();
 
   const MDXContent = page.data.body;
