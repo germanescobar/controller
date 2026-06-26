@@ -1,46 +1,70 @@
 import { useEffect, useRef } from "react";
+import {
+  type ShortcutBindings,
+} from "../../../shared/shortcuts.ts";
+import {
+  formatChord,
+  isMacPlatform,
+  matchesEvent,
+  parseChord,
+} from "./shortcut-match.ts";
+import { isRecordingChord } from "./useShortcutBindings.tsx";
 
 /**
- * Global keyboard shortcuts that drive the controller-mode loop from the keyboard.
+ * Global keyboard shortcuts that drive the controller-mode loop from the
+ * keyboard. Bindings are sourced from the shared `useShortcutBindings`
+ * hook so the user can rebind them in Settings (issue #235).
  *
- * - `N` advances to the next pinned session (only while controller mode is active).
- *   If a controller-mode advance countdown is pending, `N` commits it immediately to
- *   continue to the next session. The commit path fires even while the
- *   composer is focused (see issue #104).
- * - `S` cancels a pending controller-mode advance countdown and stays on the current
- *   session (only while controller mode is active).
- * - `D` marks the current session done (only while controller mode is active).
- * - `F` enters controller mode (no-op if already active).
- * - `E` exits controller mode (no-op if not active).
- * - `Esc` blurs the currently-focused input/textarea/contenteditable so the
- *   shortcuts above can fire afterwards. It is intentionally a no-op when the
- *   focus is inside a dialog or the embedded terminal. If a controller-mode
- *   advance countdown is pending and focus is *not* in an editable element, Esc
- *   cancels the countdown (matches the **Stay** button).
+ * Default actions (strict per-platform: ⌃ on macOS, Ctrl elsewhere):
+ *   - `Ctrl+T`       → toggle controller mode (enter if off, exit if on).
+ *   - `Ctrl+N`       → next pinned session. If a controller-mode advance
+ *                      countdown is pending, this commits it immediately to
+ *                      continue to the next session. The commit path fires
+ *                      even while the composer is focused.
+ *   - `Ctrl+D`       → mark current session done. Fires regardless of
+ *                      Controller Mode state; no-op when no session is
+ *                      open.
+ *   - `Ctrl+S`       → cancel a pending controller-mode advance countdown
+ *                      and stay on the current session. Fires even while
+ *                      the composer is focused so the user can dismiss
+ *                      the toast without blurring first.
+ *   - `Esc`          → blurs the currently-focused input/textarea/
+ *                      contenteditable. If no countdown is pending, it's
+ *                      a no-op. Intentionally a no-op inside dialogs and
+ *                      the embedded terminal.
  *
- * Shortcuts are suppressed when the user is typing (input, textarea, select,
- * contenteditable), when a dialog is open (role="dialog" or <dialog>), when
- * the embedded terminal has focus, or when a modifier key is held. Keys with
- * auto-repeat are also ignored.
+ * Defaults use Ctrl (not Cmd) because Cmd collides with too many macOS
+ * system shortcuts (Cmd+W, Cmd+Q, Cmd+R, …) and the matcher is strict
+ * per-platform — a stored "ctrl-n" will not fire on Cmd+N on macOS and
+ * vice-versa.
+ *
+ * Every chord fires regardless of which element has focus (textarea,
+ * contenteditable, button, …). `preventDefault` blocks the literal key
+ * from reaching the textarea so typing isn't corrupted. `Esc` is the
+ * one exception: it still blurs an editable element so the user can
+ * resume typing without their keys being intercepted.
+ *
+ * Shortcuts are suppressed inside dialogs (role="dialog" / <dialog>), the
+ * embedded terminal, or when an auto-repeat fires.
  */
 export interface UseControllerModeShortcutsOptions {
+  bindings: ShortcutBindings | null;
   controllerMode: boolean;
   onSkip: () => void;
   onDone: () => void;
   onEnter: () => void;
   onExit: () => void;
   /**
-   * Optional. Called when the user presses Esc (and focus is not in
-   * an editable element) while a controller-mode advance countdown is
-   * pending. Issue #104.
+   * Optional. Called when the user invokes the "stay" chord while a
+   * controller-mode advance countdown is pending. Issue #104.
    */
   onCancelAdvance?: () => void;
   /**
-   * Optional. Called when the user presses `N` while a controller-mode
-   * advance countdown is pending, committing it immediately to continue
-   * to the next session. Set only when a countdown is pending so the
-   * early `N` path (which fires even while the composer is focused) is a
-   * no-op otherwise.
+   * Optional. Called when the user invokes the "next" chord while a
+   * controller-mode advance countdown is pending, committing it
+   * immediately to continue to the next session. Set only when a
+   * countdown is pending so the early `N` path (which fires even while
+   * the composer is focused) is a no-op otherwise.
    */
   onCommitAdvance?: () => void;
 }
@@ -66,7 +90,21 @@ function isInsideTerminal(target: EventTarget | null): boolean {
   return false;
 }
 
+/**
+ * Returns the parsed chord for an action, or null if the bindings aren't
+ * loaded yet or the stored string is unparseable. Cached per call so we
+ * don't re-parse on every keydown.
+ */
+function getParsedChord(
+  bindings: ShortcutBindings | null,
+  action: keyof ShortcutBindings
+) {
+  if (!bindings) return null;
+  return parseChord(bindings[action]);
+}
+
 export function useControllerModeShortcuts({
+  bindings,
   controllerMode,
   onSkip,
   onDone,
@@ -84,6 +122,7 @@ export function useControllerModeShortcuts({
   const onExitRef = useRef(onExit);
   const onCancelAdvanceRef = useRef(onCancelAdvance);
   const onCommitAdvanceRef = useRef(onCommitAdvance);
+  const bindingsRef = useRef(bindings);
 
   useEffect(() => {
     controllerModeRef.current = controllerMode;
@@ -93,12 +132,27 @@ export function useControllerModeShortcuts({
     onExitRef.current = onExit;
     onCancelAdvanceRef.current = onCancelAdvance;
     onCommitAdvanceRef.current = onCommitAdvance;
-  }, [controllerMode, onSkip, onDone, onEnter, onExit, onCancelAdvance, onCommitAdvance]);
+    bindingsRef.current = bindings;
+  }, [
+    controllerMode,
+    onSkip,
+    onDone,
+    onEnter,
+    onExit,
+    onCancelAdvance,
+    onCommitAdvance,
+    bindings,
+  ]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      // While the Settings recorder is mid-capture, the App-level
+      // listener must stay out of the way — otherwise a recorded
+      // Ctrl+T / Ctrl+N / Ctrl+D / Ctrl+S would actually toggle /
+      // navigate / mark-done instead of being captured for the new
+      // binding (issue #235 P2 review).
+      if (isRecordingChord()) return;
       if (event.repeat) return;
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
       if (isInsideDialog(event.target)) return;
       if (isInsideTerminal(event.target)) return;
 
@@ -107,9 +161,7 @@ export function useControllerModeShortcuts({
       //      drive the controller-mode loop from the keyboard after
       //      typing.
       //   2. Focus is elsewhere: if a controller-mode advance countdown
-      //      is pending, cancel it (matches the **Stay** button in the
-      //      advance toast). If no countdown is pending, the Esc key
-      //      is a no-op here.
+      //      is pending, cancel it (matches the **Stay** chord).
       // Suppressed inside dialogs (let them close) and the terminal
       // (let it forward the key to the running process).
       if (event.key === "Escape") {
@@ -124,54 +176,75 @@ export function useControllerModeShortcuts({
         return;
       }
 
-      const key = event.key.toLowerCase();
+      const currentBindings = bindingsRef.current;
+      if (!currentBindings) return;
       const inControllerMode = controllerModeRef.current;
 
-      // Let the toast's "Press S to stay" shortcut work even while the
-      // composer is focused. Because this path runs before editable-target
-      // suppression, preventDefault keeps the literal "s" out of the textarea.
-      if (inControllerMode && key === "s" && onCancelAdvanceRef.current) {
+      // All Controller Mode chords (default Ctrl+T / Ctrl+N / Ctrl+D /
+      // Ctrl+S) fire regardless of where focus is — that's the whole
+      // reason the issue switched them to modifier-based (issue #235).
+      // preventDefault keeps the literal character out of the textarea
+      // when one is focused. Esc is intentionally not in this group
+      // because the user still wants Esc to blur the input.
+
+      // The "stay" chord (default Ctrl+S) only matters while an
+      // advance is pending; no-op otherwise.
+      const stayChord = getParsedChord(currentBindings, "controllerModeStay");
+      if (
+        stayChord &&
+        onCancelAdvanceRef.current &&
+        matchesEvent(stayChord, event)
+      ) {
         event.preventDefault();
         onCancelAdvanceRef.current();
         return;
       }
 
-      // Mirror the "stay" path for "next": when a countdown is pending, `N`
-      // commits it immediately to continue to the next session. Runs before
-      // editable-target suppression so it works while the composer is focused
-      // (the advance is usually scheduled right after sending a message), and
-      // preventDefault keeps the literal "n" out of the textarea. When no
-      // countdown is pending, onCommitAdvance is undefined and the regular `N`
+      // "Next" while a countdown is pending commits the advance
+      // immediately. When no countdown is pending the regular next
       // handler below takes over.
-      if (inControllerMode && key === "n" && onCommitAdvanceRef.current) {
+      const nextChord = getParsedChord(currentBindings, "controllerModeNext");
+      if (
+        nextChord &&
+        onCommitAdvanceRef.current &&
+        matchesEvent(nextChord, event)
+      ) {
         event.preventDefault();
         onCommitAdvanceRef.current();
         return;
       }
 
-      if (isEditableTarget(event.target)) return;
+      // Toggle chord (default Ctrl+T) is the unified enter/exit
+      // binding. Runs before the controller-mode gate so the user can
+      // leave controller mode even if they're typing in the composer.
+      const toggleChord = getParsedChord(currentBindings, "controllerModeToggle");
+      if (toggleChord && matchesEvent(toggleChord, event)) {
+        event.preventDefault();
+        if (inControllerMode) {
+          onExitRef.current();
+        } else {
+          onEnterRef.current();
+        }
+        return;
+      }
 
-      if (key === "f") {
-        if (inControllerMode) return;
-        event.preventDefault();
-        onEnterRef.current();
-        return;
-      }
-      if (key === "e") {
-        if (!inControllerMode) return;
-        event.preventDefault();
-        onExitRef.current();
-        return;
-      }
-      if (!inControllerMode) return;
-      if (key === "n") {
-        event.preventDefault();
-        onSkipRef.current();
-        return;
-      }
-      if (key === "d") {
+      // "Mark done" (default Ctrl+D) fires regardless of Controller
+      // Mode — the user wants to be able to clear a pinned session
+      // from the radar without first toggling Controller Mode on.
+      // `handleFocusDone` no-ops when no session is active, so an
+      // un-focused Ctrl+D is harmless.
+      const doneChord = getParsedChord(currentBindings, "controllerModeDone");
+      if (doneChord && matchesEvent(doneChord, event)) {
         event.preventDefault();
         onDoneRef.current();
+        return;
+      }
+
+      if (!inControllerMode) return;
+
+      if (nextChord && matchesEvent(nextChord, event)) {
+        event.preventDefault();
+        onSkipRef.current();
         return;
       }
     }
@@ -179,4 +252,26 @@ export function useControllerModeShortcuts({
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, []);
+}
+
+/**
+ * Helper for callers that want a chip-ready label for an action, taking
+ * the current bindings and platform into account. Centralised here so the
+ * UI uses the same formatting as the live matcher.
+ */
+export function labelForAction(
+  bindings: ShortcutBindings | null,
+  action: keyof ShortcutBindings
+): string {
+  // Mirror DEFAULT_SHORTCUT_BINDINGS so callers get a label even
+  // before the server fetch resolves. Keeping this in sync with the
+  // shared defaults is enforced by the DEFAULT_SHORTCUT_BINDINGS test
+  // in shortcut-match.test.ts.
+  const fallback = {
+    controllerModeToggle: "ctrl-t",
+    controllerModeNext: "ctrl-n",
+    controllerModeDone: "ctrl-d",
+    controllerModeStay: "ctrl-s",
+  }[action];
+  return formatChord(bindings?.[action] ?? fallback, isMacPlatform());
 }

@@ -32,6 +32,10 @@ import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useControllerModeShortcuts } from "./lib/useControllerModeShortcuts.ts";
+import {
+  ShortcutBindingsProvider,
+  useShortcutBindingsContext,
+} from "./lib/useShortcutBindings.tsx";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
@@ -170,6 +174,14 @@ function loadSavedView(): View {
 }
 
 export function App() {
+  return (
+    <ShortcutBindingsProvider>
+      <AppBody />
+    </ShortcutBindingsProvider>
+  );
+}
+
+function AppBody() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setViewState] = useState<View>(loadSavedView);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
@@ -611,11 +623,18 @@ export function App() {
     maxWidth: 480,
   });
 
-  // Controller Mode keyboard shortcuts (N / D / F / E). While an advance is
-  // pending, S (or Esc) stays and N continues immediately (even while the
-  // composer is focused). Esc only cancels when focus is not in an editable
-  // element (issue #104).
+  // Controller Mode keyboard shortcuts (defaults: ⌃T toggle, ⌃N next,
+  // ⌃D done, ⌃S stay; ⌃ on macOS, Ctrl off-mac). We default to Ctrl
+  // rather than Cmd because Cmd collides with too many macOS system
+  // shortcuts (Cmd+W, Cmd+Q, Cmd+R, Cmd+T, …). The chord for each
+  // action is read from `useShortcutBindings`, so users can rebind
+  // them in Settings (issue #235). The matcher is strict per-platform:
+  // a stored "ctrl-n" only fires on ⌃N on macOS, never on ⌘N. Esc
+  // still blurs and (when not in an editable) cancels a pending
+  // advance.
+  const shortcutBindings = useShortcutBindingsContext();
   useControllerModeShortcuts({
+    bindings: shortcutBindings.bindings,
     controllerMode,
     onSkip: handleFocusSkip,
     onDone: handleFocusDone,
@@ -647,7 +666,7 @@ export function App() {
         />
       )}
 
-      <div
+        <div
         className={`fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-in-out md:relative md:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
@@ -681,6 +700,7 @@ export function App() {
           onFocusQueueChange={handleFocusQueueChange}
           controllerMode={controllerMode}
           onControllerModeToggle={handleControllerModeToggle}
+          shortcutBindings={shortcutBindings.bindings}
           focusRefreshKey={focusRefreshKey}
           eventsRefreshKey={eventsRefreshKey}
         />
@@ -803,6 +823,7 @@ export function App() {
             }}
             onOpenConversation={handleOpenConversation}
             controllerMode={controllerMode}
+            shortcutBindings={shortcutBindings.bindings}
             focusPosition={focusPosition}
             onFocusDone={handleFocusDone}
             onFocusSkip={handleFocusSkip}

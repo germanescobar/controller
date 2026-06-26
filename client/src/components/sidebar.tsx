@@ -59,6 +59,8 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
+import { formatChord, isMacPlatform } from "@/lib/shortcut-match";
+import type { ShortcutBindings } from "../../../shared/shortcuts.ts";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -82,6 +84,12 @@ interface SidebarProps {
   onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
   controllerMode?: boolean;
   onControllerModeToggle?: () => void;
+  /**
+   * Effective Controller Mode shortcut bindings. Used to render the
+   * correct chord in the sidebar's Controller Mode button tooltip.
+   * See issue #235.
+   */
+  shortcutBindings?: ShortcutBindings | null;
   focusRefreshKey?: number;
   // Bumped by the App's project-event subscription when an out-of-band
   // lifecycle change lands (worktree added/removed, session added,
@@ -222,6 +230,7 @@ export function Sidebar({
   onFocusQueueChange,
   controllerMode = false,
   onControllerModeToggle,
+  shortcutBindings = null,
   focusRefreshKey,
   eventsRefreshKey,
 }: SidebarProps) {
@@ -694,7 +703,11 @@ export function Sidebar({
                   ? "bg-blue-500/15 text-blue-300 ring-1 ring-inset ring-blue-400/30 hover:bg-blue-500/25 hover:text-blue-200"
                   : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
               )}
-              title={controllerMode ? "Exit Controller Mode" : "Start Controller Mode"}
+              title={
+                controllerMode
+                  ? `Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", isMacPlatform())})`
+                  : `Start Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", isMacPlatform())})`
+              }
             >
               <Play
                 className={cn(

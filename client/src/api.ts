@@ -1,5 +1,7 @@
 const BASE = "/api";
 
+import type { ShortcutBindings } from "../../shared/shortcuts.ts";
+
 export interface Project {
   id: string;
   name: string;
@@ -1565,4 +1567,27 @@ export function runWorktreeSetup(
     cancel: () => controller.abort(),
     result,
   };
+}
+
+// --- Keyboard shortcut bindings (issue #235) ---
+
+export async function fetchShortcutBindings(): Promise<ShortcutBindings> {
+  const res = await fetch(`${BASE}/shortcuts`);
+  return res.json();
+}
+
+export async function saveShortcutBindings(
+  overrides: Partial<ShortcutBindings>
+): Promise<ShortcutBindings> {
+  const res = await fetch(`${BASE}/shortcuts`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(overrides),
+  });
+  return res.json();
+}
+
+export async function resetShortcutBindings(): Promise<ShortcutBindings> {
+  const res = await fetch(`${BASE}/shortcuts`, { method: "DELETE" });
+  return res.json();
 }
