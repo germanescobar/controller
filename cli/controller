@@ -63,7 +63,25 @@ const USAGE = `Usage:
   \`sessions start\` kicks off a new agent run on the given worktree and prints
   a URL the user can open in Controller to follow along. The CLI does not
   stream transcript events; the run is persisted to disk and the UI subscribes
-  to the existing event-list endpoint for live updates.`;
+  to the existing event-list endpoint for live updates.
+
+  controller schedules list <project> [--enabled-only]
+  controller schedules show <project> <scheduleId>
+  controller schedules add <project> --worktree <id> --prompt <text> \\
+      [--at <iso>] [--cron <expr>] [--timezone <tz>] \\
+      [--every minute|hour|day|weekday] [--on-day <0-6>] [--at-hour <0-23>] [--at-minute <0-59>] \\
+      [--provider codex|claude|anita] [--model <id>] [--mode default|plan] \\
+      [--enabled true|false] [--source user|agent]
+  controller schedules enable <project> <scheduleId>
+  controller schedules disable <project> <scheduleId>
+  controller schedules remove <project> <scheduleId>
+  controller schedules runs <project> <scheduleId>
+
+  \`schedules add\` registers a future session on a worktree. Use \`--at <iso>\`
+  for a one-shot run, or \`--cron <expr>\` / \`--every\` for a recurring one.
+  \`--every day|weekday\` fires at \`--at-hour\`:\`--at-minute\` (default 09:00) in
+  \`--timezone\` (default the server's). The run fires on the next scheduler
+  tick after the target time.`;
 
 // Exposed for tests: only auto-run `main()` when this file is the script the
 // process was launched as, so unit tests can import the helpers without
@@ -461,6 +479,205 @@ export async function runSessions(argv, serverUrl) {
   fail(`Unknown sessions action: ${parsed.action}`);
 }
 
+// --- schedules surface (issue #243) ---
+
+// Mirror of `presetToCron` in `server/lib/schedule-cron.ts`. The CLI is
+// dependency-free and can't import the server module, so the structured
+// `--every` / `--on-day` presets are translated to cron here and sent over
+// the wire as a plain cron string. Keep the two in sync.
+export function presetToCron({ every, onDay, atHour, atMinute }) {
+  const minute = clampInt(atMinute ?? 0, 0, 59);
+  const hour = clampInt(atHour ?? 9, 0, 23);
+  switch (every) {
+    case "minute":
+      return "* * * * *";
+    case "hour":
+      return `${minute} * * * *`;
+    case "day":
+      return `${minute} ${hour} * * *`;
+    case "weekday":
+      return `${minute} ${hour} * * 1-5`;
+    default:
+      if (onDay != null) return `${minute} ${hour} * * ${clampInt(onDay, 0, 6)}`;
+      return null;
+  }
+}
+
+function clampInt(value, min, max) {
+  const n = Math.trunc(Number(value));
+  if (Number.isNaN(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
+export function parseSchedules(argv) {
+  const [command, project, ...rest] = argv;
+  if (!command) fail(`Unknown schedules command\n${USAGE}`);
+  if (!project) fail(`schedules ${command} requires a <project>`);
+  switch (command) {
+    case "list":
+      return { project, action: "list", includeDisabled: !rest.includes("--enabled-only") };
+    case "show":
+      if (!rest[0]) fail("schedules show requires a <scheduleId>");
+      return { project, action: "show", scheduleId: rest[0] };
+    case "runs":
+      if (!rest[0]) fail("schedules runs requires a <scheduleId>");
+      return { project, action: "runs", scheduleId: rest[0] };
+    case "enable":
+      if (!rest[0]) fail("schedules enable requires a <scheduleId>");
+      return { project, action: "enable", scheduleId: rest[0] };
+    case "disable":
+      if (!rest[0]) fail("schedules disable requires a <scheduleId>");
+      return { project, action: "disable", scheduleId: rest[0] };
+    case "remove":
+      if (!rest[0]) fail("schedules remove requires a <scheduleId>");
+      return { project, action: "remove", scheduleId: rest[0] };
+    case "add": {
+      const worktreeId = flagValue(rest, "--worktree");
+      if (!worktreeId) fail("schedules add requires --worktree <worktreeId>");
+      const prompt = flagValue(rest, "--prompt");
+      if (!prompt || !prompt.trim()) fail("schedules add requires --prompt <text>");
+
+      const at = flagValue(rest, "--at");
+      const explicitCron = flagValue(rest, "--cron");
+      const every = flagValue(rest, "--every");
+      const onDay = flagValue(rest, "--on-day");
+      // An explicit --cron wins; otherwise derive one from the structured
+      // preset flags. Falling through to neither means a one-shot --at.
+      let cron = explicitCron ?? null;
+      if (!cron && (every || onDay != null)) {
+        cron = presetToCron({
+          every,
+          onDay: onDay != null ? Number(onDay) : undefined,
+          atHour: flagValue(rest, "--at-hour"),
+          atMinute: flagValue(rest, "--at-minute"),
+        });
+        if (!cron) fail("schedules add: --every must be minute|hour|day|weekday, or pass --on-day <0-6>");
+      }
+      if (!cron && !at) {
+        fail("schedules add requires --at <iso> (one-shot) or --cron/--every (recurring)");
+      }
+
+      const timezone = flagValue(rest, "--timezone");
+      const provider = flagValue(rest, "--provider");
+      const model = flagValue(rest, "--model");
+      const mode = flagValue(rest, "--mode");
+      const enabled = flagValue(rest, "--enabled");
+      const source = flagValue(rest, "--source");
+
+      return {
+        project,
+        action: "add",
+        body: {
+          worktreeId,
+          prompt,
+          ...(cron ? { cron } : {}),
+          ...(at ? { runAt: at } : {}),
+          ...(timezone ? { timezone } : {}),
+          ...(provider ? { provider } : {}),
+          ...(model ? { model } : {}),
+          ...(mode ? { mode } : {}),
+          ...(enabled != null ? { enabled: enabled === "true" } : {}),
+          ...(source ? { source } : {}),
+          createdBy: "cli",
+        },
+      };
+    }
+    default:
+      fail(`Unknown schedules command: ${command}\n${USAGE}`);
+  }
+}
+
+function formatScheduleRow(schedule) {
+  const repeat = schedule.cron ? `cron=${schedule.cron} (${schedule.timezone})` : `at=${schedule.runAt}`;
+  const state = schedule.enabled ? "enabled" : "disabled";
+  const err = schedule.lastError ? `  lastError=${schedule.lastError}` : "";
+  return `${schedule.id}  [${state}]  ${repeat}\n  next=${schedule.nextRunAt}  worktree=${schedule.worktreeId}\n  prompt: ${schedule.prompt}${err}`;
+}
+
+export async function runSchedules(argv, serverUrl) {
+  const parsed = parseSchedules(argv);
+  const projectId = await resolveProjectId(serverUrl, parsed.project);
+  const base = `/api/projects/${projectId}/schedules`;
+
+  if (parsed.action === "list") {
+    const { response, result } = await getJson(
+      serverUrl,
+      `${base}?includeDisabled=${parsed.includeDisabled ? "true" : "false"}`
+    );
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to list schedules (HTTP ${response.status})`);
+    }
+    const schedules = Array.isArray(result) ? result : [];
+    if (schedules.length === 0) {
+      process.stdout.write("No schedules.\n");
+      return;
+    }
+    for (const schedule of schedules) {
+      process.stdout.write(`${formatScheduleRow(schedule)}\n`);
+    }
+    return;
+  }
+
+  if (parsed.action === "show") {
+    const { response, result } = await getJson(serverUrl, `${base}/${parsed.scheduleId}`);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to load schedule (HTTP ${response.status})`);
+    }
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  if (parsed.action === "runs") {
+    const { response, result } = await getJson(serverUrl, `${base}/${parsed.scheduleId}/runs`);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to load runs (HTTP ${response.status})`);
+    }
+    const runs = Array.isArray(result) ? result : [];
+    if (runs.length === 0) {
+      process.stdout.write("No runs yet.\n");
+      return;
+    }
+    for (const run of runs) {
+      const outcome = run.error ? `error: ${run.error}` : `session=${run.sessionId}`;
+      process.stdout.write(`${run.firedAt}  ${outcome}\n`);
+    }
+    return;
+  }
+
+  if (parsed.action === "add") {
+    const { response, result } = await postJson(serverUrl, base, parsed.body);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to add schedule (HTTP ${response.status})`);
+    }
+    process.stdout.write(`Created schedule ${result.id}\n  next run: ${result.nextRunAt}\n`);
+    return;
+  }
+
+  if (parsed.action === "enable" || parsed.action === "disable") {
+    const { response, result } = await postJson(
+      serverUrl,
+      `${base}/${parsed.scheduleId}/${parsed.action}`,
+      {}
+    );
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to ${parsed.action} schedule (HTTP ${response.status})`);
+    }
+    process.stdout.write(`Schedule ${parsed.action}d.\n`);
+    return;
+  }
+
+  if (parsed.action === "remove") {
+    const { response, result } = await deleteJson(serverUrl, `${base}/${parsed.scheduleId}`);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to remove schedule (HTTP ${response.status})`);
+    }
+    process.stdout.write("Removed schedule.\n");
+    return;
+  }
+
+  fail(`Unknown schedules action: ${parsed.action}`);
+}
+
 // --- browser surface (issue #109) ---
 
 function parseBrowser(argv) {
@@ -831,7 +1048,8 @@ async function main() {
     surface !== "integrations" &&
     surface !== "skills" &&
     surface !== "worktrees" &&
-    surface !== "sessions"
+    surface !== "sessions" &&
+    surface !== "schedules"
   ) {
     fail(`Unknown surface: ${surface}\n${USAGE}`);
   }
@@ -848,6 +1066,8 @@ async function main() {
     await runWorktrees(rest, serverUrl);
   } else if (surface === "sessions") {
     await runSessions(rest, serverUrl);
+  } else if (surface === "schedules") {
+    await runSchedules(rest, serverUrl);
   }
 }
 

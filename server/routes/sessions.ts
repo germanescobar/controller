@@ -652,8 +652,8 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  * client closing the response is decoupled from the agent process — the
  * run continues even if the CLI exits immediately after printing the URL.
  */
-function makeHeadlessSessionStartRequest(
-  req: Request<{ projectId: string }>,
+export function makeHeadlessSessionStartRequest(
+  req: Request<{ projectId: string }> | undefined,
   projectId: string,
   worktreeId: string,
   body: {
@@ -706,7 +706,7 @@ function makeHeadlessSessionStartRequest(
  *   - intercepts `write(...)` to scan SSE events for `run.started`,
  *   - returns no-ops for everything else.
  */
-function makeSessionStartShim(
+export function makeSessionStartShim(
   projectId: string,
   worktreeId: string,
   realRes: Response
@@ -875,7 +875,7 @@ function makeSessionStartShim(
  * the next enqueued message after a turn completes — that path streams to no
  * one but still persists events and advances the queue (see issue #113).
  */
-async function handleSessionStream(
+export async function handleSessionStream(
   req: Request<{ projectId: string }>,
   res: Response
 ) {

@@ -7,6 +7,7 @@ A web-based UI for managing and interacting with AI coding agents. It provides a
 - **Multi-provider support** — plug in different AI coding agents (Anita, Codex, Claude) and switch between them per session.
 - **Project management** — register local project directories and manage them from a sidebar.
 - **Session management** — create, resume, and archive coding sessions within each project. Sessions persist their event history to disk.
+- **Scheduled sessions** — schedule a session to run later via `controller schedules` (see Usage): either once at a specific time or on a recurring cron schedule. Schedules survive restarts and fire on the next scheduler tick after their target time.
 - **Real-time streaming** — agent output (text, reasoning, tool calls, tool results) is streamed to the browser via SSE.
 - **Model selection** — choose which model to use for each session.
 - **Slash-command skills** — type `/<skill-name>` in the chat input to activate an installed skill for Anita, Codex, or Claude. The orchestrator is the only source of truth for slash commands; it prepends the `SKILL.md` body at send time and turns off the agent CLIs' own slash-command paths so the two never compete.
@@ -211,3 +212,32 @@ runner (or in CI). The macOS artifacts are best built on macOS.
 3. Start a new session, pick a provider and model, and type a prompt.
 4. Watch the agent work in real time — you'll see its reasoning, tool calls, and text responses streamed into the chat.
 5. Resume previous sessions from the sidebar.
+
+### Scheduling sessions
+
+The `controller` CLI can schedule a session to run later, optionally on a
+repeat. Schedules are stored per-project under the Controller home and fire on
+the next scheduler tick (every 30s by default, overridable with
+`SCHEDULER_TICK_INTERVAL_MS`) after their target time, surviving restarts.
+
+```bash
+# One-shot: run tomorrow at 08:00 (server timezone)
+controller schedules add my-project --worktree main \
+  --at 2026-06-27T08:00:00 --prompt "Run the morning health check"
+
+# Recurring: every weekday at 09:00 New York time
+controller schedules add my-project --worktree main \
+  --every weekday --at-hour 9 --timezone "America/New_York" \
+  --prompt "Triage overnight issues"
+
+controller schedules list my-project
+controller schedules show my-project <scheduleId>
+controller schedules runs my-project <scheduleId>     # materialized sessions
+controller schedules disable my-project <scheduleId>
+controller schedules enable  my-project <scheduleId>
+controller schedules remove  my-project <scheduleId>
+```
+
+Each schedule starts a *new* session on the given worktree when it fires; the
+session shows up in the sidebar like any other. The same operations are
+available over HTTP under `/api/projects/:id/schedules` for the UI.

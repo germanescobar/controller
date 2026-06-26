@@ -151,6 +151,36 @@ export function projectStoreDir(projectPath: string): string {
   return path.join(orchestratorHome(), "projects", `${path.basename(resolved)}-${key}`);
 }
 
+// --- Schedules ---
+
+/**
+ * Directory holding a project's schedule files. Lives alongside the
+ * project's session/event storage under the Controller home (keyed by a
+ * hash of the absolute project path), NOT in the project working tree.
+ * See `projectStoreDir` for the keying rationale.
+ */
+export function projectSchedulesDir(projectPath: string): string {
+  return path.join(projectStoreDir(projectPath), "schedules");
+}
+
+/** Per-schedule JSON file, keyed by the schedule's uuid. */
+export function projectScheduleFile(projectPath: string, scheduleId: string): string {
+  return path.join(projectSchedulesDir(projectPath), `${scheduleId}.json`);
+}
+
+/**
+ * Index file listing `{ id, nextRunAt, enabled }` for every schedule so a
+ * cold-start tick can find due schedules without reading every file.
+ */
+export function projectSchedulesIndexFile(projectPath: string): string {
+  return path.join(projectSchedulesDir(projectPath), "index.json");
+}
+
+/** Per-schedule run history (materialized sessions), keyed by schedule id. */
+export function projectScheduleRunsFile(projectPath: string, scheduleId: string): string {
+  return path.join(projectSchedulesDir(projectPath), `${scheduleId}.runs.json`);
+}
+
 // --- Terminal Tabs ---
 
 export function terminalTabsRegistryFile(): string {
