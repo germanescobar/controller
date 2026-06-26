@@ -36,6 +36,7 @@ import {
   ShortcutBindingsProvider,
   useShortcutBindingsContext,
 } from "./lib/useShortcutBindings.tsx";
+import { FocusAdvanceToast } from "./components/focus-advance-toast.tsx";
 import { pickNextFocusItem } from "./lib/focus-advance.ts";
 
 /**
@@ -54,67 +55,6 @@ export interface PendingFocusAdvance {
   next: FocusQueueItem;
   /** Epoch ms when the advance was scheduled. */
   scheduledAt: number;
-}
-
-function FocusAdvanceToast({
-  scheduledAt,
-  durationMs,
-  onCancel,
-}: {
-  scheduledAt: number;
-  durationMs: number;
-  onCancel: () => void;
-}) {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const interval = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  const elapsedMs = Math.max(0, now - scheduledAt);
-  const progress = Math.min(1, elapsedMs / durationMs);
-  const remainingProgress = Math.max(0, 1 - progress);
-  const secondsRemaining = Math.max(0, Math.ceil((durationMs - elapsedMs) / 1000));
-
-  return (
-    <div className="w-80 overflow-hidden rounded-lg border border-blue-400/20 bg-[#151922] text-slate-100 shadow-xl shadow-black/35">
-      <div className="p-3">
-        <div className="flex items-start gap-2">
-          <div className="mt-0.5 rounded-md border border-blue-400/15 bg-blue-400/10 p-1 text-blue-300">
-            <ArrowRight className="h-3.5 w-3.5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-slate-50">
-              Advancing to next conversation
-            </div>
-            <div className="mt-0.5 text-xs text-slate-400">
-              <span className="hidden md:inline">
-                Press <span className="font-medium text-slate-200">S</span> to stay ·{" "}
-                <span className="font-medium text-slate-200">N</span> to continue ·{" "}
-              </span>
-              <span>{secondsRemaining}s</span>
-            </div>
-          </div>
-        </div>
-        <div className="mt-3 flex justify-end md:hidden">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md px-2 py-1 text-xs font-medium text-slate-300 transition-colors hover:bg-white/5 hover:text-slate-100"
-          >
-            Stay
-          </button>
-        </div>
-      </div>
-      <div className="h-1 bg-slate-700/80">
-        <div
-          className="h-full bg-blue-400 transition-[width] duration-200 ease-linear"
-          style={{ width: `${remainingProgress * 100}%` }}
-        />
-      </div>
-    </div>
-  );
 }
 
 export type View =
@@ -192,6 +132,11 @@ function AppBody() {
   const [controllerMode, setControllerMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
+  // Live shortcut bindings shared with the Settings panel and the
+  // Controller Mode keyboard listener. Read here (top of AppBody) so
+  // both `handleFocusAdvanceAfterSend` and `useControllerModeShortcuts`
+  // can pass the same map into the toast and the keydown handler.
+  const shortcutBindings = useShortcutBindingsContext();
   // Scheduled "advance to the next focus item" while a 4-second
   // countdown is showing in a toast. Set by
   // `handleFocusAdvanceAfterSend` after a send, cleared either by the
@@ -570,7 +515,8 @@ function AppBody() {
   // them away from the originating session before the in-flight
   // user bubble can render is what made the message look "lost"
   // (issue #104). The countdown gives them FOCUS_ADVANCE_COUNTDOWN_MS
-  // to see the bubble, with S / Esc shortcuts for cancelling.
+  // to see the bubble, with the **Stay** chord (default ⌃S / Ctrl+S)
+  // or Esc for cancelling.
   //
   // The "sent from" session id is passed in so we can apply the
   // stay-put rule when the only pinned item is the one the user
@@ -599,6 +545,7 @@ function AppBody() {
           <FocusAdvanceToast
             scheduledAt={pendingAdvance.scheduledAt}
             durationMs={FOCUS_ADVANCE_COUNTDOWN_MS}
+            bindings={shortcutBindings.bindings}
             onCancel={cancelPendingAdvance}
           />
         ),
@@ -612,7 +559,7 @@ function AppBody() {
         commitPendingAdvance();
       }, FOCUS_ADVANCE_COUNTDOWN_MS);
     },
-    [controllerMode, focusQueue, commitPendingAdvance, cancelPendingAdvance],
+    [controllerMode, focusQueue, commitPendingAdvance, cancelPendingAdvance, shortcutBindings.bindings],
   );
 
   // Sidebar resizing
@@ -632,7 +579,6 @@ function AppBody() {
   // a stored "ctrl-n" only fires on ⌃N on macOS, never on ⌘N. Esc
   // still blurs and (when not in an editable) cancels a pending
   // advance.
-  const shortcutBindings = useShortcutBindingsContext();
   useControllerModeShortcuts({
     bindings: shortcutBindings.bindings,
     controllerMode,
