@@ -49,7 +49,8 @@ export const SHORTCUT_ACTIONS: ShortcutActionSpec[] = [
   {
     id: "controllerModeDone",
     label: "Mark session done",
-    description: "Remove the active session from the focus queue.",
+    description:
+      "Remove the active session from the focus queue. Works whether or not Controller Mode is active — no-op when no session is open.",
   },
   {
     id: "controllerModeStay",

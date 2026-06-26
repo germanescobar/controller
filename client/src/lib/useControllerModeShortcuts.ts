@@ -20,8 +20,9 @@ import {
  *                      countdown is pending, this commits it immediately to
  *                      continue to the next session. The commit path fires
  *                      even while the composer is focused.
- *   - `Ctrl+D`       → mark current session done (only while controller
- *                      mode is active).
+ *   - `Ctrl+D`       → mark current session done. Fires regardless of
+ *                      Controller Mode state; no-op when no session is
+ *                      open.
  *   - `Ctrl+S`       → cancel a pending controller-mode advance countdown
  *                      and stay on the current session. Fires even while
  *                      the composer is focused so the user can dismiss
@@ -220,17 +221,23 @@ export function useControllerModeShortcuts({
         return;
       }
 
+      // "Mark done" (default Ctrl+D) fires regardless of Controller
+      // Mode — the user wants to be able to clear a pinned session
+      // from the radar without first toggling Controller Mode on.
+      // `handleFocusDone` no-ops when no session is active, so an
+      // un-focused Ctrl+D is harmless.
+      const doneChord = getParsedChord(currentBindings, "controllerModeDone");
+      if (doneChord && matchesEvent(doneChord, event)) {
+        event.preventDefault();
+        onDoneRef.current();
+        return;
+      }
+
       if (!inControllerMode) return;
 
       if (nextChord && matchesEvent(nextChord, event)) {
         event.preventDefault();
         onSkipRef.current();
-        return;
-      }
-      const doneChord = getParsedChord(currentBindings, "controllerModeDone");
-      if (doneChord && matchesEvent(doneChord, event)) {
-        event.preventDefault();
-        onDoneRef.current();
         return;
       }
     }
