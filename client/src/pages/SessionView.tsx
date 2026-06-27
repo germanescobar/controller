@@ -111,6 +111,12 @@ import {
   parseSkillMarkers,
 } from "../lib/skill-picker.ts";
 import { modelProviderLabel } from "../lib/model-labels.ts";
+import {
+  buildComposerDraftKey,
+  loadComposerDraft,
+  saveComposerDraft,
+  clearComposerDraft,
+} from "../lib/composer-draft.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -2860,7 +2866,19 @@ export function SessionView({
   onArchive,
   onDiffSummary,
 }: SessionViewProps) {
-  const [message, setMessage] = useState("");
+  // Composer draft persistence (issue #251): rehydrate the textarea and skill
+  // chips from localStorage so an in-progress message survives re-mounts and
+  // reloads. Keyed per-session (or per project+worktree for the new-session
+  // view).
+  const composerDraftKey = buildComposerDraftKey(sessionId, projectId, worktreeId);
+  const initialComposerDraft = useMemo(
+    () => loadComposerDraft(composerDraftKey),
+    // Only the first mount's key matters here; key changes are handled by the
+    // rehydration effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  const [message, setMessage] = useState(initialComposerDraft.text);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<SessionAttachment[]>([]);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
@@ -2959,7 +2977,20 @@ export function SessionView({
   // first skill rides through the single-valued `skillName` transport; the
   // rest ride as `[/skill: name]` markers prepended to the message text.
   const [availableSkills, setAvailableSkills] = useState<AgentSkill[]>([]);
-  const [activeSkills, setActiveSkills] = useState<AgentSkill[]>([]);
+  const [activeSkills, setActiveSkills] = useState<AgentSkill[]>(
+    initialComposerDraft.skills
+  );
+  // Rehydrate when the draft key changes without a re-mount. The view is keyed
+  // by project+worktree in App.tsx, so a brand-new session getting its id
+  // (new-session view -> created session) swaps the key in place; re-read the
+  // (typically empty, post-send) draft for the new key.
+  const composerDraftKeyRef = useRef(composerDraftKey);
+  if (composerDraftKeyRef.current !== composerDraftKey) {
+    composerDraftKeyRef.current = composerDraftKey;
+    const rehydrated = loadComposerDraft(composerDraftKey);
+    setMessage(rehydrated.text);
+    setActiveSkills(rehydrated.skills);
+  }
   const [skillPopoverOpen, setSkillPopoverOpen] = useState(false);
   const [skillHighlightIndex, setSkillHighlightIndex] = useState(0);
   // Ref to the highlighted skill option so keyboard navigation can scroll it
@@ -3331,6 +3362,20 @@ export function SessionView({
     textarea.style.overflowY =
       textarea.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [message]);
+
+  // Mirror the composer draft (text + skill chips) to localStorage on change.
+  // Skip while a steer is in flight: the composer is disabled and `message` is
+  // forced to "" during that transition, which would otherwise clobber the
+  // draft we're about to send. Clearing on a real send/steer is done
+  // explicitly via clearComposerDraft.
+  useEffect(() => {
+    if (steerInProgress) return;
+    if (message.length === 0 && activeSkills.length === 0) {
+      clearComposerDraft(composerDraftKey);
+      return;
+    }
+    saveComposerDraft(composerDraftKey, { text: message, skills: activeSkills });
+  }, [message, activeSkills, composerDraftKey, steerInProgress]);
 
   const attachToSession = (nextSessionId: string) => {
     debugSessionIsolation("stream.attachedToSession", {
@@ -4604,6 +4649,7 @@ export function SessionView({
     setMessage("");
     setActiveSkills([]);
     setSkillPopoverOpen(false);
+    clearComposerDraft(composerDraftKey);
   };
 
   // Validate + upload composer attachments, then start the turn with the
@@ -4748,6 +4794,9 @@ export function SessionView({
     }
 
     setMessage("");
+    // The draft text was just consumed by the steer. Clear it explicitly: the
+    // write-through effect is skipped while steerInProgress is set.
+    clearComposerDraft(composerDraftKey);
     setStreamItems((prev) => [...prev, { type: "user_message", text: steerText, at: Date.now() }]);
 
     if (providerUsesNativeSteering) {
