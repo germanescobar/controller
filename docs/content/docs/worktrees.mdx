@@ -1,0 +1,53 @@
+---
+title: Worktrees
+description: Run sessions on isolated git worktrees so branches and dev servers don't collide.
+---
+
+A *worktree* is a git worktree Controller manages for a project: an isolated
+checkout on its own branch. Running each session on its own worktree keeps
+parallel work — and parallel dev servers — from stepping on each other.
+
+## Create a worktree from the UI
+
+1. Open the project.
+2. Create a worktree, pick the **base branch** to fork from, and give it a
+   **name**.
+
+Controller checks out the new worktree and, if the project has a
+[`setup.sh`](/docs/controller-scripts), runs it to install dependencies.
+
+## Pick a worktree when starting a session
+
+When you start a session, choose which worktree it runs on. The session's
+agent, terminals, and `run.sh` all operate inside that worktree's checkout, so
+its changes stay isolated to that branch.
+
+## Parallel worktrees and PORT_OFFSET
+
+Each worktree gets a numeric **`PORT_OFFSET`** — `0` for the main worktree,
+then `3`, `6`, and so on. By deriving your dev server's ports from your base
+ports plus `PORT_OFFSET` in [`run.sh`](/docs/controller-scripts), two worktrees
+can run side by side without colliding on the same port (e.g. both trying to
+bind `3000`). See [Controller scripts](/docs/controller-scripts) for the port
+pattern.
+
+## Target a worktree with schedules
+
+Scheduled sessions run on a specific worktree. Pass `--worktree` when adding a
+schedule from the CLI:
+
+```bash
+controller schedules add my-project --worktree main \
+  --at 2026-06-27T08:00:00 --prompt "Run the morning health check"
+```
+
+Each schedule starts a new session on the given worktree when it fires, and it
+shows up in the sidebar like any other session.
+
+## Ask the agent to create one
+
+You can have the agent set up a fresh worktree for you. When you ask it to
+**"create a worktree on a new branch"** or **"work on this issue in a fresh
+worktree"**, it reaches for the `controller-worktrees` skill. Combined with
+[`run.sh`](/docs/controller-scripts), this gives you an isolated branch with its
+own dev server in one step.

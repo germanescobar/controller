@@ -1,0 +1,41 @@
+---
+title: Skills
+description: Slash-command skills — native and controller-managed — and how to add your own.
+---
+
+*Skills* are reusable instructions you invoke with a slash command. Type
+`/<skill-name>` in the chat input to activate one for the current message.
+
+## Two kinds of skills
+
+- **Native skills** are shipped with the agent and owned by the agent itself.
+- **Controller-managed skills** are owned by the orchestrator, prefixed with
+  `controller-` (for example `controller-worktrees`, `controller-scripts`,
+  `controller-integrations`). They're hidden from the agent CLI's own slash
+  picker so the two systems never offer competing commands.
+
+## How the orchestrator owns slash commands
+
+Controller is the single source of truth for slash commands. When you invoke a
+skill, the orchestrator **prepends the skill's `SKILL.md` body** to your message
+at send time, and it **disables the agent CLI's own slash-command path**. That
+way there's exactly one slash system in play — Controller's — and a
+`/skill` never resolves two different ways.
+
+## Where skills live on disk
+
+Skills live under each agent's home directory:
+
+- `~/.codex/skills/`
+- `~/.claude/skills/`
+- `~/.anita/skills/`
+
+Each skill is a folder containing a `SKILL.md` file.
+
+## Add a custom skill
+
+To add your own skill, drop a `SKILL.md` into a new folder under the
+appropriate agent home. The frontmatter's name and description make it
+discoverable; the body is what gets prepended when the skill is invoked. The
+`controller-search-skills` skill helps the agent find and activate an existing
+skill when you describe a capability rather than naming the command.

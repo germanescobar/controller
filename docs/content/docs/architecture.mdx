@@ -1,9 +1,21 @@
 ---
 title: Architecture
-description: How Controller's client, server, and Electron shell fit together.
+description: How Controller's client, server, agent CLIs, and Electron shell fit together.
 ---
 
-```text
+At a high level Controller is three layers:
+
+```
+client (React + Vite)  ↔  server (Express)  ↔  agent CLIs (child processes)
+```
+
+- The **client** is a React + Vite single-page app (Tailwind CSS, shadcn/ui).
+- The **server** is an Express backend that streams agent events to the client
+  over **SSE** and backs embedded terminals over **WebSocket**.
+- **Agent CLIs** (Anita, Codex, Claude) run as child processes the server
+  spawns, parses, and normalizes.
+
+```
 client/          React + Vite frontend (Tailwind CSS, shadcn/ui)
 electron/        Electron desktop shell
 server/          Express API backend
@@ -19,20 +31,56 @@ server/          Express API backend
     api-keys.ts  API key CRUD
 ```
 
-The server spawns agent CLIs as child processes, parses their JSON output
-streams, normalizes events into a common format (`AgentStreamEvent`), and
-forwards them to the client over SSE. Session state and events are stored as
-JSON/JSONL files inside each project's `.coding-agent/` directory.
+## Provider abstraction
+
+`server/lib/agents.ts` defines the provider abstraction and the Anita / Codex /
+Claude adapters. The server spawns each agent CLI as a child process, parses its
+JSON output stream, normalizes events into a common shape (`AgentStreamEvent`),
+and forwards them to the client over SSE. Adding a new provider means adding an
+adapter here that maps the CLI's output onto `AgentStreamEvent`.
+
+## Session persistence
+
+`server/lib/sessions.ts` stores session state and events as JSON/JSONL files
+inside each project's `.coding-agent/` directory. `server/lib/projects.ts`
+holds the project registry and `server/lib/api-keys.ts` stores provider API
+keys. Because the transcript is an append-only event log on disk, sessions
+resume with full history and survive restarts.
+
+## Embedded terminals and tmux
 
 Embedded terminal tabs are backed by deterministic `tmux` sessions. The Express
-server attaches browser WebSocket connections to those sessions, so commands
-started in a terminal can survive browser refreshes and backend hot reloads.
-Closing a terminal tab intentionally kills its associated `tmux` session.
+server attaches browser WebSocket connections to those sessions, so:
 
-Electron is an additional shell around the same app. In development it loads the
-Vite dev server. In packaged builds it starts the compiled Express backend
-locally and loads the built client from that backend, so browser and desktop
-modes keep the same API, SSE, and WebSocket contracts.
+- Commands **survive browser refreshes** and backend hot reloads (the `tmux`
+  session keeps running; the browser just re-attaches).
+- Closing a terminal tab **intentionally kills** its associated `tmux` session.
+
+The deterministic session naming is what makes re-attachment and clean teardown
+reliable.
+
+## Electron shell
+
+Electron is an additional shell around the same app. In **development** it loads
+the Vite dev server. In **packaged** builds it starts the compiled Express
+backend locally and loads the built client from that backend — so browser and
+desktop modes keep identical API, SSE, and WebSocket contracts.
+
+## Integrations gateway
+
+The [integrations](/docs/integrations) gateway presents a uniform surface over
+three transport kinds: an **MCP** integration runs as a child process the
+server talks to, a **REST** integration is reached via a `request` against its
+base URL, and a **native CLI** integration is discovered and invoked on the
+host. Credentials are injected by the server at call time, never exposed to the
+agent.
+
+## Scheduler
+
+The scheduler subsystem runs a tick (every 30s by default, overridable with
+`SCHEDULER_TICK_INTERVAL_MS`) and fires due schedules — one-shot or recurring
+(cron) — on the next tick after their target time. Schedule state is stored per
+project under the Controller home, so schedules survive restarts.
 
 ## Where state lives
 
@@ -41,3 +89,6 @@ the app surfaces are documented separately:
 
 - [State location](/docs/state-location)
 - [macOS privacy prompts](/docs/macos-privacy)
+
+To build and run all of this yourself, see [Building from
+source](/docs/building-from-source).

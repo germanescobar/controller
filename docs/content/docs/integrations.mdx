@@ -1,0 +1,54 @@
+---
+title: Integrations
+description: A uniform gateway over MCP servers, REST APIs, and native CLIs — without pasting secrets.
+---
+
+The **integrations gateway** gives the agent a single, uniform surface over
+third-party services, no matter how each one is actually reached: MCP servers,
+REST APIs, or native command-line tools all look the same from the agent's
+side.
+
+## Built-in integrations
+
+Controller ships with integrations for:
+
+| Integration | Kind |
+|---|---|
+| Cloudflare | MCP server |
+| Help Scout Docs | REST API |
+| Notion | Native CLI (`ntn`) |
+| Trello | REST API |
+| Interactive Brokers | Local gateway |
+| GitHub Issues | Native CLI (`gh`) |
+| Tavily | Web search / extraction |
+
+## Credentials stay out of the prompt
+
+Controller **injects credentials** into each integration call. You never paste
+secrets into the app or into the agent's prompt, and the agent never sees the
+raw tokens — it just calls the tool and Controller supplies the auth.
+
+## Discovering and calling integrations
+
+Discover what an integration can do:
+
+```bash
+controller integrations tools <name>
+```
+
+Then call a specific capability:
+
+```bash
+controller integrations call <name> <tool>
+```
+
+For services exposed as raw HTTP, use `request` instead of `call` to make a
+direct request against the integration's base URL.
+
+## The controller-integrations skill
+
+The agent reaches all of this through the `controller-integrations` skill: when
+a task needs an external service, it searches the gateway for a matching
+capability and calls it. Ask the agent to do something that involves a
+connected service (e.g. "open a Trello card" or "search Notion for the launch
+doc") and it routes through the gateway automatically.

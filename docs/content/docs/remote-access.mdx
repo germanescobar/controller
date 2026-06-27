@@ -1,0 +1,47 @@
+---
+title: Remote access
+description: Reach Controller from your phone safely with Tailscale — without exposing the backend to the internet.
+---
+
+You often want to reach Controller away from your desk: to review a
+long-running session, respond to an agent that's waiting on you, or triage
+scheduled runs. The goal is to do that **without exposing the backend to the
+public internet**.
+
+## Why not just open a port
+
+Controller's backend is **privileged**. It manages local paths, spawns agent
+CLIs, runs terminal sessions, and holds your API keys. Anyone who reaches it
+can drive your machine. **Do not expose it directly to the public internet.**
+
+## Recommended: Tailscale
+
+[Tailscale](https://tailscale.com) puts your devices on a private network so
+only they can reach each other — no open ports, no public exposure.
+
+1. Install Tailscale on your Mac (or Linux host) and on your phone.
+2. Sign in to the **same account** on both.
+3. **Use a short machine name.** A name like `macbook` is far easier to type on
+   a phone keyboard than `germanescobars-macbook-pro-2`. Set it in the
+   Tailscale admin panel, or:
+
+   ```sh
+   sudo tailscale set --hostname=macbook
+   ```
+
+4. From your phone's browser, go to `http://<shortname>:4500` — substituting
+   the port you picked on the welcome screen:
+
+   ```
+   http://macbook:4500
+   ```
+
+The app's **"Listening on port N"** footer has a **Copy** button that grabs the
+full local URL, so you can send it to your phone in one tap.
+
+## LAN fallback
+
+If both devices are on the same local network and your firewall allows the
+port, you can reach the host by its LAN address directly. This works without
+Tailscale but only on that network, and you're responsible for the firewall —
+treat it as a fallback, not the default.
