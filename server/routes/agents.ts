@@ -1,7 +1,16 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { getAgentProvider, getAgentStatuses } from "../lib/agents.js";
 import { setAgentSetting } from "../lib/agent-settings.js";
 import { fetchAnitaModels, fetchCodexModels, getClaudeModels } from "../lib/models.js";
+import { resolveWorktree } from "../lib/worktrees.js";
+import { codexAppServerManager } from "../lib/codex-app-server.js";
+import {
+  listSessionRuntimes,
+  stopSessionRuntime,
+} from "../lib/session-runtime.js";
+import {
+  markClaudeSessionPermissionsRevoked,
+} from "../lib/session-permissions.js";
 
 export const agentsRouter = Router();
 
@@ -75,3 +84,77 @@ agentsRouter.put("/:agentId", async (req, res) => {
   const status = statuses.find((entry) => entry.id === agentId);
   res.json(status);
 });
+
+/**
+ * Reset the per-agent "always allow" decisions for the given worktree.
+ * See issue #259.
+ *
+ * - Codex: tears down the live `codex app-server` child and clears all
+ *   thread runtimes. The next turn spawns a fresh app-server.
+ * - Claude: terminates every active Claude child for the worktree and
+ *   marks the worktree so the next turn skips `--resume`, forcing a
+ *   fresh session id (Claude's only mechanism for revoking session
+ *   permissions without keeping the conversation history — there's no
+ *   public "remove rules" message in the control protocol).
+ * - Anita: no permission prompts to revoke; returns a 200 with zeroes.
+ */
+agentsRouter.post(
+  "/:agentId/session-permissions/reset",
+  async (req: Request, res: Response) => {
+    const { agentId } = req.params;
+    const agent = getAgentProvider(agentId as string);
+    if (!agent) {
+      res.status(404).json({ error: "Unknown agent" });
+      return;
+    }
+    const { projectId, worktreeId } = req.body as {
+      projectId?: unknown;
+      worktreeId?: unknown;
+    };
+    if (typeof projectId !== "string" || typeof worktreeId !== "string") {
+      res.status(400).json({
+        error: "projectId and worktreeId are required strings",
+      });
+      return;
+    }
+    const worktree = await resolveWorktree(
+      projectId,
+      worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+
+    let droppedRuntimes = 0;
+    let killedRuntimes = 0;
+
+    if (agentId === "codex") {
+      droppedRuntimes = codexAppServerManager.resetAllSessions();
+    } else if (agentId === "claude") {
+      const claudeRuntimes = listSessionRuntimes().filter(
+        (entry) =>
+          entry.active &&
+          entry.provider === "claude" &&
+          entry.worktreeId === worktree.id
+      );
+      for (const runtime of claudeRuntimes) {
+        try {
+          await stopSessionRuntime(runtime.sessionId);
+          killedRuntimes += 1;
+        } catch {
+          /* best-effort: a runtime that already exited races the reset */
+        }
+      }
+      // Mark the worktree so the next turn skips `--resume`. The
+      // session-start route consumes this flag exactly once.
+      markClaudeSessionPermissionsRevoked(worktree.id);
+    } else {
+      // Anita (and any other provider without permission prompts):
+      // nothing to revoke, but acknowledge the call so the UI doesn't
+      // surface a confusing error.
+    }
+
+    res.json({ ok: true, droppedRuntimes, killedRuntimes });
+  }
+);

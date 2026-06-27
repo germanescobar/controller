@@ -1,8 +1,19 @@
 import { useState, useEffect, type ReactNode } from "react";
-import { Key, Trash2, Check, Loader2, Settings2, Pencil, Plus } from "lucide-react";
+import { Key, Trash2, Check, Loader2, Settings2, Pencil, Plus, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { toast } from "sonner";
 import {
   fetchProviders,
   setProviderKey,
@@ -10,6 +21,7 @@ import {
   fetchAgents,
   updateAgent,
   fetchModels,
+  resetAgentSessionPermissions,
   type ProviderStatus,
   type AgentStatus,
   type Model,
@@ -20,12 +32,27 @@ import { modelProviderLabel } from "../lib/model-labels.ts";
 // rendered nested under the Anita row rather than as a top-level section.
 const ANITA_AGENT_ID = "anita";
 
+/**
+ * Worktree context for the reset-session-permissions action (issue
+ * #259). `undefined` when Settings was opened from a view that
+ * doesn't carry a project/worktree — the button is disabled in that
+ * case because we have no worktree to scope the reset to.
+ */
+export interface AgentsSectionWorktreeContext {
+  projectId: string;
+  worktreeId: string;
+}
+
 /*
  * Settings section for enabling agents, setting their CLI paths, and
  * configuring the model-provider API keys the Anita agent uses. Self-loading so
  * it can drop into the settings page without the page wiring its data.
  */
-export function AgentsSection() {
+export function AgentsSection({
+  worktreeContext,
+}: {
+  worktreeContext?: AgentsSectionWorktreeContext;
+} = {}) {
   const [agents, setAgents] = useState<AgentStatus[]>([]);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
 
@@ -64,6 +91,26 @@ export function AgentsSection() {
     setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
   };
 
+  const handleResetSessionPermissions = async (agent: AgentStatus) => {
+    if (!worktreeContext) return;
+    try {
+      const result = await resetAgentSessionPermissions(
+        agent.id,
+        worktreeContext.projectId,
+        worktreeContext.worktreeId
+      );
+      const total = result.droppedRuntimes + result.killedRuntimes;
+      toast.success(
+        total > 0
+          ? `Reset session permissions for ${agent.name} (cleared ${total}).`
+          : `Reset session permissions for ${agent.name}.`
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(`Failed to reset: ${message}`);
+    }
+  };
+
   return (
     <div className="space-y-3">
       {agents.map((agent) => (
@@ -74,6 +121,11 @@ export function AgentsSection() {
           onSavePath={(path) => handleSaveAgentPath(agent.id, path)}
           onSaveDefaultModel={(defaultModel) => handleSaveDefaultModel(agent.id, defaultModel)}
           onToggleAutoApprove={() => handleToggleAutoApprove(agent)}
+          onResetSessionPermissions={
+            worktreeContext
+              ? () => handleResetSessionPermissions(agent)
+              : undefined
+          }
         >
           {agent.id === ANITA_AGENT_ID && (
             <ApiKeysSection providers={providers} onChange={load} />
@@ -90,6 +142,13 @@ interface AgentRowProps {
   onSavePath: (path: string | null) => Promise<void>;
   onSaveDefaultModel: (defaultModel: string | null) => Promise<void>;
   onToggleAutoApprove: () => void;
+  /**
+   * Open the confirmation dialog for resetting this agent's session
+   * permissions. `undefined` when the surrounding page has no
+   * worktree context (e.g. Settings opened from the empty landing),
+   * in which case the row hides the action entirely.
+   */
+  onResetSessionPermissions?: () => void;
   children?: ReactNode;
 }
 
@@ -122,6 +181,7 @@ function AgentRow({
   onSavePath,
   onSaveDefaultModel,
   onToggleAutoApprove,
+  onResetSessionPermissions,
   children,
 }: AgentRowProps) {
   const [showPath, setShowPath] = useState(false);
@@ -296,10 +356,87 @@ function AgentRow({
               title={agent.autoApprove ? "Require manual approval" : "Auto-approve actions"}
             />
           </div>
+
+          {onResetSessionPermissions ? (
+            <ResetSessionPermissionsRow
+              agent={agent}
+              onConfirm={onResetSessionPermissions}
+            />
+          ) : null}
         </div>
       )}
 
       {children && <div className="mt-3 border-t border-border pt-3">{children}</div>}
+    </div>
+  );
+}
+
+/*
+ * "Reset session permissions" row + confirmation dialog (issue #259).
+ *
+ * The dialog copy explains the destructive scope per agent:
+ *   - Codex: tears down the live app-server child (next turn re-spawns).
+ *   - Claude: ends any in-flight Claude child and forces the next turn
+ *     to start a fresh session id, losing session-scoped "always allow"
+ *     rules but keeping the conversation out of the conversation history
+ *     scope. (Claude's control protocol has no public rule-removal
+ *     message — this is the only revocation path.)
+ *   - Anita: no-op (Anita doesn't expose permission prompts yet).
+ */
+function ResetSessionPermissionsRow({
+  agent,
+  onConfirm,
+}: {
+  agent: AgentStatus;
+  onConfirm: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const description =
+    agent.id === "codex"
+      ? `This ends every active Codex app-server thread for this worktree. The next turn will spawn a fresh one and start prompting for actions that were previously auto-approved. The current Codex session may end mid-turn.`
+      : agent.id === "claude"
+        ? `This ends the active Claude child for this worktree and forces the next turn to start a fresh session id, so any "Always allow" decisions granted during the current session no longer apply. The conversation context for that session is reset.`
+        : `Anita doesn't expose approval prompts yet, so there's nothing to reset for this agent.`;
+
+  return (
+    <div className="mt-3 flex items-start justify-between gap-3 border-t border-border pt-3">
+      <div className="min-w-0">
+        <div className="text-sm font-medium">Session permissions</div>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          Clear every "Always allow" decision made in the current session.
+        </p>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => setOpen(true)}
+        title={`Reset session permissions for ${agent.name}`}
+      >
+        <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+        Reset
+      </Button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Reset {agent.name} session permissions?
+            </AlertDialogTitle>
+            <AlertDialogDescription>{description}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setOpen(false);
+                onConfirm();
+              }}
+            >
+              Reset
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

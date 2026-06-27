@@ -45,6 +45,14 @@ interface SettingsPageProps {
   section: SettingsSection;
   onSectionChange: (section: SettingsSection) => void;
   onClose: () => void;
+  /**
+   * Worktree context captured when the user opened Settings. The reset
+   * session permissions button needs this so the server knows which
+   * worktree to revoke. `undefined` when Settings was opened from a
+   * view that doesn't carry a project/worktree (e.g. the empty
+   * landing page) — in that case the reset button is disabled.
+   */
+  worktreeContext?: { projectId: string; worktreeId: string };
 }
 
 /*
@@ -57,7 +65,12 @@ interface SettingsPageProps {
  * appears next to the page title. On desktop (≥md) we keep the original
  * two-column layout with the section nav on the left.
  */
-export function SettingsPage({ section, onSectionChange, onClose }: SettingsPageProps) {
+export function SettingsPage({
+  section,
+  onSectionChange,
+  onClose,
+  worktreeContext,
+}: SettingsPageProps) {
   const active = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
 
   return (
@@ -145,7 +158,9 @@ export function SettingsPage({ section, onSectionChange, onClose }: SettingsPage
             </Button>
           </div>
 
-          {active.id === "agents" && <AgentsSection />}
+          {active.id === "agents" && (
+            <AgentsSection worktreeContext={worktreeContext} />
+          )}
           {active.id === "integrations" && <IntegrationsSection />}
           {active.id === "skills" && <SkillsSection />}
           {active.id === "shortcuts" && <ShortcutsSection />}

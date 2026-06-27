@@ -903,6 +903,33 @@ export async function updateAgent(
   return res.json();
 }
 
+/*
+ * Reset the agent's "Always allow" decisions for the given worktree.
+ * See issue #259. The server tears down any live Codex app-server
+ * threads / Claude children and marks the worktree so the next turn
+ * starts fresh. Returns the number of runtimes dropped and killed so
+ * the UI can show a confirmation toast.
+ */
+export async function resetAgentSessionPermissions(
+  agentId: string,
+  projectId: string,
+  worktreeId: string
+): Promise<{ ok: true; droppedRuntimes: number; killedRuntimes: number }> {
+  const res = await fetch(
+    `${BASE}/agents/${encodeURIComponent(agentId)}/session-permissions/reset`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, worktreeId }),
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Reset failed (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function fetchModels(agent?: string): Promise<Model[]> {
   const params = agent ? `?agent=${encodeURIComponent(agent)}` : "";
   const res = await fetch(`${BASE}/models${params}`);

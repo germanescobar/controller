@@ -7,6 +7,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { getProject } from "../lib/projects.js";
 import { getProjectWorktrees, resolveWorktree } from "../lib/worktrees.js";
+import {
+  consumeClaudeSessionRevocation,
+} from "../lib/session-permissions.js";
 
 const execAsync = promisify(exec);
 import {
@@ -1040,13 +1043,24 @@ export async function handleSessionStream(
 
   const apiKeyEnv = await getApiKeyEnvVars();
 
+  // If the user reset Claude's session permissions for this worktree
+  // (issue #259), drop `resumeSessionId` so the next Claude session
+  // starts fresh — losing any "always allow" decisions granted during
+  // the previous session. Claude's control protocol has no public
+  // "remove rules" message, so a fresh session id is the only way to
+  // revoke session-scoped permissions.
+  const effectiveResumeSessionId =
+    providerId === "claude" && consumeClaudeSessionRevocation(worktree.id)
+      ? undefined
+      : resumeSessionId;
+
   const child = provider.spawn({
     message: agentMessage,
     cwd: worktree.path,
     env: { ...apiKeyEnv, ...controllerAgentEnv() },
     command: resolvedCommand,
     attachments,
-    resumeSessionId,
+    resumeSessionId: effectiveResumeSessionId,
     model,
     reasoningEffort,
     serviceTier,

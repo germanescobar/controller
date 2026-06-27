@@ -799,6 +799,15 @@ function AppBody() {
             section={activeView.section}
             onSectionChange={(section) => setView({ page: "settings", section })}
             onClose={() => setView(preSettingsViewRef.current)}
+            worktreeContext={
+              preSettingsViewRef.current.page === "session"
+                ? {
+                    projectId: preSettingsViewRef.current.projectId,
+                    worktreeId:
+                      preSettingsViewRef.current.worktreeId ?? "main",
+                  }
+                : undefined
+            }
           />
         )}
         </AppErrorBoundary>

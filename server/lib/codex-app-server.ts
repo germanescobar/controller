@@ -678,6 +678,51 @@ export class CodexAppServerManager {
 
     this.sessions.clear();
   }
+
+  /**
+   * Drop every live thread runtime and terminate the underlying `codex
+   * app-server` child. Called when the user resets the agent's session
+   * permissions — see issue #259. The Codex thread state lives on the
+   * app-server side, so the only way to clear session-scoped
+   * `acceptForSession` decisions is to tear down the child; the next
+   * `turn/start` will spawn a fresh one with a clean slate.
+   *
+   * Returns the count of thread runtimes that were dropped, so the UI
+   * can show "reset N session(s)".
+   */
+  resetAllSessions(): number {
+    const dropped = this.sessions.size;
+    for (const runtime of this.sessions.values()) {
+      if (runtime.turnInProgress) {
+        this.emit(runtime, {
+          type: "run.failed",
+          sessionId: runtime.sessionId,
+          error: "Session reset by user (session permissions revoked)",
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+    this.sessions.clear();
+    if (this.child) {
+      const child = this.child;
+      this.child = null;
+      this.initializePromise = null;
+      // Reject any pending JSON-RPC calls so callers don't hang.
+      const error = new Error(
+        "Codex app-server reset (session permissions revoked)"
+      );
+      for (const pending of this.pendingCalls.values()) {
+        pending.reject(error);
+      }
+      this.pendingCalls.clear();
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already dead */
+      }
+    }
+    return dropped;
+  }
 }
 
 /**
