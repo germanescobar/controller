@@ -36,6 +36,7 @@ import { unifiedSkillDir } from "./paths.js";
  */
 export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-browser",
+  "controller-terminal",
   "controller-integrations",
   "controller-scripts",
   "controller-schedules",
@@ -242,6 +243,74 @@ changes that would break a positional CSS selector.
   usually safe to ignore — re-running the command is enough.
 - \`ref=\` lookups return \`Stale ref\` if the page changed between the snapshot
   and the action. Re-run \`snapshot\` to refresh the refs.
+`;
+}
+
+function buildTerminalSkillBody(cliPath: string): string {
+  return `---
+name: controller-terminal
+description: Drive the persistent terminals the user has open in the Terminals tab — list them, run a command in a specific tab, snapshot recent output, and tail new output. Use it to inspect a running dev server, tail logs, or restart a process without opening a fresh shell.
+---
+
+${managedMarker("controller-terminal")}
+
+# Terminal
+
+You can drive the same persistent terminals the user sees in the **Terminals**
+tab with the terminal CLI. Use it to inspect a running server, tail logs, or
+restart a process from inside your worktree. The user sees exactly what you do
+in real time — your commands and their output land in the same tab.
+
+This skill is managed by the Controller app (directory name
+\`controller-terminal\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users invoke
+it like any other skill: type \`/controller-terminal <task>\` or pick it from
+the autocomplete.
+
+Invoke the CLI by its absolute path — it is not on your PATH. Every command
+below is run as \`${cliPath} terminal <command>\`:
+
+## Commands
+
+- \`${cliPath} terminal list\` — list the terminals open in the current
+  worktree. Each row is a terminal id (plus \`[attached]\` when the user is
+  watching it). **Terminal ids come from here — don't guess them.**
+- \`${cliPath} terminal run <terminalId> <command…>\` — send a command to a
+  terminal tab. It runs in the tab the user already has open; you read the
+  result with \`snapshot\` / \`tail\`.
+- \`${cliPath} terminal snapshot <terminalId> [--lines N]\` — print the last
+  \`N\` lines of the terminal's buffered output (default 200, capped at the
+  buffer size).
+- \`${cliPath} terminal tail <terminalId> [--follow]\` — print new output.
+  \`--follow\` keeps streaming until you interrupt it; without it the stream
+  ends after output goes quiet.
+
+## How to use it
+
+1. \`list\` to find the terminal id you want.
+2. \`snapshot\` to read where the terminal is right now.
+3. \`run\` to send a command, then \`snapshot\` again or \`tail\` to watch the
+   result.
+
+## Worked example: watch the build, restart on failure
+
+\`\`\`
+${cliPath} terminal snapshot build              # read the current build output
+${cliPath} terminal run build "npm run dev"     # (re)start the dev server
+${cliPath} terminal tail build --follow         # stream new output until it settles
+\`\`\`
+
+There is no dedicated "restart" verb — \`run\` covers it. Send whatever shell
+command you would type yourself.
+
+## Notes
+
+- You can only reach terminals the user already has open in **this** worktree —
+  not terminals in another worktree or project. Creating a new terminal is a UI
+  action; if a command reports that no terminal with that id is open, ask the
+  user to open the Terminals tab (or run \`list\` to see what's available).
+- Output is whatever the terminal's rolling buffer holds; very old output may
+  have scrolled out of the buffer.
 `;
 }
 
@@ -829,6 +898,7 @@ export async function installManagedSkills(): Promise<void> {
   const cli = controllerCliShellPath();
   const skills: ManagedSkill[] = [
     { name: "controller-browser", body: buildBrowserSkillBody(cli) },
+    { name: "controller-terminal", body: buildTerminalSkillBody(cli) },
     { name: "controller-integrations", body: buildIntegrationsSkillBody(cli) },
     { name: "controller-schedules", body: buildSchedulesSkillBody(cli) },
     { name: "controller-scripts", body: CONTROLLER_SCRIPTS_SKILL_BODY },

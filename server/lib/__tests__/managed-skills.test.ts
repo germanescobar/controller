@@ -131,6 +131,7 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
     // surfaces, so its lines must include one of them.
     const cases = [
       { name: "controller-browser", surfaces: ["browser"] },
+      { name: "controller-terminal", surfaces: ["terminal"] },
       { name: "controller-integrations", surfaces: ["integrations"] },
       { name: "controller-schedules", surfaces: ["schedules"] },
       { name: "controller-search-skills", surfaces: ["skills"] },
