@@ -24,14 +24,19 @@ agentsRouter.put("/:agentId", async (req, res) => {
     return;
   }
 
-  const { enabled, path, defaultModel } = req.body as {
+  const { enabled, path, defaultModel, autoApprove } = req.body as {
     enabled?: unknown;
     path?: unknown;
     defaultModel?: unknown;
+    autoApprove?: unknown;
   };
 
   if (enabled !== undefined && typeof enabled !== "boolean") {
     res.status(400).json({ error: "enabled must be a boolean" });
+    return;
+  }
+  if (autoApprove !== undefined && typeof autoApprove !== "boolean") {
+    res.status(400).json({ error: "autoApprove must be a boolean" });
     return;
   }
   if (path !== undefined && path !== null && typeof path !== "string") {
@@ -63,6 +68,7 @@ agentsRouter.put("/:agentId", async (req, res) => {
     ...(defaultModel !== undefined
       ? { defaultModel: defaultModel as string | null }
       : {}),
+    ...(autoApprove !== undefined ? { autoApprove: autoApprove as boolean } : {}),
   });
 
   const statuses = await getAgentStatuses();

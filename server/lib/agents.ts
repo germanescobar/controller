@@ -7,6 +7,12 @@ import {
 import { getAgentSetting, getAgentSettings } from "./agent-settings.js";
 import { canonicalProviderId } from "./provider-id.js";
 import { childProcessEnv } from "./shell-env.js";
+import {
+  DEFAULT_AUTO_APPROVE,
+  anitaAutoApproveFlags,
+  claudePermissionMode,
+  codexExecAutoApproveFlags,
+} from "./auto-approve.js";
 
 export interface AgentPlanStep {
   step: string;
@@ -130,6 +136,13 @@ export interface SpawnOptions {
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   serviceTier?: "fast" | "flex";
   mode?: "default" | "plan";
+  /**
+   * Whether the agent should auto-approve the actions it would otherwise
+   * prompt for. Defaults to on (autonomous). When false, the provider omits
+   * its auto-approve flags so the agent asks for permission, and Controller
+   * routes those prompts as approval cards. See `./auto-approve.ts`.
+   */
+  autoApprove?: boolean;
   /**
    * Stable identity/environment context to deliver as a real system message
    * instead of prepending it to the user message. Only honored by providers
@@ -476,8 +489,8 @@ const anitaProvider: AgentProvider = {
   name: "Anita",
   command: "anita",
 
-  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, systemPrompt }) {
-    const cmdArgs = ["--stream-json", "--auto-approve"];
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, systemPrompt, autoApprove = DEFAULT_AUTO_APPROVE }) {
+    const cmdArgs = ["--stream-json", ...anitaAutoApproveFlags(autoApprove)];
     // Only emit `--model` when the caller actually supplied a value. The
     // anita CLI rejects empty model strings with "Invalid model format"
     // before any `run.started` event lands (issue #213); omit the flag
@@ -541,13 +554,13 @@ const codexProvider: AgentProvider = {
   name: "Codex",
   command: "codex",
 
-  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode }) {
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode, autoApprove = DEFAULT_AUTO_APPROVE }) {
     // Flags must come before the prompt argument. Same belt-and-suspenders
     // guard as the anita provider: only emit `--model` when the caller
     // supplied a non-empty value (issue #213). Codex is more permissive
     // than anita with empty model strings, but emitting `--model ""`
     // still risks it picking a default the user didn't intend.
-    const flags = ["--json", "--full-auto", "--skip-git-repo-check"];
+    const flags = ["--json", ...codexExecAutoApproveFlags(autoApprove), "--skip-git-repo-check"];
     if (model && model.trim()) {
       flags.push("--model", model);
     }
@@ -609,9 +622,14 @@ const claudeProvider: AgentProvider = {
   name: "Claude",
   command: "claude",
 
-  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, mode }) {
+  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, mode, autoApprove = DEFAULT_AUTO_APPROVE }) {
     const planMode = mode === "plan";
     const prompt = withAttachmentContext(message, attachments, "claude");
+    // The CLI must route `can_use_tool` requests to us — over the stream-json
+    // control channel — whenever the user should see approval prompts. That is
+    // true in plan mode (interactive approval loop) and whenever auto-approve
+    // is off (manual approval for every action).
+    const usesControlChannel = planMode || !autoApprove;
 
     const args = [
       "-p",
@@ -620,8 +638,10 @@ const claudeProvider: AgentProvider = {
       "--verbose",
       "--permission-mode",
       // Plan mode drives an interactive approval loop, so it cannot bypass
-      // permissions; default runs stay fully autonomous as before.
-      planMode ? "plan" : "bypassPermissions",
+      // permissions. Otherwise the mode follows the auto-approve setting:
+      // `bypassPermissions` runs fully autonomously, `default` makes the CLI
+      // ask before every action.
+      planMode ? "plan" : claudePermissionMode(autoApprove),
       // Turn off Claude Code's built-in slash commands so the orchestrator
       // is the only path. The orchestrator's skill catalog is the single
       // source of truth for `/<name>` invocations; the CLI's `/help`,
@@ -630,10 +650,11 @@ const claudeProvider: AgentProvider = {
       "--disable-slash-commands",
     ];
 
-    if (planMode) {
+    if (usesControlChannel) {
       // Stream prompts and permission decisions over stdin/stdout so the CLI
       // routes `can_use_tool` requests to us (the `stdio` sentinel) instead of
-      // silently denying them — the root cause of plan-mode tool failures.
+      // silently denying them — the root cause of plan-mode tool failures, and
+      // the channel that carries manual approvals when auto-approve is off.
       args.push("--input-format", "stream-json", "--permission-prompt-tool", "stdio");
     }
 
@@ -647,9 +668,9 @@ const claudeProvider: AgentProvider = {
       args.push("--resume", resumeSessionId);
     }
 
-    // Default mode passes the prompt as an argv argument; plan mode sends it
-    // over the stream-json control channel after the initialize handshake.
-    if (!planMode) {
+    // Control-channel turns send the prompt over stream-json stdin after the
+    // initialize handshake; otherwise the prompt is a plain argv argument.
+    if (!usesControlChannel) {
       args.push(prompt);
     }
 
@@ -659,12 +680,12 @@ const claudeProvider: AgentProvider = {
     const child = spawn(command ?? "claude", args, {
       cwd,
       env: childProcessEnv(env),
-      // Plan mode keeps stdin open for the live control channel; default mode
-      // never reads stdin (the caller ends it).
-      stdio: [planMode ? "pipe" : "ignore", "pipe", "pipe"],
+      // Control-channel turns keep stdin open for the live approval channel;
+      // fully autonomous turns never read stdin (the caller ends it).
+      stdio: [usesControlChannel ? "pipe" : "ignore", "pipe", "pipe"],
     });
 
-    if (planMode) {
+    if (usesControlChannel) {
       writeClaudeControlLine(child, {
         type: "control_request",
         request_id: randomUUID(),
@@ -1426,6 +1447,8 @@ export interface AgentStatus {
   version: string | null;
   /** Default model id pre-selected for new sessions, or null. */
   defaultModel: string | null;
+  /** Whether the agent auto-approves actions (on) or asks for them (off). */
+  autoApprove: boolean;
 }
 
 /**
@@ -1454,7 +1477,12 @@ export async function getAgentStatuses(): Promise<AgentStatus[]> {
   const settings = await getAgentSettings();
   return Promise.all(
     Object.values(providers).map(async (provider) => {
-      const setting = settings[provider.id] ?? { enabled: true, path: null, defaultModel: null };
+      const setting = settings[provider.id] ?? {
+        enabled: true,
+        path: null,
+        defaultModel: null,
+        autoApprove: DEFAULT_AUTO_APPROVE,
+      };
       const resolvedPath = resolveCommand(provider.command, setting.path);
       const installed = resolvedPath !== null;
       const version = installed ? await getCommandVersion(resolvedPath) : null;
@@ -1466,6 +1494,7 @@ export async function getAgentStatuses(): Promise<AgentStatus[]> {
         resolvedPath,
         version,
         defaultModel: setting.defaultModel,
+        autoApprove: setting.autoApprove,
       };
     })
   );

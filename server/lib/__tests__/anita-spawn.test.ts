@@ -143,6 +143,19 @@ test("anita spawn omits --model when the value is empty/whitespace", async () =>
   }
 });
 
+test("anita spawn passes --auto-approve by default and omits it when off", async () => {
+  const onArgs = await captureAnitaArgs({});
+  assert.ok(
+    onArgs.includes("--auto-approve"),
+    `auto-approve on must pass --auto-approve, got: ${onArgs.join(" ")}`
+  );
+  const offArgs = await captureAnitaArgs({ autoApprove: false });
+  assert.ok(
+    !offArgs.includes("--auto-approve"),
+    `auto-approve off must omit --auto-approve, got: ${offArgs.join(" ")}`
+  );
+});
+
 test("anita spawn passes --model before the chat subcommand when supplied", async () => {
   const args = await captureAnitaArgs({ model: "ollama/glm-4.7-flash:latest" });
   const flagIndex = args.indexOf("--model");
@@ -259,4 +272,24 @@ test("codex spawn passes --model when supplied", async () => {
   const flagIndex = args.indexOf("--model");
   assert.ok(flagIndex >= 0, `expected --model in argv: ${args.join(" ")}`);
   assert.equal(args[flagIndex + 1], "gpt-5");
+});
+
+test("codex spawn uses --full-auto by default and a restricted sandbox when off", async () => {
+  const onArgs = await captureCodexArgs({});
+  assert.ok(
+    onArgs.includes("--full-auto"),
+    `auto-approve on must pass --full-auto, got: ${onArgs.join(" ")}`
+  );
+  const offArgs = await captureCodexArgs({ autoApprove: false });
+  assert.ok(
+    !offArgs.includes("--full-auto"),
+    `auto-approve off must omit --full-auto, got: ${offArgs.join(" ")}`
+  );
+  const sandboxIndex = offArgs.indexOf("--sandbox");
+  assert.ok(sandboxIndex >= 0, `off must set --sandbox, got: ${offArgs.join(" ")}`);
+  assert.equal(offArgs[sandboxIndex + 1], "read-only");
+  assert.ok(
+    offArgs.some((flag) => flag.includes("approval_policy")),
+    `off must set an approval policy, got: ${offArgs.join(" ")}`
+  );
 });

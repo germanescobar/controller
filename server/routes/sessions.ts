@@ -923,11 +923,16 @@ export async function handleSessionStream(
   // different provider default when the user later changes Settings
   // would change the model under an already-running session without
   // any UI signal. PR review from chatgpt-codex-connector on #218.
+  // Per-agent settings drive both the default model (new sessions only) and
+  // whether the agent auto-approves its actions this turn. Auto-approve is
+  // read fresh on every turn so toggling it in Settings takes effect on the
+  // next turn without a restart.
+  const agentSetting = await getAgentSetting(providerId);
+  const autoApprove = agentSetting.autoApprove;
   const queryModel = typeof req.query.model === "string" ? req.query.model.trim() : "";
   let model: string | undefined = queryModel || undefined;
   if (!model && !resumeSessionId) {
-    const setting = await getAgentSetting(providerId);
-    const fallback = setting.defaultModel;
+    const fallback = agentSetting.defaultModel;
     if (fallback && fallback.trim()) {
       model = fallback.trim();
     }
@@ -1010,6 +1015,7 @@ export async function handleSessionStream(
       mode,
       providerId,
       attachments,
+      autoApprove,
     });
     return;
   }
@@ -1045,6 +1051,7 @@ export async function handleSessionStream(
     reasoningEffort,
     serviceTier,
     mode,
+    autoApprove,
     systemPrompt: usesSystemPrompt ? controllerPreamble : undefined,
   });
   const parseProviderEvent = provider.createParser?.() ?? provider.parseEvent.bind(provider);
@@ -1072,7 +1079,10 @@ export async function handleSessionStream(
   // it open has been observed to make Anita hang silently mid-run. Plan-mode
   // Claude is the exception: it streams the prompt and live approval decisions
   // over stdin, so its pipe must stay open for the whole turn.
-  const claudeUsesControlChannel = providerId === "claude" && mode === "plan";
+  // Claude routes approvals over the stream-json control channel in plan mode
+  // and whenever auto-approve is off (manual approval for every action).
+  const claudeUsesControlChannel =
+    providerId === "claude" && (mode === "plan" || !autoApprove);
   if (
     providerId === "anita" ||
     providerId === "codex" ||
@@ -1656,6 +1666,7 @@ async function streamCodexPlanSession(
     mode: "default" | "plan";
     providerId: string;
     attachments: AttachmentMetadata[];
+    autoApprove: boolean;
   }
 ) {
   const {
@@ -1672,6 +1683,7 @@ async function streamCodexPlanSession(
     mode,
     providerId,
     attachments,
+    autoApprove,
   } = options;
 
   res.writeHead(200, {
@@ -1832,6 +1844,7 @@ async function streamCodexPlanSession(
         serviceTier,
         mode,
         attachments,
+        autoApprove,
       },
       handleEvent
     );
@@ -2244,33 +2257,57 @@ sessionsRouter.post(
     }
 
     const runtime = getSessionRuntime(req.params.sessionId);
-    if (!runtime.active || !runtime.child) {
+    if (!runtime.active) {
       res
         .status(409)
         .json({ error: "This session has no running process to approve against." });
       return;
     }
 
-    // The decision is built from server-tracked state (tool input + permission
-    // suggestions), never from the client. Prefer the in-memory record; fall
-    // back to the persisted event so an approval survives a page reload.
-    const pending =
-      consumePendingApproval(req.params.sessionId, requestId) ??
-      findPendingApproval(
-        await getEvents(worktree.path, req.params.sessionId),
-        requestId
-      );
-    if (!pending) {
-      res.status(404).json({ error: "No pending approval matches this request." });
-      return;
-    }
+    // Codex approvals are answered on the shared app-server (no per-session
+    // child process); the manager owns the pending request/JSON-RPC mapping.
+    if (canonicalProviderId(runtime.provider ?? "") === "codex") {
+      try {
+        await codexAppServerManager.submitApproval(
+          req.params.sessionId,
+          requestId,
+          decision
+        );
+      } catch (error) {
+        res.status(404).json({
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    } else {
+      if (!runtime.child) {
+        res
+          .status(409)
+          .json({ error: "This session has no running process to approve against." });
+        return;
+      }
 
-    const sent = sendClaudeApprovalDecision(runtime.child, pending, decision);
-    if (!sent) {
-      res
-        .status(409)
-        .json({ error: "The session process is no longer accepting input." });
-      return;
+      // The decision is built from server-tracked state (tool input + permission
+      // suggestions), never from the client. Prefer the in-memory record; fall
+      // back to the persisted event so an approval survives a page reload.
+      const pending =
+        consumePendingApproval(req.params.sessionId, requestId) ??
+        findPendingApproval(
+          await getEvents(worktree.path, req.params.sessionId),
+          requestId
+        );
+      if (!pending) {
+        res.status(404).json({ error: "No pending approval matches this request." });
+        return;
+      }
+
+      const sent = sendClaudeApprovalDecision(runtime.child, pending, decision);
+      if (!sent) {
+        res
+          .status(409)
+          .json({ error: "The session process is no longer accepting input." });
+        return;
+      }
     }
 
     await appendEvent(worktree.path, req.params.sessionId, {
