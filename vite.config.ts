@@ -11,10 +11,17 @@ function parsePort(value: string | undefined, fallback: number): number {
     : fallback;
 }
 
+// Dev defaults are offset (+2) from the packaged app's canonical ports
+// (4500 client / 3100 API) so a `npm run dev` next to a running packaged
+// Controller never collides on the first try. Worktree PORT_OFFSET still
+// adds on top — main worktree 4502/3102, then 4505/3105, 4508/3108, ...
+const DEV_CLIENT_BASE_PORT = 4502;
+const DEV_API_BASE_PORT = 3102;
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const clientPort = parsePort(env.VITE_DEV_SERVER_PORT, 4500);
-  const apiPort = parsePort(env.VITE_API_PORT ?? env.API_PORT ?? env.PORT, 3100);
+  const clientPort = parsePort(env.VITE_DEV_SERVER_PORT, DEV_CLIENT_BASE_PORT);
+  const apiPort = parsePort(env.VITE_API_PORT ?? env.API_PORT ?? env.PORT, DEV_API_BASE_PORT);
   const apiTarget = `http://localhost:${apiPort}`;
 
   return {
