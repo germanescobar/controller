@@ -1,6 +1,8 @@
 /*
  * Tests for `server/lib/projects.ts` — project persistence and the
- * `.coding-orchestrator/{setup,run}.sh` script files it writes (issue #52).
+ * `.controller/{setup,run}.sh` script files it writes (issue #52), including
+ * the backward-compatible read/write of legacy `.coding-orchestrator/` repos
+ * (issue #248).
  *
  * Strategy: point `CONTROLLER_HOME` at a throwaway temp directory so the
  * projects registry is isolated per run, and give each project its own temp
@@ -38,8 +40,15 @@ async function withSandbox(run: (sandbox: Sandbox) => Promise<void>): Promise<vo
   }
 }
 
-function scriptPath(projectPath: string, fileName: string): string {
-  return path.join(projectPath, ".coding-orchestrator", fileName);
+/* Path to a native script. Defaults to the current `.controller/` directory;
+ * pass `.coding-orchestrator` to address the legacy directory in the
+ * backward-compatibility tests. */
+function scriptPath(
+  projectPath: string,
+  fileName: string,
+  dir: ".controller" | ".coding-orchestrator" = ".controller"
+): string {
+  return path.join(projectPath, dir, fileName);
 }
 
 test("addProject writes run.sh when run commands are provided", async () => {
@@ -74,6 +83,36 @@ test("addProject preserves pre-existing scripts when fields are blank", async ()
 
     assert.equal(await fs.readFile(scriptPath(projectPath, "setup.sh"), "utf-8"), existing);
     assert.equal(await fs.readFile(scriptPath(projectPath, "run.sh"), "utf-8"), existing);
+  });
+});
+
+test("addProject writes new scripts to .controller, leaving .coding-orchestrator untouched", async () => {
+  await withSandbox(async ({ projectPath }) => {
+    await addProject("demo", projectPath, "npm install", "npm run dev");
+
+    assert.ok(existsSync(scriptPath(projectPath, "setup.sh", ".controller")));
+    assert.ok(existsSync(scriptPath(projectPath, "run.sh", ".controller")));
+    assert.ok(!existsSync(path.join(projectPath, ".coding-orchestrator")));
+  });
+});
+
+test("updateProject writes back to a legacy .coding-orchestrator repo, not .controller", async () => {
+  await withSandbox(async ({ projectPath }) => {
+    // Repo onboarded before the rename: scripts live under the legacy dir.
+    await fs.mkdir(path.join(projectPath, ".coding-orchestrator"), { recursive: true });
+    await fs.writeFile(
+      scriptPath(projectPath, "setup.sh", ".coding-orchestrator"),
+      "#!/bin/bash\nset -e\n\nnpm install\n"
+    );
+    const project = await addProject("demo", projectPath);
+
+    await updateProject(project.id, { runCommands: "npm run dev" });
+
+    assert.match(
+      await fs.readFile(scriptPath(projectPath, "run.sh", ".coding-orchestrator"), "utf-8"),
+      /npm run dev/
+    );
+    assert.ok(!existsSync(path.join(projectPath, ".controller")));
   });
 });
 

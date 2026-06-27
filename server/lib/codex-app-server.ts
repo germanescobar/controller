@@ -1,4 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getAgentProvider,
   resolveAgentCommand,
@@ -8,6 +11,31 @@ import {
   type AgentUserInputQuestion,
 } from "./agents.js";
 import { childProcessEnv } from "./shell-env.js";
+
+/* Version reported to Codex in `clientInfo`. Read from the nearest ancestor
+ * package.json so it stays in sync with the build: this module lives at
+ * `server/lib/` in dev and `dist/server/lib/` when packaged, and the canonical
+ * package.json is an ancestor directory in both layouts. Falls back to "0.0.0"
+ * when it cannot be located. */
+function readAppVersion(): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const candidate = path.join(dir, "package.json");
+    if (existsSync(candidate)) {
+      try {
+        const pkg = JSON.parse(readFileSync(candidate, "utf-8")) as { version?: string };
+        if (typeof pkg.version === "string") return pkg.version;
+      } catch {
+        /* Malformed package.json — keep walking up to a valid one. */
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return "0.0.0";
+    dir = parent;
+  }
+}
+
+const APP_VERSION = readAppVersion();
 
 type JsonRpcId = string | number;
 
@@ -426,7 +454,7 @@ export class CodexAppServerManager {
       });
 
       this.call("initialize", {
-        clientInfo: { name: "coding-orchestrator", version: "0.1.0" },
+        clientInfo: { name: "controller", version: APP_VERSION },
         capabilities: { experimentalApi: true },
       })
         .then(() => {
