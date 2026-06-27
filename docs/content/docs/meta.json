@@ -3,11 +3,21 @@
   "description": "Public documentation for Controller.",
   "root": true,
   "pages": [
-    "---Overview---",
+    "---User guide---",
     "overview",
     "installation",
+    "first-project",
+    "controller-mode",
+    "controller-scripts",
+    "worktrees",
+    "integrations",
+    "skills",
+    "sidebar",
+    "remote-access",
+    "browser-preview",
+    "---Development---",
     "architecture",
-    "---State---",
+    "building-from-source",
     "state-location",
     "macos-privacy"
   ]

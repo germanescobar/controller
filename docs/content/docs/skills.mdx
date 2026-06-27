@@ -1,0 +1,58 @@
+---
+title: Skills
+description: Unified, controller-managed, and per-agent skills — and how to create your own from Settings.
+---
+
+*Skills* are reusable instructions you invoke with a slash command. Type
+`/<skill-name>` in the chat input and Controller activates that skill for the
+current message — it prepends the skill's `SKILL.md` body to what you send.
+Controller is the single source of truth for slash commands: it disables each
+agent CLI's own slash path so the two never compete, and the `/<name>` flow
+works the same regardless of where the skill comes from.
+
+## Unified skills (recommended)
+
+**Unified skills** are Controller's own, app-owned catalog. This is the kind you
+should reach for first: they live in one place, work across every provider
+(Anita, Codex, Claude), and you manage them entirely from the app.
+
+- **Manage them in Settings.** The **Skills** section of Settings lets you
+  create, edit, search, import, and delete skills — no editing files by hand.
+- **The agent can build them for you.** Ask the agent to turn a recurring
+  workflow into a skill and it drafts the `SKILL.md` (the `controller-skill-creator`
+  skill) and saves it to your catalog.
+- **They win on conflicts.** A unified skill takes precedence over a per-agent
+  skill of the same name, so your catalog is the source of truth.
+
+Under the hood they're stored under your Controller home
+(`<controller-home>/skills/<name>/SKILL.md`), but you never need to touch that
+path — Settings is the interface.
+
+## Controller-managed skills
+
+**Controller-managed skills** are built into the orchestrator and prefixed with
+`controller-` (for example `controller-worktrees`, `controller-scripts`,
+`controller-integrations`). They wire the agent into Controller's own features —
+worktrees, scripts, the integrations gateway — and are hidden from the agent
+CLI's own slash picker so they don't collide with anything else.
+
+## Per-agent skills
+
+Each provider also has its **own** skill system, independent of Controller.
+These live in the agent's home directory:
+
+- `~/.codex/skills/`
+- `~/.claude/skills/`
+- `~/.anita/skills/`
+
+Controller discovers these alongside the unified catalog so they show up in the
+same `/<name>` picker, but they're owned by the agent, not the app — and they
+only apply to that one provider.
+
+## Which to use
+
+Prefer **unified skills** for anything you want available everywhere and easy to
+edit — create them from Settings or ask the agent to write one. Reach for
+**per-agent skills** only when a skill is genuinely specific to a single
+provider. **Controller-managed skills** you don't create; they ship with the
+app.

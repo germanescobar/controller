@@ -1,68 +1,93 @@
 ---
 title: Installation
-description: Prerequisites and the steps to install and run Controller in development.
+description: Install a prebuilt Controller release on macOS or Linux, or build it from source.
 ---
 
-## Prerequisites
+The fastest way to get Controller is a prebuilt release from the
+[GitHub Releases page](https://github.com/germanescobar/controller/releases).
+Each tagged release attaches the distributables for that version. Prefer to
+build it yourself? Jump to [Building from source](/docs/building-from-source).
 
-- Node.js 20+
-- `tmux` for persistent embedded terminals that survive backend restarts
-- At least one supported coding agent CLI installed and on your `PATH`:
+## Requirements
+
+- **`tmux`** — Controller backs every embedded terminal with a `tmux` session
+  so commands survive browser refreshes and backend restarts. Install it with
+  Homebrew (`brew install tmux`) on macOS or your package manager on Linux.
+- **At least one supported coding agent CLI on your `PATH`:**
   - **Anita** (`anita`)
   - **Codex** (`codex`)
   - **Claude** (`claude`)
+- The backend listens on the port you pick on the welcome screen (default
+  `4500`).
 
-## Install & Run
+## macOS
 
-```bash
-npm install
-npm run dev
+The macOS release ships as a `.zip` and a `.dmg`. The current builds are
+**arm64 / Apple Silicon**; on an Intel Mac, [build from
+source](/docs/building-from-source) on the Intel host (an x64 build is
+targeted for a later release).
+
+1. Download `Controller-<version>-arm64-mac.zip` (or the `.dmg`) from the
+   latest release.
+2. Unzip and drag **Controller.app** into `/Applications` (or double-click the
+   DMG and drag it the same way).
+3. **First launch.** This release is **ad-hoc signed, not Developer-ID-signed,
+   and not notarized**, so on first launch macOS may show **"Controller" Not
+   Opened** with a message that Apple could not verify the app. To allow it:
+   1. Click **Done** on the warning dialog.
+   2. Open **System Settings → Privacy & Security**.
+   3. Scroll to the **Security** section.
+   4. Click **Open Anyway** next to the message about Controller being blocked.
+   5. Confirm with Touch ID, password, or administrator approval if prompted.
+   6. Click **Open Anyway** in the final confirmation dialog.
+
+   After this one-time approval, Controller opens normally from Finder,
+   Spotlight, or Launchpad. Once a Developer-ID-signed build ships, this step
+   goes away.
+
+The first time the app reads inside a project folder under `~/Desktop`,
+`~/Documents`, or `~/Downloads`, macOS shows a privacy prompt — see
+[macOS privacy prompts](/docs/macos-privacy) for the full list and how to reset
+them.
+
+## Linux
+
+The Linux release ships as an AppImage (currently aarch64; an x86_64 build is
+targeted for a later release). No install required:
+
+```sh
+chmod +x Controller-<version>-arm64.AppImage
+./Controller-<version>-arm64.AppImage
 ```
 
-This starts both the Express server (port `3100`) and the Vite dev server
-concurrently.
+If your desktop doesn't integrate AppImages automatically, install
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) or run it
+from the command line as above.
 
-The Vite dev server listens on port `4500` by default and proxies `/api` and
-`/ws/terminal` to the Express server. The server remains reachable from other
-devices when your network allows it, which supports mobile access through
-trusted LAN, VPN, or secure tunnel setups such as Tailscale.
+## First-run welcome screen
 
-## Electron Development
-
-```bash
-npm run dev:electron
-```
-
-This starts the existing Express and Vite dev servers, waits for the Vite URL,
-and opens the Electron shell at the same React UI. The development path skips
-the welcome screen described below.
-
-## Package Electron
-
-```bash
-npm run package:electron
-```
-
-This creates a local current-OS Electron package under `release/`. The packaged
-app starts the local Express backend and loads the built client through it.
-
-### First-run welcome screen
-
-The **packaged** build shows a one-time "Welcome to Controller" screen on first
-launch. Pick the port the local backend will run on (default `4500`; ports below
-`1024` are rejected), then click **Continue**. The chosen port is remembered in
-`localStorage`, so subsequent launches skip the welcome screen and go straight to
-the app on the saved port. If that port is taken on a later launch, the welcome
+On first launch the packaged app shows a one-time **Welcome to Controller**
+screen. Pick the port the local backend will run on (default `4500`; ports
+below `1024` are rejected) and click **Continue**. The chosen port is
+remembered in `localStorage`, so later launches skip the welcome screen and go
+straight to the app. If that port is taken on a later launch, the welcome
 screen reappears with a one-click suggestion for the next free port.
 
-The same window shows a "Listening on port N" footer in the main app shell, with
-a popover that surfaces the local URL (with a Copy button) and a reminder to
-reach the app from your phone over a private network like Tailscale.
+The main app shell shows a **"Listening on port N"** footer with a popover that
+surfaces the local URL (with a **Copy** button) and a reminder to reach the app
+from your phone over a private network. See [Remote access](/docs/remote-access)
+for the recommended setup.
 
-## Network Access
+## Network access
 
 Controller can manage local paths, spawn agent CLIs, run terminal sessions, and
-store API keys. Treat the backend as privileged. For access from phones or other
-devices, prefer trusted networks, VPNs, or secure tunnels such as Tailscale. Do
-not expose the server directly to the public internet without adding an
-authentication layer.
+store API keys, so treat the backend as **privileged**. For access from phones
+or other devices, prefer trusted networks, VPNs, or secure tunnels such as
+Tailscale, and do not expose the server directly to the public internet without
+an authentication layer. [Remote access](/docs/remote-access) walks through the
+recommended Tailscale path.
+
+## Building from source
+
+Want to run the latest `main`, target an architecture without a prebuilt
+release, or contribute? See [Building from source](/docs/building-from-source).

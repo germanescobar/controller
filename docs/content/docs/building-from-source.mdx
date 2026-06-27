@@ -1,0 +1,74 @@
+---
+title: Building from source
+description: Run Controller from source, package desktop builds, and build the docs site.
+---
+
+Build from source to run the latest `main`, target an architecture without a
+prebuilt release, or contribute.
+
+## Prerequisites
+
+- **Node.js 20+**
+- **`tmux`** for the persistent embedded terminals.
+- **At least one agent CLI on your `PATH`** — `anita`, `codex`, or `claude`.
+
+## Run in development
+
+```bash
+npm install
+npm run dev
+```
+
+This starts the Express server (port `3100`) and the Vite dev server (port
+`4500`) concurrently. Vite proxies `/api` and `/ws/terminal` to Express. Open
+`http://localhost:4500`.
+
+To run the same app inside the Electron shell:
+
+```bash
+npm run dev:electron
+```
+
+This starts Express and Vite, waits for the Vite URL, and opens the Electron
+window at the same React UI. The development path skips the welcome screen.
+
+## Package desktop builds
+
+```bash
+# Unpacked current-OS build (fast, for smoke testing) → release/
+npm run package:electron
+
+# Distributable artifacts → release/
+#   macOS: DMG + ZIP    Linux: AppImage
+npm run package:electron:dist
+```
+
+### Architecture notes
+
+- By default `package:electron:dist` produces **arm64** artifacts when run on an
+  Apple Silicon Mac. To force **x64**, append `--x64` to the electron-builder
+  invocation, or run on an Intel Mac / x86_64 Linux host.
+- **Cross-building Linux from macOS is risky.** `electron-builder` supports it,
+  but `node-pty`'s native bindings are the fragile piece. The reliable path is
+  to build Linux artifacts on a **Linux host** (or in CI), and macOS artifacts
+  on **macOS**.
+
+## Build the docs site
+
+The docs site is a Next.js workspace (`output: 'export'`) under `docs/`:
+
+```bash
+# Dev server with hot reload
+npm --workspace docs run dev
+
+# Static export → docs/out/
+npm --workspace docs run build
+```
+
+The static export pre-renders every page to `docs/out/docs/<slug>/index.html`,
+plus `/llms.txt` and the search index. Deployment is automated: the
+`.github/workflows/docs.yml` workflow rebuilds and deploys to GitHub Pages only
+when `docs/**` or the root manifests change.
+
+The docs build is **build-time only** — it has no runtime dependency on the
+Controller backend or the Electron shell.

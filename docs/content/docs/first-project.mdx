@@ -1,0 +1,71 @@
+---
+title: Your first project
+description: Add a project, pick a provider and model, and send your first prompt.
+---
+
+This page walks through the path from a fresh launch to watching an agent work
+on your code.
+
+## Open the app
+
+If you installed a packaged build, launch Controller from Finder, Spotlight,
+Launchpad, or your Linux app menu. On first launch you'll see the
+**Welcome to Controller** screen — pick the backend port (default `4500`) and
+click **Continue**. See [Installation](/docs/installation) for the details.
+
+If you're running from source, open the Vite URL printed in the terminal
+(`http://localhost:4500` by default).
+
+## Add a project
+
+A *project* is a local directory Controller manages on your behalf.
+
+1. In the sidebar, click **Add a project**.
+2. Point it at a local directory — either type the path or use **Browse…** to
+   pick it with the native file picker.
+3. The project appears in the **Projects** list in the sidebar.
+
+If the directory lives under a protected folder like `~/Documents` or
+`~/Downloads`, macOS may show a privacy prompt the first time Controller reads
+inside it. See [macOS privacy prompts](/docs/macos-privacy).
+
+## Start a session
+
+A *session* is one conversation with an agent, scoped to a project.
+
+1. Select your project and start a new session.
+2. Pick a **provider** — Anita, Codex, or Claude. (The provider's CLI must be
+   installed and on your `PATH`; see [Installation](/docs/installation).)
+3. Pick a **model** for that provider.
+
+If the provider needs an API key, set it in **Settings** first — see the
+[Sidebar tour](/docs/sidebar).
+
+## Send your first prompt
+
+Type a prompt in the chat input and send it. The streaming UI shows the agent's
+work as it happens:
+
+- **Text** — the agent's natural-language responses.
+- **Reasoning** — the model's thinking, when the provider exposes it.
+- **Tool calls** — each command or file operation the agent invokes.
+- **Tool results** — the output returned to the agent.
+
+Everything streams in over SSE (Server-Sent Events), so you see progress live
+rather than waiting for the full answer.
+
+## Resume later
+
+Sessions persist their full event history to disk, so you can leave and come
+back. In the sidebar, expand your project and its worktree to find the session,
+then click it to resume exactly where you left off. See the [Sidebar
+tour](/docs/sidebar) for the full layout.
+
+## Next steps
+
+- Keep an eye on a long agent run with [Controller Mode](/docs/controller-mode).
+- Give each session an isolated dev server and ports with
+  [Controller scripts](/docs/controller-scripts) and
+  [worktrees](/docs/worktrees).
+- Reach a running session from your phone with [Remote
+  access](/docs/remote-access).

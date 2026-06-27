@@ -1,0 +1,39 @@
+---
+title: Browser preview
+description: The in-app preview browser the agent drives to verify UI work without leaving the chat.
+---
+
+Controller has an **in-app preview browser** the agent can drive directly,
+backed by the `controller-browser` skill. It lets the agent open pages, read the
+rendered DOM, and interact with the UI it just built — so it can verify its own
+work instead of guessing.
+
+## What it's for
+
+- **Verify UI work** without leaving the chat — load the page the agent just
+  changed and confirm it renders.
+- **Click through a feature** to check an end-to-end flow.
+- **Capture a regression** by opening the affected screen.
+
+## What the agent can do
+
+Through the preview browser the agent can:
+
+- Open a URL.
+- Click elements and type into inputs.
+- Read the rendered DOM to confirm what's actually on the page.
+
+Ask the agent to "open the app and check the new settings panel" and it drives
+the preview browser to do exactly that.
+
+## When to use the system browser instead
+
+The preview browser is for verifying your own running app. Prefer the **system
+browser** for:
+
+- **Authentication flows** (OAuth sign-ins and the like).
+- **Downloads.**
+- Anything that triggers **native dialogs**.
+
+These belong in a full browser with your real session and OS integration, not
+the embedded preview.

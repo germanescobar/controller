@@ -1,0 +1,76 @@
+---
+title: Controller scripts
+description: setup.sh and run.sh — per-worktree dependency install and dev server startup, authored by the agent.
+---
+
+Controller scripts let each project define how a worktree installs its
+dependencies and starts its dev server. They're two shell scripts the agent can
+write for you.
+
+## setup.sh and run.sh
+
+- **`setup.sh`** runs once when a new worktree is created. Use it to install
+  dependencies and generate any local config the app needs. It must finish and
+  exit — don't start long-running services here.
+- **`run.sh`** runs when you click **Run**. Use it to start dev servers and
+  long-running processes. It's expected to stay running while you work.
+
+## Where they live
+
+Scripts live in a `.controller/` directory at the project root:
+
+```
+<project>/.controller/setup.sh
+<project>/.controller/run.sh
+```
+
+Make them executable (`chmod +x`). Controller copies them into each worktree on
+creation and runs them from the worktree root. Projects onboarded before the
+rename keep working from a legacy `.coding-orchestrator/` directory; new
+projects use `.controller/`.
+
+## The agent can author them
+
+You don't have to write these scripts by hand. When you ask the agent to
+**"set up this project"** or **"start the dev server"**, it writes `setup.sh`
+and `run.sh` for you and remembers them per worktree. Under the hood the agent
+reaches for the `controller-scripts` skill, which knows the conventions
+(idempotent setup, ports derived from `PORT_OFFSET`, env files written for the
+dev server to read).
+
+The project form also accepts `run.sh` directly, so you can paste or edit the
+run command from the UI when you'd rather not go through the agent.
+
+## PORT_OFFSET: parallel worktrees
+
+Controller injects environment variables into each script run. The important
+one for running worktrees side by side is **`PORT_OFFSET`** — a numeric offset
+that's `0` for the main worktree, then `3`, `6`, and so on (a stride of `3`
+leaves room for projects that need a few consecutive ports).
+
+Each project defines its own base ports; Controller doesn't guess them. Add
+`PORT_OFFSET` to your base ports so two worktrees never collide on the same
+port. For example, computing a client and API port in `run.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+CLIENT_BASE_PORT=5173
+API_BASE_PORT=3000
+OFFSET="${PORT_OFFSET:-0}"
+
+CLIENT_PORT=$((CLIENT_BASE_PORT + OFFSET))
+API_PORT=$((API_BASE_PORT + OFFSET))
+
+export PORT="$API_PORT"
+npm run dev
+```
+
+Other variables Controller provides include `WORKTREE_PATH`, `SOURCE_PATH`,
+`BRANCH`, and `PROJECT_ID`.
+
+## Related
+
+- [Worktrees](/docs/worktrees) — where `PORT_OFFSET` comes from and how the
+  `controller-worktrees` skill combines with `run.sh`.
