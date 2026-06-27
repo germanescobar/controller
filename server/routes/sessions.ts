@@ -1049,10 +1049,14 @@ export async function handleSessionStream(
   // the previous session. Claude's control protocol has no public
   // "remove rules" message, so a fresh session id is the only way to
   // revoke session-scoped permissions.
-  const effectiveResumeSessionId =
-    providerId === "claude" && consumeClaudeSessionRevocation(worktree.id)
-      ? undefined
-      : resumeSessionId;
+  //
+  // We only consume the flag when we're actually about to drop a
+  // resume id. Otherwise we'd burn the one-shot on a brand-new turn
+  // and leave the original session resume-able for a later turn.
+  const shouldDropResume =
+    providerId === "claude" && resumeSessionId !== undefined &&
+    consumeClaudeSessionRevocation(worktree.id);
+  const effectiveResumeSessionId = shouldDropResume ? undefined : resumeSessionId;
 
   const child = provider.spawn({
     message: agentMessage,
@@ -1072,7 +1076,12 @@ export async function handleSessionStream(
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
-  let streamSessionId = resumeSessionId ?? "";
+  // After a Claude reset (issue #259), `effectiveResumeSessionId` is
+  // `undefined` even when the caller passed a `resumeSessionId`. The
+  // resumed-session pre-persist branch below keys off this variable,
+  // so we must use the *effective* id here — otherwise the user
+  // message gets written to the old (about-to-be-revoked) session.
+  let streamSessionId = effectiveResumeSessionId ?? "";
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
   let runTerminated = false;
@@ -1288,12 +1297,16 @@ export async function handleSessionStream(
   }, SSE_HEARTBEAT_INTERVAL_MS);
   resetWatchdog();
 
-  if (resumeSessionId) {
+  if (effectiveResumeSessionId) {
     // Serialize the resumed session-start (which appends the controller's
     // user_message) onto the same chain the stream events use, so the user
     // turn is written before any assistant/tool event that follows it.
+    //
+    // Use `effectiveResumeSessionId`, not the original `resumeSessionId`,
+    // so a Claude reset (issue #259) drops the pre-persist too — otherwise
+    // we'd write the user_message to the about-to-be-revoked session.
     eventProcessing = eventProcessing
-      .then(() => persistSessionStart(resumeSessionId))
+      .then(() => persistSessionStart(effectiveResumeSessionId!))
       .catch(() => {});
   }
 
