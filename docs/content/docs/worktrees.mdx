@@ -33,16 +33,11 @@ pattern.
 
 ## Target a worktree with schedules
 
-Scheduled sessions run on a specific worktree. Pass `--worktree` when adding a
-schedule from the CLI:
-
-```bash
-controller schedules add my-project --worktree main \
-  --at 2026-06-27T08:00:00 --prompt "Run the morning health check"
-```
-
-Each schedule starts a new session on the given worktree when it fires, and it
-shows up in the sidebar like any other session.
+Scheduled sessions run on a specific worktree. Ask the agent to schedule a
+session (for example, "run the morning health check on the `main` worktree at
+8am") and it sets up the schedule on that worktree through the
+`controller-schedules` skill. Each schedule starts a new session on the given
+worktree when it fires, and it shows up in the sidebar like any other session.
 
 ## Ask the agent to create one
 

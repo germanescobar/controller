@@ -28,27 +28,13 @@ Controller **injects credentials** into each integration call. You never paste
 secrets into the app or into the agent's prompt, and the agent never sees the
 raw tokens — it just calls the tool and Controller supplies the auth.
 
-## Discovering and calling integrations
+## How you use them
 
-Discover what an integration can do:
+You don't call integrations yourself — the **agent** does, on your behalf,
+through the `controller-integrations` skill. When a task needs an external
+service, the agent searches the gateway for a matching capability and invokes
+it, with Controller supplying the credentials.
 
-```bash
-controller integrations tools <name>
-```
-
-Then call a specific capability:
-
-```bash
-controller integrations call <name> <tool>
-```
-
-For services exposed as raw HTTP, use `request` instead of `call` to make a
-direct request against the integration's base URL.
-
-## The controller-integrations skill
-
-The agent reaches all of this through the `controller-integrations` skill: when
-a task needs an external service, it searches the gateway for a matching
-capability and calls it. Ask the agent to do something that involves a
-connected service (e.g. "open a Trello card" or "search Notion for the launch
-doc") and it routes through the gateway automatically.
+Just ask in plain language for something that involves a connected service —
+"open a Trello card for this bug" or "search Notion for the launch doc" — and
+the agent routes through the gateway automatically.

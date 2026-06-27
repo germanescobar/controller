@@ -75,6 +75,23 @@ base URL, and a **native CLI** integration is discovered and invoked on the
 host. Credentials are injected by the server at call time, never exposed to the
 agent.
 
+## Controller CLI and the agent preamble
+
+Controller drives the agents partly through a `controller` CLI and a **system
+preamble** injected into every agent turn. The preamble tells the agent it's
+running inside Controller and surfaces two discovery points without the agent
+having to guess: the app-owned **unified skill catalog** (name + description,
+with full bodies fetched on demand) and the enabled **integrations gateway**.
+
+The agent invokes the CLI by its **absolute install path** — some providers
+sanitize the environment before spawning commands, so the bare `controller`
+command may not resolve on `PATH`. Delivery is provider-aware: for Anita the
+preamble goes through `--system-prompt`; for Codex and Claude it's prepended to
+the user message, since those providers have no reliable system-prompt channel
+in their default modes. This CLI surface is for the *agent*, not for end users —
+the UI is the user-facing path. See [Skills](/docs/skills) and
+[Integrations](/docs/integrations) for the user-facing side.
+
 ## Scheduler
 
 The scheduler subsystem runs a tick (every 30s by default, overridable with
