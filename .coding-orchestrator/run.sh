@@ -1,8 +1,12 @@
 #!/bin/bash
 set -e
 
-CLIENT_BASE_PORT="${CLIENT_BASE_PORT:-4500}"
-API_BASE_PORT="${API_BASE_PORT:-3100}"
+# Dev defaults are offset (+2) from the packaged app's canonical ports
+# (4500 client / 3100 API) so `npm run dev` next to a packaged Controller
+# doesn't collide. Worktree PORT_OFFSET still adds on top — main worktree
+# 4502/3102, then 4505/3105, 4508/3108, ...
+CLIENT_BASE_PORT="${CLIENT_BASE_PORT:-4502}"
+API_BASE_PORT="${API_BASE_PORT:-3102}"
 OFFSET="${PORT_OFFSET:-0}"
 
 if ! [[ "$CLIENT_BASE_PORT" =~ ^[0-9]+$ ]]; then

@@ -55,6 +55,15 @@ export function AgentsSection() {
     setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
   };
 
+  const handleToggleAutoApprove = async (agent: AgentStatus) => {
+    // Optimistic toggle; reconcile with the server response.
+    setAgents((prev) =>
+      prev.map((a) => (a.id === agent.id ? { ...a, autoApprove: !a.autoApprove } : a))
+    );
+    const updated = await updateAgent(agent.id, { autoApprove: !agent.autoApprove });
+    setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+  };
+
   return (
     <div className="space-y-3">
       {agents.map((agent) => (
@@ -64,6 +73,7 @@ export function AgentsSection() {
           onToggle={() => handleToggleAgent(agent)}
           onSavePath={(path) => handleSaveAgentPath(agent.id, path)}
           onSaveDefaultModel={(defaultModel) => handleSaveDefaultModel(agent.id, defaultModel)}
+          onToggleAutoApprove={() => handleToggleAutoApprove(agent)}
         >
           {agent.id === ANITA_AGENT_ID && (
             <ApiKeysSection providers={providers} onChange={load} />
@@ -79,6 +89,7 @@ interface AgentRowProps {
   onToggle: () => void;
   onSavePath: (path: string | null) => Promise<void>;
   onSaveDefaultModel: (defaultModel: string | null) => Promise<void>;
+  onToggleAutoApprove: () => void;
   children?: ReactNode;
 }
 
@@ -105,7 +116,14 @@ function groupModelsByProvider(models: Model[]): ModelGroup[] {
   return Array.from(groups.entries()).map(([label, models]) => ({ label, models }));
 }
 
-function AgentRow({ agent, onToggle, onSavePath, onSaveDefaultModel, children }: AgentRowProps) {
+function AgentRow({
+  agent,
+  onToggle,
+  onSavePath,
+  onSaveDefaultModel,
+  onToggleAutoApprove,
+  children,
+}: AgentRowProps) {
   const [showPath, setShowPath] = useState(false);
   const [pathInput, setPathInput] = useState("");
   const [savingPath, setSavingPath] = useState(false);
@@ -259,6 +277,24 @@ function AgentRow({ agent, onToggle, onSavePath, onSaveDefaultModel, children }:
             {savingDefaultModel && (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             )}
+          </div>
+
+          <div className="mt-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">Auto-approve</div>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {agent.autoApprove
+                  ? "Runs without asking for permission. Turn off to approve each action."
+                  : agent.id === ANITA_AGENT_ID
+                    ? "Asks before each action. Note: approval prompts aren't shown in the UI yet for this agent."
+                    : "Asks before each action; approve or deny from the session view."}
+              </p>
+            </div>
+            <Switch
+              checked={agent.autoApprove}
+              onCheckedChange={onToggleAutoApprove}
+              title={agent.autoApprove ? "Require manual approval" : "Auto-approve actions"}
+            />
           </div>
         </div>
       )}

@@ -44,6 +44,12 @@ function parsePort(value: string | undefined, fallback: number): number {
     : fallback;
 }
 
+// Dev default for the API port. The packaged Controller app binds 3100;
+// offset by 2 here so `npm run dev` next to a packaged Controller never
+// collides on first try. Vite (client) uses the matching DEV_CLIENT_BASE_PORT
+// in vite.config.ts.
+const DEV_API_BASE_PORT = 3102;
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -208,7 +214,7 @@ terminalWss.on("connection", (ws: WebSocket) => {
   });
 });
 
-const PORT = parsePort(process.env.PORT, 3100);
+const PORT = parsePort(process.env.PORT, DEV_API_BASE_PORT);
 
 // In a packaged Electron build launched from Finder/Dock the inherited PATH is
 // minimal, so agent CLIs (and the node their shebangs need) fail to spawn.

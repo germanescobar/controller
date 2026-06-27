@@ -9,7 +9,7 @@
   "main": "dist/electron/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "dev:server": "tsx watch --env-file-if-exists=.env.local server/index.ts",
+    "dev:server": "node scripts/dev-server-with-port-bump.mjs",
     "dev:client": "vite",
     "dev:electron": "npm run build:electron-runtime && concurrently -k \"npm run dev:server\" \"npm run dev:client\" \"node electron/wait-and-launch.mjs\"",
     "build": "vite build && tsc -p server/tsconfig.json && node cli/copy-cli.mjs && npm run build:electron-runtime",

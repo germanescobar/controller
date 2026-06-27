@@ -117,6 +117,7 @@ import {
   saveComposerDraft,
   clearComposerDraft,
 } from "../lib/composer-draft.ts";
+import { describeApprovalInput } from "../lib/describe-approval-input.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -2226,8 +2227,8 @@ function ToolApprovalBlock({
         </Badge>
         <span className="text-sm text-foreground">
           {isPlanApproval
-            ? "Claude is ready to exit plan mode and implement"
-            : `Claude wants to use ${toolName}`}
+            ? "Ready to exit plan mode and implement"
+            : `Wants to use ${toolName}`}
         </span>
       </div>
       {summary ? (
@@ -2279,26 +2280,8 @@ function ToolApprovalBlock({
 }
 
 /** Best-effort one-line/-block summary of the action awaiting approval. */
-function describeApprovalInput(
-  toolName: string,
-  input: Record<string, unknown>
-): string {
-  if (toolName === "Bash" && typeof input.command === "string") {
-    return input.command;
-  }
-  if (
-    (toolName === "Write" || toolName === "Edit" || toolName === "MultiEdit") &&
-    typeof input.file_path === "string"
-  ) {
-    return input.file_path;
-  }
-  try {
-    const json = JSON.stringify(input, null, 2);
-    return json && json !== "{}" ? json : "";
-  } catch {
-    return "";
-  }
-}
+// Implementation lives in client/src/lib/describe-approval-input.ts so it can
+// be unit-tested in isolation (see describe-approval-input.test.ts).
 
 function ThreadStatusBlock({
   status,

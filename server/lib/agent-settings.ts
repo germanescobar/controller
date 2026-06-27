@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { agentSettingsFile, ensureOrchestratorHome } from "./paths.js";
 import { clearCommandResolverCache } from "./command-resolver.js";
 import { canonicalProviderId } from "./provider-id.js";
+import { DEFAULT_AUTO_APPROVE } from "./auto-approve.js";
 
 export interface AgentSetting {
   /** Whether the user has enabled this agent in Settings. */
@@ -10,11 +11,22 @@ export interface AgentSetting {
   path: string | null;
   /** Default model id the user wants pre-selected for new sessions. */
   defaultModel: string | null;
+  /**
+   * Whether the agent auto-approves the actions it would otherwise prompt for.
+   * Defaults to on so agents run autonomously out of the box; turning it off
+   * makes the agent fall back to manual approval. See `./auto-approve.ts`.
+   */
+  autoApprove: boolean;
 }
 
 type AgentSettingsStore = Record<string, AgentSetting>;
 
-const DEFAULT_SETTING: AgentSetting = { enabled: true, path: null, defaultModel: null };
+const DEFAULT_SETTING: AgentSetting = {
+  enabled: true,
+  path: null,
+  defaultModel: null,
+  autoApprove: DEFAULT_AUTO_APPROVE,
+};
 
 async function readStore(): Promise<AgentSettingsStore> {
   try {
@@ -47,6 +59,8 @@ function normalizeSetting(value: unknown): AgentSetting {
       typeof raw.defaultModel === "string" && raw.defaultModel.trim()
         ? raw.defaultModel.trim()
         : null,
+    autoApprove:
+      typeof raw.autoApprove === "boolean" ? raw.autoApprove : DEFAULT_AUTO_APPROVE,
   };
 }
 
@@ -86,6 +100,7 @@ export async function setAgentSetting(
         : patch.defaultModel && patch.defaultModel.trim()
           ? patch.defaultModel.trim()
           : null,
+    autoApprove: patch.autoApprove ?? current.autoApprove,
   };
   store[id] = next;
   await writeStore(store);

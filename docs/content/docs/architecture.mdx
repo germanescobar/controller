@@ -20,8 +20,9 @@ client/          React + Vite frontend (Tailwind CSS, shadcn/ui)
 electron/        Electron desktop shell
 server/          Express API backend
   lib/
-    agents.ts    Agent provider abstraction & Anita/Codex/Claude adapters
-    sessions.ts  Session & event persistence (JSON/JSONL files)
+    agents.ts        Agent provider abstraction & Anita/Codex/Claude adapters
+    auto-approve.ts  Per-agent auto-approve flag sets (single source of truth)
+    sessions.ts      Session & event persistence (JSON/JSONL files)
     projects.ts  Project registry
     api-keys.ts  API key storage
   routes/
@@ -48,6 +49,23 @@ keys. Because the transcript is an append-only event log on disk, sessions
 resume with full history and survive restarts.
 
 ## Embedded terminals and tmux
+
+## Auto-approve
+
+Every agent runs in auto-approve mode by default: it carries out file reads,
+edits, and commands without pausing for permission. Each agent can be switched
+to manual approval per agent in **Settings → Agents**; the choice is persisted
+and takes effect on the next turn. When auto-approve is off, the agent asks
+before each action and Controller renders the request as an approval card in the
+session view (Allow once / Always allow / Deny).
+
+The exact flags each agent uses to opt into (or out of) auto-approval live in
+`server/lib/auto-approve.ts` — the single source of truth that both the CLI
+launcher (`agents.ts`) and the Codex app-server adapter (`codex-app-server.ts`)
+read from. Claude routes manual approvals over its stream-json control channel;
+Codex routes them over the app-server's `requestApproval` JSON-RPC calls. Anita
+does not yet expose a structured approval channel, so its manual-approval prompts
+are not rendered in the UI yet.
 
 Embedded terminal tabs are backed by deterministic `tmux` sessions. The Express
 server attaches browser WebSocket connections to those sessions, so:

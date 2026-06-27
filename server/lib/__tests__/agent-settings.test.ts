@@ -24,7 +24,12 @@ function withTempHome(run: () => Promise<void>): Promise<void> {
 test("getAgentSetting defaults to enabled with no path", async () => {
   await withTempHome(async () => {
     const setting = await getAgentSetting("codex");
-    assert.deepEqual(setting, { enabled: true, path: null, defaultModel: null });
+    assert.deepEqual(setting, {
+      enabled: true,
+      path: null,
+      defaultModel: null,
+      autoApprove: true,
+    });
   });
 });
 
@@ -32,7 +37,12 @@ test("setAgentSetting persists enabled and path", async () => {
   await withTempHome(async () => {
     await setAgentSetting("codex", { enabled: false, path: "/usr/local/bin/codex" });
     const setting = await getAgentSetting("codex");
-    assert.deepEqual(setting, { enabled: false, path: "/usr/local/bin/codex", defaultModel: null });
+    assert.deepEqual(setting, {
+      enabled: false,
+      path: "/usr/local/bin/codex",
+      defaultModel: null,
+      autoApprove: true,
+    });
 
     const onDisk = JSON.parse(readFileSync(agentSettingsFile(), "utf-8"));
     assert.equal(onDisk.codex.enabled, false);
@@ -45,7 +55,12 @@ test("setAgentSetting merges partial patches", async () => {
     await setAgentSetting("anita", { enabled: false });
     await setAgentSetting("anita", { path: "/opt/anita" });
     const setting = await getAgentSetting("anita");
-    assert.deepEqual(setting, { enabled: false, path: "/opt/anita", defaultModel: null });
+    assert.deepEqual(setting, {
+      enabled: false,
+      path: "/opt/anita",
+      defaultModel: null,
+      autoApprove: true,
+    });
   });
 });
 
@@ -58,11 +73,13 @@ test("legacy 'ada' settings resolve to the canonical 'anita' id", async () => {
       enabled: false,
       path: "/opt/ada",
       defaultModel: null,
+      autoApprove: true,
     });
     assert.deepEqual(await getAgentSetting("ada"), {
       enabled: false,
       path: "/opt/ada",
       defaultModel: null,
+      autoApprove: true,
     });
   });
 });
@@ -94,6 +111,36 @@ test("setAgentSetting persists and clears defaultModel", async () => {
   });
 });
 
+test("autoApprove defaults to on and persists when toggled off", async () => {
+  await withTempHome(async () => {
+    // Default for a brand-new agent config is auto-approve = on.
+    assert.equal((await getAgentSetting("claude")).autoApprove, true);
+
+    await setAgentSetting("claude", { autoApprove: false });
+    assert.equal((await getAgentSetting("claude")).autoApprove, false);
+
+    const onDisk = JSON.parse(readFileSync(agentSettingsFile(), "utf-8"));
+    assert.equal(onDisk.claude.autoApprove, false);
+
+    // Toggling it back on persists too.
+    await setAgentSetting("claude", { autoApprove: true });
+    assert.equal((await getAgentSetting("claude")).autoApprove, true);
+  });
+});
+
+test("normalizeSetting defaults autoApprove to on for legacy objects", async () => {
+  await withTempHome(async () => {
+    // Settings written before auto-approve existed have no `autoApprove` key;
+    // they must read back as on so behavior is unchanged for existing users.
+    writeFileSync(
+      agentSettingsFile(),
+      JSON.stringify({ codex: { enabled: true, path: null, defaultModel: null } }),
+      "utf-8"
+    );
+    assert.equal((await getAgentSetting("codex")).autoApprove, true);
+  });
+});
+
 test("normalizeSetting tolerates legacy objects without defaultModel", async () => {
   await withTempHome(async () => {
     writeFileSync(
@@ -106,6 +153,7 @@ test("normalizeSetting tolerates legacy objects without defaultModel", async () 
       enabled: true,
       path: "/usr/local/bin/claude",
       defaultModel: null,
+      autoApprove: true,
     });
   });
 });

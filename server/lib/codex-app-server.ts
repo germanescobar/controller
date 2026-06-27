@@ -9,8 +9,13 @@ import {
   type AgentStreamParseResult,
   type AgentAttachment,
   type AgentUserInputQuestion,
+  type ClaudeApprovalDecision,
 } from "./agents.js";
 import { childProcessEnv } from "./shell-env.js";
+import {
+  DEFAULT_AUTO_APPROVE,
+  codexAppServerApprovalConfig,
+} from "./auto-approve.js";
 
 /* Version reported to Codex in `clientInfo`. Read from the nearest ancestor
  * package.json so it stays in sync with the build: this module lives at
@@ -58,6 +63,16 @@ interface PendingUserInputRequest {
   questions: AgentUserInputQuestion[];
 }
 
+/**
+ * A tool approval the app-server is blocked on, awaiting the user's decision.
+ * `jsonRpcId` is the id of the server→client request we must answer; `kind`
+ * selects which decision enum the answer maps onto.
+ */
+interface PendingApproval {
+  jsonRpcId: JsonRpcId;
+  kind: "command" | "fileChange";
+}
+
 interface SessionRuntime {
   sessionId: string;
   threadId: string;
@@ -68,6 +83,8 @@ interface SessionRuntime {
   currentTurnId?: string;
   listeners: Set<(event: AgentStreamEvent) => void>;
   pendingUserInput?: PendingUserInputRequest;
+  /** Tool approvals awaiting a decision, keyed by the id we expose to clients. */
+  pendingApprovals: Map<string, PendingApproval>;
   parseEvent: (line: string) => AgentStreamParseResult;
   currentTurn?: {
     resolve: () => void;
@@ -111,6 +128,8 @@ export interface StartPlanTurnOptions {
   serviceTier?: "fast" | "flex";
   resumeSessionId?: string;
   mode?: "default" | "plan";
+  /** When false, Codex asks for approval on every command and file change. */
+  autoApprove?: boolean;
 }
 
 interface CodexModelListItem {
@@ -190,12 +209,15 @@ export class CodexAppServerManager {
 
     try {
       const serviceTier = options.serviceTier === "fast" ? "fast" : null;
+      const approval = codexAppServerApprovalConfig(
+        options.autoApprove ?? DEFAULT_AUTO_APPROVE
+      );
       const turnResult = await this.call("turn/start", {
         threadId: runtime.threadId,
         input: buildCodexInput(options.message, options.attachments ?? []),
         cwd: options.cwd,
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "dangerFullAccess" },
+        approvalPolicy: approval.approvalPolicy,
+        sandboxPolicy: approval.sandboxPolicy,
         model: options.model ?? null,
         serviceTier,
         effort: options.reasoningEffort ?? null,
@@ -270,6 +292,51 @@ export class CodexAppServerManager {
     });
   }
 
+  /**
+   * Answer a pending tool approval on the live app-server. Maps the user's
+   * decision onto the per-kind decision enum and resolves the original
+   * server→client request. Throws if no matching approval is pending.
+   */
+  async submitApproval(
+    sessionId: string,
+    requestId: string,
+    decision: ClaudeApprovalDecision
+  ): Promise<void> {
+    const runtime = this.sessions.get(sessionId);
+    const pending = runtime?.pendingApprovals.get(requestId);
+    if (!runtime || !pending) {
+      throw new Error("No pending approval matches this request.");
+    }
+    runtime.pendingApprovals.delete(requestId);
+    this.sendResponse(pending.jsonRpcId, {
+      decision: mapApprovalDecision(decision),
+    });
+  }
+
+  /**
+   * Turn a Codex approval request into a `tool.approval_requested` event and
+   * remember the JSON-RPC id so the decision can be routed back. The exposed
+   * `requestId` is the stringified JSON-RPC id, which is unique per request.
+   */
+  private handleApprovalRequest(
+    runtime: SessionRuntime,
+    jsonRpcId: JsonRpcId,
+    kind: "command" | "fileChange",
+    params: Record<string, unknown>
+  ) {
+    const requestId = String(jsonRpcId);
+    runtime.pendingApprovals.set(requestId, { jsonRpcId, kind });
+    const itemId = typeof params.itemId === "string" ? params.itemId : "";
+    this.emit(runtime, {
+      type: "tool.approval_requested",
+      id: requestId,
+      toolUseId: itemId,
+      toolName: kind === "fileChange" ? "Edit" : "Shell",
+      input: params,
+      suggestions: [],
+    });
+  }
+
   async listModels(env: Record<string, string>): Promise<CodexModelListItem[]> {
     await this.ensureStarted(env);
 
@@ -308,12 +375,15 @@ export class CodexAppServerManager {
 
   private async createSession(options: StartPlanTurnOptions): Promise<SessionRuntime> {
     const serviceTier = options.serviceTier === "fast" ? "fast" : null;
+    const approval = codexAppServerApprovalConfig(
+      options.autoApprove ?? DEFAULT_AUTO_APPROVE
+    );
     const response = await this.call("thread/start", {
       model: options.model ?? null,
       serviceTier,
       cwd: options.cwd,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
+      approvalPolicy: approval.approvalPolicy,
+      sandbox: approval.sandboxMode,
       experimentalRawEvents: false,
       persistExtendedHistory: true,
       ephemeral: false,
@@ -332,6 +402,7 @@ export class CodexAppServerManager {
       startedEmitted: false,
       turnInProgress: false,
       listeners: new Set(),
+      pendingApprovals: new Map(),
       parseEvent: this.codexProvider?.createParser?.() ?? (() => null),
     };
     this.sessions.set(runtime.sessionId, runtime);
@@ -340,13 +411,16 @@ export class CodexAppServerManager {
 
   private async resumeSession(options: StartPlanTurnOptions): Promise<SessionRuntime> {
     const serviceTier = options.serviceTier === "fast" ? "fast" : null;
+    const approval = codexAppServerApprovalConfig(
+      options.autoApprove ?? DEFAULT_AUTO_APPROVE
+    );
     const response = await this.call("thread/resume", {
       threadId: options.resumeSessionId,
       model: options.model ?? null,
       serviceTier,
       cwd: options.cwd,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
+      approvalPolicy: approval.approvalPolicy,
+      sandbox: approval.sandboxMode,
       persistExtendedHistory: true,
     });
 
@@ -364,6 +438,7 @@ export class CodexAppServerManager {
       startedEmitted: false,
       turnInProgress: false,
       listeners: new Set(),
+      pendingApprovals: new Map(),
       parseEvent: this.codexProvider?.createParser?.() ?? (() => null),
     };
     this.sessions.set(runtime.sessionId, runtime);
@@ -399,6 +474,7 @@ export class CodexAppServerManager {
       runtime.turnInProgress = false;
       runtime.currentTurnId = undefined;
       runtime.pendingUserInput = undefined;
+      runtime.pendingApprovals.clear();
       runtime.listeners.clear();
       if (event.type === "run.completed") {
         runtime.currentTurn?.resolve();
@@ -484,6 +560,23 @@ export class CodexAppServerManager {
             this.emit(runtime, mappedEvent);
             return;
           }
+        }
+
+        // Approval requests arrive when auto-approve is off (untrusted policy +
+        // read-only sandbox). Surface them as `tool.approval_requested` events
+        // and hold the JSON-RPC id so `submitApproval` can answer the live
+        // request once the user decides.
+        if (
+          runtime &&
+          (message.method === "item/commandExecution/requestApproval" ||
+            message.method === "item/fileChange/requestApproval")
+        ) {
+          const kind =
+            message.method === "item/fileChange/requestApproval"
+              ? "fileChange"
+              : "command";
+          this.handleApprovalRequest(runtime, message.id, kind, params);
+          return;
         }
 
         this.sendError(message.id, `Unsupported app-server request: ${message.method}`);
@@ -585,6 +678,20 @@ export class CodexAppServerManager {
 
     this.sessions.clear();
   }
+}
+
+/**
+ * Map a Controller approval decision onto the Codex approval-decision enum.
+ * Both the command and file-change enums share these three values, so one
+ * mapping covers both kinds: `accept` (this once), `acceptForSession` (don't
+ * ask again this session), and `decline` (refuse but let the turn continue).
+ */
+function mapApprovalDecision(
+  decision: ClaudeApprovalDecision
+): "accept" | "acceptForSession" | "decline" {
+  if (decision === "always_allow") return "acceptForSession";
+  if (decision === "deny") return "decline";
+  return "accept";
 }
 
 function buildCodexInput(message: string, attachments: AgentAttachment[]): Record<string, unknown>[] {
