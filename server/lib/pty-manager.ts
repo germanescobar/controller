@@ -227,9 +227,14 @@ class PtyManager {
   }
 
   /** Ensure a tmux session exists and run a shell command in it. */
-  runCommand(sessionId: string, cwd: string, command: string): void {
+  runCommand(
+    sessionId: string,
+    cwd: string,
+    command: string,
+    extraEnv?: Record<string, string>
+  ): void {
     const sessionName = tmuxSessionName(sessionId);
-    ensureTmuxSession(sessionName, cwd);
+    ensureTmuxSession(sessionName, cwd, extraEnv);
     runTmux(["send-keys", "-t", tmuxFirstPaneTarget(sessionName), command, "C-m"], {
       stdio: ["ignore", "ignore", "pipe"],
     });

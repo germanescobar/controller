@@ -163,3 +163,52 @@ test("runCommand sends the exact command string to the shell via send-keys", asy
     await fs.rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("getOrCreate applies extra env to the terminal session", async (t) => {
+  if (!tmuxAvailable()) {
+    t.skip("tmux is not available");
+    return;
+  }
+
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-env-"));
+  const suffix = Math.random().toString(36).slice(2, 8);
+  const sessionId = "p1:w1:env-" + suffix;
+  const sentinel = "ENV_SENTINEL_" + suffix;
+
+  try {
+    const controller = new AbortController();
+    const created = ptyManager.getOrCreate(sessionId, cwd, {
+      CONTROLLER_TEST_SENTINEL: sentinel,
+    });
+    if (created.error) {
+      t.skip("could not spawn a PTY: " + created.error);
+      return;
+    }
+
+    const iterable = ptyManager.tail(sessionId, controller.signal);
+    assert.ok(iterable, "expected a tail iterable for the live session");
+
+    const collected: string[] = [];
+    const reader = (async () => {
+      for await (const chunk of iterable as AsyncIterable<string>) {
+        collected.push(chunk);
+        if (collected.join("").includes(sentinel)) break;
+      }
+    })();
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    ptyManager.runCommand(sessionId, cwd, "printf '%s\\n' \"$CONTROLLER_TEST_SENTINEL\"");
+
+    const timeout = new Promise((resolve) => setTimeout(resolve, 4000));
+    await Promise.race([reader, timeout]);
+    controller.abort();
+
+    assert.ok(
+      collected.join("").includes(sentinel),
+      "expected runCommand env to reach the shell; got: " + collected.join("")
+    );
+  } finally {
+    ptyManager.kill(sessionId);
+    await fs.rm(cwd, { recursive: true, force: true });
+  }
+});
