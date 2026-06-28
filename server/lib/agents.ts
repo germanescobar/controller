@@ -99,6 +99,18 @@ export type AgentStreamEvent =
       suggestions: ClaudePermissionSuggestion[];
     }
   | {
+      // A pending approval was settled by something other than the user's live
+      // Allow/Deny decision (which is persisted directly by the `/tool-approval`
+      // endpoint). Anita emits this around every approval gate; we only surface
+      // the non-user reasons so the approval card clears and the transcript
+      // records *why* it was denied (e.g. the parent closed stdin, or the run
+      // was cancelled). `id` matches the originating `tool.approval_requested`.
+      type: "tool.approval_resolved";
+      id: string;
+      approved: boolean;
+      reason: "aborted" | "eof" | "error";
+    }
+  | {
       type: "thread.status";
       threadId: string;
       status: string;
@@ -168,7 +180,14 @@ export interface AgentProvider {
   command: string;
   spawn(opts: SpawnOptions): ChildProcess;
   parseEvent(line: string): AgentStreamEvent | AgentStreamEvent[] | null;
-  createParser?(): (line: string) => AgentStreamEvent | AgentStreamEvent[] | null;
+  /**
+   * Build a stateful per-run parser. `autoApprove` mirrors the spawn flag so a
+   * provider can decide whether to surface manual-approval prompts: Anita emits
+   * approval events in every mode (for a uniform audit trail), but they must
+   * only render as cards when auto-approve is off. Providers that don't need it
+   * ignore the argument.
+   */
+  createParser?(autoApprove?: boolean): (line: string) => AgentStreamEvent | AgentStreamEvent[] | null;
 }
 
 export type AgentStreamParseResult = AgentStreamEvent | AgentStreamEvent[] | null;
@@ -221,14 +240,20 @@ interface AnitaParserState {
   // Used as a fallback if a downstream `tool.call` event arrives without
   // the final structured `input` field.
   toolCallInputs: Map<number, string>;
+  // Whether this run was launched with auto-approve on. Anita emits
+  // `approval.request` / `approval.resolved` in every mode for a uniform
+  // audit trail; when auto-approve is on we drop them so the UI never shows
+  // a card the user can't (and shouldn't have to) answer.
+  autoApprove: boolean;
 }
 
-function createAnitaParserState(): AnitaParserState {
+function createAnitaParserState(autoApprove: boolean): AnitaParserState {
   return {
     sessionId: "",
     textSegment: "",
     reasoningSegment: "",
     toolCallInputs: new Map(),
+    autoApprove,
   };
 }
 
@@ -464,6 +489,58 @@ function mapAnitaEvent(
     return flushed.length > 0 ? [...flushed, event] : event;
   }
 
+  if (type === "approval.request") {
+    // Anita emits an approval gate for every tool call, in every mode, so the
+    // audit trail is uniform. Only render a card when auto-approve is off —
+    // otherwise there is no live responder (stdin is closed) and the matching
+    // `approval.resolved` lands immediately, so the card would only flash.
+    if (state.autoApprove) return null;
+    const flushed = flushAnitaAccumulatedSegments(state);
+    const id = typeof raw.id === "string" ? raw.id : "";
+    const inputRaw = raw.input;
+    const input: Record<string, unknown> =
+      inputRaw && typeof inputRaw === "object" && !Array.isArray(inputRaw)
+        ? (inputRaw as Record<string, unknown>)
+        : {};
+    const event: AgentStreamEvent = {
+      type: "tool.approval_requested",
+      id,
+      // Anita's approval id is the model's tool-call id, which is also the
+      // `tool.call` / `tool.result` lifecycle id — reuse it for both.
+      toolUseId: id,
+      toolName: typeof raw.tool === "string" ? raw.tool : "tool",
+      input,
+      // Anita has no persisted "always allow" rule set to echo back.
+      suggestions: [],
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
+  if (type === "approval.resolved") {
+    // Auto-approve mode resolves silently (audit-only). When auto-approve is
+    // off, a `reason: "user"` resolution is the echo of the decision the user
+    // already made through `/tool-approval` (persisted there as
+    // `tool_approval_response`), so dropping it avoids a duplicate transcript
+    // entry. Only the non-user reasons need surfacing: they settle the pending
+    // card and record why it was denied without the user clicking anything.
+    const reason = raw.reason;
+    if (
+      state.autoApprove ||
+      reason === "user" ||
+      (reason !== "aborted" && reason !== "eof" && reason !== "error")
+    ) {
+      return null;
+    }
+    const flushed = flushAnitaAccumulatedSegments(state);
+    const event: AgentStreamEvent = {
+      type: "tool.approval_resolved",
+      id: typeof raw.id === "string" ? raw.id : "",
+      approved: raw.approved === true,
+      reason,
+    };
+    return flushed.length > 0 ? [...flushed, event] : event;
+  }
+
   if (type === "thread.status") {
     const flushed = flushAnitaAccumulatedSegments(state);
     const event: AgentStreamEvent = {
@@ -530,8 +607,8 @@ const anitaProvider: AgentProvider = {
     });
   },
 
-  createParser() {
-    const state = createAnitaParserState();
+  createParser(autoApprove = DEFAULT_AUTO_APPROVE) {
+    const state = createAnitaParserState(autoApprove);
     return (line: string): AgentStreamParseResult => {
       const raw = JSON.parse(line) as Record<string, unknown>;
       return mapAnitaEvent(raw, state);
@@ -539,7 +616,10 @@ const anitaProvider: AgentProvider = {
   },
 
   parseEvent(line: string): AgentStreamParseResult {
-    const state = createAnitaParserState();
+    // Stateless one-shot reparse (e.g. replaying a persisted line). It has no
+    // run context, so default to auto-approve on — the same default the
+    // launcher uses — which keeps the audit-only approval events suppressed.
+    const state = createAnitaParserState(DEFAULT_AUTO_APPROVE);
     const raw = JSON.parse(line) as Record<string, unknown>;
     return mapAnitaEvent(raw, state);
   },
@@ -773,6 +853,30 @@ export function sendClaudeApprovalDecision(
       response: buildClaudeApprovalResponse(request, decision),
     },
   });
+  return true;
+}
+
+/**
+ * Answer a pending Anita approval on the live process. Anita's `--stream-json`
+ * responder reads newline-delimited `approval.response` lines from stdin and
+ * matches them to the in-flight request by `id` (the tool-call id carried in
+ * `approval.request`). Anita has no "always allow" concept, so both allow
+ * decisions collapse to `approved: true`; only `deny` denies. Returns false if
+ * the child's stdin is no longer writable.
+ */
+export function sendAnitaApprovalDecision(
+  child: ChildProcess,
+  requestId: string,
+  decision: ClaudeApprovalDecision
+): boolean {
+  if (!child.stdin?.writable) return false;
+  child.stdin.write(
+    `${JSON.stringify({
+      type: "approval.response",
+      id: requestId,
+      approved: decision !== "deny",
+    })}\n`
+  );
   return true;
 }
 

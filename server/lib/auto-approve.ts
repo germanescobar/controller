@@ -20,11 +20,10 @@ export const DEFAULT_AUTO_APPROVE = true;
 
 /**
  * Anita opts into auto-approval with `--auto-approve`; omitting it makes the
- * CLI prompt for each tool call. NOTE: the Anita CLI only prompts over a TTY
- * `[y/n]` line today and has no structured stream-json approval event, so the
- * OFF path does not yet render approval cards in Controller — tracked as a
- * follow-up. The flag set below is still the source of truth for what the
- * launcher passes.
+ * CLI prompt for each tool call. In `--stream-json` mode with a piped stdin,
+ * Anita emits a structured `approval.request` event and reads the decision
+ * back as an `approval.response` line, which Controller renders as an approval
+ * card (see `mapAnitaEvent` / `sendAnitaApprovalDecision` in `./agents.ts`).
  */
 export function anitaAutoApproveFlags(autoApprove: boolean): string[] {
   return autoApprove ? ["--auto-approve"] : [];

@@ -41,6 +41,7 @@ import {
 import {
   getAgentProvider,
   resolveAgentCommand,
+  sendAnitaApprovalDecision,
   sendClaudeApprovalDecision,
   type AgentStreamEvent,
   type ClaudeApprovalDecision,
@@ -1054,7 +1055,8 @@ export async function handleSessionStream(
     autoApprove,
     systemPrompt: usesSystemPrompt ? controllerPreamble : undefined,
   });
-  const parseProviderEvent = provider.createParser?.() ?? provider.parseEvent.bind(provider);
+  const parseProviderEvent =
+    provider.createParser?.(autoApprove) ?? provider.parseEvent.bind(provider);
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
@@ -1076,15 +1078,23 @@ export async function handleSessionStream(
 
   // Close stdin for CLIs that otherwise wait on an open pipe. We pass the
   // prompt as an argv argument, so these providers don't need stdin; leaving
-  // it open has been observed to make Anita hang silently mid-run. Plan-mode
-  // Claude is the exception: it streams the prompt and live approval decisions
-  // over stdin, so its pipe must stay open for the whole turn.
-  // Claude routes approvals over the stream-json control channel in plan mode
-  // and whenever auto-approve is off (manual approval for every action).
+  // it open has been observed to make Anita hang silently mid-run.
+  //
+  // Two exceptions keep their pipe open for the whole turn:
+  // - Claude routes the prompt and live approval decisions over the
+  //   stream-json control channel in plan mode and whenever auto-approve is
+  //   off (manual approval for every action).
+  // - Anita reads manual-approval decisions over its stdin line protocol
+  //   (`approval.response` JSON lines) when auto-approve is off, so the
+  //   /tool-approval responder can answer the running process. With
+  //   auto-approve on it never reads stdin and resolves every gate itself, so
+  //   we still close the pipe. Anita detaches its own stdin reader at
+  //   end-of-run, so an open pipe no longer hangs it.
   const claudeUsesControlChannel =
     providerId === "claude" && (mode === "plan" || !autoApprove);
+  const anitaUsesApprovalChannel = providerId === "anita" && !autoApprove;
   if (
-    providerId === "anita" ||
+    (providerId === "anita" && !anitaUsesApprovalChannel) ||
     providerId === "codex" ||
     (providerId === "claude" && !claudeUsesControlChannel)
   ) {
@@ -1881,6 +1891,10 @@ export function getPersistedEventType(event: AgentStreamEvent): string {
       return "user_input_requested";
     case "tool.approval_requested":
       return "tool_approval_requested";
+    case "tool.approval_resolved":
+      // Settles the approval card the same way a user decision does; the
+      // `reason` in the data distinguishes it from a manual deny.
+      return "tool_approval_response";
     case "thread.status":
       return "thread_status";
     case "run.cancelled":
@@ -1913,6 +1927,12 @@ export function getPersistedEventData(event: AgentStreamEvent): Record<string, u
         toolName: event.toolName,
         input: event.input,
         suggestions: event.suggestions,
+      };
+    case "tool.approval_resolved":
+      return {
+        requestId: event.id,
+        decision: event.approved ? "allow_once" : "deny",
+        reason: event.reason,
       };
     case "thread.status":
       return {
@@ -2277,6 +2297,24 @@ sessionsRouter.post(
         res.status(404).json({
           error: error instanceof Error ? error.message : String(error),
         });
+        return;
+      }
+    } else if (canonicalProviderId(runtime.provider ?? "") === "anita") {
+      // Anita answers over its own stdin line protocol. The decision is just
+      // the request id + an allow/deny boolean, so there is no server-tracked
+      // tool input or permission-suggestion set to look up — write the
+      // response line directly to the live child.
+      if (!runtime.child) {
+        res
+          .status(409)
+          .json({ error: "This session has no running process to approve against." });
+        return;
+      }
+      const sent = sendAnitaApprovalDecision(runtime.child, requestId, decision);
+      if (!sent) {
+        res
+          .status(409)
+          .json({ error: "The session process is no longer accepting input." });
         return;
       }
     } else {

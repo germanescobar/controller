@@ -1468,9 +1468,20 @@ const EventBlock = memo(function EventBlock({
 
   if (event.type === "tool_approval_response") {
     const decision = data.decision as ToolApprovalDecision | undefined;
+    // Anita settles the same card non-interactively for a few reasons (stdin
+    // closed by a parent crash, the run was cancelled, or the approval callback
+    // threw). Surface those distinctly so a process death isn't mistaken for the
+    // user clicking Deny.
+    const reason = data.reason as string | undefined;
     const label =
       decision === "deny"
-        ? "Denied"
+        ? reason === "eof"
+          ? "Denied (process ended)"
+          : reason === "aborted"
+            ? "Cancelled"
+            : reason === "error"
+              ? "Denied (approval error)"
+              : "Denied"
         : decision === "always_allow"
           ? "Approved (always allow)"
           : "Approved";
