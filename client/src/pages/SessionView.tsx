@@ -5125,9 +5125,14 @@ export function SessionView({
   const pendingToolApprovalFromStream = visibleStreamItems.some(
     (item) => item.type === "tool_approval_requested"
   );
+  const streamHasSettledToolApprovals = visibleStreamItems.some(
+    (item) => item.type === "error" || item.type === "run_cancelled"
+  );
   const pendingToolApproval = pendingToolApprovalFromStream
     ? null
-    : getLatestPendingToolApproval(events);
+    : getLatestPendingToolApproval(events, {
+        hasSettledStreamItem: streamHasSettledToolApprovals,
+      });
   const waitingForToolApproval =
     pendingToolApprovalFromStream || Boolean(pendingToolApproval);
   const eventRenderItems = useMemo(() => groupEventsForRender(events), [events]);

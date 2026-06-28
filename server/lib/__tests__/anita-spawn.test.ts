@@ -282,6 +282,14 @@ test("codex spawn uses workspace-write by default and a restricted sandbox when 
     `auto-approve on must pass --sandbox, got: ${onArgs.join(" ")}`
   );
   assert.equal(onArgs[onSandboxIndex + 1], "workspace-write");
+  assert.ok(
+    onArgs.some((flag) => flag.includes("approval_policy")),
+    `auto-approve on must set an approval policy, got: ${onArgs.join(" ")}`
+  );
+  assert.ok(
+    onArgs.includes('approval_policy="on-request"'),
+    `auto-approve on must use on-request approval policy, got: ${onArgs.join(" ")}`
+  );
   const offArgs = await captureCodexArgs({ autoApprove: false });
   assert.ok(
     !offArgs.includes("--full-auto"),

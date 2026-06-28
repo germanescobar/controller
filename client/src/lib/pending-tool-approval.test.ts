@@ -58,3 +58,17 @@ test("does not return approvals before terminal run markers", () => {
     assert.equal(pending, null, `${type} should settle earlier approvals`);
   }
 });
+
+test("does not return approvals when live stream state already settled the run", () => {
+  const pending = getLatestPendingToolApproval(
+    [
+      event("tool_approval_requested", {
+        requestId: "req-1",
+        toolName: "Bash",
+      }),
+    ],
+    { hasSettledStreamItem: true }
+  );
+
+  assert.equal(pending, null);
+});

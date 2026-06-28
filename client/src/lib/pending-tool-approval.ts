@@ -6,6 +6,10 @@ export interface PendingToolApproval {
   input: Record<string, unknown>;
 }
 
+export interface PendingToolApprovalOptions {
+  hasSettledStreamItem?: boolean;
+}
+
 const TOOL_APPROVAL_SETTLED_EVENT_TYPES = new Set([
   "tool_approval_response",
   "run.completed",
@@ -15,8 +19,11 @@ const TOOL_APPROVAL_SETTLED_EVENT_TYPES = new Set([
 ]);
 
 export function getLatestPendingToolApproval(
-  events: AgentEvent[]
+  events: AgentEvent[],
+  options: PendingToolApprovalOptions = {}
 ): PendingToolApproval | null {
+  if (options.hasSettledStreamItem) return null;
+
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i];
     // A response or terminal run marker settles every earlier request. Without

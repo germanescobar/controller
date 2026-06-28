@@ -26,6 +26,8 @@ test("codex exec flags use workspace-write when on and a restricted, prompting s
   assert.deepEqual(codexExecAutoApproveFlags(true), [
     "--sandbox",
     "workspace-write",
+    "-c",
+    'approval_policy="on-request"',
   ]);
   const off = codexExecAutoApproveFlags(false);
   assert.ok(!off.includes("--full-auto"), "off must not auto-approve");
