@@ -30,3 +30,8 @@ and sessions.
   works on desktop and mobile.
 - **Desktop shell** — optional Electron wrapper that runs the same UI and
   backend as the browser app.
+- **Conductor and Superset support** — projects authored against `conductor.json`
+  or `.superset/config.json` are detected and run automatically; native
+  `.controller/setup.sh` / `run.sh` take precedence when both exist. See
+  [Controller scripts](/docs/controller-scripts) for the native format and the
+  migration path.
