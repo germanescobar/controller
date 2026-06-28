@@ -32,7 +32,7 @@ import {
   resolveProjectScripts,
   type ProjectScriptCommand,
 } from "../lib/project-scripts.js";
-import { childProcessEnv, writeEnvFile } from "../lib/shell-env.js";
+import { childProcessEnv } from "../lib/shell-env.js";
 import {
   emitSessionRemoved,
   emitWorktreeAdded,
@@ -465,18 +465,8 @@ worktreesRouter.post("/:projectId/run-script", async (req, res) => {
     ]);
 
     const env = buildScriptEnv({ project, worktree });
-    // Write the env to a file under os.tmpdir() so `buildTerminalScriptCommand`
-    // can keep the command string short. Sourcing the file (rather than
-    // inlining `KEY='v' ...` pairs) avoids zsh's command-line buffer / argv
-    // truncation on long paths + UUIDs. The path is suffixed with the
-    // worktree id so parallel runs of different worktrees don't collide.
-    const envFilePath = path.join(
-      os.tmpdir(),
-      `controller-run-env-${worktree.id}.sh`
-    );
-    await writeEnvFile(envFilePath, env);
-    const command = buildTerminalScriptCommand(scripts.run, envFilePath);
-    ptyManager.runCommand(terminalKey, worktree.path, command);
+    const command = buildTerminalScriptCommand(scripts.run);
+    ptyManager.runCommand(terminalKey, worktree.path, command, env);
 
     res.json({ ok: true, terminalId, tabs });
   } catch (err) {
