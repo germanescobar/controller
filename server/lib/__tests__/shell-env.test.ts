@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
 import {
   mergePathEntries,
   childProcessEnv,
   CONTROLLER_INTERNAL_ENV,
   shellQuote,
   formatEnvAssignments,
-  buildEnvCommand,
+  writeEnvFile,
 } from "../shell-env.js";
 
 test("mergePathEntries keeps existing entries first and appends new ones", () => {
@@ -99,37 +102,38 @@ test("formatEnvAssignments renders KEY='value' pairs space-separated", () => {
   );
 });
 
-test("buildEnvCommand prefixes the command with env KEY=val assignments", () => {
-  const out = buildEnvCommand(["bash", "-lc", "run.sh"], {
+test("writeEnvFile writes a shell-sourceable export-per-line file", async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "shell-env-test-"));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+
+  const file = path.join(tmp, "env.sh");
+  await writeEnvFile(file, {
     PORT_OFFSET: "3",
     WORKTREE_PATH: "/p with space",
   });
+
+  const contents = await fs.readFile(file, "utf8");
   assert.equal(
-    out,
-    "env PORT_OFFSET='3' WORKTREE_PATH='/p with space' 'bash' '-lc' 'run.sh'"
+    contents,
+    "export PORT_OFFSET='3'\nexport WORKTREE_PATH='/p with space'\n"
   );
 });
 
-test("buildEnvCommand shell-quotes each command element so metacharacters survive", () => {
-  // `;` inside the body must not be parsed as a shell separator — the body
-  // is one quoted argument to `bash -lc`.
-  const out = buildEnvCommand(["bash", "-lc", "set -e; run.sh"], { A: "1" });
-  assert.equal(out, "env A='1' 'bash' '-lc' 'set -e; run.sh'");
-});
+test("writeEnvFile shell-quotes values with metacharacters so sourcing is safe", async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "shell-env-test-"));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
 
-test("buildEnvCommand keeps the command line short under heavy env payloads", () => {
-  // The point of routing through `env` (vs. inlining KEY='v' pairs into the
-  // shell command line) is to avoid ARG_MAX / zsh command-line buffer
-  // truncation when env carries long paths or UUIDs. The body tail must
-  // be the only env-independent part of the command.
-  const short = buildEnvCommand(["bash", "-lc", "set -e; run.sh"], { A: "1" });
-  const heavy = buildEnvCommand(["bash", "-lc", "set -e; run.sh"], {
-    PATH: "/very/long/" + "x".repeat(2000),
-    PROJECT_ID: "uuid-" + "y".repeat(2000),
+  const file = path.join(tmp, "env.sh");
+  await writeEnvFile(file, {
+    GREETING: "hi y'all",
+    WITH_DOLLAR: "$HOME",
+    WITH_NEWLINE: "a\nb",
   });
-  assert.equal(short, "env A='1' 'bash' '-lc' 'set -e; run.sh'");
-  assert.ok(
-    heavy.endsWith(" 'bash' '-lc' 'set -e; run.sh'"),
-    `unexpected tail: ${heavy.slice(-60)}`
-  );
+
+  const contents = await fs.readFile(file, "utf8");
+  // Each value is shell-safe; embedded apostrophes, dollars, and newlines
+  // never break out of the single-quoted form.
+  assert.ok(contents.includes("export GREETING='hi y'\\''all'"));
+  assert.ok(contents.includes("export WITH_DOLLAR='$HOME'"));
+  assert.ok(contents.includes("export WITH_NEWLINE='a\nb'"));
 });

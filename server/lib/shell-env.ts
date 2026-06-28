@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -47,13 +48,15 @@ export function shellQuote(value: string): string {
 
 /**
  * Render `env` as a space-separated sequence of `KEY='value'` assignments,
- * each one shell-safe via {@link shellQuote}. Used to build command lines of
- * the shape `KEY='v' KEY2='v2' bash -lc '...'`.
+ * each one shell-safe via {@link shellQuote}. Used to build the per-
+ * session tmux launch command via `buildTmuxShellCommand` — the user's
+ * interactive shell never sees these as input, so argv / input-line size
+ * isn't a concern there.
  *
- * Prefer {@link buildEnvCommand} when the command will actually exec into
- * a child process: routing assignments through the `env` builtin keeps the
- * shell command line short, which avoids tripping ARG_MAX / zsh command-
- * line buffer limits on long paths or UUIDs.
+ * For handing env to a *script* the shell runs (e.g. a project `run.sh`),
+ * use {@link writeEnvFile} instead: a long inline assignment list would
+ * land in the `tmux send-keys` input line and trip the zsh command-line
+ * buffer / argv truncation the env-out-of-band plumbing exists to avoid.
  */
 export function formatEnvAssignments(env: Record<string, string>): string {
   return Object.entries(env)
@@ -62,26 +65,24 @@ export function formatEnvAssignments(env: Record<string, string>): string {
 }
 
 /**
- * Build a shell command line that runs `command` (argv vector) with `env`
- * set in the child's environment. Routing assignments through `env` instead
- * of inlining them as `KEY='v' ...` keeps the command line short and avoids
- * ARG_MAX / zsh command-line buffer truncation when `env` carries long
- * paths or UUIDs.
+ * Write `env` to `filePath` as a shell-sourceable file of `export KEY=val`
+ * assignments, one per line. Each value is single-quoted with embedded
+ * quotes escaped via {@link shellQuote}, so values containing newlines,
+ * spaces, single quotes, or shell metacharacters are safe to `source`.
  *
- * Each element of `command` is shell-quoted as a single token, so callers
- * can safely include metacharacters (`;`, `|`, `$`, …) in any single
- * argument — e.g. the body of `bash -lc 'set -e; body'` is passed as one
- * element so the `;` stays inside the script and isn't parsed as a shell
- * separator.
- *
- * Example output:
- *   env WORKTREE_PATH='/p' PORT_OFFSET='3' 'bash' '-lc' 'set -e; run.sh'
+ * Used to hand env to a script that the user's interactive shell runs
+ * via `tmux send-keys`. The `bash -lc 'set -a; . <file>; …'` command
+ * itself stays short regardless of how large the env values are, which
+ * is what avoids zsh's command-line buffer / argv truncation.
  */
-export function buildEnvCommand(command: string[], env: Record<string, string>): string {
-  const assignments = Object.entries(env).map(
-    ([key, value]) => `${key}=${shellQuote(value)}`
+export async function writeEnvFile(
+  filePath: string,
+  env: Record<string, string>
+): Promise<void> {
+  const lines = Object.entries(env).map(
+    ([key, value]) => `export ${key}=${shellQuote(value)}`
   );
-  return ["env", ...assignments, ...command.map(shellQuote)].join(" ");
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
 /**

@@ -46,71 +46,75 @@ test("buildScriptEnv exposes source and worktree paths", () => {
   assert.equal(env.WORKTREE_NAME, "issue-2");
 });
 
-test("buildTerminalScriptCommand routes env through `env` to avoid argv bloat", () => {
-  // Previously the command line was `KEY='v' KEY2='v2' bash -lc 'set -e; body'`.
-  // With long paths + UUIDs in env (PORT_OFFSET plus Conductor/Superset
-  // compat shims) that prefix could push past zsh's command-line buffer and
-  // get silently truncated. Routing through `env` keeps the values out of
-  // the shell's argv expansion entirely.
-  const env = buildScriptEnv(makeContext());
+test("buildTerminalScriptCommand sources an env file rather than inlining assignments", () => {
+  // The command is sent to the user's interactive shell via `tmux send-keys`,
+  // so its length must not scale with env size. Inlining `KEY='v' ...`
+  // pairs would land them in the shell's input line and trip zsh's
+  // command-line buffer / argv truncation. The env file is written by
+  // the route handler; here we only assert the resulting command shape.
   const command = buildTerminalScriptCommand(
     [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
-    env
+    "/tmp/controller-run-env-wt1.sh"
   );
 
-  assert.ok(command.startsWith("env "), `expected to start with "env ", got: ${command}`);
-  assert.ok(
-    command.endsWith("'bash' '-lc' 'set -e; bash /p/run.sh'"),
-    `unexpected tail: ...${command.slice(-60)}`
+  // The body is one shell-quoted token, with the env file path inside it
+  // escaped via shellQuote so any single quote in the path stays safe.
+  // We assert the structural shape rather than exact byte-equality to
+  // avoid duplicating shellQuote's behavior here.
+  assert.ok(command.startsWith("bash -lc 'set -e; set -a; . "));
+  assert.ok(command.includes("/tmp/controller-run-env-wt1.sh"));
+  assert.ok(command.includes("set +a; bash /p/run.sh"));
+  assert.ok(command.includes("rm -f "));
+  assert.ok(command.endsWith("'"));
+  // No env values may leak into the command string itself.
+  assert.ok(!command.includes("WORKTREE_PATH="));
+  assert.ok(!command.includes("PORT_OFFSET="));
+  assert.ok(!command.includes("CONDUCTOR_"));
+  assert.ok(!command.includes("SUPERSET_"));
+});
+
+test("buildTerminalScriptCommand command string is independent of env size", () => {
+  // The whole point: the command string the user's shell parses via
+  // `tmux send-keys` must stay short and bounded regardless of how big
+  // env values are. The env is in a file, not in the command, so this
+  // is satisfied by construction — but we assert the outer shape is
+  // stable across varied env file paths and command bodies.
+  const short = buildTerminalScriptCommand(
+    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
+    "/tmp/e.sh"
   );
-  // Every Controller export must be passed to env, not dropped or inlined
-  // before bash.
-  for (const key of Object.keys(env)) {
-    assert.ok(
-      command.includes(` ${key}=`),
-      `expected ${key} assignment in command, got: ${command}`
-    );
+  const long = buildTerminalScriptCommand(
+    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
+    "/tmp/controller-run-env-worktree-with-a-long-id-1234567890.sh"
+  );
+  assert.ok(short.startsWith("bash -lc '"));
+  assert.ok(long.startsWith("bash -lc '"));
+  assert.ok(short.endsWith("'"));
+  assert.ok(long.endsWith("'"));
+  // The growth comes only from the env file path; the env values
+  // themselves are never in the command. The exact length delta depends
+  // on shellQuote's escaping (apostrophes get doubled), so we don't
+  // pin a number — just lock in that no env value appears in either.
+  for (const value of ["WORKTREE_PATH=", "PORT_OFFSET=", "CONDUCTOR_", "SUPERSET_"]) {
+    assert.ok(!short.includes(value), `short should not contain ${value}`);
+    assert.ok(!long.includes(value), `long should not contain ${value}`);
   }
 });
 
-test("buildTerminalScriptCommand keeps the command tail short under heavy env", () => {
-  // The whole point: the bash invocation tail must be independent of how
-  // much env is in play. Heavy env (long paths, UUIDs) must not lengthen
-  // the part the user's shell actually parses.
-  const heavy = {
-    WORKTREE_PATH: "/" + "a".repeat(2000),
-    SOURCE_PATH: "/" + "b".repeat(2000),
-    PROJECT_ID: "uuid-" + "c".repeat(2000),
-    PORT_OFFSET: "3",
-  };
+test("buildTerminalScriptCommand joins multiple commands with newlines inside one body", () => {
+  // `;` would split into separate `bash -lc` calls if the body were not
+  // a single shell-quoted token. The whole body is one token here, so
+  // any metacharacter inside (including newlines) stays inside the
+  // script.
   const command = buildTerminalScriptCommand(
-    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
-    heavy
+    [
+      { command: "echo first", label: "1", source: "native" },
+      { command: "echo second", label: "2", source: "native" },
+    ],
+    "/tmp/controller-run-env-wt1.sh"
   );
-  assert.ok(
-    command.endsWith("'bash' '-lc' 'set -e; bash /p/run.sh'"),
-    `command should have a short fixed-size tail, got: ...${command.slice(-80)}`
-  );
-});
-
-test("buildTerminalScriptCommand preserves Conductor and Superset compat shims", () => {
-  // Conductor/Superset projects rely on these names in their scripts.
-  // They must keep flowing through to env so those scripts still work.
-  const env = buildScriptEnv(makeContext());
-  const command = buildTerminalScriptCommand(
-    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
-    env
-  );
-
-  for (const key of [
-    "CONDUCTOR_WORKSPACE_PATH",
-    "CONDUCTOR_ROOT_PATH",
-    "CONDUCTOR_PORT",
-    "SUPERSET_WORKSPACE_PATH",
-  ]) {
-    assert.ok(
-      command.includes(` ${key}=`),
-      `expected ${key} to be passed through, got: ${command}`
-    );
-  }
+  assert.ok(command.startsWith("bash -lc '"));
+  // The joined body still appears, in order, with newlines intact.
+  assert.ok(command.includes("set +a; echo first;\necho second; rm -f "));
+  assert.ok(command.endsWith("'"));
 });

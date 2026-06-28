@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Project } from "./projects.js";
 import type { Worktree } from "./worktrees.js";
-import { buildEnvCommand, shellQuote } from "./shell-env.js";
+import { shellQuote, writeEnvFile } from "./shell-env.js";
 
 export type ProjectScriptSource = "native" | "conductor" | "superset";
 export type ProjectRunMode = "concurrent" | "nonconcurrent";
@@ -101,16 +101,26 @@ export function buildScriptEnv(context: ScriptContext): Record<string, string> {
 
 export function buildTerminalScriptCommand(
   commands: ProjectScriptCommand[],
-  env: Record<string, string>
+  envFilePath: string
 ): string {
-  // Route env through `env` instead of inlining `KEY='v' …` pairs into the
-  // shell command line. Long paths + UUIDs in env (PORT_OFFSET plus the
-  // Conductor/Superset compat shims) were pushing the prefix past ARG_MAX /
-  // zsh's command-line buffer and getting silently truncated. `env` parses
-  // `KEY=val` args itself and passes them to the spawned bash via execve,
-  // so the values never appear on the user's shell command line.
+  // The user's interactive shell receives this command via `tmux send-keys`,
+  // so the input line must stay short regardless of how large the worktree
+  // env is. Instead of inlining `KEY='v' ...` pairs (which trips zsh's
+  // command-line buffer / argv truncation for long paths + UUIDs), we
+  // source a small env file written by the route handler. The file's
+  // contents are bounded only by the filesystem, not by the shell's
+  // input buffer.
+  //
+  // `set -a` / `set +a` make every sourced `export` propagate to commands
+  // the script runs as children. `rm -f` cleans up; failure modes
+  // (`/tmp` leaks, server crash before cleanup) are bounded by `/tmp`
+  // being cleared on reboot, and the file is never read again after
+  // this single command runs.
   const body = joinShellCommands(commands.map((item) => item.command));
-  return buildEnvCommand(["bash", "-lc", `set -e; ${body}`], env);
+  const scriptBody =
+    `set -a; . ${shellQuote(envFilePath)}; set +a; ${body}; ` +
+    `rm -f ${shellQuote(envFilePath)}`;
+  return `bash -lc ${shellQuote(`set -e; ${scriptBody}`)}`;
 }
 
 function joinShellCommands(commands: string[]): string {
