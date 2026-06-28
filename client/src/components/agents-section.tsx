@@ -388,9 +388,7 @@ export function AgentRow({
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     {agent.autoApprove
                       ? "Runs without asking for permission. Turn off to approve each action."
-                      : agent.id === ANITA_AGENT_ID
-                        ? "Asks before each action. Note: approval prompts aren't shown in the UI yet for this agent."
-                        : "Asks before each action; approve or deny from the session view."}
+                      : "Asks before each action; approve or deny from the session view."}
                   </p>
                 </div>
                 <Switch

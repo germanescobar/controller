@@ -6,13 +6,13 @@ const anita = getAgentProvider("anita");
 assert.ok(anita, "anita provider must be registered");
 
 type ParserLine = (line: string) => AgentStreamEvent | AgentStreamEvent[] | null;
-type ParserFactory = () => ParserLine;
+type ParserFactory = (autoApprove?: boolean) => ParserLine;
 
-function createParser(): ParserLine {
+function createParser(autoApprove?: boolean): ParserLine {
   assert.ok(anita, "anita provider must be registered");
   assert.ok(typeof anita.createParser === "function", "anita provider must expose createParser");
   const factory = anita.createParser as ParserFactory;
-  return factory();
+  return factory(autoApprove);
 }
 
 /**
@@ -20,8 +20,8 @@ function createParser(): ParserLine {
  * events. A single line can produce an array (e.g. flush prose before a
  * tool call), and an empty array or `null` line contributes nothing.
  */
-function runFixture(jsonl: string): AgentStreamEvent[] {
-  const parse = createParser();
+function runFixture(jsonl: string, autoApprove?: boolean): AgentStreamEvent[] {
+  const parse = createParser(autoApprove);
   const out: AgentStreamEvent[] = [];
   for (const rawLine of jsonl.split("\n")) {
     const line = rawLine.trim();
@@ -520,4 +520,100 @@ test("anita parser: empty final tool.call with no prior deltas leaves input empt
   assert.equal(toolCalls.length, 2);
   assert.deepEqual(toolCalls[0].input, { command: "first" });
   assert.deepEqual(toolCalls[1].input, {}, "input must be empty, not inherited");
+});
+
+test("anita parser: approval.request maps to tool.approval_requested when auto-approve is off", () => {
+  const events = runFixture(
+    [
+      JSON.stringify({
+        type: "approval.request",
+        id: "call-9",
+        tool: "run_command",
+        input: { command: "rm -rf build" },
+        timestamp: "2026-06-08T00:00:00.000Z",
+      }),
+    ].join("\n"),
+    false
+  );
+
+  assert.deepEqual(events, [
+    {
+      type: "tool.approval_requested",
+      id: "call-9",
+      toolUseId: "call-9",
+      toolName: "run_command",
+      input: { command: "rm -rf build" },
+      suggestions: [],
+    },
+  ]);
+});
+
+test("anita parser: approval events are dropped when auto-approve is on (audit-only)", () => {
+  const events = runFixture(
+    [
+      JSON.stringify({ type: "approval.request", id: "c1", tool: "edit", input: {}, timestamp: "t" }),
+      JSON.stringify({
+        type: "approval.resolved",
+        id: "c1",
+        approved: true,
+        reason: "user",
+        timestamp: "t",
+      }),
+    ].join("\n"),
+    true
+  );
+
+  assert.deepEqual(events, [], "auto-approve on must not surface approval cards");
+});
+
+test("anita parser: approval.resolved with reason 'user' is dropped (the POST already settled it)", () => {
+  const events = runFixture(
+    [
+      JSON.stringify({ type: "approval.request", id: "c2", tool: "edit", input: {}, timestamp: "t" }),
+      JSON.stringify({
+        type: "approval.resolved",
+        id: "c2",
+        approved: true,
+        reason: "user",
+        timestamp: "t",
+      }),
+    ].join("\n"),
+    false
+  );
+
+  assert.deepEqual(
+    events,
+    [
+      {
+        type: "tool.approval_requested",
+        id: "c2",
+        toolUseId: "c2",
+        toolName: "edit",
+        input: {},
+        suggestions: [],
+      },
+    ],
+    "only the request should surface; the user resolution is the POST's echo"
+  );
+});
+
+test("anita parser: non-user approval.resolved surfaces as tool.approval_resolved", () => {
+  for (const reason of ["eof", "aborted", "error"] as const) {
+    const events = runFixture(
+      [
+        JSON.stringify({
+          type: "approval.resolved",
+          id: "c3",
+          approved: false,
+          reason,
+          timestamp: "t",
+        }),
+      ].join("\n"),
+      false
+    );
+
+    assert.deepEqual(events, [
+      { type: "tool.approval_resolved", id: "c3", approved: false, reason },
+    ]);
+  }
 });
