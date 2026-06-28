@@ -1569,6 +1569,8 @@ export function getAgentProviders(): AgentProvider[] {
 export interface AgentStatus {
   id: string;
   name: string;
+  /** Executable command name used to resolve the agent CLI. */
+  command: string;
   /** The CLI resolves on PATH (or via an explicit path override). */
   installed: boolean;
   /** The user has enabled this agent in Settings. */
@@ -1621,6 +1623,7 @@ export async function getAgentStatuses(): Promise<AgentStatus[]> {
       return {
         id: provider.id,
         name: provider.name,
+        command: provider.command,
         installed,
         enabled: setting.enabled,
         resolvedPath,

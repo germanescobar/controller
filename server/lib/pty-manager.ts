@@ -1,7 +1,12 @@
 import * as pty from "node-pty";
 import crypto from "node:crypto";
 import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
-import { CONTROLLER_INTERNAL_ENV, childProcessEnv } from "./shell-env.js";
+import {
+  CONTROLLER_INTERNAL_ENV,
+  childProcessEnv,
+  formatEnvAssignments,
+  shellQuote,
+} from "./shell-env.js";
 
 interface PtySession {
   pty: pty.IPty;
@@ -76,16 +81,6 @@ function killTmuxSession(sessionName: string): void {
   } catch {
     // The tmux session may already be gone.
   }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function formatEnvAssignments(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([key, value]) => `${key}=${shellQuote(value)}`)
-    .join(" ");
 }
 
 function buildTmuxShellCommand(env?: Record<string, string>): string {

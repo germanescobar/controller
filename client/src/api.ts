@@ -879,6 +879,7 @@ export async function importUnifiedSkills(
 export interface AgentStatus {
   id: string;
   name: string;
+  command: string;
   installed: boolean;
   enabled: boolean;
   resolvedPath: string | null;
@@ -906,6 +907,7 @@ export async function updateAgent(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+  await throwIfNotOk(res, "Failed to update agent");
   return res.json();
 }
 
@@ -924,15 +926,17 @@ export async function setProviderKey(
   providerId: string,
   key: string
 ): Promise<void> {
-  await fetch(`${BASE}/api-keys/${providerId}`, {
+  const res = await fetch(`${BASE}/api-keys/${providerId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key }),
   });
+  await throwIfNotOk(res, "Failed to save API key");
 }
 
 export async function deleteProviderKey(providerId: string): Promise<void> {
-  await fetch(`${BASE}/api-keys/${providerId}`, { method: "DELETE" });
+  const res = await fetch(`${BASE}/api-keys/${providerId}`, { method: "DELETE" });
+  await throwIfNotOk(res, "Failed to delete API key");
 }
 
 // --- Integrations (issue #130) ---
