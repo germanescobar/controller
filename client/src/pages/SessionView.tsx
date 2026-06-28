@@ -195,6 +195,12 @@ type StreamItem = (
       toolName: string;
       input: Record<string, unknown>;
     }
+  | {
+      type: "tool_approval_response";
+      requestId: string;
+      decision: "allow_once" | "deny";
+      reason?: "aborted" | "eof" | "error";
+    }
   | { type: "thread_status"; status: string; activeFlags: string[] }
   | { type: "error"; text: unknown }
   | { type: "run_cancelled"; reason: string }
@@ -1351,6 +1357,26 @@ function WorkingBlock({
   );
 }
 
+/**
+ * Label for a settled tool approval. Anita can settle a card non-interactively
+ * (the run was cancelled, the approval callback threw, or a parent closed
+ * stdin), so the `reason` distinguishes those from a user clicking Deny. Shared
+ * by the persisted-event renderer and the live stream-item renderer.
+ */
+function toolApprovalResponseLabel(
+  decision: ToolApprovalDecision | undefined,
+  reason: string | undefined
+): string {
+  if (decision === "deny") {
+    if (reason === "eof") return "Denied (process ended)";
+    if (reason === "aborted") return "Cancelled";
+    if (reason === "error") return "Denied (approval error)";
+    return "Denied";
+  }
+  if (decision === "always_allow") return "Approved (always allow)";
+  return "Approved";
+}
+
 const EventBlock = memo(function EventBlock({
   event,
   copiedId,
@@ -1468,23 +1494,8 @@ const EventBlock = memo(function EventBlock({
 
   if (event.type === "tool_approval_response") {
     const decision = data.decision as ToolApprovalDecision | undefined;
-    // Anita settles the same card non-interactively for a few reasons (stdin
-    // closed by a parent crash, the run was cancelled, or the approval callback
-    // threw). Surface those distinctly so a process death isn't mistaken for the
-    // user clicking Deny.
     const reason = data.reason as string | undefined;
-    const label =
-      decision === "deny"
-        ? reason === "eof"
-          ? "Denied (process ended)"
-          : reason === "aborted"
-            ? "Cancelled"
-            : reason === "error"
-              ? "Denied (approval error)"
-              : "Denied"
-        : decision === "always_allow"
-          ? "Approved (always allow)"
-          : "Approved";
+    const label = toolApprovalResponseLabel(decision, reason);
     return (
       <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
         <div className="h-px flex-1 bg-border" />
@@ -2196,11 +2207,17 @@ function ToolApprovalBlock({
   input,
   onDecision,
   submitting = false,
+  supportsAlwaysAllow = true,
 }: {
   toolName: string;
   input: Record<string, unknown>;
   onDecision?: (decision: ToolApprovalDecision) => void;
   submitting?: boolean;
+  // Whether the agent can persist an "always allow" rule. Anita has no rule
+  // set — it answers each gate one-shot — so offering the option would lie
+  // about what happens (the next matching tool call still prompts). Hide it
+  // there rather than silently downgrading the choice to allow-once.
+  supportsAlwaysAllow?: boolean;
 }) {
   // ExitPlanMode is an approve-the-plan gate, not a per-tool permission. Its
   // plan text already renders as an assistant message above, so the block only
@@ -2246,14 +2263,16 @@ function ToolApprovalBlock({
             <Button size="sm" disabled={disabled} onClick={() => onDecision?.("allow_once")}>
               Allow once
             </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={disabled}
-              onClick={() => onDecision?.("always_allow")}
-            >
-              Always allow
-            </Button>
+            {supportsAlwaysAllow ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={disabled}
+                onClick={() => onDecision?.("always_allow")}
+              >
+                Always allow
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="ghost"
@@ -4375,6 +4394,28 @@ export function SessionView({
               },
             ]);
           }
+        } else if (adaEvent.type === "tool.approval_resolved") {
+          // A pending approval settled without the user answering (the run was
+          // cancelled, the approval errored, or the parent closed stdin). Drop
+          // the live request card and leave a settled marker carrying the
+          // reason so it isn't mistaken for a user decision. (User decisions
+          // never reach here — they're persisted by /tool-approval and the
+          // card is removed in handleToolApproval.)
+          if (isVisible()) {
+            setStreamItems((prev) => [
+              ...prev.filter(
+                (item) =>
+                  item.type !== "tool_approval_requested" || item.id !== adaEvent.id
+              ),
+              {
+                type: "tool_approval_response",
+                requestId: adaEvent.id,
+                decision: adaEvent.approved ? "allow_once" : "deny",
+                reason: adaEvent.reason,
+                at: Date.now(),
+              },
+            ]);
+          }
         } else if (adaEvent.type === "thread.status") {
           // Thread status changes are useful internally, but they're noisy in
           // the visible transcript when there's no actionable information.
@@ -5607,10 +5648,26 @@ export function SessionView({
                           toolName={item.toolName}
                           input={item.input}
                           submitting={submittingApprovalId === item.id}
+                          supportsAlwaysAllow={selectedProvider !== "anita"}
                           onDecision={(decision) =>
                             handleToolApproval(item.id, decision)
                           }
                         />
+                      );
+                    }
+
+                    if (item.type === "tool_approval_response") {
+                      return (
+                        <div
+                          key={render.key}
+                          className="flex items-center gap-2 py-1 text-xs text-muted-foreground"
+                        >
+                          <div className="h-px flex-1 bg-border" />
+                          <span>
+                            {toolApprovalResponseLabel(item.decision, item.reason)}
+                          </span>
+                          <div className="h-px flex-1 bg-border" />
+                        </div>
                       );
                     }
 
@@ -5662,6 +5719,7 @@ export function SessionView({
                     toolName={pendingToolApproval.toolName}
                     input={pendingToolApproval.input}
                     submitting={submittingApprovalId === pendingToolApproval.requestId}
+                    supportsAlwaysAllow={selectedProvider !== "anita"}
                     onDecision={(decision) =>
                       handleToolApproval(pendingToolApproval.requestId, decision)
                     }

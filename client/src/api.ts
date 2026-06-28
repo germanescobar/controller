@@ -221,6 +221,12 @@ export type AnitaStreamEvent =
       suggestions: Record<string, unknown>[];
     }
   | {
+      type: "tool.approval_resolved";
+      id: string;
+      approved: boolean;
+      reason: "aborted" | "eof" | "error";
+    }
+  | {
       type: "thread.status";
       threadId: string;
       status: string;
