@@ -776,6 +776,22 @@ export function sendClaudeApprovalDecision(
   return true;
 }
 
+/**
+ * Inject the session-scoped `destination` Claude expects on every
+ * `permissionUpdates` entry. Claude emits `permission_suggestions` without
+ * `destination`; the control-protocol Zod schema rejects entries that omit
+ * it ("Dropping malformed permissionUpdate entry"), so we default to
+ * `"session"` to match the runtime scope the user is approving for.
+ */
+function withSessionDestination(
+  entries: ClaudePermissionSuggestion[]
+): Record<string, unknown>[] {
+  return entries.map((entry) => ({
+    ...entry,
+    destination: entry.destination ?? "session",
+  }));
+}
+
 function buildClaudeApprovalResponse(
   request: ClaudeApprovalRequest,
   decision: ClaudeApprovalDecision
@@ -793,21 +809,33 @@ function buildClaudeApprovalResponse(
   // Approving ExitPlanMode must also switch the session out of plan mode so the
   // CLI proceeds with implementation in the same turn; otherwise the turn ends
   // still in plan mode (verified against the CLI's control protocol).
+  //
+  // The wrapping field is `permissionUpdates` (camelCase). Claude's
+  // permission-update schema requires every entry to carry both `behavior` and
+  // `destination`; the inner `setMode` entry here already includes both, so
+  // it goes through unmodified.
   if (request.toolName === "ExitPlanMode") {
     return {
       behavior: "allow",
       updatedInput: request.input,
-      updatedPermissions: [
+      permissionUpdates: [
         { type: "setMode", mode: "acceptEdits", destination: "session" },
       ],
     };
   }
 
+  // The wrapping field is `permissionUpdates` (camelCase, matching Claude's
+  // control-protocol schema). Claude sends the suggestions without
+  // `destination`, but the schema requires it; `withSessionDestination` fills
+  // it in so each entry parses cleanly and the rule is actually persisted.
+  // Without this fix the response is dropped as malformed, the rule never
+  // lands, and the run never emits a terminal event — the agent appears to
+  // "keep working" until the inactivity watchdog kills it 5 minutes later.
   if (decision === "always_allow") {
     return {
       behavior: "allow",
       updatedInput: request.input,
-      updatedPermissions: request.suggestions,
+      permissionUpdates: withSessionDestination(request.suggestions),
     };
   }
 
