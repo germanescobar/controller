@@ -36,6 +36,55 @@ export function childProcessEnv(extra?: Record<string, string>): Record<string, 
 }
 
 /**
+ * Shell-single-quote a value so it's safe as a single shell token. Matches
+ * the quoting the existing `bash -lc '...'` and `tmux` invocations already
+ * rely on — used by every caller that interpolates an untrusted string into
+ * a shell command line.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Render `env` as a space-separated sequence of `KEY='value'` assignments,
+ * each one shell-safe via {@link shellQuote}. Used to build command lines of
+ * the shape `KEY='v' KEY2='v2' bash -lc '...'`.
+ *
+ * Prefer {@link buildEnvCommand} when the command will actually exec into
+ * a child process: routing assignments through the `env` builtin keeps the
+ * shell command line short, which avoids tripping ARG_MAX / zsh command-
+ * line buffer limits on long paths or UUIDs.
+ */
+export function formatEnvAssignments(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
+    .join(" ");
+}
+
+/**
+ * Build a shell command line that runs `command` (argv vector) with `env`
+ * set in the child's environment. Routing assignments through `env` instead
+ * of inlining them as `KEY='v' ...` keeps the command line short and avoids
+ * ARG_MAX / zsh command-line buffer truncation when `env` carries long
+ * paths or UUIDs.
+ *
+ * Each element of `command` is shell-quoted as a single token, so callers
+ * can safely include metacharacters (`;`, `|`, `$`, …) in any single
+ * argument — e.g. the body of `bash -lc 'set -e; body'` is passed as one
+ * element so the `;` stays inside the script and isn't parsed as a shell
+ * separator.
+ *
+ * Example output:
+ *   env WORKTREE_PATH='/p' PORT_OFFSET='3' 'bash' '-lc' 'set -e; run.sh'
+ */
+export function buildEnvCommand(command: string[], env: Record<string, string>): string {
+  const assignments = Object.entries(env).map(
+    ([key, value]) => `${key}=${shellQuote(value)}`
+  );
+  return ["env", ...assignments, ...command.map(shellQuote)].join(" ");
+}
+
+/**
  * Merge a freshly-captured PATH into the current one, keeping existing
  * entries first and appending only new directories. The result never drops
  * a directory the process already had, so restoration is purely additive.

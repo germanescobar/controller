@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Project } from "./projects.js";
 import type { Worktree } from "./worktrees.js";
+import { buildEnvCommand, shellQuote } from "./shell-env.js";
 
 export type ProjectScriptSource = "native" | "conductor" | "superset";
 export type ProjectRunMode = "concurrent" | "nonconcurrent";
@@ -102,8 +103,14 @@ export function buildTerminalScriptCommand(
   commands: ProjectScriptCommand[],
   env: Record<string, string>
 ): string {
+  // Route env through `env` instead of inlining `KEY='v' …` pairs into the
+  // shell command line. Long paths + UUIDs in env (PORT_OFFSET plus the
+  // Conductor/Superset compat shims) were pushing the prefix past ARG_MAX /
+  // zsh's command-line buffer and getting silently truncated. `env` parses
+  // `KEY=val` args itself and passes them to the spawned bash via execve,
+  // so the values never appear on the user's shell command line.
   const body = joinShellCommands(commands.map((item) => item.command));
-  return `${formatEnvAssignments(env)} bash -lc ${shellQuote(`set -e; ${body}`)}`;
+  return buildEnvCommand(["bash", "-lc", `set -e; ${body}`], env);
 }
 
 function joinShellCommands(commands: string[]): string {
@@ -268,14 +275,4 @@ function normalizeStringArray(value: unknown): string[] | undefined {
 
 function normalizeRunMode(value: string | undefined): ProjectRunMode {
   return value === "nonconcurrent" ? "nonconcurrent" : DEFAULT_RUN_MODE;
-}
-
-function formatEnvAssignments(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([key, value]) => `${key}=${shellQuote(value)}`)
-    .join(" ");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

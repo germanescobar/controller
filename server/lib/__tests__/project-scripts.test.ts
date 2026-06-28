@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildScriptEnv } from "../project-scripts.js";
+import { buildScriptEnv, buildTerminalScriptCommand } from "../project-scripts.js";
 
 function makeContext(overrides: {
   portOffset?: number;
@@ -44,4 +44,73 @@ test("buildScriptEnv exposes source and worktree paths", () => {
   assert.equal(env.WORKTREE_PATH, "/project/.worktrees/issue-2");
   assert.equal(env.SOURCE_PATH, "/project");
   assert.equal(env.WORKTREE_NAME, "issue-2");
+});
+
+test("buildTerminalScriptCommand routes env through `env` to avoid argv bloat", () => {
+  // Previously the command line was `KEY='v' KEY2='v2' bash -lc 'set -e; body'`.
+  // With long paths + UUIDs in env (PORT_OFFSET plus Conductor/Superset
+  // compat shims) that prefix could push past zsh's command-line buffer and
+  // get silently truncated. Routing through `env` keeps the values out of
+  // the shell's argv expansion entirely.
+  const env = buildScriptEnv(makeContext());
+  const command = buildTerminalScriptCommand(
+    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
+    env
+  );
+
+  assert.ok(command.startsWith("env "), `expected to start with "env ", got: ${command}`);
+  assert.ok(
+    command.endsWith("'bash' '-lc' 'set -e; bash /p/run.sh'"),
+    `unexpected tail: ...${command.slice(-60)}`
+  );
+  // Every Controller export must be passed to env, not dropped or inlined
+  // before bash.
+  for (const key of Object.keys(env)) {
+    assert.ok(
+      command.includes(` ${key}=`),
+      `expected ${key} assignment in command, got: ${command}`
+    );
+  }
+});
+
+test("buildTerminalScriptCommand keeps the command tail short under heavy env", () => {
+  // The whole point: the bash invocation tail must be independent of how
+  // much env is in play. Heavy env (long paths, UUIDs) must not lengthen
+  // the part the user's shell actually parses.
+  const heavy = {
+    WORKTREE_PATH: "/" + "a".repeat(2000),
+    SOURCE_PATH: "/" + "b".repeat(2000),
+    PROJECT_ID: "uuid-" + "c".repeat(2000),
+    PORT_OFFSET: "3",
+  };
+  const command = buildTerminalScriptCommand(
+    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
+    heavy
+  );
+  assert.ok(
+    command.endsWith("'bash' '-lc' 'set -e; bash /p/run.sh'"),
+    `command should have a short fixed-size tail, got: ...${command.slice(-80)}`
+  );
+});
+
+test("buildTerminalScriptCommand preserves Conductor and Superset compat shims", () => {
+  // Conductor/Superset projects rely on these names in their scripts.
+  // They must keep flowing through to env so those scripts still work.
+  const env = buildScriptEnv(makeContext());
+  const command = buildTerminalScriptCommand(
+    [{ command: "bash /p/run.sh", label: "run.sh", source: "native" }],
+    env
+  );
+
+  for (const key of [
+    "CONDUCTOR_WORKSPACE_PATH",
+    "CONDUCTOR_ROOT_PATH",
+    "CONDUCTOR_PORT",
+    "SUPERSET_WORKSPACE_PATH",
+  ]) {
+    assert.ok(
+      command.includes(` ${key}=`),
+      `expected ${key} to be passed through, got: ${command}`
+    );
+  }
 });
