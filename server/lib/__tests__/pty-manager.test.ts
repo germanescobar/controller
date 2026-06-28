@@ -23,6 +23,15 @@ test("lastLines returns the trailing N lines and the whole text when shorter", (
   assert.equal(lastLines("only", 3), "only");
 });
 
+test("lastLines counts completed lines when the text ends in a newline", () => {
+  // A trailing newline must not consume a line slot: `--lines 1` should still
+  // return the last completed line, and `--lines N` the last N of them.
+  assert.equal(lastLines("a\nb\nc\n", 1), "c\n");
+  assert.equal(lastLines("a\nb\nc\n", 2), "b\nc\n");
+  // When the whole text fits, it is returned verbatim (newline preserved).
+  assert.equal(lastLines("a\nb\n", 5), "a\nb\n");
+});
+
 function tmuxAvailable(): boolean {
   try {
     execFileSync("tmux", ["-V"], { stdio: "ignore" });

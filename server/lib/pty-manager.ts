@@ -16,9 +16,15 @@ interface PtySession {
 /** Return the last `lines` lines of `text`, or all of it when it has fewer. */
 export function lastLines(text: string, lines: number): string {
   const limit = Math.max(1, Math.floor(lines));
-  const parts = text.split("\n");
+  // Terminal output usually ends in a trailing newline. Splitting that raw
+  // would yield an empty final element that consumes a line slot, so
+  // `--lines N` would return only N-1 completed lines. Peel the trailing
+  // newline off before counting and re-append it to preserve the output shape.
+  const trailingNewline = text.endsWith("\n");
+  const body = trailingNewline ? text.slice(0, -1) : text;
+  const parts = body.split("\n");
   if (parts.length <= limit) return text;
-  return parts.slice(-limit).join("\n");
+  return parts.slice(-limit).join("\n") + (trailingNewline ? "\n" : "");
 }
 
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB per session buffer
