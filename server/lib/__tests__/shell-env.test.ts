@@ -1,6 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergePathEntries, childProcessEnv, CONTROLLER_INTERNAL_ENV } from "../shell-env.js";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
+import {
+  mergePathEntries,
+  childProcessEnv,
+  CONTROLLER_INTERNAL_ENV,
+  shellQuote,
+  formatEnvAssignments,
+  writeEnvFile,
+} from "../shell-env.js";
 
 test("mergePathEntries keeps existing entries first and appends new ones", () => {
   const merged = mergePathEntries("/usr/bin:/bin", "/opt/homebrew/bin:/usr/bin");
@@ -72,4 +82,58 @@ test("childProcessEnv drops undefined values", () => {
   } finally {
     process.env = saved;
   }
+});
+
+test("shellQuote wraps the value in single quotes and escapes embedded ones", () => {
+  assert.equal(shellQuote("plain"), "'plain'");
+  assert.equal(shellQuote("with spaces"), "'with spaces'");
+  assert.equal(shellQuote("it's"), "'it'\\''s'");
+});
+
+test("formatEnvAssignments renders KEY='value' pairs space-separated", () => {
+  assert.equal(
+    formatEnvAssignments({ A: "1", B: "two words" }),
+    "A='1' B='two words'"
+  );
+  // Values with embedded single quotes must still be safe shell tokens.
+  assert.equal(
+    formatEnvAssignments({ GREETING: "hi y'all" }),
+    "GREETING='hi y'\\''all'"
+  );
+});
+
+test("writeEnvFile writes a shell-sourceable export-per-line file", async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "shell-env-test-"));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+
+  const file = path.join(tmp, "env.sh");
+  await writeEnvFile(file, {
+    PORT_OFFSET: "3",
+    WORKTREE_PATH: "/p with space",
+  });
+
+  const contents = await fs.readFile(file, "utf8");
+  assert.equal(
+    contents,
+    "export PORT_OFFSET='3'\nexport WORKTREE_PATH='/p with space'\n"
+  );
+});
+
+test("writeEnvFile shell-quotes values with metacharacters so sourcing is safe", async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "shell-env-test-"));
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+
+  const file = path.join(tmp, "env.sh");
+  await writeEnvFile(file, {
+    GREETING: "hi y'all",
+    WITH_DOLLAR: "$HOME",
+    WITH_NEWLINE: "a\nb",
+  });
+
+  const contents = await fs.readFile(file, "utf8");
+  // Each value is shell-safe; embedded apostrophes, dollars, and newlines
+  // never break out of the single-quoted form.
+  assert.ok(contents.includes("export GREETING='hi y'\\''all'"));
+  assert.ok(contents.includes("export WITH_DOLLAR='$HOME'"));
+  assert.ok(contents.includes("export WITH_NEWLINE='a\nb'"));
 });

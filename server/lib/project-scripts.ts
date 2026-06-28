@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Project } from "./projects.js";
 import type { Worktree } from "./worktrees.js";
+import { shellQuote, writeEnvFile } from "./shell-env.js";
 
 export type ProjectScriptSource = "native" | "conductor" | "superset";
 export type ProjectRunMode = "concurrent" | "nonconcurrent";
@@ -100,10 +101,26 @@ export function buildScriptEnv(context: ScriptContext): Record<string, string> {
 
 export function buildTerminalScriptCommand(
   commands: ProjectScriptCommand[],
-  env: Record<string, string>
+  envFilePath: string
 ): string {
+  // The user's interactive shell receives this command via `tmux send-keys`,
+  // so the input line must stay short regardless of how large the worktree
+  // env is. Instead of inlining `KEY='v' ...` pairs (which trips zsh's
+  // command-line buffer / argv truncation for long paths + UUIDs), we
+  // source a small env file written by the route handler. The file's
+  // contents are bounded only by the filesystem, not by the shell's
+  // input buffer.
+  //
+  // `set -a` / `set +a` make every sourced `export` propagate to commands
+  // the script runs as children. `rm -f` cleans up; failure modes
+  // (`/tmp` leaks, server crash before cleanup) are bounded by `/tmp`
+  // being cleared on reboot, and the file is never read again after
+  // this single command runs.
   const body = joinShellCommands(commands.map((item) => item.command));
-  return `${formatEnvAssignments(env)} bash -lc ${shellQuote(`set -e; ${body}`)}`;
+  const scriptBody =
+    `set -a; . ${shellQuote(envFilePath)}; set +a; ${body}; ` +
+    `rm -f ${shellQuote(envFilePath)}`;
+  return `bash -lc ${shellQuote(`set -e; ${scriptBody}`)}`;
 }
 
 function joinShellCommands(commands: string[]): string {
@@ -268,14 +285,4 @@ function normalizeStringArray(value: unknown): string[] | undefined {
 
 function normalizeRunMode(value: string | undefined): ProjectRunMode {
   return value === "nonconcurrent" ? "nonconcurrent" : DEFAULT_RUN_MODE;
-}
-
-function formatEnvAssignments(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([key, value]) => `${key}=${shellQuote(value)}`)
-    .join(" ");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

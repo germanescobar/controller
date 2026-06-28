@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +34,55 @@ export function childProcessEnv(extra?: Record<string, string>): Record<string, 
     env[key] = value;
   }
   return extra ? { ...env, ...extra } : env;
+}
+
+/**
+ * Shell-single-quote a value so it's safe as a single shell token. Matches
+ * the quoting the existing `bash -lc '...'` and `tmux` invocations already
+ * rely on — used by every caller that interpolates an untrusted string into
+ * a shell command line.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Render `env` as a space-separated sequence of `KEY='value'` assignments,
+ * each one shell-safe via {@link shellQuote}. Used to build the per-
+ * session tmux launch command via `buildTmuxShellCommand` — the user's
+ * interactive shell never sees these as input, so argv / input-line size
+ * isn't a concern there.
+ *
+ * For handing env to a *script* the shell runs (e.g. a project `run.sh`),
+ * use {@link writeEnvFile} instead: a long inline assignment list would
+ * land in the `tmux send-keys` input line and trip the zsh command-line
+ * buffer / argv truncation the env-out-of-band plumbing exists to avoid.
+ */
+export function formatEnvAssignments(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
+    .join(" ");
+}
+
+/**
+ * Write `env` to `filePath` as a shell-sourceable file of `export KEY=val`
+ * assignments, one per line. Each value is single-quoted with embedded
+ * quotes escaped via {@link shellQuote}, so values containing newlines,
+ * spaces, single quotes, or shell metacharacters are safe to `source`.
+ *
+ * Used to hand env to a script that the user's interactive shell runs
+ * via `tmux send-keys`. The `bash -lc 'set -a; . <file>; …'` command
+ * itself stays short regardless of how large the env values are, which
+ * is what avoids zsh's command-line buffer / argv truncation.
+ */
+export async function writeEnvFile(
+  filePath: string,
+  env: Record<string, string>
+): Promise<void> {
+  const lines = Object.entries(env).map(
+    ([key, value]) => `export ${key}=${shellQuote(value)}`
+  );
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
 /**
