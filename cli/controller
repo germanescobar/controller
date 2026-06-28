@@ -34,6 +34,17 @@ const USAGE = `Usage:
   (role + accessible name + ref) instead of the default text + interactive
   elements view. Refs are populated in both modes.
 
+  controller terminal list
+  controller terminal run <terminalId> <command…>
+  controller terminal snapshot <terminalId> [--lines N]
+  controller terminal tail <terminalId> [--follow]
+
+  Terminal ids come from \`terminal list\`, which shows the terminals open in
+  the current worktree — don't guess them. \`run\` sends a command to a tab the
+  user already has open (the user sees it in the Terminals tab); read the
+  result with \`snapshot\` (last \`--lines\` lines, default 200) or \`tail\`
+  (new output; \`--follow\` streams until interrupted).
+
   controller integrations list
   controller integrations search <query>
   controller integrations tools <integration>
@@ -739,6 +750,129 @@ async function runBrowser(argv, serverUrl) {
   process.stdout.write(`${lines.join("\n") || "OK"}\n`);
 }
 
+// --- terminal surface (issue #261) ---
+
+// Collect positional args, skipping known flags. `valueFlags` consume the
+// following token; `boolFlags` are standalone. Lets `snapshot`/`tail` accept
+// `--lines`/`--follow` in any position without swallowing the terminal id.
+function positionalArgs(rest, valueFlags = [], boolFlags = []) {
+  const out = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    if (boolFlags.includes(rest[i])) continue;
+    if (valueFlags.includes(rest[i])) {
+      i += 1;
+      continue;
+    }
+    out.push(rest[i]);
+  }
+  return out;
+}
+
+export function parseTerminal(argv) {
+  const [command, ...rest] = argv;
+  switch (command) {
+    case "list":
+      return { action: "list", params: {} };
+    case "run": {
+      const [terminalId, ...commandParts] = rest;
+      if (!terminalId) fail("terminal run requires a <terminalId>");
+      // Everything after the id is the command, verbatim, so the agent can
+      // quote it normally (e.g. `terminal run build "npm run dev"`).
+      const command = commandParts.join(" ").trim();
+      if (!command) fail("terminal run requires a <command>");
+      return { action: "run", params: { terminalId, command } };
+    }
+    case "snapshot": {
+      const positional = positionalArgs(rest, ["--lines"]);
+      const terminalId = positional[0];
+      if (!terminalId) fail("terminal snapshot requires a <terminalId>");
+      const lines = flagValue(rest, "--lines");
+      return {
+        action: "snapshot",
+        params: { terminalId, ...(lines !== undefined ? { lines: Number(lines) } : {}) },
+      };
+    }
+    case "tail": {
+      const positional = positionalArgs(rest, [], ["--follow"]);
+      const terminalId = positional[0];
+      if (!terminalId) fail("terminal tail requires a <terminalId>");
+      return { action: "tail", params: { terminalId, follow: rest.includes("--follow") } };
+    }
+    default:
+      fail(`Unknown terminal command: ${command ?? ""}\n${USAGE}`);
+  }
+}
+
+function printTerminal(action, result) {
+  if (action === "list") {
+    const terminals = result.terminals ?? [];
+    if (terminals.length === 0) {
+      process.stdout.write("No terminals are open in this worktree.\n");
+      return;
+    }
+    for (const t of terminals) {
+      process.stdout.write(`${t.id}${t.attached ? "  [attached]" : ""}\n`);
+    }
+    return;
+  }
+  if (action === "run") {
+    process.stdout.write(`Sent to ${result.terminalId}: ${result.sent}\n`);
+    return;
+  }
+  if (action === "snapshot") {
+    const text = result.text ?? "";
+    process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+    return;
+  }
+}
+
+export async function runTerminal(argv, serverUrl) {
+  const { action, params } = parseTerminal(argv);
+  if (action === "tail") {
+    await runTerminalTail(serverUrl, params);
+    return;
+  }
+  const { response, result } = await postJson(serverUrl, "/api/terminal/command", { action, params });
+  if (!result || result.ok === false) {
+    fail((result && result.error) || `Terminal command failed (HTTP ${response.status})`);
+  }
+  printTerminal(action, result);
+}
+
+// `tail` is a streaming response: read chunks as they arrive and write them
+// straight through. `--follow` keeps the server stream open until the user
+// interrupts the CLI; without it the server ends the stream after a short idle.
+async function runTerminalTail(serverUrl, params) {
+  let response;
+  try {
+    response = await fetch(`${serverUrl.replace(/\/$/, "")}/api/terminal/command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "tail", params, cwd: process.cwd() }),
+    });
+  } catch (error) {
+    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+  }
+  if (response.status >= 400) {
+    let message = `Terminal tail failed (HTTP ${response.status})`;
+    try {
+      const parsed = await response.json();
+      if (parsed && parsed.error) message = parsed.error;
+    } catch {}
+    fail(message);
+  }
+  if (!response.body) {
+    fail("Terminal tail returned no stream");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    process.stdout.write(decoder.decode(value, { stream: true }));
+  }
+}
+
 // --- integrations surface (issue #130) ---
 
 function parsePairs(rest, flag) {
@@ -1045,6 +1179,7 @@ async function main() {
   }
   if (
     surface !== "browser" &&
+    surface !== "terminal" &&
     surface !== "integrations" &&
     surface !== "skills" &&
     surface !== "worktrees" &&
@@ -1055,6 +1190,7 @@ async function main() {
   }
   const serverUrl = await getServerUrl();
   if (surface === "browser") await runBrowser(rest, serverUrl);
+  else if (surface === "terminal") await runTerminal(rest, serverUrl);
   else if (surface === "integrations") await runIntegrations(rest, serverUrl);
   else if (surface === "skills") {
     if (rest[0] === "create") {

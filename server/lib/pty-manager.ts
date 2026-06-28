@@ -7,6 +7,24 @@ interface PtySession {
   pty: pty.IPty;
   buffer: string;
   cwd: string;
+  /* Number of live `onData` subscribers (renderer panes, agent tails). Used by
+   * the terminal surface (issue #261) to report whether a terminal is being
+   * watched, without changing the persistent-session lifecycle. */
+  listeners: number;
+}
+
+/** Return the last `lines` lines of `text`, or all of it when it has fewer. */
+export function lastLines(text: string, lines: number): string {
+  const limit = Math.max(1, Math.floor(lines));
+  // Terminal output usually ends in a trailing newline. Splitting that raw
+  // would yield an empty final element that consumes a line slot, so
+  // `--lines N` would return only N-1 completed lines. Peel the trailing
+  // newline off before counting and re-append it to preserve the output shape.
+  const trailingNewline = text.endsWith("\n");
+  const body = trailingNewline ? text.slice(0, -1) : text;
+  const parts = body.split("\n");
+  if (parts.length <= limit) return text;
+  return parts.slice(-limit).join("\n") + (trailingNewline ? "\n" : "");
 }
 
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB per session buffer
@@ -188,6 +206,7 @@ class PtyManager {
       pty: ptyProcess,
       buffer: "",
       cwd,
+      listeners: 0,
     };
 
     // Accumulate output into the buffer
@@ -236,7 +255,84 @@ class PtyManager {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
     const disposable = session.pty.onData(cb);
-    return () => disposable.dispose();
+    session.listeners += 1;
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      session.listeners -= 1;
+      disposable.dispose();
+    };
+  }
+
+  /**
+   * List the sessions whose id starts with `prefix`, returning the trailing
+   * id segment and whether anything is currently watching its output. Powers
+   * `terminal list` (issue #261), scoped to a single worktree by its prefix.
+   */
+  listByPrefix(prefix: string): Array<{ id: string; attached: boolean }> {
+    const out: Array<{ id: string; attached: boolean }> = [];
+    for (const [key, session] of this.sessions) {
+      if (key.startsWith(prefix)) {
+        out.push({ id: key.slice(prefix.length), attached: session.listeners > 0 });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Return the last `lines` lines of a session's buffered output, or null when
+   * the session does not exist. A pure slice over the existing rolling buffer.
+   */
+  snapshot(sessionId: string, lines: number): string | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    return lastLines(session.buffer, lines);
+  }
+
+  /**
+   * Async iterable over new output for a session, or null when the session
+   * does not exist. Wraps the existing `onData` subscription so multiple
+   * tails can run alongside the renderer's stream. Pass an `AbortSignal` to
+   * stop the iteration (a `--follow` client disconnecting, or a non-follow
+   * idle timeout); the subscription is always cleaned up on exit.
+   */
+  tail(sessionId: string, signal?: AbortSignal): AsyncIterable<string> | null {
+    if (!this.sessions.has(sessionId)) return null;
+    const self = this;
+    return {
+      async *[Symbol.asyncIterator](): AsyncIterator<string> {
+        const queue: string[] = [];
+        let wake: (() => void) | null = null;
+        const onAbort = () => wake?.();
+        signal?.addEventListener("abort", onAbort);
+        const unsubscribe = self.onData(sessionId, (data) => {
+          queue.push(data);
+          wake?.();
+        });
+        if (!unsubscribe) {
+          signal?.removeEventListener("abort", onAbort);
+          return;
+        }
+        try {
+          while (!signal?.aborted) {
+            if (queue.length === 0) {
+              await new Promise<void>((resolve) => {
+                wake = resolve;
+              });
+              wake = null;
+              if (signal?.aborted) break;
+            }
+            while (queue.length > 0) {
+              yield queue.shift() as string;
+            }
+          }
+        } finally {
+          unsubscribe();
+          signal?.removeEventListener("abort", onAbort);
+        }
+      },
+    };
   }
 
   /** Check if a session has a PTY. */

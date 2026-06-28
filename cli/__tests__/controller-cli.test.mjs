@@ -104,6 +104,132 @@ test("runIntegrations surfaces server errors as a non-zero exit", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// terminal CLI parser + dispatcher (issue #261)
+// ---------------------------------------------------------------------------
+
+test("parseTerminal maps list/run/snapshot/tail to action payloads", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseTerminal(["list"]), { action: "list", params: {} });
+  // `run` keeps the command verbatim, joining everything after the id.
+  assert.deepEqual(
+    cli.parseTerminal(["run", "build", "npm", "run", "dev"]),
+    { action: "run", params: { terminalId: "build", command: "npm run dev" } }
+  );
+  // `--lines` is parsed regardless of position and coerced to a number.
+  assert.deepEqual(
+    cli.parseTerminal(["snapshot", "build", "--lines", "50"]),
+    { action: "snapshot", params: { terminalId: "build", lines: 50 } }
+  );
+  assert.deepEqual(
+    cli.parseTerminal(["snapshot", "build"]),
+    { action: "snapshot", params: { terminalId: "build" } }
+  );
+  assert.deepEqual(
+    cli.parseTerminal(["tail", "build", "--follow"]),
+    { action: "tail", params: { terminalId: "build", follow: true } }
+  );
+  assert.deepEqual(
+    cli.parseTerminal(["tail", "build"]),
+    { action: "tail", params: { terminalId: "build", follow: false } }
+  );
+});
+
+test("parseTerminal requires a terminal id for run/snapshot/tail", async () => {
+  const cli = await loadCli();
+  for (const argv of [["run"], ["snapshot"], ["tail"], ["run", "build"]]) {
+    const originalExit = process.exit;
+    const originalStderr = process.stderr.write.bind(process.stderr);
+    let exitCode = null;
+    process.exit = (code) => {
+      exitCode = code;
+      throw new Error("__exit__");
+    };
+    process.stderr.write = () => true;
+    try {
+      await assert.rejects(async () => cli.parseTerminal(argv), /__exit__/);
+    } finally {
+      process.exit = originalExit;
+      process.stderr.write = originalStderr;
+    }
+    assert.equal(exitCode, 1, `expected ${JSON.stringify(argv)} to fail`);
+  }
+});
+
+test("runTerminal list POSTs to /api/terminal/command and prints one row per terminal", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      status: 200,
+      json: async () => ({
+        ok: true,
+        projectId: "p1",
+        worktreeId: "w1",
+        terminals: [
+          { id: "default", label: "default", attached: true },
+          { id: "build", label: "build", attached: false },
+        ],
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runTerminal(["list"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://controller.test/api/terminal/command");
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.action, "list");
+  assert.equal(body.cwd, process.cwd());
+  const out = stdoutChunks.join("");
+  assert.match(out, /default {2}\[attached\]/);
+  assert.match(out, /\bbuild\b/);
+});
+
+test("runTerminal surfaces a server error as a non-zero exit", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    status: 404,
+    json: async () => ({ ok: false, error: 'No terminal "build" is open in this worktree.' }),
+  });
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      () => cli.runTerminal(["snapshot", "build"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /No terminal "build" is open/);
+});
+
+// ---------------------------------------------------------------------------
 // worktrees + sessions CLI parsers (issue #190)
 // ---------------------------------------------------------------------------
 
