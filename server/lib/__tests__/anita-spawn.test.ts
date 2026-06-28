@@ -274,11 +274,21 @@ test("codex spawn passes --model when supplied", async () => {
   assert.equal(args[flagIndex + 1], "gpt-5");
 });
 
-test("codex spawn uses --full-auto by default and a restricted sandbox when off", async () => {
+test("codex spawn uses workspace-write by default and a restricted sandbox when off", async () => {
   const onArgs = await captureCodexArgs({});
+  const onSandboxIndex = onArgs.indexOf("--sandbox");
   assert.ok(
-    onArgs.includes("--full-auto"),
-    `auto-approve on must pass --full-auto, got: ${onArgs.join(" ")}`
+    onSandboxIndex >= 0,
+    `auto-approve on must pass --sandbox, got: ${onArgs.join(" ")}`
+  );
+  assert.equal(onArgs[onSandboxIndex + 1], "workspace-write");
+  assert.ok(
+    onArgs.some((flag) => flag.includes("approval_policy")),
+    `auto-approve on must set an approval policy, got: ${onArgs.join(" ")}`
+  );
+  assert.ok(
+    onArgs.includes('approval_policy="on-request"'),
+    `auto-approve on must use on-request approval policy, got: ${onArgs.join(" ")}`
   );
   const offArgs = await captureCodexArgs({ autoApprove: false });
   assert.ok(

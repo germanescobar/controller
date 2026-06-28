@@ -118,6 +118,7 @@ import {
   clearComposerDraft,
 } from "../lib/composer-draft.ts";
 import { describeApprovalInput } from "../lib/describe-approval-input.ts";
+import { getLatestPendingToolApproval } from "../lib/pending-tool-approval.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -1155,28 +1156,6 @@ function getLatestPendingUserInputRequest(
           Boolean
         );
       return questions.length > 0 ? { eventId: event.id, questions } : null;
-    }
-  }
-
-  return null;
-}
-
-function getLatestPendingToolApproval(
-  events: AgentEvent[]
-): { requestId: string; toolName: string; input: Record<string, unknown> } | null {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    // A response settles every earlier request, so the most recent terminal
-    // marker wins: a response means nothing is pending.
-    if (event.type === "tool_approval_response") return null;
-    if (event.type === "tool_approval_requested") {
-      const requestId = event.data.requestId as string | undefined;
-      if (!requestId) return null;
-      return {
-        requestId,
-        toolName: (event.data.toolName as string | undefined) ?? "tool",
-        input: (event.data.input as Record<string, unknown> | undefined) ?? {},
-      };
     }
   }
 
@@ -5146,9 +5125,14 @@ export function SessionView({
   const pendingToolApprovalFromStream = visibleStreamItems.some(
     (item) => item.type === "tool_approval_requested"
   );
+  const streamHasSettledToolApprovals = visibleStreamItems.some(
+    (item) => item.type === "error" || item.type === "run_cancelled"
+  );
   const pendingToolApproval = pendingToolApprovalFromStream
     ? null
-    : getLatestPendingToolApproval(events);
+    : getLatestPendingToolApproval(events, {
+        hasSettledStreamItem: streamHasSettledToolApprovals,
+      });
   const waitingForToolApproval =
     pendingToolApprovalFromStream || Boolean(pendingToolApproval);
   const eventRenderItems = useMemo(() => groupEventsForRender(events), [events]);

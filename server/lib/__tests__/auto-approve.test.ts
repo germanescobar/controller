@@ -22,8 +22,13 @@ test("claude permission mode follows auto-approve", () => {
   assert.equal(claudePermissionMode(false), "default");
 });
 
-test("codex exec flags swap full-auto for a restricted, prompting sandbox", () => {
-  assert.deepEqual(codexExecAutoApproveFlags(true), ["--full-auto"]);
+test("codex exec flags use workspace-write when on and a restricted, prompting sandbox when off", () => {
+  assert.deepEqual(codexExecAutoApproveFlags(true), [
+    "--sandbox",
+    "workspace-write",
+    "-c",
+    'approval_policy="on-request"',
+  ]);
   const off = codexExecAutoApproveFlags(false);
   assert.ok(!off.includes("--full-auto"), "off must not auto-approve");
   assert.ok(off.includes("read-only"), "off restricts the sandbox");
