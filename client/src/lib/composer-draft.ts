@@ -14,15 +14,35 @@
  * objects, which can't be serialized to localStorage without copying
  * potentially large blobs and would still lose file identity on restore. Only
  * the text and skill chips are restored.
+ *
+ * The agent + run options (provider, model, mode, reasoning effort, service
+ * tier) are persisted only for the new-session view, where they are user-chosen
+ * for a not-yet-created session. For existing sessions these come from the
+ * persisted session on the server, so the draft never carries them.
  */
-import type { AgentSkill } from "../api.ts";
+import type { AgentSkill, ReasoningEffort, ServiceTier } from "../api.ts";
 
 export interface ComposerDraft {
   text: string;
   skills: AgentSkill[];
+  provider?: string;
+  model?: string;
+  mode?: "default" | "plan";
+  reasoningEffort?: ReasoningEffort;
+  serviceTier?: ServiceTier;
 }
 
 const EMPTY_DRAFT: ComposerDraft = { text: "", skills: [] };
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+const SERVICE_TIERS: readonly ServiceTier[] = ["fast", "flex"];
 
 /** Build the localStorage key for a session's (or new-session view's) draft. */
 export function buildComposerDraftKey(
@@ -40,11 +60,27 @@ export function loadComposerDraft(key: string): ComposerDraft {
   try {
     const raw = window.localStorage.getItem(key);
     if (!raw) return EMPTY_DRAFT;
-    const parsed = JSON.parse(raw) as { text?: unknown; skills?: unknown };
-    return {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const draft: ComposerDraft = {
       text: typeof parsed.text === "string" ? parsed.text : "",
       skills: normalizeDraftSkills(parsed.skills),
     };
+    // Agent + run options are optional and only present on new-session drafts.
+    // Validate enum-typed fields so stale/corrupt values fall back to defaults
+    // at the call site; provider/model are free-form strings validated
+    // downstream (against the live provider list / model catalog).
+    if (typeof parsed.provider === "string") draft.provider = parsed.provider;
+    if (typeof parsed.model === "string") draft.model = parsed.model;
+    if (parsed.mode === "default" || parsed.mode === "plan") {
+      draft.mode = parsed.mode;
+    }
+    if (REASONING_EFFORTS.includes(parsed.reasoningEffort as ReasoningEffort)) {
+      draft.reasoningEffort = parsed.reasoningEffort as ReasoningEffort;
+    }
+    if (SERVICE_TIERS.includes(parsed.serviceTier as ServiceTier)) {
+      draft.serviceTier = parsed.serviceTier as ServiceTier;
+    }
+    return draft;
   } catch {
     return EMPTY_DRAFT;
   }
