@@ -95,3 +95,58 @@ test("drops malformed skill entries while keeping valid text", () => {
   assert.equal(loaded.text, "keep me");
   assert.deepEqual(loaded.skills, [skill]);
 });
+
+test("round-trips agent + run options", () => {
+  const key = buildComposerDraftKey(undefined, "proj-1", "wt-1");
+  saveComposerDraft(key, {
+    text: "draft with options",
+    skills: [],
+    provider: "claude",
+    model: "claude-opus-4-8",
+    mode: "plan",
+    reasoningEffort: "high",
+    serviceTier: "fast",
+  });
+
+  const loaded = loadComposerDraft(key);
+  assert.equal(loaded.provider, "claude");
+  assert.equal(loaded.model, "claude-opus-4-8");
+  assert.equal(loaded.mode, "plan");
+  assert.equal(loaded.reasoningEffort, "high");
+  assert.equal(loaded.serviceTier, "fast");
+});
+
+test("omits options entirely when not provided", () => {
+  const key = buildComposerDraftKey(undefined, "proj-1");
+  saveComposerDraft(key, { text: "no options", skills: [] });
+
+  const loaded = loadComposerDraft(key);
+  assert.equal(loaded.provider, undefined);
+  assert.equal(loaded.model, undefined);
+  assert.equal(loaded.mode, undefined);
+  assert.equal(loaded.reasoningEffort, undefined);
+  assert.equal(loaded.serviceTier, undefined);
+});
+
+test("drops invalid enum-typed options but keeps valid ones", () => {
+  const key = "composerDraft:bad-options";
+  window.localStorage.setItem(
+    key,
+    JSON.stringify({
+      text: "keep me",
+      skills: [],
+      provider: "claude",
+      mode: "bogus",
+      reasoningEffort: "turbo",
+      serviceTier: 7,
+    })
+  );
+
+  const loaded = loadComposerDraft(key);
+  assert.equal(loaded.text, "keep me");
+  // Free-form string survives; invalid enums are dropped to fall back to defaults.
+  assert.equal(loaded.provider, "claude");
+  assert.equal(loaded.mode, undefined);
+  assert.equal(loaded.reasoningEffort, undefined);
+  assert.equal(loaded.serviceTier, undefined);
+});

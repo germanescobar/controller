@@ -116,6 +116,7 @@ import {
   loadComposerDraft,
   saveComposerDraft,
   clearComposerDraft,
+  type ComposerDraft,
 } from "../lib/composer-draft.ts";
 import { describeApprovalInput } from "../lib/describe-approval-input.ts";
 import { getLatestPendingToolApproval } from "../lib/pending-tool-approval.ts";
@@ -2900,12 +2901,16 @@ export function SessionView({
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [models, setModels] = useState<Model[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedModel, setSelectedModel] = useState<string>(
+    initialComposerDraft.model ?? ""
+  );
   const [selectedReasoningEffort, setSelectedReasoningEffort] =
-    useState<ReasoningEffort>("medium");
+    useState<ReasoningEffort>(initialComposerDraft.reasoningEffort ?? "medium");
   const [selectedServiceTier, setSelectedServiceTier] =
-    useState<ServiceTier>("flex");
-  const [selectedMode, setSelectedMode] = useState<"default" | "plan">("default");
+    useState<ServiceTier>(initialComposerDraft.serviceTier ?? "flex");
+  const [selectedMode, setSelectedMode] = useState<"default" | "plan">(
+    initialComposerDraft.mode ?? "default"
+  );
   const [isFocusPinned, setIsFocusPinned] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string | undefined>();
   const [titleDialogOpen, setTitleDialogOpen] = useState(false);
@@ -2918,7 +2923,9 @@ export function SessionView({
   const [agents, setAgents] = useState<import("../api.ts").AgentStatus[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
   const [providerLoadError, setProviderLoadError] = useState<string | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<string>("anita");
+  const [selectedProvider, setSelectedProvider] = useState<string>(
+    initialComposerDraft.provider ?? "anita"
+  );
   const [providerResolved, setProviderResolved] = useState(!sessionId);
   const [showProviderPicker, setShowProviderPicker] = useState(false);
   const initialTerminalState = loadStoredTerminals(projectId, worktreeId);
@@ -2977,11 +2984,30 @@ export function SessionView({
   // (new-session view -> created session) swaps the key in place; re-read the
   // (typically empty, post-send) draft for the new key.
   const composerDraftKeyRef = useRef(composerDraftKey);
+  // Tracks the draft key whose new-session agent/run options have been restored.
+  // The mirror effect must not persist options before the reset effect restores
+  // them for the current key, or a key switch (e.g. leaving an existing session
+  // for the new-session composer) would write the previous session's
+  // provider/model into the new draft and clobber the user's saved choices. The
+  // mount key starts "restored" because the state initializers seeded it.
+  const optionsRestoredForKeyRef = useRef<string | null>(composerDraftKey);
+  // Drafted model to prefer over the agent default while restoring a new-session
+  // draft, until the user explicitly changes the provider or model. Without it
+  // the provider-ready effect's default-model reload would clobber the drafted
+  // model.
+  const pendingDraftModelRef = useRef<string | null>(
+    initialComposerDraft.model ?? null
+  );
   if (composerDraftKeyRef.current !== composerDraftKey) {
     composerDraftKeyRef.current = composerDraftKey;
     const rehydrated = loadComposerDraft(composerDraftKey);
     setMessage(rehydrated.text);
     setActiveSkills(rehydrated.skills);
+    // The new key's options aren't restored until the reset effect runs after
+    // this render: block option persistence until then and stage the drafted
+    // model so the provider-ready effect prefers it over the agent default.
+    optionsRestoredForKeyRef.current = null;
+    pendingDraftModelRef.current = rehydrated.model ?? null;
   }
   const [skillPopoverOpen, setSkillPopoverOpen] = useState(false);
   const [skillHighlightIndex, setSkillHighlightIndex] = useState(0);
@@ -3366,8 +3392,37 @@ export function SessionView({
       clearComposerDraft(composerDraftKey);
       return;
     }
-    saveComposerDraft(composerDraftKey, { text: message, skills: activeSkills });
-  }, [message, activeSkills, composerDraftKey, steerInProgress]);
+    // On the new-session view, wait until this key's options have been restored
+    // before persisting. The stored draft already holds the correct text/skills
+    // (just rehydrated) and options, so skipping here loses nothing and avoids
+    // overwriting them with options carried over from a previously viewed key.
+    if (!sessionId && optionsRestoredForKeyRef.current !== composerDraftKey) {
+      return;
+    }
+    const draft: ComposerDraft = { text: message, skills: activeSkills };
+    // The agent + run options are only user-chosen (and thus worth restoring)
+    // on the new-session view. For existing sessions these come from the
+    // persisted session, so we don't mirror them into the draft.
+    if (!sessionId) {
+      draft.provider = selectedProvider;
+      draft.model = selectedModel;
+      draft.mode = selectedMode;
+      draft.reasoningEffort = selectedReasoningEffort;
+      draft.serviceTier = selectedServiceTier;
+    }
+    saveComposerDraft(composerDraftKey, draft);
+  }, [
+    message,
+    activeSkills,
+    composerDraftKey,
+    steerInProgress,
+    sessionId,
+    selectedProvider,
+    selectedModel,
+    selectedMode,
+    selectedReasoningEffort,
+    selectedServiceTier,
+  ]);
 
   const attachToSession = (nextSessionId: string) => {
     debugSessionIsolation("stream.attachedToSession", {
@@ -3463,7 +3518,12 @@ export function SessionView({
 
   useEffect(() => {
     if (providerResolved && providerReady) {
-      const defaultModelId = sessionId ? undefined : getAgentDefaultModel(selectedProvider);
+      // For a new session, prefer a drafted model over the agent default so a
+      // restored draft keeps its model; the ref is cleared once the user picks
+      // a provider or model (see the pickers below).
+      const defaultModelId = sessionId
+        ? undefined
+        : pendingDraftModelRef.current ?? getAgentDefaultModel(selectedProvider);
       loadModels(selectedProvider, defaultModelId);
     }
   }, [selectedProvider, providerResolved, providerReady, sessionId]);
@@ -3620,17 +3680,27 @@ export function SessionView({
       setStreamItems([]);
       setStreaming(false);
       setProviderResolved(true);
-      setSelectedMode("default");
-      setSelectedReasoningEffort("medium");
-      setSelectedServiceTier("flex");
-      // Pre-select the saved default model for this provider when starting a
-      // new session. If the saved default is no longer in the catalog, the
-      // loadModels fallback will pick the first model and surface a toast.
-      const defaultModelId = getAgentDefaultModel(selectedProvider);
+      // Restore the agent + run options from this new-session view's draft,
+      // falling back to defaults when absent. An invalid provider is reconciled
+      // by loadAgentProviders (falls back to the first installed provider); an
+      // invalid model by the loadModels fallback (first model + toast).
+      const draft = loadComposerDraft(composerDraftKey);
+      const provider = draft.provider ?? selectedProvider;
+      if (draft.provider) setSelectedProvider(draft.provider);
+      setSelectedMode(draft.mode ?? "default");
+      setSelectedReasoningEffort(draft.reasoningEffort ?? "medium");
+      setSelectedServiceTier(draft.serviceTier ?? "flex");
+      // Stage the drafted model so the provider-ready effect prefers it over the
+      // agent default, then mark this key's options restored so the mirror
+      // effect may persist again.
+      pendingDraftModelRef.current = draft.model ?? null;
+      optionsRestoredForKeyRef.current = composerDraftKey;
+      // Pre-select the draft's model, or the saved default for this provider
+      // when starting a fresh new session. If neither is in the catalog, the
+      // loadModels fallback picks the first model and surfaces a toast.
+      const defaultModelId = draft.model ?? getAgentDefaultModel(provider);
       if (defaultModelId) {
-        // Defer slightly so the provider effect has resolved models first, or
-        // just call loadModels with the default to handle both cases.
-        loadModels(selectedProvider, defaultModelId);
+        loadModels(provider, defaultModelId);
       }
     }
     setActiveStreamSessionId(sessionId ?? null);
@@ -6032,6 +6102,9 @@ export function SessionView({
                                 key={p.id}
                                 type="button"
                                 onClick={() => {
+                                  // Explicit provider choice: drop any staged
+                                  // draft model so this provider's default loads.
+                                  pendingDraftModelRef.current = null;
                                   setSelectedProvider(p.id);
                                   setShowProviderPicker(false);
                                 }}
@@ -6185,6 +6258,9 @@ export function SessionView({
                                           key={model.id}
                                           type="button"
                                           onClick={() => {
+                                            // Explicit model choice supersedes
+                                            // any staged draft model.
+                                            pendingDraftModelRef.current = null;
                                             setSelectedModel(model.id);
                                             setShowModelPicker(false);
                                           }}
