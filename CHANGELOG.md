@@ -76,64 +76,25 @@ and run it; no install required.
 
 ## [Unreleased]
 
-### Fixed
+## [0.2.0] - 2026-06-28
 
-- **Quote the macOS CLI path before rendering commands.** The agent preamble
-  and the four managed skill bodies (browser, integrations, scripts,
-  search-skills, skill-creator, worktrees) now interpolate the Controller
-  CLI's install path wrapped in single quotes. On macOS the default home
-  is `~/Library/Application Support/Controller/` which contains a literal
-  space; without quoting, an agent that copies the documented "absolute
-  path" command verbatim hits a shell split at the space before the CLI
-  ever runs. The fix is in `controllerCliShellPath()` / `shellQuote()` in
-  `server/lib/controller-cli.ts`; the raw path is still exported as
-  `controllerCliInstalledPath()` for consumers that need the actual
-  filesystem path.
+The second preview release. Headline changes: the orchestrator's on-disk
+state moved out of `$HOME` to platform-appropriate locations (a breaking
+change for existing installs — see below), a public docs site, agent-facing
+CLI surfaces for worktrees / sessions / terminals, per-agent auto-approval
+controls, and the completion of the **Coding Orchestrator → Controller**
+and **Ada → Anita** renames.
 
-### Changed
+> **Upgrade note (breaking):** if you are coming from 0.1.0 (or any
+> pre-#223 build) with state under `~/coding-orchestrator/`, move that
+> directory to the new home **before** launching 0.2.0. The new build does
+> not read or migrate the old path; leaving state behind starts the app
+> empty. See *Changed → Move orchestrator state out of `$HOME`* below and
+> the README's "State location" section for the exact `mv` per platform.
 
-- **Move orchestrator state out of `$HOME` and reduce macOS TCC prompts** (#223).
-  This is a **breaking change for existing installs**: the orchestrator's home
-  directory moved to the platform-appropriate location:
-  - **macOS:** `~/Library/Application Support/Controller/`
-  - **Linux:** `$XDG_STATE_HOME/Controller/` (falls back to `~/.local/state/Controller/`)
-  - **Other:** legacy `~/coding-orchestrator/` until a follow-up adds a native convention
-
-  If you're upgrading from a pre-223 install with state under
-  `~/coding-orchestrator/`, move that directory to the new location by hand
-  before starting the new build (see the README's "State location" section
-  for the exact `mv` per platform). The new build does not read or write
-  the old path; leaving state behind means the new build starts empty.
-
-  Env-var contract: `CONTROLLER_HOME` overrides the home for the current
-  process. There is no `CODING_ORCHESTRATOR_HOME` alias — tests and dev
-  shells set `CONTROLLER_HOME` directly. The CLI now also receives
-  `CONTROLLER_HOME` in the env injected for spawned agents, and its
-  `controller-runtime.json` lookup uses the platform-default home. Net
-  effect: `~/coding-orchestrator/` is no longer created or read on macOS,
-  and the new home is exempt from TCC prompts because it lives under
-  `Application Support`.
-
-  Dev-binary signature stability (the other half of why TCC consent
-  doesn't stick across rebuilds) is deferred to a follow-up PR.
-
-- **Sidebar rename and Controller Mode prominence.** The sidebar's
-  "In flight" section is now **On radar**, and the copy in the
-  focus-queue empty state, the Controller Mode banner inside the
-  session view, and the "Add/Remove from in-flight" tooltips on the
-  radar pin buttons (header and mobile) all use the new "On radar"
-  wording. The "New project" entry that used to sit at the top of
-  the sidebar moved to a small **New** button on the right of the
-  **Projects** label. Controller Mode now sits inline next to the
-  **ON RADAR** label (only when the focus queue has items), showing
-  a play icon and the "Controller Mode" label (the `F`/`E` keyboard
-  hint was dropped to keep the button visually quiet), with an
-  active blue/ringed state when on and a neutral hover state when
-  off. The completion toast
-  ("Session completed — A background session has finished. [View]")
-  and the green-dot badge on completed sessions in the sidebar were
-  removed; the `completedSessions` state and prop were deleted
-  since nothing reads them anymore.
+> **macOS Gatekeeper:** the macOS build remains ad-hoc-signed and not
+> notarized. On first launch, open **System Settings → Privacy & Security →
+> Security** and click **Open Anyway** for Controller.
 
 ### Added
 
@@ -208,24 +169,91 @@ and run it; no install required.
   project-management block that surfaces every new subcommand with the
   absolute CLI install path so the agent can copy/paste them verbatim.
 
-### Fixed
+- **Agent-controlled terminal surface** (`controller terminal` CLI +
+  managed skill). Agents can list the user's open terminals, run a
+  command in a specific tab, snapshot recent output, and tail new
+  output without opening a fresh shell.
 
-- **`controller integrations …` no longer crashes with
-  `ReferenceError: runIntegrations is not defined`** (#178). The unified
-  CLI's dispatcher called a `runIntegrations` helper that was never
-  defined, so every `list` / `search` / `tools` / `describe` / `call` /
-  `request` / `status` subcommand threw before reaching the server. The
-  dispatcher is now wired up to `parseIntegrations` and `printIntegrations`,
-  mirroring the `browser` and `skills` surfaces, and POSTs to the
-  `/api/integrations/gateway/<endpoint>` routes the server already
-  exposes (caught in review — the gateway endpoints live under
-  `/gateway/*`, not at the router root). Server-side errors are surfaced
-  as a non-zero exit with the message from `result.error`, consistent
-  with the other surfaces. A new smoke-test file
-  (`cli/__tests__/controller-cli.test.mjs`) imports the CLI module,
-  stubs `fetch`, and asserts the regression class is caught early.
+- **Per-agent auto-approval flags** (#258). Auto-approval behavior is
+  now configurable per agent from the agent settings, alongside the
+  simplified settings rows (#273).
+
+- **Schedule future sessions with optional repeat** (#245). Queue a
+  session to run later, once at a specific time or on a recurring
+  schedule.
+
+- **`run.sh` support in the project form** (#238). Projects can declare
+  a per-worktree run script from the project settings form.
+
+- **Clickable internal `controller://` links.** Transcripts can link to
+  other conversations and resolve them inside the app.
+
+- **Persist chat composer drafts across navigation** (#253), including
+  the selected agent and run options (#275), and **persist run env in
+  terminal sessions** (#274), so in-progress input and per-session
+  configuration survive navigation and refreshes.
+
+- **Render Anita manual-approval prompts in the UI** (#270). Manual tool
+  approvals requested by Anita are now surfaced as interactive prompts.
+
+- **Refresh button in the source-tab file explorer.**
+
+- **Public docs site on GitHub Pages** (#246) with a sidebar help icon,
+  completed with full user-guide and development sections (#256).
+
+- **Customizable Controller Mode shortcuts** (#242). The Controller Mode
+  focus-advance shortcuts are now modifier-based and user-customizable,
+  with a live "stay / continue" chord shown on the focus-advance toast
+  (#235).
 
 ### Changed
+
+- **Move orchestrator state out of `$HOME` and reduce macOS TCC prompts** (#223).
+  This is a **breaking change for existing installs**: the orchestrator's home
+  directory moved to the platform-appropriate location:
+  - **macOS:** `~/Library/Application Support/Controller/`
+  - **Linux:** `$XDG_STATE_HOME/Controller/` (falls back to `~/.local/state/Controller/`)
+  - **Other:** legacy `~/coding-orchestrator/` until a follow-up adds a native convention
+
+  If you're upgrading from a pre-223 install with state under
+  `~/coding-orchestrator/`, move that directory to the new location by hand
+  before starting the new build (see the README's "State location" section
+  for the exact `mv` per platform). The new build does not read or write
+  the old path; leaving state behind means the new build starts empty.
+
+  Env-var contract: `CONTROLLER_HOME` overrides the home for the current
+  process. There is no `CODING_ORCHESTRATOR_HOME` alias — tests and dev
+  shells set `CONTROLLER_HOME` directly. The CLI now also receives
+  `CONTROLLER_HOME` in the env injected for spawned agents, and its
+  `controller-runtime.json` lookup uses the platform-default home. Net
+  effect: `~/coding-orchestrator/` is no longer created or read on macOS,
+  and the new home is exempt from TCC prompts because it lives under
+  `Application Support`.
+
+  Dev-binary signature stability (the other half of why TCC consent
+  doesn't stick across rebuilds) is deferred to a follow-up PR.
+
+- **Finished the Coding Orchestrator → Controller rename** (#255). The
+  product is now consistently named **Controller** across the UI,
+  prompts, CLI, and docs.
+
+- **Sidebar rename and Controller Mode prominence.** The sidebar's
+  "In flight" section is now **On radar**, and the copy in the
+  focus-queue empty state, the Controller Mode banner inside the
+  session view, and the "Add/Remove from in-flight" tooltips on the
+  radar pin buttons (header and mobile) all use the new "On radar"
+  wording. The "New project" entry that used to sit at the top of
+  the sidebar moved to a small **New** button on the right of the
+  **Projects** label. Controller Mode now sits inline next to the
+  **ON RADAR** label (only when the focus queue has items), showing
+  a play icon and the "Controller Mode" label (the `F`/`E` keyboard
+  hint was dropped to keep the button visually quiet), with an
+  active blue/ringed state when on and a neutral hover state when
+  off. The completion toast
+  ("Session completed — A background session has finished. [View]")
+  and the green-dot badge on completed sessions in the sidebar were
+  removed; the `completedSessions` state and prop were deleted
+  since nothing reads them anymore.
 
 - **New worktrees now base off `origin/<branch>` by default** (#172).
   Creating a worktree from the orchestrator runs `git fetch origin <branch>`
@@ -290,9 +318,22 @@ and run it; no install required.
   skill-creator}` is no longer required for this purpose (it was a
   one-time follow-up to #173's rename).
 
+- **Renamed the default agent from "Ada" to "Anita"** (#151) to match the
+  `anita` CLI. This touches the agent display name, the spawned CLI command,
+  user-facing labels, prompts, logs, and docs. The canonical provider id is now
+  `anita`.
 
+  **Backward compatibility:** the legacy `ada` provider id is still accepted on
+  read. Existing sessions that persisted `provider: "ada"` (or omitted it),
+  agent settings saved under the `ada` key, and API requests using
+  `?provider=ada` continue to work — they resolve to `anita` automatically, so
+  no migration is required. Skills are read from the canonical
+  `~/.anita/skills` / `.anita/skills` locations, falling back to the legacy
+  `~/.ada/skills` / `.ada/skills` locations when the new ones don't exist yet.
 
-### Changed
+- **Send project env to tmux via a temp file** rather than inline in the
+  `send-keys` line, so environment values with spaces or shell
+  metacharacters reach terminal sessions intact.
 
 - **Updated session-file ownership comments to reflect post-#152 / #163
   reality** (#165). The Ada→Anita rename moved the `anita` CLI's session
@@ -312,6 +353,30 @@ and run it; no install required.
 
 ### Fixed
 
+- **Quote the macOS CLI path before rendering commands.** The agent preamble
+  and the four managed skill bodies (browser, integrations, scripts,
+  search-skills, skill-creator, worktrees) now interpolate the Controller
+  CLI's install path wrapped in single quotes. On macOS the default home
+  is `~/Library/Application Support/Controller/` which contains a literal
+  space; without quoting, an agent that copies the documented "absolute
+  path" command verbatim hits a shell split at the space before the CLI
+  ever runs. The fix is in `controllerCliShellPath()` / `shellQuote()` in
+  `server/lib/controller-cli.ts`; the raw path is still exported as
+  `controllerCliInstalledPath()` for consumers that need the actual
+  filesystem path.
+
+- **`controller integrations …` no longer crashes with
+  `ReferenceError: runIntegrations is not defined`** (#178). The unified
+  CLI's dispatcher called a `runIntegrations` helper that was never
+  defined, so every `list` / `search` / `tools` / `describe` / `call` /
+  `request` / `status` subcommand threw before reaching the server. The
+  dispatcher is now wired up to `parseIntegrations` and `printIntegrations`,
+  mirroring the `browser` and `skills` surfaces, and POSTs to the
+  `/api/integrations/gateway/<endpoint>` routes the server already
+  exposes. A new smoke-test file (`cli/__tests__/controller-cli.test.mjs`)
+  imports the CLI module, stubs `fetch`, and asserts the regression class
+  is caught early.
+
 - **Anita multi-turn transcripts now render in full** (#163). The orchestrator
   was skipping its own transcript persistence for Anita and relying on the
   `anita` CLI to write events into `.coding-agent/events/`. After the Ada→Anita
@@ -322,21 +387,23 @@ and run it; no install required.
   for Codex and Claude — so Anita is no longer coupled to the CLI's on-disk
   storage location. Transcript writes are now serialized through the stream's
   processing chain so the persisted `.coding-agent/events/` JSONL always records
-  events in stream order; previously fire-and-forget appends could let the OS
-  reorder them and a reloaded transcript could show an assistant response ahead
-  of the user turn that prompted it.
+  events in stream order.
 
-### Changed
+- **Claude "Always allow" no longer hangs after approval.** Granting an
+  "Always allow" tool approval to the Claude agent no longer leaves the
+  run waiting; the approval resolves and the turn continues.
 
-- **Renamed the default agent from "Ada" to "Anita"** (#151) to match the
-  `anita` CLI. This touches the agent display name, the spawned CLI command,
-  user-facing labels, prompts, logs, and docs. The canonical provider id is now
-  `anita`.
+- **Codex: clear stale tool approvals after terminal runs.** Tool
+  approvals left over from a previous terminal run are now cleared so
+  they don't leak into the next run.
 
-  **Backward compatibility:** the legacy `ada` provider id is still accepted on
-  read. Existing sessions that persisted `provider: "ada"` (or omitted it),
-  agent settings saved under the `ada` key, and API requests using
-  `?provider=ada` continue to work — they resolve to `anita` automatically, so
-  no migration is required. Skills are read from the canonical
-  `~/.anita/skills` / `.anita/skills` locations, falling back to the legacy
-  `~/.ada/skills` / `.ada/skills` locations when the new ones don't exist yet.
+- **Exclude shared test files from the Electron TypeScript build** so
+  `*.test.ts` files under `shared/` no longer break `build:electron-runtime`.
+
+### Docs
+
+- **Mention Conductor and Superset project support in the Overview** (#272).
+
+- **Document the macOS Gatekeeper bypass** (and the Tahoe Gatekeeper
+  dead-end / direct-binary launch workaround) for the ad-hoc-signed,
+  un-notarized build.
