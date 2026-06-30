@@ -30,14 +30,14 @@ test("runIntegrations is defined (regression for issue #178)", async () => {
 
 test("parseIntegrations maps subcommands to gateway endpoints", async () => {
   const cli = await loadCli();
-  assert.deepEqual(cli.parseIntegrations(["list"]), { endpoint: "list", body: {} });
+  assert.deepEqual(cli.parseIntegrations(["list"]), { action: "gateway", endpoint: "list", body: {} });
   assert.deepEqual(
     cli.parseIntegrations(["search", "openapi", "auth"]),
-    { endpoint: "search", body: { query: "openapi auth" } }
+    { action: "gateway", endpoint: "search", body: { query: "openapi auth" } }
   );
   assert.deepEqual(
     cli.parseIntegrations(["call", "Trello", "createCard", "--json", '{"idList":"abc"}']),
-    { endpoint: "call", body: { integration: "Trello", tool: "createCard", args: { idList: "abc" } } }
+    { action: "gateway", endpoint: "call", body: { integration: "Trello", tool: "createCard", args: { idList: "abc" } } }
   );
 });
 
@@ -633,4 +633,462 @@ test("runSchedules add resolves the project and POSTs to the schedules endpoint"
   assert.equal(body.worktreeId, "wt-1");
   assert.equal(body.runAt, "2026-06-26T08:00:00.000Z");
   assert.match(stdoutChunks.join(""), /Created schedule sched-1/);
+});
+
+// ---------------------------------------------------------------------------
+// integrations create + list --all (issue #279)
+// ---------------------------------------------------------------------------
+
+test("parseIntegrations create builds a single-scheme registry payload with a Bearer header attachment", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseIntegrations([
+    "create",
+    "--name",
+    "NotionCustom",
+    "--transport-mode",
+    "rest",
+    "--transport-config",
+    "baseUrl=https://api.notion.com/v1",
+    "--transport-header",
+    "Notion-Version=2026-03-11",
+    "--scheme-acquisition",
+    "static",
+    "--scheme-attachment",
+    "header:Authorization",
+    "--scheme-attachment-prefix",
+    "Bearer ",
+    "--scheme-secret",
+    "secret_xyz",
+  ]);
+  assert.equal(parsed.action, "create");
+  assert.equal(parsed.body.name, "NotionCustom");
+  assert.equal(parsed.body.transport.mode, "rest");
+  assert.deepEqual(parsed.body.transport.config, { baseUrl: "https://api.notion.com/v1" });
+  assert.deepEqual(parsed.body.transport.headers, { "Notion-Version": "2026-03-11" });
+  assert.deepEqual(parsed.body.auth.schemes, [
+    {
+      acquisition: "static",
+      attachment: { kind: "header", name: "Authorization", prefix: "Bearer " },
+      secret: "secret_xyz",
+    },
+  ]);
+  // `--enabled` is omitted so the server default (true) applies.
+  assert.equal("enabled" in parsed.body, false);
+});
+
+test("parseIntegrations create supports a multi-scheme AND-set (Trello shape) and forwards --enabled", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseIntegrations([
+    "create",
+    "--name",
+    "Trello",
+    "--enabled",
+    "false",
+    "--transport-mode",
+    "rest",
+    "--transport-config",
+    "baseUrl=https://api.trello.com/1",
+    "--scheme-acquisition",
+    "static",
+    "--scheme-attachment",
+    "query:key",
+    "--scheme-secret",
+    "APIKEY",
+    "--scheme-acquisition",
+    "static",
+    "--scheme-attachment",
+    "query:token",
+    "--scheme-secret",
+    "USERTOKEN",
+  ]);
+  assert.equal(parsed.action, "create");
+  assert.equal(parsed.body.enabled, false);
+  assert.equal(parsed.body.auth.schemes.length, 2);
+  assert.deepEqual(parsed.body.auth.schemes[0], {
+    acquisition: "static",
+    attachment: { kind: "query", name: "key" },
+    secret: "APIKEY",
+  });
+  assert.deepEqual(parsed.body.auth.schemes[1], {
+    acquisition: "static",
+    attachment: { kind: "query", name: "token" },
+    secret: "USERTOKEN",
+  });
+});
+
+test("parseIntegrations create rejects invalid transport modes and acquisitions with a clear error", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseIntegrations([
+          "create",
+          "--name",
+          "x",
+          "--transport-mode",
+          "websocket",
+          "--scheme-acquisition",
+          "static",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--transport-mode must be one of/);
+  assert.match(stderrText, /websocket/);
+
+  // Reset and test the acquisition validator.
+  stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseIntegrations([
+          "create",
+          "--name",
+          "x",
+          "--transport-mode",
+          "rest",
+          "--scheme-acquisition",
+          "magic",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--scheme-acquisition must be one of/);
+  assert.match(stderrText, /magic/);
+});
+
+test("parseIntegrations create rejects attachments for hmac/mtls/cloud and malformed attachment forms", async () => {
+  const cli = await loadCli();
+  for (const bad of [
+    "--scheme-attachment", "header:Authorization",
+    "--scheme-acquisition", "hmac",
+  ]) void bad;
+  const cases = [
+    {
+      // hmac is non-attachable.
+      argv: [
+        "create",
+        "--name", "x", "--transport-mode", "rest",
+        "--scheme-acquisition", "hmac",
+        "--scheme-attachment", "header:Authorization",
+      ],
+      matches: /--scheme-attachment is not valid for acquisition "hmac"/,
+    },
+    {
+      // missing colon
+      argv: [
+        "create", "--name", "x", "--transport-mode", "rest",
+        "--scheme-acquisition", "static",
+        "--scheme-attachment", "header",
+      ],
+      matches: /--scheme-attachment must be in the form <header\|query>:<name>/,
+    },
+    {
+      // wrong kind
+      argv: [
+        "create", "--name", "x", "--transport-mode", "rest",
+        "--scheme-acquisition", "static",
+        "--scheme-attachment", "cookie:session",
+      ],
+      matches: /--scheme-attachment kind must be "header" or "query"/,
+    },
+  ];
+  for (const { argv, matches } of cases) {
+    const originalExit = process.exit;
+    const originalStderr = process.stderr.write.bind(process.stderr);
+    let exitCode = null;
+    let stderrText = "";
+    process.exit = (code) => {
+      exitCode = code;
+      throw new Error("__exit__");
+    };
+    process.stderr.write = (chunk) => {
+      stderrText += String(chunk);
+      return true;
+    };
+    try {
+      await assert.rejects(
+        async () => cli.parseIntegrations(argv),
+        /__exit__/
+      );
+    } finally {
+      process.exit = originalExit;
+      process.stderr.write = originalStderr;
+    }
+    assert.equal(exitCode, 1, `expected ${JSON.stringify(argv)} to fail`);
+    assert.match(stderrText, matches, `stderr did not match for ${JSON.stringify(argv)}: ${stderrText}`);
+  }
+});
+
+test("parseIntegrations create marks --scheme-secret-file and stdin sources for async resolution", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseIntegrations([
+    "create",
+    "--name",
+    "x",
+    "--transport-mode",
+    "rest",
+    "--scheme-acquisition",
+    "static",
+    "--scheme-attachment",
+    "header:Authorization",
+    "--scheme-secret-file",
+    "/tmp/secret.txt",
+  ]);
+  // The parser leaves a sentinel so the async run path can read the file
+  // and patch the secret onto the body before the POST. The sentinel must
+  // never reach the wire.
+  assert.equal(parsed.body.auth.schemes[0].secret, "");
+  assert.deepEqual(parsed.body.auth.schemes[0].__secretSource, {
+    kind: "file",
+    path: "/tmp/secret.txt",
+  });
+
+  const stdinParsed = cli.parseIntegrations([
+    "create",
+    "--name",
+    "x",
+    "--transport-mode",
+    "rest",
+    "--scheme-acquisition",
+    "static",
+    "--scheme-attachment",
+    "header:Authorization",
+    "--scheme-secret",
+    "-",
+  ]);
+  assert.equal(stdinParsed.body.auth.schemes[0].secret, "");
+  assert.deepEqual(stdinParsed.body.auth.schemes[0].__secretSource, { kind: "stdin" });
+});
+
+test("parseIntegrations create rejects --scheme-secret and --scheme-secret-file on the same block", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseIntegrations([
+          "create", "--name", "x", "--transport-mode", "rest",
+          "--scheme-acquisition", "static",
+          "--scheme-attachment", "header:Authorization",
+          "--scheme-secret", "inline",
+          "--scheme-secret-file", "/tmp/secret.txt",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--scheme-secret and --scheme-secret-file are mutually exclusive/);
+});
+
+test("parseIntegrations list --all routes to the registry view, not the gateway", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseIntegrations(["list", "--all"]), {
+    action: "registry-list",
+    body: { json: false },
+  });
+  assert.deepEqual(cli.parseIntegrations(["list", "--all", "--json"]), {
+    action: "registry-list",
+    body: { json: true },
+  });
+});
+
+test("runIntegrations create POSTs to /api/integrations/, strips secret sentinels, and prints id+name", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      status: 201,
+      json: async () => ({
+        id: "conn-abc",
+        name: "Trello",
+        enabled: true,
+        transport: { mode: "rest" },
+        auth: { schemes: [] },
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runIntegrations(
+      [
+        "create",
+        "--name", "Trello",
+        "--transport-mode", "rest",
+        "--scheme-acquisition", "static",
+        "--scheme-attachment", "query:key",
+        "--scheme-secret", "K",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(calls.length, 1);
+  // The registry route is `/api/integrations/`, not the gateway prefix.
+  assert.equal(calls[0].url, "http://controller.test/api/integrations/");
+  assert.equal(calls[0].init.method, "POST");
+  const body = JSON.parse(calls[0].init.body);
+  assert.equal(body.cwd, process.cwd());
+  assert.equal(body.name, "Trello");
+  // Sentinel must not reach the wire.
+  assert.equal("__secretSource" in body.auth.schemes[0], false);
+  assert.equal(body.auth.schemes[0].secret, "K");
+  assert.match(stdoutChunks.join(""), /Created integration Trello \(id=conn-abc\) \[mode=rest\]/);
+});
+
+test("runIntegrations create reads --scheme-secret-file and never includes the sentinel on the wire", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ctrl-cli-"));
+  const secretPath = path.join(dir, "secret.txt");
+  await fs.writeFile(secretPath, "TOP-SECRET\n", "utf-8");
+
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      status: 201,
+      json: async () => ({
+        id: "conn-1",
+        name: "x",
+        enabled: true,
+        transport: { mode: "rest" },
+        auth: { schemes: [] },
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runIntegrations(
+      [
+        "create",
+        "--name", "x",
+        "--transport-mode", "rest",
+        "--scheme-acquisition", "static",
+        "--scheme-attachment", "header:Authorization",
+        "--scheme-secret-file", secretPath,
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+  const body = JSON.parse(calls[0].init.body);
+  // Trailing newline stripped; sentinel stripped.
+  assert.equal(body.auth.schemes[0].secret, "TOP-SECRET");
+  assert.equal("__secretSource" in body.auth.schemes[0], false);
+  // The file contents must never reach stdout/stderr via the CLI's writes.
+  for (const chunk of stdoutChunks) {
+    assert.ok(!chunk.includes("TOP-SECRET"), `secret leaked to stdout: ${chunk}`);
+  }
+});
+
+test("runIntegrations list --all GETs the registry endpoint and prints full records", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      status: 200,
+      json: async () => ([
+        {
+          id: "conn-1",
+          name: "Notion",
+          enabled: true,
+          transport: { mode: "rest" },
+          auth: { schemes: [{ id: "s1", acquisition: "static", hasSecret: true, config: {}, attachment: { kind: "header", name: "Authorization" } }] },
+        },
+        {
+          id: "conn-2",
+          name: "Disabled",
+          enabled: false,
+          transport: { mode: "cli" },
+          auth: { schemes: [] },
+        },
+      ]),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runIntegrations(["list", "--all"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://controller.test/api/integrations/");
+  // GET, not POST (the registry index is read-only).
+  assert.equal(calls[0].init, undefined);
+  const out = stdoutChunks.join("");
+  assert.match(out, /conn-1  Notion  \[enabled\]  rest/);
+  assert.match(out, /conn-2  Disabled  \[disabled\]  cli/);
+  // Secret values must not appear (and the server never returns them anyway).
+  assert.ok(!out.includes("secret"));
 });
