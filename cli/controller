@@ -45,13 +45,39 @@ const USAGE = `Usage:
   result with \`snapshot\` (last \`--lines\` lines, default 200) or \`tail\`
   (new output; \`--follow\` streams until interrupted).
 
-  controller integrations list
+  controller integrations list [--all]
   controller integrations search <query>
   controller integrations tools <integration>
   controller integrations describe <integration> <tool>
   controller integrations call <integration> <tool> [--json '{"key":"value"}']
   controller integrations request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']
   controller integrations status <integration>
+  controller integrations create --name <name> --transport-mode <mode> \\
+      [--enabled true|false] \\
+      [--transport-config k=v]... [--transport-header k=v]... [--transport-query k=v]... \\
+      [--scheme-acquisition <kind> [--scheme-id <id>] \\
+          [--scheme-attachment <header|query>:<name> [--scheme-attachment-prefix <prefix>]] \\
+          [--scheme-config k=v]... \\
+          [--scheme-secret <value> | --scheme-secret=- | --scheme-secret-file <path>]]...
+
+  \`integrations list\` (default) shows active connections in the agent-facing
+  gateway view. \`--all\` returns the full registry (active + disabled) — use
+  it to inspect an existing connection or grab an id before calling \`create\`.
+
+  \`integrations create\` stands up a new connection in the registry. The
+  built-in connections (Notion, Trello, GitHub, …) are read-only from the
+  agent's side, so this is how you wire up a custom third-party service and
+  then immediately use it through the gateway (\`call\` / \`request\`).
+
+  Each \`--scheme-acquisition\` flag starts a new auth scheme block; everything
+  until the next \`--scheme-acquisition\` (or end of args) belongs to it. At
+  least one scheme is required. Valid acquisitions: static, basic, oauth,
+  oauth_client_credentials, oauth_dynamic, cloud, hmac, mtls. Attachments
+  (\`--scheme-attachment header:Authorization\`) are rejected for hmac/mtls/cloud.
+
+  Secrets: prefer \`--scheme-secret-file <path>\` (read once, never echoed) or
+  \`--scheme-secret=-\` (read from stdin). \`--scheme-secret <value>\` is also
+  accepted but exposes the value to the process list / shell history.
 
   controller skills list
   controller skills search <query>
@@ -892,22 +918,46 @@ function flagValue(rest, flag) {
   return idx >= 0 ? rest[idx + 1] : undefined;
 }
 
+// Mirror of the `CONNECTION_MODES` and `ACQUISITIONS` enums in
+// `server/routes/integrations.ts`. The CLI re-validates these so the agent
+// gets immediate feedback on a typo instead of a generic 400; the server
+// remains the source of truth (keeps the two in sync).
+const INTEGRATION_MODES = ["mcp", "openapi", "rest", "graphql", "cli"];
+const INTEGRATION_ACQUISITIONS = [
+  "static",
+  "basic",
+  "oauth",
+  "oauth_client_credentials",
+  "oauth_dynamic",
+  "cloud",
+  "hmac",
+  "mtls",
+];
+// Acquisitions that don't carry an attachable credential (the gateway
+// reaches them through signing or the transport layer, not a header/query).
+const NON_ATTACHABLE_ACQUISITIONS = new Set(["hmac", "mtls", "cloud"]);
+
 export function parseIntegrations(argv) {
   const [command, ...rest] = argv;
   switch (command) {
     case "list":
-      return { endpoint: "list", body: {} };
+      // `--all` switches to the registry view (full record, includes disabled).
+      // Plain `list` keeps the existing gateway view (active + summary).
+      if (rest.includes("--all")) {
+        return { action: "registry-list", body: { json: rest.includes("--json") } };
+      }
+      return { action: "gateway", endpoint: "list", body: {} };
     case "search": {
       const query = rest.join(" ").trim();
       if (!query) fail("integrations search requires a <query>");
-      return { endpoint: "search", body: { query } };
+      return { action: "gateway", endpoint: "search", body: { query } };
     }
     case "tools":
       if (!rest[0]) fail("integrations tools requires an <integration>");
-      return { endpoint: "tools", body: { integration: rest[0] } };
+      return { action: "gateway", endpoint: "tools", body: { integration: rest[0] } };
     case "describe":
       if (!rest[0] || !rest[1]) fail("integrations describe requires <integration> <tool>");
-      return { endpoint: "describe", body: { integration: rest[0], tool: rest[1] } };
+      return { action: "gateway", endpoint: "describe", body: { integration: rest[0], tool: rest[1] } };
     case "call": {
       if (!rest[0] || !rest[1]) fail("integrations call requires <integration> <tool>");
       const json = flagValue(rest, "--json");
@@ -919,7 +969,7 @@ export function parseIntegrations(argv) {
           fail("--json must be valid JSON");
         }
       }
-      return { endpoint: "call", body: { integration: rest[0], tool: rest[1], args } };
+      return { action: "gateway", endpoint: "call", body: { integration: rest[0], tool: rest[1], args } };
     }
     case "request": {
       if (!rest[0] || !rest[1] || !rest[2]) fail("integrations request requires <integration> <METHOD> <path>");
@@ -933,6 +983,7 @@ export function parseIntegrations(argv) {
         }
       }
       return {
+        action: "gateway",
         endpoint: "request",
         body: {
           integration: rest[0],
@@ -946,10 +997,318 @@ export function parseIntegrations(argv) {
     }
     case "status":
       if (!rest[0]) fail("integrations status requires an <integration>");
-      return { endpoint: "status", body: { integration: rest[0] } };
+      return { action: "gateway", endpoint: "status", body: { integration: rest[0] } };
+    case "create":
+      // `create` is not a gateway call: it POSTs to the registry endpoint
+      // (`/api/integrations/`) and the response shape differs from the
+      // gateway actions, so it has its own dispatch path below.
+      return { action: "create", body: parseIntegrationCreate(rest) };
     default:
       fail(`Unknown integrations command: ${command ?? ""}\n${USAGE}`);
   }
+}
+
+/*
+ * Build the registry create body from CLI flags.
+ *
+ *   controller integrations create --name <name> --transport-mode <mode> \\
+ *       [--enabled true|false] \\
+ *       [--transport-config k=v]... [--transport-header k=v]... [--transport-query k=v]... \\
+ *       [--scheme-acquisition <kind> [--scheme-id <id>] \\
+ *           [--scheme-attachment <header|query>:<name> [--scheme-attachment-prefix <prefix>]] \\
+ *           [--scheme-config k=v]... \\
+ *           [--scheme-secret <value> | --scheme-secret=- | --scheme-secret-file <path>]]...
+ *
+ * The scheme flags form a small "block" grammar: `--scheme-acquisition`
+ * starts a new block and consumes every following `--scheme-*` flag until
+ * the next `--scheme-acquisition` or end of args. We split on acquisition
+ * boundaries first, then parse each block in isolation. This keeps the
+ * parser linear in argv length and means a user mistake in one scheme
+ * (e.g. a bad attachment) doesn't lose the others.
+ */
+function parseIntegrationCreate(rest) {
+  // Walk argv once, popping top-level flags + their values into the
+  // top-level record, and accumulating any `--scheme-*` arg into a
+  // pending list. We treat `--scheme-acquisition` as a hard block
+  // boundary: it flushes the pending scheme args into a new block
+  // (if the prior block is non-empty) and the next non-scheme arg
+  // starts the new block's content. This keeps the parser linear in
+  // argv length and means a typo in one scheme doesn't lose the others.
+  const name = { value: undefined };
+  const transportMode = { value: undefined };
+  const enabled = { value: undefined };
+  const transport = { config: {}, headers: {}, query: {} };
+
+  // Flags whose `--flag=value` shorthand the parser accepts. The value
+  // is whatever follows the first `=`. For `--scheme-secret=-` the value
+  // is the literal "-" (a sentinel for stdin), not a missing token — so
+  // splitting in argv before the value-consumer runs is exactly the
+  // shape we need. Transport pair flags (`--transport-config k=v`, ...)
+  // are listed too so users can write `--transport-config=baseUrl=...`
+  // in shells that prefer the `=` form.
+  const EQUALS_FORM_FLAGS = new Set([
+    "--name",
+    "--enabled",
+    "--transport-mode",
+    "--transport-config",
+    "--transport-header",
+    "--transport-query",
+    "--scheme-acquisition",
+    "--scheme-id",
+    "--scheme-attachment",
+    "--scheme-attachment-prefix",
+    "--scheme-config",
+    "--scheme-secret",
+    "--scheme-secret-file",
+  ]);
+  // `=value` shorthand: when the arg is `--flag=value`, split it so the
+  // value-consumer sees the flag and value as separate tokens (just like
+  // a shell would have if the user had written them as separate args).
+  // `parsePairs`-style flags (transport-config, scheme-config) are
+  // handled here too: `--transport-config=baseUrl=https://x` becomes
+  // `--transport-config baseUrl=https://x`, and the existing key=value
+  // parser does the rest.
+  rest = expandEqualsForm(rest, EQUALS_FORM_FLAGS);
+
+  const blocks = [];
+  let pending = null;
+  let lastTopLevelFlag = null;
+  let lastSchemeFlag = null;
+  // When set, the next non-`--scheme-*` arg is the acquisition kind for
+  // the current scheme block. We track this explicitly so the loop doesn't
+  // try to route the acquisition value into the top-level value consumer.
+  let nextIsSchemeAcquisition = false;
+
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+
+    if (arg === "--scheme-acquisition") {
+      if (pending) blocks.push(pending);
+      pending = { args: [] };
+      nextIsSchemeAcquisition = true;
+      lastTopLevelFlag = null;
+      lastSchemeFlag = null;
+      continue;
+    }
+
+    if (nextIsSchemeAcquisition) {
+      // Acquisition value is positional (not a `--scheme-*` flag).
+      pending.args.push(arg);
+      nextIsSchemeAcquisition = false;
+      lastTopLevelFlag = null;
+      lastSchemeFlag = null;
+      continue;
+    }
+
+    // Scheme value-flag: the arg immediately following a `--scheme-*` flag.
+    if (lastSchemeFlag) {
+      pending.args.push(lastSchemeFlag);
+      pending.args.push(arg);
+      lastSchemeFlag = null;
+      lastTopLevelFlag = null;
+      continue;
+    }
+
+    // --scheme-* flags (other than --scheme-acquisition) are routed to the
+    // scheme buffer of the current block. A scheme flag without a prior
+    // --scheme-acquisition is a user error.
+    if (arg.startsWith("--scheme-")) {
+      if (!pending) {
+        fail(`integrations create: ${arg} appeared before any --scheme-acquisition`);
+      }
+      // Bool-style scheme flags (none today) would skip the next arg here.
+      lastSchemeFlag = arg;
+      lastTopLevelFlag = null;
+      continue;
+    }
+
+    // Top-level value: the arg immediately following a top-level
+    // value-flag. We track which flag was just consumed so the splitter
+    // doesn't mistake a positional value (e.g. the name) for a flag.
+    if (lastTopLevelFlag) {
+      assignTopLevelValue(lastTopLevelFlag, arg, {
+        name,
+        transportMode,
+        enabled,
+        transport,
+      });
+      lastTopLevelFlag = null;
+      continue;
+    }
+
+    // Top-level value-flags.
+    if (arg === "--name") { lastTopLevelFlag = "--name"; continue; }
+    if (arg === "--transport-mode") { lastTopLevelFlag = "--transport-mode"; continue; }
+    if (arg === "--enabled") { lastTopLevelFlag = "--enabled"; continue; }
+    if (
+      arg === "--transport-config" ||
+      arg === "--transport-header" ||
+      arg === "--transport-query"
+    ) {
+      lastTopLevelFlag = arg;
+      continue;
+    }
+
+    // Unknown flag: surface a clear error so the user can fix it.
+    if (arg.startsWith("--")) {
+      fail(`integrations create: unexpected flag "${arg}"`);
+    }
+    fail(`integrations create: unexpected positional argument "${arg}"`);
+  }
+  if (pending) blocks.push(pending);
+
+  // Validate required fields now that the top-level walk is done.
+  const trimmedName = (name.value ?? "").trim();
+  if (!trimmedName) fail("integrations create requires --name <name>");
+  if (!transportMode.value) fail("integrations create requires --transport-mode <mode>");
+  if (!INTEGRATION_MODES.includes(transportMode.value)) {
+    fail(
+      `integrations create: --transport-mode must be one of ${INTEGRATION_MODES.join("|")} (got "${transportMode.value}")`
+    );
+  }
+
+  if (blocks.length === 0) {
+    fail("integrations create requires at least one --scheme-acquisition <kind> block");
+  }
+
+  return {
+    name: trimmedName,
+    ...(enabled.value !== undefined ? { enabled: enabled.value } : {}),
+    transport: {
+      mode: transportMode.value,
+      config: transport.config,
+      headers: transport.headers,
+      query: transport.query,
+    },
+    auth: { schemes: blocks.map(parseSchemeBlock) },
+  };
+}
+
+/*
+ * Accept `--flag=value` as a shorthand for `--flag value` for the
+ * documented top-level and scheme flags. The shell hands us a single
+ * token (`--scheme-secret=-` is one token, not two), and the value-
+ * consumer arms of the main parser only look for the bare flag — so
+ * without this expansion the `=` form silently dropped on the floor.
+ * For `parsePairs`-style flags (`--transport-config=baseUrl=...`,
+ * `--scheme-config=clientId=abc`) the value side still contains a `=`,
+ * which is fine: we only split on the first `=` between the known
+ * flag and the rest, then the per-flag key=value parser does its job.
+ */
+function expandEqualsForm(argv, flags) {
+  const out = [];
+  for (const arg of argv) {
+    if (typeof arg !== "string" || !arg.startsWith("--")) { out.push(arg); continue; }
+    const eq = arg.indexOf("=");
+    if (eq <= 0) { out.push(arg); continue; }
+    const flag = arg.slice(0, eq);
+    if (!flags.has(flag)) { out.push(arg); continue; }
+    out.push(flag);
+    out.push(arg.slice(eq + 1));
+  }
+  return out;
+}
+
+function assignTopLevelValue(flag, value, refs) {
+  if (flag === "--name") refs.name.value = value;
+  else if (flag === "--transport-mode") refs.transportMode.value = value;
+  else if (flag === "--enabled") {
+    if (value !== "true" && value !== "false") {
+      fail('integrations create: --enabled must be "true" or "false"');
+    }
+    refs.enabled.value = value === "true";
+  } else if (flag === "--transport-config") {
+    const eq = value.indexOf("=");
+    if (eq > 0) refs.transport.config[value.slice(0, eq)] = value.slice(eq + 1);
+  } else if (flag === "--transport-header") {
+    const eq = value.indexOf("=");
+    if (eq > 0) refs.transport.headers[value.slice(0, eq)] = value.slice(eq + 1);
+  } else if (flag === "--transport-query") {
+    const eq = value.indexOf("=");
+    if (eq > 0) refs.transport.query[value.slice(0, eq)] = value.slice(eq + 1);
+  }
+}
+
+/* Parse a single `--scheme-*` block (the slice after `--scheme-acquisition <kind>`). */
+function parseSchemeBlock(block) {
+  const args = block.args;
+  const acquisition = args[0];
+  if (!acquisition) fail("integrations create: --scheme-acquisition requires a <kind>");
+  if (!INTEGRATION_ACQUISITIONS.includes(acquisition)) {
+    fail(
+      `integrations create: --scheme-acquisition must be one of ${INTEGRATION_ACQUISITIONS.join("|")} (got "${acquisition}")`
+    );
+  }
+
+  // Strip the acquisition token so the rest of the helpers see the
+  // scheme-internal flags (--scheme-id, --scheme-attachment, ...).
+  const inner = args.slice(1);
+
+  const id = flagValue(inner, "--scheme-id");
+  const config = parsePairs(inner, "--scheme-config");
+
+  // `--scheme-attachment` uses the form `header:Authorization` /
+  // `query:api_key`. We parse it here so the agent gets a clear error
+  // on a malformed value before the server sees it.
+  let attachment;
+  const rawAttachment = flagValue(inner, "--scheme-attachment");
+  if (rawAttachment !== undefined) {
+    if (NON_ATTACHABLE_ACQUISITIONS.has(acquisition)) {
+      fail(
+        `integrations create: --scheme-attachment is not valid for acquisition "${acquisition}" (hmac/mtls/cloud don't carry an attachable credential)`
+      );
+    }
+    const colon = rawAttachment.indexOf(":");
+    if (colon <= 0 || colon === rawAttachment.length - 1) {
+      fail(
+        `integrations create: --scheme-attachment must be in the form <header|query>:<name> (got "${rawAttachment}")`
+      );
+    }
+    const kind = rawAttachment.slice(0, colon);
+    const name = rawAttachment.slice(colon + 1);
+    if (kind !== "header" && kind !== "query") {
+      fail(
+        `integrations create: --scheme-attachment kind must be "header" or "query" (got "${kind}")`
+      );
+    }
+    const prefix = flagValue(inner, "--scheme-attachment-prefix");
+    attachment = { kind, name, ...(prefix ? { prefix } : {}) };
+  }
+
+  // Secret resolution: --scheme-secret-file / --scheme-secret=- (stdin) /
+  // --scheme-secret <value>. The file/stdin reads are deferred to the
+  // async run path so this parser stays synchronous; the dispatcher reads
+  // them after parseIntegrations returns and patches the secret onto the
+  // body before the POST.
+  const secretValue = flagValue(inner, "--scheme-secret");
+  const secretFile = flagValue(inner, "--scheme-secret-file");
+  if (secretValue !== undefined && secretFile !== undefined) {
+    fail(
+      "integrations create: --scheme-secret and --scheme-secret-file are mutually exclusive on a single scheme block"
+    );
+  }
+  let secret;
+  let secretSource = null;
+  if (secretFile !== undefined) {
+    secret = ""; // sentinel: dispatcher reads the file
+    secretSource = { kind: "file", path: secretFile };
+  } else if (secretValue !== undefined) {
+    if (secretValue === "-") {
+      secret = "";
+      secretSource = { kind: "stdin" };
+    } else {
+      secret = secretValue;
+    }
+  }
+
+  return {
+    ...(id ? { id } : {}),
+    acquisition,
+    ...(attachment ? { attachment } : {}),
+    ...(Object.keys(config).length > 0 ? { config } : {}),
+    ...(secretSource || secret !== undefined ? { secret } : {}),
+    ...(secretSource ? { __secretSource: secretSource } : {}),
+  };
 }
 
 export function printIntegrations(command, result) {
@@ -957,6 +1316,26 @@ export function printIntegrations(command, result) {
     const conns = result.connections ?? [];
     if (conns.length === 0) return process.stdout.write("No integrations are enabled for this session.\n");
     for (const c of conns) process.stdout.write(`${c.name}  [${c.mode}/${c.kind}]  ${c.summary}\n`);
+    return;
+  }
+  if (command === "list --all") {
+    // The registry endpoint returns the connection array directly (not
+    // wrapped in `{ connections: [...] }` like the gateway does), so
+    // accept both shapes for forward compatibility.
+    const conns = Array.isArray(result?.connections)
+      ? result.connections
+      : Array.isArray(result)
+      ? result
+      : [];
+    if (conns.length === 0) return process.stdout.write("No integrations are configured.\n");
+    if (result.json) {
+      process.stdout.write(`${JSON.stringify(conns, null, 2)}\n`);
+      return;
+    }
+    for (const c of conns) {
+      const state = c.enabled ? "enabled" : "disabled";
+      process.stdout.write(`${c.id}  ${c.name}  [${state}]  ${c.transport?.mode ?? "?"}\n`);
+    }
     return;
   }
   if (command === "search") {
@@ -1111,15 +1490,92 @@ async function runSkills(argv, serverUrl) {
 
 // --- integrations dispatcher (issue #178) ---
 //
-// Bridges `parseIntegrations` (which already maps the subcommand to a
-// gateway endpoint + body) to the existing `printIntegrations` renderer.
-// Server-side the gateway endpoints are mounted under `/api/integrations/gateway/*`
-// (`server/routes/integrations.ts`), so the URL prefix is `/gateway/`.
+// Bridges `parseIntegrations` to the right wire call. There are three
+// action kinds today:
+//   - `gateway`         POST /api/integrations/gateway/<endpoint>   (list/search/call/...)
+//   - `registry-list`   GET  /api/integrations/                    (list --all)
+//   - `create`          POST /api/integrations/                    (create)
+//
+// `gateway` is the historical surface; the registry routes are mounted on
+// `/api/integrations/` (same one the Settings dialog uses) and have a
+// different request/response shape, so they get their own branch.
 export async function runIntegrations(argv, serverUrl) {
-  const { endpoint, body } = parseIntegrations(argv);
-  const { response, result } = await postJson(serverUrl, `/api/integrations/gateway/${endpoint}`, body);
-  if (response.status >= 400 && result && result.error) fail(result.error);
-  printIntegrations(argv[0], result);
+  const parsed = parseIntegrations(argv);
+  if (parsed.action === "gateway") {
+    const { response, result } = await postJson(
+      serverUrl,
+      `/api/integrations/gateway/${parsed.endpoint}`,
+      parsed.body
+    );
+    if (response.status >= 400 && result && result.error) fail(result.error);
+    printIntegrations(argv[0], result);
+    return;
+  }
+  if (parsed.action === "registry-list") {
+    const { response, result } = await getJson(serverUrl, "/api/integrations/");
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to list integrations (HTTP ${response.status})`);
+    }
+    // The registry endpoint returns the connection array directly (not
+    // wrapped in `{ connections: [...] }` like the gateway does). Wrap it
+    // here so `printIntegrations` can use a single shape and the `--json`
+    // flag renders the array rather than the full HTTP envelope.
+    const conns = Array.isArray(result) ? result : result?.connections ?? [];
+    printIntegrations("list --all", { connections: conns, json: parsed.body.json });
+    return;
+  }
+  if (parsed.action === "create") {
+    await runIntegrationsCreate(serverUrl, parsed.body);
+    return;
+  }
+  fail(`Unknown integrations action: ${parsed.action}`);
+}
+
+/*
+ * Resolve secret sources in the create body and POST to the registry.
+ *
+ * The synchronous parser leaves a `__secretSource` sentinel on each scheme
+ * whose value must be read at submit time (file or stdin). We do that here
+ * because the parser must stay synchronous and the file read is async. After
+ * resolution, we strip the sentinel so it never reaches the wire.
+ */
+async function runIntegrationsCreate(serverUrl, body) {
+  const schemes = body?.auth?.schemes;
+  if (Array.isArray(schemes)) {
+    for (const scheme of schemes) {
+      if (!scheme || !scheme.__secretSource) continue;
+      const source = scheme.__secretSource;
+      delete scheme.__secretSource;
+      if (source.kind === "file") {
+        try {
+          const fs = await import("node:fs/promises");
+          scheme.secret = (await fs.readFile(source.path, "utf-8")).replace(/\r?\n$/, "");
+        } catch (error) {
+          fail(`Could not read --scheme-secret-file ${source.path}: ${error?.message ?? error}`);
+        }
+      } else if (source.kind === "stdin") {
+        // Read stdin until EOF, strip a single trailing newline so the common
+        // `echo "$TOKEN" | controller ...` idiom doesn't pick up an extra \n.
+        // Real stdin yields Buffer chunks; `Readable.from([...])` in tests
+        // can yield either, so coerce to Buffer here to keep the concat path
+        // uniform.
+        const chunks = [];
+        for await (const chunk of process.stdin) {
+          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        }
+        scheme.secret = Buffer.concat(chunks).toString("utf-8").replace(/\r?\n$/, "");
+      }
+    }
+  }
+  const { response, result } = await postJson(serverUrl, "/api/integrations/", body);
+  if (response.status >= 400) {
+    fail(result?.error ?? `Failed to create integration (HTTP ${response.status})`);
+  }
+  const name = result?.name ?? body?.name ?? "(unnamed)";
+  const id = result?.id ?? "(no id)";
+  const mode = result?.transport?.mode ?? body?.transport?.mode ?? "?";
+  const state = result?.enabled === false ? "  [disabled]" : "";
+  process.stdout.write(`Created integration ${name} (id=${id}) [mode=${mode}]${state}\n`);
 }
 
 // `create` does not fit the `parseSkills` shape because it takes
