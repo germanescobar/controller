@@ -887,6 +887,51 @@ test("parseIntegrations create marks --scheme-secret-file and stdin sources for 
   ]);
   assert.equal(stdinParsed.body.auth.schemes[0].secret, "");
   assert.deepEqual(stdinParsed.body.auth.schemes[0].__secretSource, { kind: "stdin" });
+
+  // The shell hands us `--scheme-secret=-` as a single argv token. The
+  // documented `echo "$TOKEN" | controller integrations create ...` idiom
+  // (PR review from Codex on #281) only works if the parser accepts the
+  // `=` form, not just the separate-token form.
+  const stdinEquals = cli.parseIntegrations([
+    "create",
+    "--name", "x",
+    "--transport-mode", "rest",
+    "--scheme-acquisition=static",
+    "--scheme-attachment=header:Authorization",
+    "--scheme-secret=-",
+  ]);
+  assert.equal(stdinEquals.body.auth.schemes[0].secret, "");
+  assert.deepEqual(stdinEquals.body.auth.schemes[0].__secretSource, { kind: "stdin" });
+});
+
+test("parseIntegrations create accepts --flag=value shorthand for all value flags", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseIntegrations([
+    "create",
+    "--name=myapi",
+    "--enabled=false",
+    "--transport-mode=rest",
+    "--transport-config=baseUrl=https://api.example.com/v1",
+    "--transport-header=Accept=application/json",
+    "--scheme-acquisition=static",
+    "--scheme-id=scheme-1",
+    "--scheme-attachment=header:Authorization",
+    "--scheme-attachment-prefix=Bearer ",
+    "--scheme-config=clientId=abc",
+    "--scheme-config=scope=read:all",
+    "--scheme-secret=INLINE",
+  ]);
+  assert.equal(parsed.body.name, "myapi");
+  assert.equal(parsed.body.enabled, false);
+  assert.equal(parsed.body.transport.mode, "rest");
+  assert.deepEqual(parsed.body.transport.config, { baseUrl: "https://api.example.com/v1" });
+  assert.deepEqual(parsed.body.transport.headers, { Accept: "application/json" });
+  const scheme = parsed.body.auth.schemes[0];
+  assert.equal(scheme.id, "scheme-1");
+  assert.equal(scheme.acquisition, "static");
+  assert.deepEqual(scheme.attachment, { kind: "header", name: "Authorization", prefix: "Bearer " });
+  assert.deepEqual(scheme.config, { clientId: "abc", scope: "read:all" });
+  assert.equal(scheme.secret, "INLINE");
 });
 
 test("parseIntegrations create rejects --scheme-secret and --scheme-secret-file on the same block", async () => {
@@ -1041,6 +1086,68 @@ test("runIntegrations create reads --scheme-secret-file and never includes the s
   // The file contents must never reach stdout/stderr via the CLI's writes.
   for (const chunk of stdoutChunks) {
     assert.ok(!chunk.includes("TOP-SECRET"), `secret leaked to stdout: ${chunk}`);
+  }
+});
+
+test("runIntegrations create with --scheme-secret=- reads from stdin and never echoes the value", async () => {
+  // Regression test for the PR review from Codex on #281: the
+  // documented `echo "$TOKEN" | controller integrations create ...` form
+  // only works if `--scheme-secret=-` is accepted as a single argv token
+  // and the secret is read from stdin at submit time.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+
+  // Feed stdin a known value. `process.stdin` is a TTY in the test
+  // runner, so we patch the readable factory with a one-shot stream.
+  const { Readable } = await import("node:stream");
+  const originalStdin = process.stdin;
+  const fakeStdin = Readable.from(["FROM-STDIN\n"]);
+  Object.defineProperty(process, "stdin", { value: fakeStdin, configurable: true });
+
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      status: 201,
+      json: async () => ({
+        id: "conn-1",
+        name: "x",
+        enabled: true,
+        transport: { mode: "rest" },
+        auth: { schemes: [] },
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runIntegrations(
+      [
+        "create",
+        "--name", "x",
+        "--transport-mode", "rest",
+        "--scheme-acquisition", "static",
+        "--scheme-attachment", "header:Authorization",
+        "--scheme-secret=-",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+    Object.defineProperty(process, "stdin", { value: originalStdin, configurable: true });
+  }
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0].init.body);
+  // Trailing newline stripped; sentinel stripped.
+  assert.equal(body.auth.schemes[0].secret, "FROM-STDIN");
+  assert.equal("__secretSource" in body.auth.schemes[0], false);
+  for (const chunk of stdoutChunks) {
+    assert.ok(!chunk.includes("FROM-STDIN"), `secret leaked to stdout: ${chunk}`);
   }
 });
 

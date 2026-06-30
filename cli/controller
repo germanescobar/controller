@@ -1039,6 +1039,37 @@ function parseIntegrationCreate(rest) {
   const enabled = { value: undefined };
   const transport = { config: {}, headers: {}, query: {} };
 
+  // Flags whose `--flag=value` shorthand the parser accepts. The value
+  // is whatever follows the first `=`. For `--scheme-secret=-` the value
+  // is the literal "-" (a sentinel for stdin), not a missing token — so
+  // splitting in argv before the value-consumer runs is exactly the
+  // shape we need. Transport pair flags (`--transport-config k=v`, ...)
+  // are listed too so users can write `--transport-config=baseUrl=...`
+  // in shells that prefer the `=` form.
+  const EQUALS_FORM_FLAGS = new Set([
+    "--name",
+    "--enabled",
+    "--transport-mode",
+    "--transport-config",
+    "--transport-header",
+    "--transport-query",
+    "--scheme-acquisition",
+    "--scheme-id",
+    "--scheme-attachment",
+    "--scheme-attachment-prefix",
+    "--scheme-config",
+    "--scheme-secret",
+    "--scheme-secret-file",
+  ]);
+  // `=value` shorthand: when the arg is `--flag=value`, split it so the
+  // value-consumer sees the flag and value as separate tokens (just like
+  // a shell would have if the user had written them as separate args).
+  // `parsePairs`-style flags (transport-config, scheme-config) are
+  // handled here too: `--transport-config=baseUrl=https://x` becomes
+  // `--transport-config baseUrl=https://x`, and the existing key=value
+  // parser does the rest.
+  rest = expandEqualsForm(rest, EQUALS_FORM_FLAGS);
+
   const blocks = [];
   let pending = null;
   let lastTopLevelFlag = null;
@@ -1151,6 +1182,31 @@ function parseIntegrationCreate(rest) {
     },
     auth: { schemes: blocks.map(parseSchemeBlock) },
   };
+}
+
+/*
+ * Accept `--flag=value` as a shorthand for `--flag value` for the
+ * documented top-level and scheme flags. The shell hands us a single
+ * token (`--scheme-secret=-` is one token, not two), and the value-
+ * consumer arms of the main parser only look for the bare flag — so
+ * without this expansion the `=` form silently dropped on the floor.
+ * For `parsePairs`-style flags (`--transport-config=baseUrl=...`,
+ * `--scheme-config=clientId=abc`) the value side still contains a `=`,
+ * which is fine: we only split on the first `=` between the known
+ * flag and the rest, then the per-flag key=value parser does its job.
+ */
+function expandEqualsForm(argv, flags) {
+  const out = [];
+  for (const arg of argv) {
+    if (typeof arg !== "string" || !arg.startsWith("--")) { out.push(arg); continue; }
+    const eq = arg.indexOf("=");
+    if (eq <= 0) { out.push(arg); continue; }
+    const flag = arg.slice(0, eq);
+    if (!flags.has(flag)) { out.push(arg); continue; }
+    out.push(flag);
+    out.push(arg.slice(eq + 1));
+  }
+  return out;
 }
 
 function assignTopLevelValue(flag, value, refs) {
@@ -1500,8 +1556,13 @@ async function runIntegrationsCreate(serverUrl, body) {
       } else if (source.kind === "stdin") {
         // Read stdin until EOF, strip a single trailing newline so the common
         // `echo "$TOKEN" | controller ...` idiom doesn't pick up an extra \n.
+        // Real stdin yields Buffer chunks; `Readable.from([...])` in tests
+        // can yield either, so coerce to Buffer here to keep the concat path
+        // uniform.
         const chunks = [];
-        for await (const chunk of process.stdin) chunks.push(chunk);
+        for await (const chunk of process.stdin) {
+          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        }
         scheme.secret = Buffer.concat(chunks).toString("utf-8").replace(/\r?\n$/, "");
       }
     }
