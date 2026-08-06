@@ -80,6 +80,7 @@ import {
   type QueuedMessage,
   type QueuedMessageInput,
 } from "../lib/session-queue.js";
+import { acceptCodexSteer } from "../lib/codex-steer.js";
 
 // Strip ANSI escape codes (color, cursor, etc.)
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
@@ -1540,7 +1541,11 @@ export async function handleSessionStream(
         // This happens server-side so the queue drains regardless of
         // whether any client is connected (see issue #113).
         if (streamSessionId && !pausedForClaudeUserInput && code === 0) {
-          void advanceSessionQueue(req.params.projectId, worktreeId, streamSessionId);
+          void scheduleSessionQueueAdvance(
+            req.params.projectId,
+            worktreeId,
+            streamSessionId
+          );
         }
       })
       .catch(() => {});
@@ -1617,6 +1622,39 @@ async function advanceSessionQueue(
   markSessionInactive(sessionId);
   await recordQueueAdvanceFailure(projectId, worktreeId, sessionId, next);
   await advanceSessionQueue(projectId, worktreeId, sessionId);
+}
+
+/*
+ * Finalization and a late /steer fallback can both discover that a queue is
+ * ready. Serialize those triggers and re-check runtime state so they cannot
+ * start two follow-up turns concurrently.
+ */
+const queueAdvanceChains = new Map<string, Promise<void>>();
+
+function scheduleSessionQueueAdvance(
+  projectId: string,
+  worktreeId: string,
+  sessionId: string
+): Promise<void> {
+  const previous = queueAdvanceChains.get(sessionId) ?? Promise.resolve();
+  const next = previous
+    .then(async () => {
+      if (getSessionRuntime(sessionId).active) return;
+      await advanceSessionQueue(projectId, worktreeId, sessionId);
+    })
+    .catch((error) => {
+      console.error(
+        `[session] queue advancement failed (session=${sessionId}):`,
+        error instanceof Error ? error.message : error
+      );
+    });
+  queueAdvanceChains.set(sessionId, next);
+  void next.finally(() => {
+    if (queueAdvanceChains.get(sessionId) === next) {
+      queueAdvanceChains.delete(sessionId);
+    }
+  });
+  return next;
 }
 
 /** Persist a visible error for a queued message that could not be started. */
@@ -1779,7 +1817,7 @@ async function streamCodexPlanSession(
     // Drain the next enqueued message on a clean completion (server-side,
     // independent of any client; see issue #113).
     if (streamSessionId && exitCode === 0) {
-      void advanceSessionQueue(projectId, worktreeId, streamSessionId);
+      void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
     }
   }
 
@@ -2052,13 +2090,50 @@ sessionsRouter.post(
     }
 
     const message = req.body.message as string | undefined;
+    const queuedMessageId = req.body.queuedMessageId as string | undefined;
     if (!message || typeof message !== "string") {
       res.status(400).json({ error: "message is required" });
       return;
     }
 
     try {
-      await codexAppServerManager.steerSession(req.params.sessionId, message);
+      const result = await acceptCodexSteer({
+        queuedMessageId,
+        steer: () => codexAppServerManager.steerSession(req.params.sessionId, message),
+        getQueuedMessage: async (id) =>
+          (await listQueue(req.params.sessionId)).find((item) => item.id === id),
+        removeQueuedMessage: async (id) => {
+          await removeFromQueue(req.params.sessionId, id);
+        },
+        buildFollowUp: async () => {
+          const session = await getSession(worktree.path, req.params.sessionId);
+          if (!session?.provider || !session.model) {
+            throw new Error("Session metadata is unavailable for the follow-up");
+          }
+          return {
+            text: message,
+            visibleText: message,
+            provider: session.provider,
+            model: session.model,
+            reasoningEffort: session.reasoningEffort,
+            serviceTier: session.serviceTier === "fast" ? "fast" : undefined,
+            mode: session.mode === "plan" ? "plan" : "default",
+            attachmentIds: [],
+          };
+        },
+        enqueueFollowUp: (input) => enqueueMessage(req.params.sessionId, input),
+      });
+      if (result.disposition === "queued") {
+        res.json({ ok: true, ...result });
+        if (!getSessionRuntime(req.params.sessionId).active) {
+          void scheduleSessionQueueAdvance(
+            req.params.projectId,
+            worktree.id,
+            req.params.sessionId
+          );
+        }
+        return;
+      }
       await appendEvent(worktree.path, req.params.sessionId, {
         id: randomUUID(),
         sessionId: req.params.sessionId,
@@ -2066,7 +2141,7 @@ sessionsRouter.post(
         type: "user_message",
         data: { text: message },
       });
-      res.json({ ok: true });
+      res.json({ ok: true, ...result });
     } catch (error) {
       res.status(400).json({
         error: error instanceof Error ? error.message : String(error),

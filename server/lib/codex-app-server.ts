@@ -253,19 +253,29 @@ export class CodexAppServerManager {
     });
   }
 
-  async steerSession(sessionId: string, message: string): Promise<void> {
+  async steerSession(sessionId: string, message: string): Promise<"steered" | "turn-ended"> {
     const runtime = this.sessions.get(sessionId);
     if (!runtime?.turnInProgress) {
-      throw new Error("No active turn for this session");
+      return "turn-ended";
     }
     if (!runtime.currentTurnId) {
       throw new Error("Turn ID not yet available");
     }
-    await this.call("turn/steer", {
-      threadId: runtime.threadId,
-      input: [{ type: "text", text: message, text_elements: [] }],
-      expectedTurnId: runtime.currentTurnId,
-    });
+    try {
+      await this.call("turn/steer", {
+        threadId: runtime.threadId,
+        input: [{ type: "text", text: message, text_elements: [] }],
+        expectedTurnId: runtime.currentTurnId,
+      });
+      return "steered";
+    } catch (error) {
+      // A terminal notification can arrive while turn/steer is in flight.
+      // Once that happens the app-server no longer owns the message, so let
+      // the route preserve it as a follow-up. Other failures are genuine and
+      // must remain visible to the composer without claiming delivery.
+      if (!runtime.turnInProgress) return "turn-ended";
+      throw error;
+    }
   }
 
   async submitUserInput(

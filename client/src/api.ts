@@ -506,20 +506,25 @@ export async function steerSession(
   projectId: string,
   sessionId: string,
   message: string,
-  worktreeId?: string
-): Promise<void> {
+  worktreeId?: string,
+  queuedMessageId?: string
+): Promise<{ disposition: "steered" | "queued"; message?: QueuedMessage }> {
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/steer${withWorktree(worktreeId)}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, queuedMessageId }),
     }
   );
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { error?: string };
     throw new Error(body.error ?? "Failed to steer session");
   }
+  return await res.json() as {
+    disposition: "steered" | "queued";
+    message?: QueuedMessage;
+  };
 }
 
 /** A message enqueued to run after the active turn completes (see issue #113). */
