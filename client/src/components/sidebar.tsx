@@ -119,6 +119,40 @@ export interface FocusQueueItem {
   active: boolean;
 }
 
+/**
+ * Order radar (focus-pinned) sessions so the items that need the user's
+ * attention float to the top:
+ *
+ *   1. Finished (inactive) sessions — most recently finished first
+ *      (`lastActiveAt` desc).
+ *   2. Running (active) sessions — oldest running first, so the most
+ *      recently started running session lands at the very bottom
+ *      (`lastActiveAt` asc).
+ *
+ * Pure: does not mutate the input. Within each bucket ties on
+ * `lastActiveAt` fall back to the caller's array order (Array#sort is
+ * stable in modern engines).
+ */
+export function sortFocusQueue(items: FocusQueueItem[]): FocusQueueItem[] {
+  const finished = items
+    .filter((item) => !item.active)
+    .sort(
+      (a, b) =>
+        new Date(b.session.lastActiveAt).getTime() -
+        new Date(a.session.lastActiveAt).getTime(),
+    );
+
+  const running = items
+    .filter((item) => item.active)
+    .sort(
+      (a, b) =>
+        new Date(a.session.lastActiveAt).getTime() -
+        new Date(b.session.lastActiveAt).getTime(),
+    );
+
+  return [...finished, ...running];
+}
+
 function CodexLogo({ className }: { className?: string }) {
   return (
     <svg
@@ -318,30 +352,22 @@ export function Sidebar({
   const setupRunCancelRef = useRef<(() => void) | null>(null);
 
   const focusQueue = useMemo<FocusQueueItem[]>(() => {
-    return projectData
-      .flatMap((project) =>
-        project.worktrees.flatMap((worktree) =>
-          worktree.sessions
-            .filter((session) => Boolean(session.focusPinnedAt))
-            .map((session) => ({
-              projectId: project.id,
-              projectName: project.name,
-              worktreeId: worktree.id,
-              worktreeName: worktree.name,
-              session,
-              active: activeSessionIds.has(session.id),
-            })),
-        ),
-      )
-      .sort((a, b) => {
-        const aTime = new Date(
-          a.session.focusPinnedAt ?? a.session.createdAt,
-        ).getTime();
-        const bTime = new Date(
-          b.session.focusPinnedAt ?? b.session.createdAt,
-        ).getTime();
-        return aTime - bTime;
-      });
+    const items = projectData.flatMap((project) =>
+      project.worktrees.flatMap((worktree) =>
+        worktree.sessions
+          .filter((session) => Boolean(session.focusPinnedAt))
+          .map((session) => ({
+            projectId: project.id,
+            projectName: project.name,
+            worktreeId: worktree.id,
+            worktreeName: worktree.name,
+            session,
+            active: activeSessionIds.has(session.id),
+          })),
+      ),
+    );
+
+    return sortFocusQueue(items);
   }, [activeSessionIds, projectData]);
 
   useEffect(() => {
