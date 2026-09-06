@@ -3123,7 +3123,6 @@ export function SessionView({
   const terminalTabsSavePendingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
-  const composerPointerDownRef = useRef(false);
   const hadVisibleFocusAdvanceRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
@@ -6506,18 +6505,17 @@ export function SessionView({
                   className={`rounded-xl border border-border bg-input transition-[padding] md:p-3 ${
                     showComposerDetails ? "p-3" : "p-2.5"
                   }`}
-                  onPointerDownCapture={() => {
-                    composerPointerDownRef.current = true;
-                    window.setTimeout(() => {
-                      composerPointerDownRef.current = false;
-                    }, 0);
-                  }}
                   onBlurCapture={(event) => {
+                    // Mobile focus transitions around touch controls are not
+                    // stable enough to drive visibility: a tapped button can
+                    // blur again after its click and unmount its own picker.
+                    // The document-level outside-pointer handler above owns
+                    // mobile collapse instead.
+                    if (isMobileComposerViewport) return;
                     if (
                       event.currentTarget.contains(
                         event.relatedTarget as Node | null,
-                      ) ||
-                      (isMobileComposerViewport && composerPointerDownRef.current)
+                      )
                     ) {
                       return;
                     }
