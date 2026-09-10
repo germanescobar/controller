@@ -43,7 +43,7 @@ const SECTIONS: SectionSpec[] = [
     id: "shortcuts",
     label: "Shortcuts",
     shortLabel: "Shortcuts",
-    description: "Customise Controller Mode keyboard shortcuts.",
+    description: "Customise focus-queue keyboard shortcuts.",
   },
   {
     id: "schedules",

@@ -14,6 +14,7 @@ import { agentsRouter } from "./routes/agents.js";
 import { skillsRouter } from "./routes/skills.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
 import { listSessionRuntimes } from "./lib/session-runtime.js";
+import { listPersistedAttentionSessionIds } from "./lib/session-attention.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
@@ -90,9 +91,11 @@ app.get("/api/agent-providers", async (_req, res) => {
 
 // Bulk session runtime snapshot — replaces the per-session /runtime polling
 // the sidebar and SessionView were doing. One request returns the active
-// state for every session currently known to the runtime map.
-app.get("/api/runtimes", (_req, res) => {
-  res.json({ sessions: listSessionRuntimes() });
+// state for every session currently known to the runtime map, plus unresolved
+// prompts reconstructed from persisted events after a server restart.
+app.get("/api/runtimes", async (_req, res) => {
+  const persistedAttention = await listPersistedAttentionSessionIds();
+  res.json({ sessions: listSessionRuntimes(persistedAttention) });
 });
 
 const shouldServeClient =

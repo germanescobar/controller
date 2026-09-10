@@ -8,35 +8,35 @@ import { shortcutBindingsFile, ensureOrchestratorHome } from "./paths.js";
 // want the build layout to drift.
 
 type ShortcutActionId =
-  | "controllerModeToggle"
-  | "controllerModeNext"
-  | "controllerModeDone"
-  | "controllerModeStay"
+  | "focusAdvanceNext"
+  | "focusStay"
+  | "focusDone"
+  | "focusAutoAdvance"
   | "filesPanelToggle"
   | "filesPanelSearch";
 
 type ShortcutBindings = Record<ShortcutActionId, string>;
 
 const ACTION_IDS: ReadonlySet<ShortcutActionId> = new Set([
-  "controllerModeToggle",
-  "controllerModeNext",
-  "controllerModeDone",
-  "controllerModeStay",
+  "focusAdvanceNext",
+  "focusStay",
+  "focusDone",
+  "focusAutoAdvance",
   "filesPanelToggle",
   "filesPanelSearch",
 ]);
 
 const DEFAULT_BINDINGS: Readonly<Record<ShortcutActionId, string>> = {
-  controllerModeToggle: "ctrl-t",
-  controllerModeNext: "ctrl-n",
-  controllerModeDone: "ctrl-d",
-  controllerModeStay: "ctrl-s",
+  focusAdvanceNext: "ctrl-n",
+  focusStay: "ctrl-s",
+  focusDone: "ctrl-d",
+  focusAutoAdvance: "ctrl-t",
   filesPanelToggle: "cmd-b",
   filesPanelSearch: "cmd-p",
 };
 
 /**
- * Persisted user overrides for Controller Mode keyboard shortcuts.
+ * Persisted user overrides for focus-queue keyboard shortcuts.
  *
  * The file lives in the Controller home directory (see `paths.ts` and
  * issue #235) so overrides survive across browsers on the same machine
@@ -50,11 +50,38 @@ const DEFAULT_BINDINGS: Readonly<Record<ShortcutActionId, string>> = {
 
 type StoredOverrides = Partial<Record<ShortcutActionId, string>>;
 
+/**
+ * One-shot migration: action ids renamed when Controller Mode was
+ * dropped in favour of the always-on focus-queue triage loop (issue
+ * #333 follow-up). The user-facing chord the user picked is
+ * preserved — we only translate the key. `controllerModeToggle` is
+ * not mapped because the action was removed entirely; any saved
+ * override for it is silently dropped.
+ */
+const LEGACY_ACTION_ALIASES: Record<string, ShortcutActionId> = {
+  controllerModeNext: "focusAdvanceNext",
+  controllerModeStay: "focusStay",
+  controllerModeDone: "focusDone",
+};
+
 async function readStore(): Promise<StoredOverrides> {
   try {
     const content = await fs.readFile(shortcutBindingsFile(), "utf-8");
     const parsed = JSON.parse(content) as unknown;
-    return normalizeStore(parsed);
+    const [store, migrated] = normalizeStore(parsed);
+    if (migrated) {
+      // Self-heal: rewrite the file in the new shape so a future
+      // upgrade doesn't have to re-apply the migration. Best-effort —
+      // if the disk write fails (e.g. read-only home), the in-memory
+      // translation still holds for the rest of this process.
+      try {
+        await writeStore(store);
+      } catch {
+        // Ignore — the translated overrides are still in effect for
+        // this request. The file will be retried on the next read.
+      }
+    }
+    return store;
   } catch {
     return {};
   }
@@ -72,17 +99,49 @@ function normalizeChord(value: string): string {
     .join("-");
 }
 
-function normalizeStore(parsed: unknown): StoredOverrides {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+/**
+ * Returns the cleaned overrides map and a flag indicating whether any
+ * legacy `controllerMode*` keys were translated. When the flag is set
+ * the caller should write the cleaned map back to disk so the file
+ * doesn't carry orphaned ids forever.
+ *
+ * Translation rules:
+ *   - Known current ids pass through unchanged.
+ *   - Legacy ids are mapped to their new equivalents **only when** the
+ *     user hasn't already set the new id — otherwise the existing
+ *     new-id value wins (no clobbering).
+ *   - Anything else is dropped.
+ */
+function normalizeStore(
+  parsed: unknown,
+): [StoredOverrides, boolean] {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return [{}, false];
+  }
   const store: StoredOverrides = {};
-  for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (!ACTION_IDS.has(id as ShortcutActionId)) continue;
+  let migrated = false;
+  for (const [rawId, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof value !== "string") continue;
     const normalized = normalizeChord(value);
     if (!normalized) continue;
-    store[id as ShortcutActionId] = normalized;
+    if (ACTION_IDS.has(rawId as ShortcutActionId)) {
+      store[rawId as ShortcutActionId] = normalized;
+      continue;
+    }
+    const aliased = LEGACY_ACTION_ALIASES[rawId];
+    if (aliased) {
+      // Don't clobber an existing new-id override with an older one
+      // — the user's most recent choice wins.
+      if (store[aliased] === undefined) {
+        store[aliased] = normalized;
+      }
+    }
+    // Any unknown / legacy id (mapped or removed) is a signal that
+    // the file is stale. Mark for rewrite so future reads start from
+    // the cleaned shape. The cleaned shape won't include this id.
+    migrated = true;
   }
-  return store;
+  return [store, migrated];
 }
 
 async function writeStore(store: StoredOverrides): Promise<void> {
@@ -92,6 +151,11 @@ async function writeStore(store: StoredOverrides): Promise<void> {
 
 /** Bundled defaults — re-exported for tests so they don't depend on shared/. */
 export const DEFAULT_SHORTCUT_BINDINGS = DEFAULT_BINDINGS;
+
+// Re-exported so tests can write directly to the on-disk file when
+// simulating a legacy or corrupted overrides shape (e.g. the
+// Controller-Mode → focus-queue migration in #333 follow-up).
+export { shortcutBindingsFile };
 
 export type { ShortcutActionId, ShortcutBindings };
 

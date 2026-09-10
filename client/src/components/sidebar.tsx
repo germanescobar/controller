@@ -16,7 +16,6 @@ import {
   CheckCircle2,
   RotateCw,
   AlertTriangle,
-  Play,
   HelpCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -61,8 +60,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
 import { DOCS_URL } from "@/lib/links";
-import { formatChord, isMacPlatform } from "@/lib/shortcut-match";
-import type { ShortcutBindings } from "../../../shared/shortcuts.ts";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -83,15 +80,16 @@ interface SidebarProps {
   onNewWorktree: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSettings: () => void;
-  onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
-  controllerMode?: boolean;
-  onControllerModeToggle?: () => void;
   /**
-   * Effective Controller Mode shortcut bindings. Used to render the
-   * correct chord in the sidebar's Controller Mode button tooltip.
-   * See issue #235.
+   * The canonical sorted focus queue, owned by App (which overlays
+   * per-session handled timestamps and runs `sortFocusQueue`). The
+   * sidebar uses this for rendering and App uses its first row for
+   * navigation. The sidebar still emits a *raw* version
+   * of this via `onFocusQueueChange` so App can apply its visit
+   * overlay in one place.
    */
-  shortcutBindings?: ShortcutBindings | null;
+  focusQueue?: FocusQueueItem[];
+  onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
   focusRefreshKey?: number;
   // Bumped by the App's project-event subscription when an out-of-band
   // lifecycle change lands (worktree added/removed, session added,
@@ -117,6 +115,128 @@ export interface FocusQueueItem {
   worktreeName: string;
   session: SessionSummary;
   active: boolean;
+  /**
+   * True when the agent has paused on a user-input request or has
+   * a pending tool approval. Drives the highest-priority bucket in
+   * `sortFocusQueue` and the priority preference in
+   * `pickNextFocusItem`. Independent of `active`: Claude's
+   * structured-input pause kills the child so the session shows as
+   * inactive but still owes the user a reply.
+   */
+  awaitingInput?: boolean;
+  /**
+   * ISO timestamp of the last time the user explicitly advanced past
+   * this session with Next or auto-advance. Drives the
+   * visited/unvisited split in `sortFocusQueue` — finished sessions
+   * the user has not handled since their latest completion sit at the top
+   * ("triage pile"), and advancing past one sinks it below the unvisited
+   * pile so the user isn't bounced back to them on every cycle.
+   * Independent of `lastActiveAt`, which still tracks agent
+   * activity and ordering within the unfinished queue.
+   */
+  lastVisitedAt?: string;
+}
+
+/**
+ * Order radar (focus-pinned) sessions into priority buckets so the
+ * most urgent items float to the top:
+ *
+ *   1. **Awaiting input** — items whose agent has paused on a
+ *      `user.input_requested` prompt or has at least one pending
+ *      tool approval. The user owes a reply to these; they sit at
+ *      the very top, oldest-arrival first (`lastActiveAt` asc).
+ *      The `active` flag doesn't matter here — Claude's
+ *      structured-input pause kills the child so a session can be
+ *      inactive and still awaiting.
+ *   2. **Finished, unvisited** — the triage pile. Items whose agent
+ *      finished and the user has not yet explicitly advanced past that
+ *      completion. A new completion after a prior visit returns here.
+ *      Merely opening one does not change its position. Oldest-arrival first
+ *      (`lastActiveAt` asc) so the user walks the pile in the
+ *      order the agents finished. Advancing past a session sinks it
+ *      into the next bucket so the user isn't bounced back to it
+ *      on every cycle.
+ *   3. **Finished, visited** — items the user has already handled.
+ *      Most-recently-handled at the very bottom of this
+ *      sub-bucket (`lastVisitedAt` asc, ties on array order) so
+ *      the freshest look sits closest to the running pile below.
+ *   4. **Running (active)** — sessions where the agent is still
+ *      working. Oldest-running first, so the most recently
+ *      started running session lands at the very bottom of the
+ *      queue (`lastActiveAt` asc).
+ *
+ * Within each bucket, ties on the sort key fall back to the
+ * caller's array order (Array#sort is stable).
+ *
+ * Pure: does not mutate the input.
+ */
+export function sortFocusQueue(items: FocusQueueItem[]): FocusQueueItem[] {
+  const hasUnseenCompletion = (item: FocusQueueItem) => {
+    if (!item.lastVisitedAt) return true;
+    return (
+      new Date(item.session.lastActiveAt).getTime() >
+      new Date(item.lastVisitedAt).getTime()
+    );
+  };
+
+  const awaiting = items
+    .filter((item) => item.awaitingInput)
+    .sort(
+      (a, b) =>
+        new Date(a.session.lastActiveAt).getTime() -
+        new Date(b.session.lastActiveAt).getTime(),
+    );
+
+  const finishedUnvisited = items
+    .filter(
+      (item) =>
+        !item.awaitingInput && !item.active && hasUnseenCompletion(item),
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.session.lastActiveAt).getTime() -
+        new Date(b.session.lastActiveAt).getTime(),
+    );
+
+  const finishedVisited = items
+    .filter(
+      (item) =>
+        !item.awaitingInput && !item.active && !hasUnseenCompletion(item),
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.lastVisitedAt!).getTime() -
+        new Date(b.lastVisitedAt!).getTime(),
+    );
+
+  const running = items
+    .filter((item) => !item.awaitingInput && item.active)
+    .sort(
+      (a, b) =>
+        new Date(a.session.lastActiveAt).getTime() -
+        new Date(b.session.lastActiveAt).getTime(),
+    );
+
+  return [...awaiting, ...finishedUnvisited, ...finishedVisited, ...running];
+}
+
+/**
+ * Mark one queue item as handled, then return the queue in its new
+ * canonical order. Navigation intentionally happens after this step
+ * so Next and auto-advance always open the new first row.
+ */
+export function markFocusItemHandled(
+  items: FocusQueueItem[],
+  sessionId: string,
+  handledAt: string,
+): FocusQueueItem[] {
+  return sortFocusQueue(
+    items.map((item) =>
+      item.session.id === sessionId
+        ? { ...item, lastVisitedAt: handledAt }
+        : item,
+    ),
+  );
 }
 
 function CodexLogo({ className }: { className?: string }) {
@@ -262,10 +382,8 @@ export function Sidebar({
   onNewWorktree,
   onProjectsChanged,
   onSettings,
+  focusQueue: focusQueueProp,
   onFocusQueueChange,
-  controllerMode = false,
-  onControllerModeToggle,
-  shortcutBindings = null,
   focusRefreshKey,
   eventsRefreshKey,
 }: SidebarProps) {
@@ -274,6 +392,15 @@ export function Sidebar({
   const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(
     new Set(),
   );
+  // Sessions whose agent has paused on a user-input request or has
+  // at least one pending tool approval. The runtime map reports this
+  // independently of `active` (Claude's structured-input pause kills
+  // the child process, so the session is `active: false` but still
+  // needs the user's attention). Surfaced at the very top of the
+  // focus queue.
+  const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<
+    Set<string>
+  >(new Set());
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<
     Record<string, number>
   >({});
@@ -327,36 +454,43 @@ export function Sidebar({
   } | null>(null);
   const setupRunCancelRef = useRef<(() => void) | null>(null);
 
-  const focusQueue = useMemo<FocusQueueItem[]>(() => {
-    return projectData
-      .flatMap((project) =>
-        project.worktrees.flatMap((worktree) =>
-          worktree.sessions
-            .filter((session) => Boolean(session.focusPinnedAt))
-            .map((session) => ({
-              projectId: project.id,
-              projectName: project.name,
-              worktreeId: worktree.id,
-              worktreeName: worktree.name,
-              session,
-              active: activeSessionIds.has(session.id),
-            })),
-        ),
-      )
-      .sort((a, b) => {
-        const aTime = new Date(
-          a.session.focusPinnedAt ?? a.session.createdAt,
-        ).getTime();
-        const bTime = new Date(
-          b.session.focusPinnedAt ?? b.session.createdAt,
-        ).getTime();
-        return aTime - bTime;
-      });
-  }, [activeSessionIds, projectData]);
+  // Raw focus items: project/worktree/session metadata plus the
+  // runtime flags (active, awaitingInput). Computed here because
+  // the sidebar owns the projectData / runtime fetches. App applies
+  // the visit-timestamp overlay and runs the canonical sort; the
+  // sorted queue comes back via `focusQueueProp` and is what we
+  // render.
+  const rawFocusItems = useMemo<FocusQueueItem[]>(() => {
+    return projectData.flatMap((project) =>
+      project.worktrees.flatMap((worktree) =>
+        worktree.sessions
+          .filter((session) => Boolean(session.focusPinnedAt))
+          .map((session) => ({
+            projectId: project.id,
+            projectName: project.name,
+            worktreeId: worktree.id,
+            worktreeName: worktree.name,
+            session,
+            active: activeSessionIds.has(session.id),
+            awaitingInput: awaitingInputSessionIds.has(session.id) || undefined,
+          })),
+      ),
+    );
+  }, [activeSessionIds, awaitingInputSessionIds, projectData]);
+
+  // The canonical, sorted queue lives in App (it has the visit
+  // overlay + final sort). On the very first paint (before App has
+  // emitted its first sorted value) fall back to a local sort using
+  // the raw items so the sidebar has something to render.
+  const fallbackQueue = useMemo(
+    () => sortFocusQueue(rawFocusItems),
+    [rawFocusItems],
+  );
+  const focusQueue = focusQueueProp ?? fallbackQueue;
 
   useEffect(() => {
-    onFocusQueueChange?.(focusQueue);
-  }, [focusQueue, onFocusQueueChange]);
+    onFocusQueueChange?.(rawFocusItems);
+  }, [rawFocusItems, onFocusQueueChange]);
 
   const refreshActiveSessions = useCallback(async () => {
     // One bulk request replaces the previous per-session /runtime polling loop
@@ -364,6 +498,13 @@ export function Sidebar({
     const entries = await fetchActiveRuntimes().catch(() => []);
     setActiveSessionIds(
       new Set(entries.filter((entry) => entry.active).map((entry) => entry.sessionId)),
+    );
+    setAwaitingInputSessionIds(
+      new Set(
+        entries
+          .filter((entry) => entry.awaitingInput)
+          .map((entry) => entry.sessionId),
+      ),
     );
   }, []);
 
@@ -410,12 +551,12 @@ export function Sidebar({
   }, [loadAll, focusRefreshKey, eventsRefreshKey]);
 
   useEffect(() => {
-    if (activeSessionIds.size === 0) return;
+    if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
     const interval = window.setInterval(() => {
       refreshActiveSessions().catch(() => {});
     }, 2000);
     return () => window.clearInterval(interval);
-  }, [activeSessionIds, refreshActiveSessions]);
+  }, [activeSessionIds, awaitingInputSessionIds, refreshActiveSessions]);
 
   const toggleProject = (id: string) => {
     setProjectData((prev) =>
@@ -757,35 +898,10 @@ export function Sidebar({
   return (
     <aside className="flex h-full flex-col border-r border-border bg-sidebar" style={{ width: "100%" }}>
       <ScrollArea className="flex-1 overflow-hidden px-3">
-        <div className="flex items-center justify-between py-3">
+        <div className="flex items-center justify-between gap-2 py-3">
           <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             On radar
           </span>
-          {focusQueue.length > 0 ? (
-            <button
-              type="button"
-              onClick={onControllerModeToggle}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-                controllerMode
-                  ? "bg-blue-500/15 text-blue-300 ring-1 ring-inset ring-blue-400/30 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground",
-              )}
-              title={
-                controllerMode
-                  ? `Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", isMacPlatform())})`
-                  : `Start Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", isMacPlatform())})`
-              }
-            >
-              <Play
-                className={cn(
-                  "h-3.5 w-3.5",
-                  controllerMode ? "text-blue-300" : "text-muted-foreground",
-                )}
-              />
-              <span>Controller Mode</span>
-            </button>
-          ) : null}
         </div>
 
         <div className="flex flex-col gap-1 pb-3">
@@ -1063,6 +1179,18 @@ export function Sidebar({
                                               provider={session.provider}
                                               className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
                                             />
+                                            {/* Awaiting-input dot: the agent has paused on
+                                                a user-input request or has a pending
+                                                approval. Most urgent state — surfaced
+                                                at the top of the queue with a coloured
+                                                dot so the user can spot it at a glance. */}
+                                            {awaitingInputSessionIds.has(session.id) ? (
+                                              <span
+                                                className="h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                                                title="Awaiting your input"
+                                                aria-label="Awaiting your input"
+                                              />
+                                            ) : null}
                                             <span className="truncate">
                                               {session.title ||
                                                 session.id.slice(0, 8)}

@@ -10,7 +10,7 @@ import {
 import type { ShortcutActionId } from "../lib/shortcut-settings.js";
 
 /**
- * Controller Mode keyboard shortcut bindings.
+ * Focus-queue keyboard shortcut bindings.
  *
  * GET  /api/shortcuts       → effective bindings (defaults merged with overrides)
  * PUT  /api/shortcuts       → replace override map

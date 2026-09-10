@@ -213,12 +213,12 @@ function prettyKey(key: string): string {
  * Bindings map action-id → chord-string. We resolve each chord to a
  * parsed form and return the first match.
  *
- * Note: in practice we don't use this — `useControllerModeShortcuts`
- * matches against each action's chord directly so the host can decide
- * priority (e.g. the `controllerModeNext` chord matches even while a
- * countdown is pending, taking precedence over `controllerModeStay`).
- * Exposed for future chords and for the settings UI's "what fires for
- * this chord?" lookup.
+ * Note: in practice we don't use this — `useFocusShortcuts` matches
+ * against each action's chord directly so the host can decide
+ * priority (e.g. the `focusAdvanceNext` chord matches even while a
+ * countdown is pending, taking precedence over `focusStay`). Exposed
+ * for future chords and for the settings UI's "what fires for this
+ * chord?" lookup.
  */
 export function findMatchingAction(
   bindings: Record<string, string>,

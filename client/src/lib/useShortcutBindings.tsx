@@ -19,15 +19,15 @@ import {
 } from "../../../shared/shortcuts.ts";
 
 /**
- * Single source of truth for Controller Mode shortcut bindings.
+ * Single source of truth for focus-queue shortcut bindings.
  *
  * The provider lives near the root of the app (in `App.tsx`); every
- * consumer — the global keyboard listener, the `<Kbd>` chips in the
- * Controller Mode bar, the sidebar tooltip, and the Settings panel —
- * reads from the same shared state via `useShortcutBindingsContext()`.
- * That way a rebind in Settings is visible everywhere immediately
- * (issue #235 P2 review: previously Settings had its own `useState`,
- * so saved changes only took effect after a full reload).
+ * consumer — the global keyboard listener, the toast chip text, and
+ * the Settings panel — reads from the same shared state via
+ * `useShortcutBindingsContext()`. That way a rebind in Settings is
+ * visible everywhere immediately (issue #235 P2 review: previously
+ * Settings had its own `useState`, so saved changes only took effect
+ * after a full reload).
  *
  * Until the first fetch resolves, `bindings` is `null`; consumers
  * fall back to the bundled defaults.
@@ -114,9 +114,9 @@ export function bindingFor(
 /**
  * Module-level flag the App-level keyboard listener checks before
  * handling a chord. The Settings recorder sets this while the user is
- * mid-recording so a Ctrl+T / Ctrl+N / Ctrl+D / Ctrl+S press
- * captured by the recorder doesn't also fire the global handler and
- * toggle controller mode / navigate / mark done (issue #235 P2
+ * mid-recording so a Ctrl+N / Ctrl+D / Ctrl+S / Ctrl+T press captured
+ * by the recorder doesn't also fire the global handler and navigate /
+ * mark done / cancel an advance / toggle auto-advance (issue #235 P2
  * review).
  *
  * Using a module variable rather than context because the recorder

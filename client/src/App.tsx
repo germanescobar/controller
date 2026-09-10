@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { Archive, ArrowRight, Menu, Radar, X } from "lucide-react";
+import { Archive, ArrowRight, Menu, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,15 +15,18 @@ import {
   archiveSession,
   fetchProjects,
   markSessionFocusDone,
-  pinSessionFocus,
   subscribeProjectEvents,
-  unpinSessionFocus,
   type Project,
   type ProjectEvent,
   type Worktree,
 } from "./api.ts";
 import type { ControllerLinkTarget } from "../../shared/conversation-links.ts";
-import { Sidebar, type FocusQueueItem } from "./components/sidebar.tsx";
+import {
+  Sidebar,
+  markFocusItemHandled,
+  sortFocusQueue,
+  type FocusQueueItem,
+} from "./components/sidebar.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
@@ -31,18 +34,21 @@ import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
-import { useControllerModeShortcuts } from "./lib/useControllerModeShortcuts.ts";
+import { useFocusShortcuts } from "./lib/useFocusShortcuts.ts";
 import {
   ShortcutBindingsProvider,
   useShortcutBindingsContext,
 } from "./lib/useShortcutBindings.tsx";
 import { FileIndexProvider } from "./lib/useFileIndex.tsx";
-import { FocusAdvanceToast } from "./components/focus-advance-toast.tsx";
-import { pickNextFocusItem } from "./lib/focus-advance.ts";
+import { pickFirstFocusItem } from "./lib/focus-advance.ts";
+import {
+  loadSavedVisitedAt,
+  persistVisitedAt,
+} from "./lib/focus-visited-storage.ts";
 
 /**
- * Time the focus-advance toast shows a "Moving to next..." countdown
- * before actually navigating. The countdown is what keeps the user
+ * Time the conversation panel shows its auto-advance countdown before
+ * navigating. The countdown is what keeps the user
  * from losing sight of the message they just sent: the in-flight
  * bubble stays on screen for at least this long, and they can
  * cancel the advance with the **Stay** button or Esc.
@@ -53,7 +59,6 @@ const FOCUS_ADVANCE_COUNTDOWN_MS = 4000;
 
 export interface PendingFocusAdvance {
   sentFromSessionId: string;
-  next: FocusQueueItem;
   /** Epoch ms when the advance was scheduled. */
   scheduledAt: number;
 }
@@ -132,16 +137,57 @@ function AppBody() {
     return saved.page === "session" ? saved.projectId : null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [controllerMode, setControllerMode] = useState(false);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
+  // Per-session "last handled" timestamp. Updated only when the user
+  // advances past a session with Next or committed auto-advance. Drives
+  // the visited/unvisited split in `sortFocusQueue` — finished
+  // sessions the user has not handled sit at the top of the
+  // finished block ("triage pile"), and advancing past one sinks it below
+  // the unvisited pile so the user isn't bounced back to them on
+  // every cycle. The persisted key retains its historical "visited"
+  // name for backwards compatibility.
+  //
+  // Hydrated from localStorage on first paint and persisted on
+  // every update so the triage pile survives a reload. Without
+  // persistence, a reload re-surfaces every pinned session as
+  // "fresh" again and loses the user's triage progress.
+  const [visitedAt, setVisitedAt] = useState<Record<string, string>>(
+    () => loadSavedVisitedAt(window.localStorage),
+  );
+  // Write-through to localStorage whenever `visitedAt` changes. A
+  // dedicated effect is cleaner than wrapping the setter because
+  // Watching the state guarantees we persist exactly the value that
+  // just became canonical. Persistence failures are swallowed inside
+  // `persistVisitedAt`; the in-memory state still works.
+  useEffect(() => {
+    persistVisitedAt(window.localStorage, visitedAt);
+  }, [visitedAt]);
+  // Post-reply auto-advance countdown: on by default. When off,
+  // replies stay on the current session until the user hits Next,
+  // Mark Done, or re-enables the toggle. The Next chord always
+  // advances regardless of this setting (it's the manual escape
+  // hatch). Persisted to localStorage so a user who turns it off
+  // doesn't have to turn it off again on every reload.
+  const [autoAdvance, setAutoAdvance] = useState<boolean>(() => {
+    try {
+      const saved = window.localStorage.getItem(
+        "controller.focus.autoAdvance",
+      );
+      if (saved === "false") return false;
+    } catch {
+      // localStorage can throw in private-mode browsers; fall
+      // through to the default.
+    }
+    return true;
+  });
   // Live shortcut bindings shared with the Settings panel and the
-  // Controller Mode keyboard listener. Read here (top of AppBody) so
-  // both `handleFocusAdvanceAfterSend` and `useControllerModeShortcuts`
-  // can pass the same map into the toast and the keydown handler.
+  // Focus-queue keyboard listener. Read here (top of AppBody) so
+  // both the conversation panel and `useFocusShortcuts` can use the
+  // same configured chords.
   const shortcutBindings = useShortcutBindingsContext();
   // Scheduled "advance to the next focus item" while a 4-second
-  // countdown is showing in a toast. Set by
+  // countdown is showing in the conversation panel. Set by
   // `handleFocusAdvanceAfterSend` after a send, cleared either by the
   // timer firing (then we navigate) or by any of the cancel paths
   // (S, Esc, manual nav, unmount). See issue #104.
@@ -155,16 +201,19 @@ function AppBody() {
     { added: number; deleted: number } | null
   >(null);
   const pendingFocusAdvanceRef = useRef<PendingFocusAdvance | null>(null);
+  const focusQueueRef = useRef<FocusQueueItem[]>([]);
+  const visitedAtRef = useRef(visitedAt);
   const advanceTimerRef = useRef<number | null>(null);
-  const advanceToastIdRef = useRef<string | number | null>(null);
   // The view to return to when settings is closed (the last non-settings view).
   const preSettingsViewRef = useRef<View>({ page: "empty" });
 
-  const dismissAdvanceToast = () => {
-    if (advanceToastIdRef.current === null) return;
-    toast.dismiss(advanceToastIdRef.current);
-    advanceToastIdRef.current = null;
-  };
+  useEffect(() => {
+    focusQueueRef.current = focusQueue;
+  }, [focusQueue]);
+
+  useEffect(() => {
+    visitedAtRef.current = visitedAt;
+  }, [visitedAt]);
 
   const setView = (v: View) => {
     // Entering settings: remember the view we're leaving so closing returns there.
@@ -181,15 +230,29 @@ function AppBody() {
       advanceTimerRef.current = null;
     }
     pendingFocusAdvanceRef.current = null;
-    dismissAdvanceToast();
     setPendingFocusAdvance((current) => (current ? null : current));
   };
 
   const closeSidebar = () => setSidebarOpen(false);
 
-  const handleFocusQueueChange = useCallback((queue: FocusQueueItem[]) => {
-    setFocusQueue(queue);
-  }, []);
+  const handleFocusQueueChange = useCallback(
+    (queue: FocusQueueItem[]) => {
+      // Overlay the per-session handled timestamps onto the items the
+      // sidebar emitted, then sort via the shared helper. The sidebar
+      // builds the raw items (it owns the runtime / projectData
+      // fetches); App owns the visit tracking and the canonical
+      // ordering.
+      const withVisits = queue.map((item) => {
+        const visited = visitedAtRef.current[item.session.id];
+        if (visited === item.lastVisitedAt) return item;
+        return { ...item, lastVisitedAt: visited };
+      });
+      const sorted = sortFocusQueue(withVisits);
+      focusQueueRef.current = sorted;
+      setFocusQueue(sorted);
+    },
+    [],
+  );
 
   /**
    * Open a pinned focus item by switching the view to its session
@@ -208,9 +271,48 @@ function AppBody() {
   }, []);
 
   /**
-   * Commit a scheduled focus advance: navigate to the target session
-   * and clear the pending state. Safe to call when nothing is pending
-   * (it just no-ops).
+   * Advance past a session in two explicit steps: first mark and
+   * re-sort the current item, then open the new first queue item.
+   * Resolving the destination after the mutation keeps navigation
+   * aligned with exactly what the sidebar displays.
+   */
+  const advancePastFocusItem = useCallback(
+    (sessionId: string) => {
+      const currentQueue = focusQueueRef.current;
+      const isPinned = currentQueue.some(
+        (item) => item.session.id === sessionId,
+      );
+      let reordered = currentQueue;
+
+      if (isPinned) {
+        const handledAt = new Date().toISOString();
+        const nextVisitedAt = {
+          ...visitedAtRef.current,
+          [sessionId]: handledAt,
+        };
+        visitedAtRef.current = nextVisitedAt;
+        setVisitedAt(nextVisitedAt);
+
+        reordered = markFocusItemHandled(
+          currentQueue,
+          sessionId,
+          handledAt,
+        );
+        focusQueueRef.current = reordered;
+        setFocusQueue(reordered);
+      }
+
+      const next = pickFirstFocusItem(reordered, sessionId);
+      if (next) openFocusItem(next);
+    },
+    [openFocusItem],
+  );
+
+  /**
+   * Commit a scheduled focus advance: reorder the originating session,
+   * then navigate to the queue's new first row. The target is resolved
+   * here rather than when the countdown starts, so live queue changes
+   * during those four seconds are respected.
    */
   const commitPendingAdvance = useCallback(() => {
     const pending = pendingFocusAdvanceRef.current;
@@ -221,9 +323,8 @@ function AppBody() {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
-    dismissAdvanceToast();
-    openFocusItem(pending.next);
-  }, [openFocusItem]);
+    advancePastFocusItem(pending.sentFromSessionId);
+  }, [advancePastFocusItem]);
 
   /**
    * Cancel a scheduled focus advance: clear the pending state and
@@ -236,7 +337,6 @@ function AppBody() {
       window.clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
     }
-    dismissAdvanceToast();
   }, []);
 
   // Clear the countdown on unmount so a stale timer doesn't fire
@@ -248,7 +348,6 @@ function AppBody() {
         advanceTimerRef.current = null;
       }
       pendingFocusAdvanceRef.current = null;
-      dismissAdvanceToast();
     };
   }, []);
 
@@ -296,44 +395,6 @@ function AppBody() {
       }
     };
   }, [activeProjectId, scheduleEventsRefetch]);
-
-  const handleControllerModeToggle = useCallback(() => {
-    if (controllerMode) {
-      setControllerMode(false);
-      cancelPendingAdvance();
-      return;
-    }
-    const firstItem = focusQueue[0];
-    if (!firstItem) {
-      toast.info("Add a session to On radar to use Controller Mode");
-      return;
-    }
-    setControllerMode(true);
-    openFocusItem(firstItem);
-  }, [controllerMode, focusQueue, openFocusItem, cancelPendingAdvance]);
-
-  const handleControllerModeEnter = useCallback(() => {
-    const firstItem = focusQueue[0];
-    if (!firstItem) {
-      toast.info("Add a session to On radar to use Controller Mode");
-      return;
-    }
-    setControllerMode(true);
-    openFocusItem(firstItem);
-  }, [focusQueue, openFocusItem]);
-
-  const handleControllerModeExit = useCallback(() => {
-    setControllerMode(false);
-    // Exiting controller mode also cancels any pending advance — the
-    // target session is no longer relevant once controller mode is off.
-    if (advanceTimerRef.current !== null) {
-      window.clearTimeout(advanceTimerRef.current);
-      advanceTimerRef.current = null;
-    }
-    pendingFocusAdvanceRef.current = null;
-    dismissAdvanceToast();
-    setPendingFocusAdvance(null);
-  }, []);
 
   const handleSelectProject = (projectId: string) => {
     setActiveProjectId(projectId);
@@ -425,14 +486,34 @@ function AppBody() {
     setMobileDiffSummary(null);
   }, [activeView.page === "session" ? activeView.sessionId : null]);
 
-  const focusPosition =
-    currentFocusIndex >= 0
-      ? { current: currentFocusIndex + 1, total: focusQueue.length }
-      : controllerMode
-        ? { current: 0, total: focusQueue.length }
-        : undefined;
-  const currentFocusItem = currentFocusIndex >= 0 ? focusQueue[currentFocusIndex] : null;
+  // When handled timestamps change, re-sort the queue so handled items
+  // sink below the unvisited triage pile. Avoid an infinite loop
+  // by checking that the timestamps are actually different before
+  // triggering the sort.
+  useEffect(() => {
+    setFocusQueue((current) => {
+      const withVisits = current.map((item) => {
+        const visited = visitedAt[item.session.id];
+        if (visited === item.lastVisitedAt) return item;
+        return { ...item, lastVisitedAt: visited };
+      });
+      const sorted = sortFocusQueue(withVisits);
+      // Bail if nothing actually changed (same array reference,
+      // same item references). `sortFocusQueue` returns a fresh
+      // array even when order is unchanged, so we compare items.
+      if (
+        sorted.length === current.length &&
+        sorted.every((item, i) => item === current[i])
+      ) {
+        focusQueueRef.current = current;
+        return current;
+      }
+      focusQueueRef.current = sorted;
+      return sorted;
+    });
+  }, [visitedAt]);
 
+  const currentFocusItem = currentFocusIndex >= 0 ? focusQueue[currentFocusIndex] : null;
   const handleFocusSkip = () => {
     // If a countdown is already scheduled, `N` (and the **Next**
     // button) commit it immediately rather than skipping to a
@@ -442,31 +523,36 @@ function AppBody() {
       return;
     }
     if (focusQueue.length === 0) {
-      setControllerMode(false);
       toast.info("Focus queue is empty");
       return;
     }
-    const nextIndex =
-      currentFocusIndex >= 0 ? (currentFocusIndex + 1) % focusQueue.length : 0;
-    openFocusItem(focusQueue[nextIndex]);
+    const sentFromId =
+      currentFocusItem?.session.id ?? activeView.sessionId ?? "";
+    advancePastFocusItem(sentFromId);
   };
 
-  const handleToggleCurrentSessionPin = async () => {
-    if (activeView.page !== "session" || !activeView.sessionId) return;
-    const { projectId, worktreeId, sessionId } = activeView;
-    const pinned = currentFocusIndex >= 0;
-
+  // Toggle the post-reply auto-advance countdown. Persists to
+  // localStorage so the choice survives reloads. Next, Stay, and Mark
+  // Done are unaffected — they always work regardless of this
+  // setting (Next is the manual escape hatch).
+  //
+  // Toggling OFF also cancels any in-flight countdown: the user has
+  // just said "I want to stay on this session," so honoring a
+  // 4-second-old auto-advance schedule contradicts that intent.
+  const handleToggleAutoAdvance = useCallback(() => {
+    const nextValue = !autoAdvance;
+    setAutoAdvance(nextValue);
     try {
-      if (pinned) {
-        await unpinSessionFocus(projectId, sessionId, worktreeId);
-      } else {
-        await pinSessionFocus(projectId, sessionId, worktreeId);
-      }
-      setFocusRefreshKey((key) => key + 1);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
+      window.localStorage.setItem(
+        "controller.focus.autoAdvance",
+        nextValue ? "true" : "false",
+      );
+    } catch {
+      // localStorage can throw in private-mode browsers; the
+      // in-memory state still flips for the rest of the session.
     }
-  };
+    if (!nextValue) cancelPendingAdvance();
+  }, [autoAdvance, cancelPendingAdvance]);
 
   const handleArchiveCurrentSession = () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
@@ -514,76 +600,66 @@ function AppBody() {
             item.session.id === sessionId
           )
       );
+      focusQueueRef.current = nextQueue;
       setFocusQueue(nextQueue);
       setFocusRefreshKey((key) => key + 1);
 
       if (nextQueue.length === 0) {
-        setControllerMode(false);
         toast.success("Focus queue complete");
         return;
       }
 
-      const nextIndex =
-        currentFocusIndex >= 0
-          ? currentFocusIndex % nextQueue.length
-          : 0;
-      openFocusItem(nextQueue[nextIndex]);
+      openFocusItem(nextQueue[0]);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
     }
   };
 
-  // After the user sends a message in controller mode, schedule an
-  // advance to the next focus item rather than navigating
-  // immediately. The user just committed a message, and bouncing
-  // them away from the originating session before the in-flight
-  // user bubble can render is what made the message look "lost"
-  // (issue #104). The countdown gives them FOCUS_ADVANCE_COUNTDOWN_MS
-  // to see the bubble, with the **Stay** chord (default ⌃S / Ctrl+S)
-  // or Esc for cancelling.
+  // After the user sends a message, schedule an advance to the next
+  // focus item rather than navigating immediately. The user just
+  // committed a message, and bouncing them away from the originating
+  // session before the in-flight user bubble can render is what made
+  // the message look "lost" (issue #104). The countdown gives them
+  // FOCUS_ADVANCE_COUNTDOWN_MS to see the bubble, with the **Stay**
+  // chord (default ⌃S / Ctrl+S) or Esc for cancelling.
   //
   // The "sent from" session id is passed in so we can apply the
   // stay-put rule when the only pinned item is the one the user
   // just replied to (queue-of-one, no-op).
+  //
+  // When `autoAdvance` is off, replies stay on the current session —
+  // the user has to hit Next (manual skip), Mark Done (removes from
+  // queue), or re-enable the toggle. Staying does not reorder it.
   const handleFocusAdvanceAfterSend = useCallback(
     (sentFromSessionId: string) => {
-      if (!controllerMode) return;
-      const next = pickNextFocusItem(focusQueue, sentFromSessionId);
-      if (!next) return;
+      if (!autoAdvance) return;
+      // Only schedule when another row exists, but deliberately do not
+      // cache which row it is. The commit resolves the new first item
+      // after demoting the current session and applying any live queue
+      // updates that arrived during the countdown.
+      if (!pickFirstFocusItem(focusQueueRef.current, sentFromSessionId)) return;
       // Replace any existing pending advance (the user sent again
       // before the previous countdown finished). The new origin
       // session is what matters; we restart the clock.
       if (advanceTimerRef.current !== null) {
         window.clearTimeout(advanceTimerRef.current);
       }
-      dismissAdvanceToast();
       const pendingAdvance = {
         sentFromSessionId,
-        next,
         scheduledAt: Date.now(),
       };
       pendingFocusAdvanceRef.current = pendingAdvance;
       setPendingFocusAdvance(pendingAdvance);
-      advanceToastIdRef.current = toast.custom(
-        () => (
-          <FocusAdvanceToast
-            scheduledAt={pendingAdvance.scheduledAt}
-            durationMs={FOCUS_ADVANCE_COUNTDOWN_MS}
-            bindings={shortcutBindings.bindings}
-            onCancel={cancelPendingAdvance}
-          />
-        ),
-        {
-          duration: Infinity,
-          position: "top-right",
-          unstyled: true,
-        },
-      );
       advanceTimerRef.current = window.setTimeout(() => {
         commitPendingAdvance();
       }, FOCUS_ADVANCE_COUNTDOWN_MS);
     },
-    [controllerMode, focusQueue, commitPendingAdvance, cancelPendingAdvance, shortcutBindings.bindings],
+    [
+      autoAdvance,
+      commitPendingAdvance,
+      cancelPendingAdvance,
+      shortcutBindings.bindings,
+    ],
   );
 
   // Sidebar resizing
@@ -594,22 +670,20 @@ function AppBody() {
     maxWidth: 480,
   });
 
-  // Controller Mode keyboard shortcuts (defaults: ⌃T toggle, ⌃N next,
-  // ⌃D done, ⌃S stay; ⌃ on macOS, Ctrl off-mac). We default to Ctrl
-  // rather than Cmd because Cmd collides with too many macOS system
-  // shortcuts (Cmd+W, Cmd+Q, Cmd+R, Cmd+T, …). The chord for each
-  // action is read from `useShortcutBindings`, so users can rebind
-  // them in Settings (issue #235). The matcher is strict per-platform:
-  // a stored "ctrl-n" only fires on ⌃N on macOS, never on ⌘N. Esc
-  // still blurs and (when not in an editable) cancels a pending
-  // advance.
-  useControllerModeShortcuts({
+  // Focus-queue keyboard shortcuts (defaults: ⌃N next, ⌃D done, ⌃S
+  // stay, ⌃T toggle auto-advance; ⌃ on macOS, Ctrl off-mac). We
+  // default to Ctrl rather than Cmd because Cmd collides with too
+  // many macOS system shortcuts (Cmd+W, Cmd+Q, Cmd+R, …). The chord
+  // for each action is read from `useShortcutBindings`, so users can
+  // rebind them in Settings (issue #235). The matcher is strict
+  // per-platform: a stored "ctrl-n" only fires on ⌃N on macOS, never
+  // on ⌘N. Esc still blurs and (when not in an editable) cancels a
+  // pending advance.
+  useFocusShortcuts({
     bindings: shortcutBindings.bindings,
-    controllerMode,
     onSkip: handleFocusSkip,
     onDone: handleFocusDone,
-    onEnter: handleControllerModeEnter,
-    onExit: handleControllerModeExit,
+    onToggleAutoAdvance: handleToggleAutoAdvance,
     onCancelAdvance: pendingFocusAdvance ? cancelPendingAdvance : undefined,
     onCommitAdvance: pendingFocusAdvance ? commitPendingAdvance : undefined,
   });
@@ -668,9 +742,7 @@ function AppBody() {
             closeSidebar();
           }}
           onFocusQueueChange={handleFocusQueueChange}
-          controllerMode={controllerMode}
-          onControllerModeToggle={handleControllerModeToggle}
-          shortcutBindings={shortcutBindings.bindings}
+          focusQueue={focusQueue}
           focusRefreshKey={focusRefreshKey}
           eventsRefreshKey={eventsRefreshKey}
         />
@@ -704,19 +776,6 @@ function AppBody() {
               <span className="text-green-400/90">+{mobileDiffSummary.added}</span>{" "}
               <span className="text-red-400/90">-{mobileDiffSummary.deleted}</span>
             </span>
-          )}
-          {activeView.page === "session" && activeView.sessionId && (
-            <button
-              onClick={handleToggleCurrentSessionPin}
-              className={`shrink-0 rounded-md p-1.5 transition-colors ${
-                currentFocusIndex >= 0
-                  ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
-              }`}
-              title={currentFocusIndex >= 0 ? "Remove from Radar" : "Add to Radar"}
-            >
-              <Radar className="h-4 w-4" />
-            </button>
           )}
           {activeView.page === "session" && activeView.sessionId && (
             <button
@@ -792,12 +851,11 @@ function AppBody() {
               loadProjects();
             }}
             onOpenConversation={handleOpenConversation}
-            controllerMode={controllerMode}
             shortcutBindings={shortcutBindings.bindings}
-            focusPosition={focusPosition}
+            autoAdvance={autoAdvance}
+            onToggleAutoAdvance={handleToggleAutoAdvance}
             onFocusDone={handleFocusDone}
             onFocusSkip={handleFocusSkip}
-            onFocusExit={handleControllerModeExit}
             onFocusPinnedChange={() => setFocusRefreshKey((key) => key + 1)}
             onTitleChange={() => setFocusRefreshKey((key) => key + 1)}
             onArchive={handleArchiveCurrentSession}
@@ -806,11 +864,9 @@ function AppBody() {
             focusAdvanceCountdown={
               pendingFocusAdvance
                 ? {
-                    // SessionView only needs the origin to preserve
-                    // the pending message and cancel if the user
-                    // starts typing there again. The visible
-                    // countdown lives in the toast.
                     sentFromSessionId: pendingFocusAdvance.sentFromSessionId,
+                    scheduledAt: pendingFocusAdvance.scheduledAt,
+                    durationMs: FOCUS_ADVANCE_COUNTDOWN_MS,
                     onCancel: cancelPendingAdvance,
                   }
                 : null

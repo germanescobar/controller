@@ -222,7 +222,7 @@ export function sessionQueueFile(sessionId: string): string {
 // --- Shortcut Bindings ---
 
 /**
- * Persisted keyboard shortcut overrides for Controller Mode. Lives in the
+ * Persisted keyboard shortcut overrides for the focus-queue. Lives in the
  * Controller home so it survives across browsers on the same machine
  * (issue #235). The defaults are baked into the client; this file only
  * stores user overrides keyed by action id.

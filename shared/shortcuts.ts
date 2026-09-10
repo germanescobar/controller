@@ -21,10 +21,10 @@
  */
 
 export type ShortcutActionId =
-  | "controllerModeToggle"
-  | "controllerModeNext"
-  | "controllerModeDone"
-  | "controllerModeStay"
+  | "focusAdvanceNext"
+  | "focusStay"
+  | "focusDone"
+  | "focusAutoAdvance"
   | "filesPanelToggle"
   | "filesPanelSearch";
 
@@ -38,26 +38,27 @@ export interface ShortcutActionSpec {
 
 export const SHORTCUT_ACTIONS: ShortcutActionSpec[] = [
   {
-    id: "controllerModeToggle",
-    label: "Toggle Controller Mode",
-    description: "Enter or exit Controller Mode for the focus queue.",
-  },
-  {
-    id: "controllerModeNext",
+    id: "focusAdvanceNext",
     label: "Next session",
     description:
       "Advance to the next focus-queue session. While an advance countdown is pending, this commits the advance immediately instead of waiting.",
   },
   {
-    id: "controllerModeDone",
-    label: "Mark session done",
-    description:
-      "Remove the active session from the focus queue. Works whether or not Controller Mode is active — no-op when no session is open.",
-  },
-  {
-    id: "controllerModeStay",
+    id: "focusStay",
     label: "Stay on session",
     description: "Cancel a pending focus-queue advance countdown.",
+  },
+  {
+    id: "focusDone",
+    label: "Mark session done",
+    description:
+      "Remove the active session from the focus queue. No-op when no session is open.",
+  },
+  {
+    id: "focusAutoAdvance",
+    label: "Toggle auto-advance",
+    description:
+      "Toggle the post-reply auto-advance countdown on or off. When off, replies stay on the current session until you hit Next or Mark Done manually. Next always advances regardless of this setting.",
   },
   {
     id: "filesPanelToggle",
@@ -90,10 +91,10 @@ export const SHORTCUT_ACTIONS: ShortcutActionSpec[] = [
  * the same `cmd-b` chord fires on Ctrl+B.
  */
 export const DEFAULT_SHORTCUT_BINDINGS: Record<ShortcutActionId, string> = {
-  controllerModeToggle: "ctrl-t",
-  controllerModeNext: "ctrl-n",
-  controllerModeDone: "ctrl-d",
-  controllerModeStay: "ctrl-s",
+  focusAdvanceNext: "ctrl-n",
+  focusStay: "ctrl-s",
+  focusDone: "ctrl-d",
+  focusAutoAdvance: "ctrl-t",
   filesPanelToggle: "cmd-b",
   filesPanelSearch: "cmd-p",
 };

@@ -1,43 +1,41 @@
 ---
-title: Controller Mode
-description: The always-on overlay for steering long agent runs with keyboard shortcuts.
+title: Focus navigation
+description: Triage sessions with On radar, Next, Done, and optional auto-advance.
 ---
 
-**Controller Mode** is an always-on overlay designed for long agent runs.
-Instead of watching a single chat scroll by, it keeps the controls you need to
-steer the agent within reach while it works.
+**Focus navigation** helps you triage several agent sessions without losing
+your place. Add important conversations to **On radar**, then use the controls
+beside the conversation to move through the queue.
 
 ## When to use it
 
-- **Use Controller Mode** for long, multi-step runs where you want to advance,
-  stay, or redirect the agent without hunting through the UI — keyboard-first
-  steering over an extended session.
-- **Use plain chat mode** for quick, conversational back-and-forth where you're
-  reading and replying to each response as it lands.
+- Put long-running or attention-heavy sessions **On radar**.
+- Use **Next** to mark the current session handled and open the queue's new
+  first item.
+- Use **Done** when a session no longer belongs on radar.
+- Turn on **Auto-advance** to start a short countdown after you reply or resolve
+  an input request. Choose **Stay** to cancel it.
+
+The focus panel remains available for conversations that are not on radar, so
+you can jump to the next queued session or add the current conversation.
 
 ## Keyboard shortcuts
 
-Controller Mode is modifier-based and **user-customizable**. Shortcuts are
-chords built on a modifier (**Ctrl** on Linux, **⌘** on macOS) plus a key, so
-they don't collide with the agent's own typing. You can remap them to keys that
-suit your keyboard.
+Desktop focus actions have **user-customizable** keyboard shortcuts. The panel
+shows the current bindings for **Next**, **Stay**, **Done**, and
+**Auto-advance**. Mobile keeps the controls compact and does not show shortcut
+chips.
 
-## The stay / continue chord
+## Auto-advance
 
-When the agent reaches a point where it's about to advance focus, Controller
-shows a **focus-advance toast**. The toast displays the live **stay /
-continue** chord so you can decide in the moment:
+When auto-advance is enabled and a countdown starts, the same focus panel shows
+the remaining time and the controls you need:
 
 - **Stay** — hold focus where it is.
-- **Continue** — let the agent advance.
-
-The chord shown on the toast is the live, current binding, so it always matches
-whatever you've configured — no need to remember the mapping.
+- **Next** — advance immediately.
 
 The countdown is scheduled whenever you're "done with the current session for
-now" in Controller Mode: after sending a message, after clicking **Allow** on a
-tool-approval card (and **Deny** does *not* advance — it's the explicit
-"stay and reconsider" signal), and after submitting answers to a structured
-user-input prompt. If you resolve a prompt while a countdown is already in
-flight, the clock restarts on the new origin session rather than stacking a
-second toast.
+now": after sending a message, clicking **Allow** on a tool-approval card, or
+submitting structured input. **Deny** keeps you on the current session. If
+another qualifying action happens during a countdown, the timer restarts
+instead of creating a second countdown.

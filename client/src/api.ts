@@ -122,6 +122,13 @@ export interface SessionRuntimeEntry {
   provider?: string;
   projectId?: string;
   worktreeId?: string;
+  /**
+   * True when the agent has paused on a user-input request OR has at
+   * least one pending tool approval. The focus-queue sidebar uses
+   * this as the highest-priority "needs your attention" signal
+   * regardless of the session's `active` state.
+   */
+  awaitingInput?: boolean;
 }
 
 export interface AgentEvent {

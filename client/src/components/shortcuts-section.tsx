@@ -22,7 +22,7 @@ import {
 } from "../../../shared/shortcuts.ts";
 
 /*
- * Settings panel for Controller Mode keyboard shortcuts.
+ * Settings panel for focus-queue keyboard shortcuts.
  *
  * Each action shows its current chord and a "Record" button. Clicking
  * Record waits for the next key chord, then auto-saves it (no separate
@@ -181,9 +181,10 @@ function Recorder({
   //
   // We also set the `recordingChord` module flag while recording so the
   // global App-level listener (registered on window capture too) skips
-  // its handler — otherwise Ctrl+T / Ctrl+N / Ctrl+D / Ctrl+S would
-  // actually toggle / navigate / mark-done instead of being captured
-  // for the new binding (issue #235 P2 review).
+  // its handler — otherwise Ctrl+N / Ctrl+D / Ctrl+S / Ctrl+T would
+  // actually navigate / mark-done / cancel / toggle-auto-advance
+  // instead of being captured for the new binding (issue #235 P2
+  // review).
   useEffect(() => {
     setRecordingChord(true);
     return () => setRecordingChord(false);

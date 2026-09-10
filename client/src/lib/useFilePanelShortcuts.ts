@@ -18,7 +18,7 @@ import { isRecordingChord } from "./useShortcutBindings.tsx";
  *     finder overlay scoped to the active worktree.
  *
  * Both chords follow the same suppression rules as
- * `useControllerModeShortcuts` (issue #235):
+ * `useFocusShortcuts` (issue #235):
  *   - Skipped while the Settings recorder is mid-capture so the
  *     recorded key isn't double-handled.
  *   - Skipped on auto-repeat.
@@ -34,9 +34,9 @@ import { isRecordingChord } from "./useShortcutBindings.tsx";
  *     the shortcut. The composer needs `Cmd+B` / `Cmd+P` for text
  *     formatting and clipboard respectively, and the chat
  *     composer's own handlers win the race anyway. Note this is the
- *     one place the rules diverge from `useControllerModeShortcuts`:
- *     controller-mode chords fire even inside the composer because
- *     they're the only way to escape a stuck focus-mode loop; the
+ *     one place the rules diverge from `useFocusShortcuts`:
+ *     focus-queue chords fire even inside the composer because
+ *     they're the only way to escape a stuck focus loop; the
  *     files-panel chords are convenience bindings and shouldn't
  *     clobber text editing.
  *

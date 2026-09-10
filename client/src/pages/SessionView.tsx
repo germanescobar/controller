@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, CheckCircle2, StepForward, LogOut, Radar, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -44,6 +44,7 @@ import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
+import { FocusConversationControls } from "@/components/focus-conversation-controls";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import { isControllerAvailable } from "@/lib/controller";
 import { formatChord, matchesEvent, parseChord } from "@/lib/shortcut-match";
@@ -138,6 +139,11 @@ import {
 import { describeApprovalInput } from "../lib/describe-approval-input.ts";
 import { getLatestPendingToolApproval } from "../lib/pending-tool-approval.ts";
 import { extractFilesFromClipboard } from "../lib/clipboard-files.ts";
+import {
+  getComposerLayout,
+  MOBILE_COMPOSER_MEDIA_QUERY,
+} from "../lib/mobile-composer.ts";
+import { getConversationCountdown } from "../lib/focus-conversation-countdown.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -150,18 +156,17 @@ interface SessionViewProps {
   // the transcript. Resolves the short form (session-only) to its owning
   // project/worktree before navigating. No-op if the parent doesn't provide it.
   onOpenConversation?: (target: ControllerLinkTarget) => void;
-  controllerMode?: boolean;
   /**
-   * Effective shortcut bindings for Controller Mode chords. `null` while
-   * the settings hook is still loading. SessionView reads these so the
-   * `<Kbd>` chips and the inline "press S to stay" listener reflect the
-   * user's rebinds. See issue #235.
+   * Effective shortcut bindings for the focus-queue chords (Next /
+   * Stay / Done). `null` while the settings hook is still loading.
+   * SessionView reads these so the inline "press Ctrl+S to stay"
+   * listener matches the user's rebinds. See issue #235.
    */
   shortcutBindings?: import("../../../shared/shortcuts.ts").ShortcutBindings | null;
-  focusPosition?: { current: number; total: number };
+  autoAdvance?: boolean;
+  onToggleAutoAdvance?: () => void;
   onFocusDone?: () => void;
   onFocusSkip?: () => void;
-  onFocusExit?: () => void;
   onFocusPinnedChange?: () => void;
   // Opens the archive confirmation dialog for the current session.
   // Owned by the parent because it shares its `archiveConfirmOpen`
@@ -180,21 +185,24 @@ interface SessionViewProps {
   // other views (sidebar, focus queue) that cache the title separately.
   onTitleChange?: () => void;
   // Fires right after the user sends a message (or answers an agent
-  // prompt) in controller mode, with the id of the session the message
-  // was sent from. The parent can use this to advance to the next
-  // focus item. See issue #81 follow-up: "respond and advance to the
-  // next conversation".
+  // prompt), with the id of the session the message was sent from.
+  // The parent can use this to advance to the next focus item. See
+  // issue #81 follow-up: "respond and advance to the next
+  // conversation".
   onFocusAdvanceAfterSend?: (sessionId: string) => void;
   /**
-   * When non-null, a controller-mode advance has been scheduled after
+   * When non-null, a focus-advance countdown has been scheduled after
    * a send. While this is set, SessionView preserves the in-flight
    * user-message bubble in the originating session (we skip the
    * session-change cleanup that would otherwise wipe it) so the user
-   * always has time to see the message they just sent. Typing in the
-   * originating composer cancels the pending advance.
+   * always has time to see the message they just sent. The conversation
+   * controls render the countdown and Stay action; typing in the
+   * originating composer also cancels it.
    */
   focusAdvanceCountdown?: {
     sentFromSessionId: string;
+    scheduledAt: number;
+    durationMs: number;
     onCancel: () => void;
   } | null;
 }
@@ -294,7 +302,6 @@ const IS_TOUCH_DEVICE =
   typeof window !== "undefined" &&
   typeof window.matchMedia === "function" &&
   window.matchMedia("(pointer: coarse)").matches;
-
 function supportsAttachments(provider: string): boolean {
   return provider === "anita" || provider === "codex" || provider === "claude";
 }
@@ -2898,12 +2905,11 @@ export function SessionView({
   onSessionCreated,
   onBackgroundComplete,
   onOpenConversation,
-  controllerMode = false,
   shortcutBindings = null,
-  focusPosition,
+  autoAdvance = true,
+  onToggleAutoAdvance,
   onFocusDone,
   onFocusSkip,
-  onFocusExit,
   onFocusPinnedChange,
   onTitleChange,
   onFocusAdvanceAfterSend,
@@ -2924,6 +2930,18 @@ export function SessionView({
     []
   );
   const [message, setMessage] = useState(initialComposerDraft.text);
+  const [composerHasFocus, setComposerHasFocus] = useState(false);
+  const [isMobileComposerViewport, setIsMobileComposerViewport] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(MOBILE_COMPOSER_MEDIA_QUERY).matches,
+  );
+  const composerLayout = getComposerLayout(
+    isMobileComposerViewport,
+    composerHasFocus,
+    COMPOSER_MAX_LINES,
+  );
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<SessionAttachment[]>([]);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
@@ -3104,6 +3122,7 @@ export function SessionView({
   const terminalRefs = useRef<Record<string, TerminalHandle | null>>({});
   const terminalTabsSavePendingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const hadVisibleFocusAdvanceRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
@@ -3377,24 +3396,54 @@ export function SessionView({
   }, [streaming]);
 
   useEffect(() => {
+    const mediaQuery = window.matchMedia(MOBILE_COMPOSER_MEDIA_QUERY);
+    const syncViewport = () => setIsMobileComposerViewport(mediaQuery.matches);
+    syncViewport();
+    mediaQuery.addEventListener("change", syncViewport);
+    return () => mediaQuery.removeEventListener("change", syncViewport);
+  }, []);
+
+  // Mobile taps do not reliably populate a blur event's `relatedTarget`.
+  // Collapsing from onBlur could therefore unmount an agent/model picker
+  // between pointer-down and click. Treat the entire composer as one
+  // interaction surface and collapse only on an explicit tap outside it.
+  useEffect(() => {
+    if (!isMobileComposerViewport || !composerHasFocus) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && composerRef.current?.contains(target)) return;
+      setComposerHasFocus(false);
+      setSkillPopoverOpen(false);
+      setMentionPopoverOpen(false);
+      setShowProviderPicker(false);
+      setShowReasoningEffortPicker(false);
+      setShowModelPicker(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [composerHasFocus, isMobileComposerViewport]);
+
+  useEffect(() => {
     debugSessionIsolation("view.mounted", { projectId, worktreeId, sessionId });
     return () => {
       debugSessionIsolation("view.unmounted", { projectId, worktreeId, sessionId });
     };
   }, [projectId, worktreeId, sessionId]);
 
-  // While controller mode is active, drop the user straight into the composer
-  // whenever the active session changes (entering controller mode, skipping to
-  // the next pinned session, or marking the current one done). This keeps
-  // the controller-mode triage loop keyboard-driven: the user can `Esc` out
-  // of the input to fire a shortcut and is placed back at the keyboard the
-  // moment the new session is ready.
+  // Drop desktop users straight into the composer whenever the active
+  // session changes. Mobile intentionally starts with the compact one-line
+  // composer and waits for a tap before expanding it and opening the keyboard.
   useEffect(() => {
-    if (!controllerMode || !sessionId) return;
+    if (!sessionId) return;
     const textarea = textareaRef.current;
     if (!textarea || textarea.disabled) return;
+    if (!composerLayout.autoFocusOnSessionChange) {
+      textarea.blur();
+      setComposerHasFocus(false);
+      return;
+    }
     textarea.focus();
-  }, [sessionId, controllerMode]);
+  }, [composerLayout.autoFocusOnSessionChange, sessionId]);
 
   useEffect(() => {
     const isOriginatingCountdown =
@@ -3412,7 +3461,7 @@ export function SessionView({
 
     if (
       hadVisibleFocusAdvanceRef.current &&
-      controllerMode &&
+      !isMobileComposerViewport &&
       sessionId &&
       textarea &&
       !textarea.disabled
@@ -3420,7 +3469,7 @@ export function SessionView({
       textarea.focus();
     }
     hadVisibleFocusAdvanceRef.current = false;
-  }, [focusAdvanceCountdown, controllerMode, sessionId]);
+  }, [focusAdvanceCountdown, isMobileComposerViewport, sessionId]);
 
   useEffect(() => {
     const isOriginatingCountdown =
@@ -3428,13 +3477,13 @@ export function SessionView({
       focusAdvanceCountdown?.sentFromSessionId === sessionId;
     if (!isOriginatingCountdown || !focusAdvanceCountdown) return;
 
-    // Mirror the central `useControllerModeShortcuts` "stay" chord so the
+    // Mirror the central `useFocusShortcuts` "stay" chord so the
     // user can cancel a pending advance with their (possibly rebound)
     // Cmd/Ctrl+S even when focus is inside this session's composer. The
     // central hook also fires this path, but stopping propagation here
     // keeps the textarea free of literal `s` characters in case the
     // event reaches us first. See issue #235.
-    const stayChord = parseChord(shortcutBindings?.controllerModeStay ?? "ctrl-s");
+    const stayChord = parseChord(shortcutBindings?.focusStay ?? "ctrl-s");
 
     const handleStayShortcut = (event: KeyboardEvent) => {
       if (event.repeat) return;
@@ -3464,14 +3513,14 @@ export function SessionView({
     const paddingHeight =
       Number.parseFloat(computedStyle.paddingTop) +
       Number.parseFloat(computedStyle.paddingBottom);
-    const maxHeight =
-      lineHeight * COMPOSER_MAX_LINES + paddingHeight + borderHeight;
+    const maxLines = composerLayout.maxLines;
+    const maxHeight = lineHeight * maxLines + paddingHeight + borderHeight;
     const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
 
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY =
-      textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, [message]);
+      maxLines > 1 && textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [composerLayout.maxLines, message]);
 
   // Mirror the composer draft (text + skill chips) to localStorage on change.
   // Skip while a steer is in flight: the composer is disabled and `message` is
@@ -4535,15 +4584,15 @@ export function SessionView({
       return false;
     }
 
-    // In controller mode, signal the parent to advance to the next focus
-    // item as soon as the user commits to a message. The parent owns
-    // the navigation logic and the "stay put if the only pinned item
-    // is the one we just sent to" rule (issue #81 follow-up).
-    // Continuations (queued replay / emulated steer) never advance focus.
-    // For an existing session we can advance immediately; for a send from
+    // Signal the parent to advance to the next focus item as soon as
+    // the user commits to a message. The parent owns the navigation
+    // logic and the "stay put if the only pinned item is the one we
+    // just sent to" rule (issue #81 follow-up). Continuations
+    // (queued replay / emulated steer) never advance focus. For an
+    // existing session we can advance immediately; for a send from
     // the new-thread composer (no `sessionId` yet) we defer until the
     // stream attaches and the new session id is known (issue #120).
-    if (controllerMode && onFocusAdvanceAfterSend && !runOverrides) {
+    if (onFocusAdvanceAfterSend && !runOverrides) {
       if (sessionId) {
         onFocusAdvanceAfterSend(sessionId);
       } else {
@@ -5543,11 +5592,11 @@ export function SessionView({
         .then(setEvents)
         .catch(() => {});
       // Submitting the structured-input form is the "I'm done with this
-      // session for now" moment in Controller Mode, same as sending a
-      // message: schedule the focus-advance countdown. Dismiss
+      // session for now" moment, same as sending a message: schedule
+      // the focus-advance countdown. Dismiss
       // (handleStructuredUserInputDismiss) is the explicit stay signal
       // and is intentionally not wired to advance (issue #277).
-      if (controllerMode && onFocusAdvanceAfterSend) {
+      if (onFocusAdvanceAfterSend) {
         if (targetSessionId) {
           onFocusAdvanceAfterSend(targetSessionId);
         } else {
@@ -5646,11 +5695,11 @@ export function SessionView({
         .then(setEvents)
         .catch(() => {});
       // Resolving an approval card is the same "I'm done with this session
-      // for now" moment in Controller Mode as sending a message: schedule
-      // the focus-advance countdown so the user doesn't have to hit
-      // Next manually. Deny is the explicit "I want to stay and
-      // reconsider" signal, so it doesn't advance (issue #277).
-      if (controllerMode && onFocusAdvanceAfterSend && decision !== "deny") {
+      // for now" moment as sending a message: schedule the focus-advance
+      // countdown so the user doesn't have to hit Next manually. Deny
+      // is the explicit "I want to stay and reconsider" signal, so it
+      // doesn't advance (issue #277).
+      if (onFocusAdvanceAfterSend && decision !== "deny") {
         if (targetSessionId) {
           onFocusAdvanceAfterSend(targetSessionId);
         } else {
@@ -5718,6 +5767,81 @@ export function SessionView({
     events,
     pendingMessage
   );
+  const showComposerDetails = composerLayout.showDetails;
+  const composerPlaceholder = steerInProgress
+    ? "Steering…"
+    : streaming
+      ? IS_TOUCH_DEVICE
+        ? "Send to queue"
+        : `Enter to queue · ${STEER_KEY_LABEL} to steer`
+      : availableSkills.length > 0
+        ? "Describe what you want to build… type / for a skill, @ to mention a file"
+        : sessionId
+          ? "Ask for follow-up changes — type @ to mention a file"
+          : "Describe what you want to build… type @ to mention a file";
+  const renderComposerActions = (expanded: boolean) => (
+    <div
+      className={`flex shrink-0 items-center justify-end gap-2 ${
+        expanded ? "self-end sm:self-auto" : ""
+      }`}
+    >
+      {!streaming && canAttachMore && (
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          title={
+            !providerSupportsAttachments
+              ? `${selectedProvider} does not support attachments`
+              : !modelSupportsAttachments
+                ? "Selected model does not support attachments"
+                : "Attach files"
+          }
+          className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <Paperclip className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {streaming && (
+        <button
+          type="button"
+          onClick={handleStop}
+          title="Stop"
+          className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+        >
+          <Square className="h-3.5 w-3.5" />
+        </button>
+      )}
+      <Button
+        type="submit"
+        size="icon"
+        title={
+          streaming &&
+          !message.trim() &&
+          composerAttachments.length === 0 &&
+          queue.length > 0
+            ? "Send queued message (interrupt)"
+            : streaming
+              ? "Queue for next run"
+              : "Send"
+        }
+        disabled={
+          steerInProgress ||
+          (!message.trim() &&
+            composerAttachments.length === 0 &&
+            !(streaming && queue.length > 0)) ||
+          !providerReady ||
+          (streaming && !(activeStreamSessionId ?? sessionId))
+        }
+        className="h-8 w-8 rounded-full"
+      >
+        {streaming ? (
+          <Plus className="h-4 w-4" />
+        ) : (
+          <ArrowUp className="h-4 w-4" />
+        )}
+      </Button>
+    </div>
+  );
   const waitingForStructuredInput = Boolean(latestStructuredInputRequest);
   // Live approvals render inline as stream items; this covers the reload case
   // where only persisted events exist and an approval is still pending.
@@ -5757,54 +5881,26 @@ export function SessionView({
       toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
     }
   };
+  const conversationFocusCountdown = getConversationCountdown(
+    focusAdvanceCountdown,
+    sessionId,
+  );
 
   return (
     <>
-      {controllerMode && (
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-blue-500/20 bg-blue-500/15 px-3 py-2 text-blue-200 md:px-4">
-          <div className="min-w-0 text-xs text-blue-200/80">
-            <span className="font-medium text-blue-200">Controller Mode</span>
-            <span className="ml-2">
-              {focusPosition && focusPosition.total > 0
-                ? `${focusPosition.current || 1} / ${focusPosition.total}`
-                : "No sessions on radar"}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={onFocusSkip}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title={`Next (${formatChord(shortcutBindings?.controllerModeNext ?? "ctrl-n", IS_MAC)})`}
-            >
-              <StepForward className="h-3.5 w-3.5" />
-              Next
-              <Kbd>{formatChord(shortcutBindings?.controllerModeNext ?? "ctrl-n", IS_MAC)}</Kbd>
-            </button>
-            <button
-              type="button"
-              onClick={onFocusDone}
-              disabled={!sessionId}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100 disabled:pointer-events-none disabled:opacity-50"
-              title={`Mark done (${formatChord(shortcutBindings?.controllerModeDone ?? "ctrl-d", IS_MAC)})`}
-            >
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              Done
-              <Kbd>{formatChord(shortcutBindings?.controllerModeDone ?? "ctrl-d", IS_MAC)}</Kbd>
-            </button>
-            <button
-              type="button"
-              onClick={onFocusExit}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-blue-200/80 transition-colors hover:bg-blue-500/20 hover:text-blue-100"
-              title={`Exit Controller Mode (${formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", IS_MAC)})`}
-            >
-              <LogOut className="h-3.5 w-3.5" />
-              Exit
-              <Kbd>{formatChord(shortcutBindings?.controllerModeToggle ?? "ctrl-t", IS_MAC)}</Kbd>
-            </button>
-          </div>
-        </div>
-      )}
+      {sessionId && onFocusSkip && onFocusDone && onToggleAutoAdvance ? (
+        <FocusConversationControls
+          variant="mobile"
+          bindings={shortcutBindings}
+          isOnRadar={isFocusPinned}
+          autoAdvance={autoAdvance}
+          onNext={onFocusSkip}
+          onDone={onFocusDone}
+          onAddToRadar={handleHeaderFocusPin}
+          onToggleAutoAdvance={onToggleAutoAdvance}
+          countdown={conversationFocusCountdown}
+        />
+      ) : null}
 
       {/* Header */}
       <header className={`${sessionId ? "flex" : "hidden md:flex"} h-12 md:h-14 shrink-0 items-center justify-end md:justify-between border-b border-border bg-background px-3 md:px-4`}>
@@ -5917,20 +6013,6 @@ export function SessionView({
             );
           })()}
           <div className="ml-3 flex items-center gap-1">
-            {sessionId && (
-              <button
-                type="button"
-                onClick={handleHeaderFocusPin}
-                className={`rounded-md p-1.5 transition-colors ${
-                  isFocusPinned
-                    ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 hover:text-blue-200"
-                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                }`}
-                title={isFocusPinned ? "Remove from Radar" : "Add to Radar"}
-              >
-                <Radar className="h-4 w-4" />
-              </button>
-            )}
             {sessionId && onArchive && (
               <button
                 type="button"
@@ -6014,9 +6096,23 @@ export function SessionView({
       {/* Main content area: chat + terminal side by side on desktop, tabbed on mobile */}
       <div className="flex flex-1 min-h-0">
         {/* Chat panel — hidden on mobile when terminal or changes tab is active */}
-        <div className={`flex-col min-h-0 min-w-0 w-full ${
+        <div className={`relative flex-col min-h-0 min-w-0 w-full ${
           sessionId && mobilePanel !== "agent" ? "hidden md:flex" : "flex"
         } flex-1`}>
+          {sessionId && onFocusSkip && onFocusDone && onToggleAutoAdvance ? (
+            <FocusConversationControls
+              variant="desktop"
+              bindings={shortcutBindings}
+              isOnRadar={isFocusPinned}
+              autoAdvance={autoAdvance}
+              onNext={onFocusSkip}
+              onDone={onFocusDone}
+              onAddToRadar={handleHeaderFocusPin}
+              onToggleAutoAdvance={onToggleAutoAdvance}
+              countdown={conversationFocusCountdown}
+            />
+          ) : null}
+
           {/* Messages / Events area */}
           <div
             ref={scrollContainerRef}
@@ -6401,7 +6497,35 @@ export function SessionView({
                 }}
               >
                 <div
-                  className="rounded-xl border border-border bg-input p-3"
+                  ref={composerRef}
+                  data-testid="session-composer"
+                  data-mobile-collapsed={
+                    isMobileComposerViewport && !composerHasFocus ? "true" : undefined
+                  }
+                  className={`rounded-xl border border-border bg-input transition-[padding] md:p-3 ${
+                    showComposerDetails ? "p-3" : "p-2.5"
+                  }`}
+                  onBlurCapture={(event) => {
+                    // Mobile focus transitions around touch controls are not
+                    // stable enough to drive visibility: a tapped button can
+                    // blur again after its click and unmount its own picker.
+                    // The document-level outside-pointer handler above owns
+                    // mobile collapse instead.
+                    if (isMobileComposerViewport) return;
+                    if (
+                      event.currentTarget.contains(
+                        event.relatedTarget as Node | null,
+                      )
+                    ) {
+                      return;
+                    }
+                    setComposerHasFocus(false);
+                    setSkillPopoverOpen(false);
+                    setMentionPopoverOpen(false);
+                    setShowProviderPicker(false);
+                    setShowReasoningEffortPicker(false);
+                    setShowModelPicker(false);
+                  }}
                   onDragOver={(event) => {
                     if (!canAttachMore) return;
                     event.preventDefault();
@@ -6434,12 +6558,15 @@ export function SessionView({
                     className="hidden"
                     accept={attachmentAcceptMimeTypes.join(",")}
                     onChange={(event) => {
-                      if (event.target.files) addComposerFiles(event.target.files);
+                      if (event.target.files?.length) {
+                        if (isMobileComposerViewport) setComposerHasFocus(true);
+                        addComposerFiles(event.target.files);
+                      }
                       event.currentTarget.value = "";
                     }}
                   />
-                  {activeSkills.length > 0 && !skillPopoverOpen && (
-                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                  {showComposerDetails && activeSkills.length > 0 && !skillPopoverOpen && (
+                    <div key="composer-skills" className="mb-2 flex flex-wrap items-center gap-1.5">
                       {activeSkills.map((skill, index) => (
                         <span
                           key={skill.name}
@@ -6470,8 +6597,8 @@ export function SessionView({
                       )}
                     </div>
                   )}
-                  {activeMentions.length > 0 && !mentionPopoverOpen && (
-                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                  {showComposerDetails && activeMentions.length > 0 && !mentionPopoverOpen && (
+                    <div key="composer-mentions" className="mb-2 flex flex-wrap items-center gap-1.5">
                       {activeMentions.map((mention, index) => (
                         <span
                           key={`${mention.path}-${index}`}
@@ -6506,10 +6633,11 @@ export function SessionView({
                       )}
                     </div>
                   )}
-                  <div className="relative">
+                  <div key="composer-input" className="relative flex min-w-0 items-center gap-2">
                     <textarea
                       ref={textareaRef}
                       value={message}
+                      onFocus={() => setComposerHasFocus(true)}
                       onChange={(e) => {
                         setMessage(e.target.value);
                         setCaretPos(e.target.selectionStart ?? e.target.value.length);
@@ -6535,25 +6663,14 @@ export function SessionView({
                       onSelect={(e) =>
                         setCaretPos(e.currentTarget.selectionStart ?? 0)
                       }
-                      placeholder={
-                        steerInProgress
-                          ? "Steering…"
-                          : streaming
-                          ? IS_TOUCH_DEVICE
-                            ? "Send to queue"
-                            : `Enter to queue · ${STEER_KEY_LABEL} to steer`
-                          : availableSkills.length > 0
-                          ? "Describe what you want to build… type / for a skill, @ to mention a file"
-                          : sessionId
-                          ? "Ask for follow-up changes — type @ to mention a file"
-                          : "Describe what you want to build… type @ to mention a file"
-                      }
+                      placeholder={composerPlaceholder}
                       rows={1}
                       disabled={steerInProgress}
-                      className="w-full resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
+                      className="min-w-0 flex-1 resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                       style={{ maxHeight: "calc(1.25rem * 5)" }}
                     />
-                    {skillPopoverOpen && filteredSkills.length > 0 && (
+                    {composerLayout.showCompactActions && renderComposerActions(false)}
+                    {showComposerDetails && skillPopoverOpen && filteredSkills.length > 0 && (
                       <div
                         role="listbox"
                         aria-label="Skills"
@@ -6622,7 +6739,7 @@ export function SessionView({
                         </div>
                       </div>
                     )}
-                    {mentionPopoverOpen && (
+                    {showComposerDetails && mentionPopoverOpen && (
                       <div
                         role="listbox"
                         aria-label="Files"
@@ -6711,7 +6828,7 @@ export function SessionView({
                       </div>
                     )}
                   </div>
-                  {composerAttachments.length > 0 && (
+                  {showComposerDetails && composerAttachments.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
                       {composerAttachments.map((attachment) => {
                         const fileName = getFileDisplayName(attachment.file);
@@ -6748,12 +6865,12 @@ export function SessionView({
                       })}
                     </div>
                   )}
-                  {attachmentError && (
+                  {showComposerDetails && attachmentError && (
                     <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                       {attachmentError}
                     </div>
                   )}
-                  {providerStatusMessage && (
+                  {showComposerDetails && providerStatusMessage && (
                     <div className="mt-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                       <span className="min-w-0">{providerStatusMessage}</span>
                       <button
@@ -6766,6 +6883,7 @@ export function SessionView({
                       </button>
                     </div>
                   )}
+                  {showComposerDetails && (
                   <div className="mt-2 flex items-center gap-2 sm:justify-between">
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 sm:gap-2">
                       {/* Agent provider + run-option pickers. */}
@@ -7000,64 +7118,9 @@ export function SessionView({
                           </div>
                     </>)}
                     </div>
-                    <div className="flex shrink-0 items-center justify-end gap-2 self-end sm:self-auto">
-                      {!streaming && canAttachMore && (
-                        <button
-                          type="button"
-                          onClick={() => fileInputRef.current?.click()}
-                          title={
-                            !providerSupportsAttachments
-                              ? `${selectedProvider} does not support attachments`
-                              : !modelSupportsAttachments
-                              ? "Selected model does not support attachments"
-                              : "Attach files"
-                          }
-                          className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                        >
-                          <Paperclip className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      {streaming && (
-                        <button
-                          type="button"
-                          onClick={handleStop}
-                          title="Stop"
-                          className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                        >
-                          <Square className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      <Button
-                        type="submit"
-                        size="icon"
-                        title={
-                          streaming &&
-                          !message.trim() &&
-                          composerAttachments.length === 0 &&
-                          queue.length > 0
-                            ? "Send queued message (interrupt)"
-                            : streaming
-                              ? "Queue for next run"
-                              : "Send"
-                        }
-                        disabled={
-                          steerInProgress ||
-                          (!message.trim() &&
-                            composerAttachments.length === 0 &&
-                            !(streaming && queue.length > 0)) ||
-                          !providerReady ||
-                          (streaming && !(activeStreamSessionId ?? sessionId))
-                        }
-                        className="h-8 w-8 rounded-full"
-                      >
-                        {streaming ? (
-                          <Plus className="h-4 w-4" />
-                        ) : (
-                          <ArrowUp className="h-4 w-4" />
-                        )}
-                      </Button>
-                    </div>
+                    {renderComposerActions(true)}
                   </div>
+                  )}
                 </div>
               </form>
             </div>
