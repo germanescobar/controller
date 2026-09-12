@@ -43,6 +43,7 @@ export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-search-skills",
   "controller-skill-creator",
   "controller-worktrees",
+  "controller-memory",
 ]);
 
 /** True when the given skill name (case-insensitive) is owned by the orchestrator. */
@@ -787,6 +788,146 @@ interface ManagedSkill {
   body: string;
 }
 
+function buildControllerMemorySkillBody(cliPath: string): string {
+  return `---
+name: controller-memory
+description: Use the Controller-owned memory layer to persist facts that survive across sessions — preferences, conventions, deploy processes, library choices, "we agreed X". Use when the user gives you a durable preference, asks you to remember something for next time, or before answering questions about preferences/conventions/deploys.
+---
+
+${managedMarker("controller-memory")}
+
+# Memory
+
+Controller has an app-owned **memory** layer where the user (and you, on
+request) persists facts that survive across sessions. The full
+\`<memory_index>\` block lands in your preamble every turn — that list is
+your "what's available" manifest. Note *bodies* are never auto-injected;
+fetch them on demand with \`${cliPath} memory read\`.
+
+This skill is managed by the Controller app (directory name
+\`controller-memory\`). It is surfaced in the \`/\` picker with the
+\`controller\` tag alongside Controller's other built-in skills. Users
+invoke it like any other skill: type \`/controller-memory <text>\` or pick
+it from the autocomplete.
+
+Invoke the CLI by its absolute path — it is not on your PATH. Every
+command below is run as \`${cliPath} memory <command>\`.
+
+## When to reach for memory
+
+- The user gives you a durable preference (\"we always use pnpm\",
+  \"deploys go through the GitHub Action\", \"the staging env is at
+  https://staging.example.com\"). Offer to write it
+  (\`memory write <scope> <slug> --content <text>\`) instead of just
+  acknowledging — otherwise it'll have to be re-told next session.
+- The user asks you to remember something: \"/controller-memory we use
+  Jest, not Vitest\". The skill invocation captures the *fact*; you
+  decide the scope (\`global\` for cross-project, \`project\` for
+  project-specific) and slug.
+- Before answering questions about preferences, conventions, deploys,
+  library choice, or anything phrased as \"as we discussed\" or \"we
+  agreed\", scan the \`<memory_index>\` block in your preamble. If a
+  slug looks relevant, \`memory read\` the body. If a note doesn't
+  lexically match, run \`memory search <query>\` (broader substring
+  search across bodies).
+- The Settings → Memory panel is the user's editorial control. If the
+  user edits a note there, it shows up in the index on the next turn.
+
+## When NOT to reach for memory
+
+- The task is unrelated to a preference, convention, or remembered
+  fact. The index alone is enough to decide relevance — if nothing
+  matches, don't read random notes.
+- The fact is one-off / project-local / ephemeral (\"the bug is in
+  line 42 of foo.ts\"). That's a normal code comment, not memory.
+- The user is asking about something they just told you in *this*
+  session. Memory is the cross-session layer; the live transcript is
+  the in-session layer.
+
+## Commands
+
+- \`${cliPath} memory list [--scope global|<projectId>] [--include-pinned]\` —
+  list notes for a scope. \`<projectId>\` is the project's UUID. The
+  default scope is \`global\`.
+- \`${cliPath} memory read <scope> <slug> [--project <projectId>]\` —
+  fetch the body of one note. \`scope\` is \`global\` or \`project\`.
+- \`${cliPath} memory search <query> [--scope global|<projectId>] [--limit N]\` —
+  broader substring search across note bodies. The default scope is
+  \`global\`; pass a project UUID to search that scope.
+- \`${cliPath} memory write <scope> <slug> --content <text> [--project <projectId>]\` —
+  create or overwrite a note. \`slug\` is filesystem-safe
+  (\`[A-Za-z0-9._-]+\`, up to 96 chars). The server validates the slug
+  and rejects empty / too-long bodies; pass \`--content=-\` to read the
+  body from stdin when it's longer than a shell-quoted string
+  comfortably holds.
+- \`${cliPath} memory pinned <scope> [--project <projectId>]\` — read
+  the per-scope \`pinned.md\` (the always-injected snippet).
+- \`${cliPath} memory pin <scope> --content <text> [--project <projectId>]\` —
+  write the per-scope \`pinned.md\`.
+
+## Picking the scope
+
+\`scope\` is \`global\` (every session) or \`project\` (scoped to one
+onboarded project). When called from inside a session, omit
+\`--project\` and the server resolves the project from the active
+session. To find the project's UUID, read the orchestrator's project
+list (same as for worktrees):
+
+\`\`\`sh
+PROJECTS_JSON="\$(dirname "\$(dirname '${cliPath}')")/projects.json"
+jq -r '.[] | "\\(.id)  \\(.name)"' "\$PROJECTS_JSON"
+\`\`\`
+
+Or simply omit \`--project\` — when the CLI runs from inside a session's
+worktree, the project is resolved from the orchestrator's
+session/worktree context.
+
+## Workflow
+
+End-to-end example for "remember we always deploy via the GitHub
+Action, not the CLI":
+
+\`\`\`sh
+${cliPath} memory write global deploy-via-github-action \\
+  --content "All deploys go through the \`.github/workflows/deploy.yml\` job. Never push to production directly. The staging env at https://staging.example.com mirrors prod and is the only place to verify a release before tagging."
+# → ok
+\`\`\`
+
+The \`<memory_index>\` block in the next turn's preamble will list
+\`global | deploy-via-github-action | All deploys go through the …\`.
+The user can edit or delete the note from Settings → Memory.
+
+## Failure modes to avoid
+
+- **Don't read memory for unrelated tasks.** The index alone is
+  enough to decide relevance.
+- **Don't fabricate from context when \`memory search\` returns
+  nothing.** Say so. The whole point of the surface is to avoid
+  invented preferences.
+- **Don't write a note without confirming with the user.** Durable
+  facts belong in memory; ephemeral details belong in the chat.
+  Confirm the *scope* (\`global\` vs \`project\`) and *slug* before
+  writing — a typo'd slug creates a separate note the user has to
+  clean up.
+- **Don't dump full bodies into your reply.** Read what you need,
+  cite the slug, and link the user to Settings → Memory for the
+  long form.
+
+## Notes
+
+- Notes are plain Markdown under
+  \`<controllerHome>/memory/<scope>/notes/<slug>.md\`
+  (e.g. \`~/Library/Application Support/Controller/memory/global/notes/...\`
+  on macOS). \`pinned.md\` sits next to \`notes/\`. The exact path is
+  platform-dependent — see "State location" in the README.
+- The retrieval backend is rg-based in v0 and sits behind an
+  interface; a semantic backend (zg) is a planned v1 swap.
+- The CLI is invoked by its absolute path. The bare \`controller\`
+  command may not resolve on PATH inside your shell — copy the full
+  path verbatim from this skill body.
+`;
+}
+
 function buildSkillCreatorSkillBody(cliPath: string): string {
   return `---
 name: controller-skill-creator
@@ -924,6 +1065,7 @@ export async function installManagedSkills(): Promise<void> {
     { name: "controller-search-skills", body: buildSearchSkillsBody(cli) },
     { name: "controller-skill-creator", body: buildSkillCreatorSkillBody(cli) },
     { name: "controller-worktrees", body: buildWorktreesSkillBody(cli) },
+    { name: "controller-memory", body: buildControllerMemorySkillBody(cli) },
   ];
 
   for (const skill of skills) {

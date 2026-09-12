@@ -40,11 +40,19 @@
 
 import { controllerCliShellPath } from "./controller-cli.js";
 import { gatewayList, type ListedConnection } from "./integration-gateway.js";
+import { buildMemoryBlock } from "./memory.js";
 import { listUnifiedSkills } from "./unified-skills.js";
 import type { SkillMetadata } from "./skills.js";
 
 export interface ControllerPreambleOptions {
-  // Reserved for future per-session options (e.g. feature flags).
+  /**
+   * When supplied, the preamble includes the project's pinned memory
+   * snippet (`pinned_project`) and the project's notes in the
+   * `memory_index` manifest. When omitted, only the global memory
+   * surface is shown. The route layer threads this from the
+   * message-send `projectId` param (issue #350).
+   */
+  projectId?: string;
 }
 
 // Some providers (Codex) sanitize or rebuild env vars before spawning user
@@ -96,6 +104,42 @@ function integrationsIntro(): string {
     "(or `request` for raw HTTP). These integrations are *additional* — " +
     "they do not replace any native capabilities you already have."
   );
+}
+
+/**
+ * Document the memory surface (issue #350). The full `<memory>` block
+ * (pinned snippets + a `slug + scope + 80-char preview` index) lands
+ * later in the preamble; the intro here teaches the agent when to
+ * reach for it and how to read a full note on demand. Without this
+ * the manifest is invisible — the agent would have to guess at the
+ * CLI surface from the index alone, which is the exact failure mode
+ * the design is meant to avoid.
+ */
+function memoryIntro(): string {
+  const cli = controllerCliShellPath();
+  return [
+    controllerCliNote(),
+    "",
+    "Controller has an app-owned **memory** layer where the user persists",
+    "facts that survive across sessions: preferences, conventions, deploy",
+    "processes, library choices, \"as we discussed X\". The",
+    "`<memory_index>` block in this preamble lists every note by slug + scope +",
+    "first-line preview — read it before answering questions about preferences,",
+    "conventions, deploys, library choice, or anything phrased as \"as we",
+    "discussed\" or \"we agreed\".",
+    "",
+    "Workflow:",
+    `1. Scan the \`<memory_index>\` block. If a slug looks relevant, call \`${cli} memory read <scope> <slug>\` to fetch the body.`,
+    `2. \`${cli} memory search <query>\` is the broader version — useful when the user's prompt doesn't lexically match any slug.`,
+    `3. When the user gives you a durable preference or fact, offer to write it via \`${cli} memory write <scope> <slug> --content <text>\` instead of just acknowledging.`,
+    "",
+    "Scope is `global` (every session) or `project` (per onboarded project).",
+    "When the CLI is invoked from a session, omit `--project` and the server",
+    "resolves the project from the active session. Do not read memory for",
+    "unrelated tasks — the index alone is enough to decide relevance. If",
+    "`memory search` returns nothing relevant, say so; do not fabricate from",
+    "context.",
+  ].join("\n");
 }
 
 /**
@@ -208,13 +252,19 @@ export async function buildAvailableIntegrationsBlock(): Promise<string> {
  * preamble only enumerates *what's available* and the skill carries the
  * *how to use it*. The skills catalog still surfaces `controller-worktrees`
  * to the agent with its description.
+ *
+ * The memory block (issue #350) is appended last so the manifest sits
+ * next to the intros that explain it. When the home is empty the block
+ * still renders, with explicit `(empty)` placeholders, so the agent
+ * learns the surface exists the very first turn.
  */
 export async function buildControllerPreamble(
-  _options?: ControllerPreambleOptions,
+  options?: ControllerPreambleOptions,
 ): Promise<string> {
-  const [skillsBlock, integrationsBlock] = await Promise.all([
+  const [skillsBlock, integrationsBlock, memoryBlock] = await Promise.all([
     buildAvailableSkillsBlock(),
     buildAvailableIntegrationsBlock(),
+    buildMemoryBlock({ projectId: options?.projectId }),
   ]);
   return [
     "You are running inside Controller, a desktop orchestrator for coding agents.",
@@ -226,6 +276,10 @@ export async function buildControllerPreamble(
     integrationsIntro(),
     "",
     integrationsBlock,
+    "",
+    memoryIntro(),
+    "",
+    memoryBlock,
     "",
     loopPrimitivesIntro(),
   ].join("\n");

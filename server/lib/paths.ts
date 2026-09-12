@@ -247,3 +247,44 @@ export function unifiedSkillDir(skillName: string): string {
 export function unifiedSkillFile(skillName: string): string {
   return path.join(unifiedSkillDir(skillName), "SKILL.md");
 }
+
+// --- Memory (issue #350) ---
+
+/**
+ * Root directory holding the Controller-owned memory layer. Notes
+ * live under `<root>/<scope>/notes/<slug>.md` and the per-scope
+ * always-on snippet lives at `<root>/<scope>/pinned.md`. The
+ * two scopes are `global` (shared across every session) and
+ * `projects/<projectId>` (scoped to one onboarded project). Slugs
+ * are generated as `<YYYY-MM-DDTHH-MM>-<kebab-title>` at write time
+ * so writes never collide and ordering is preserved by filename.
+ */
+export function memoryDir(): string {
+  return path.join(orchestratorHome(), "memory");
+}
+
+/** Directory for one memory scope (`global` or `projects/<projectId>`). */
+export function memoryScopeDir(scope: "global" | "project", projectId?: string): string {
+  if (scope === "global") return path.join(memoryDir(), "global");
+  if (!projectId) {
+    throw new Error("memoryScopeDir: project scope requires a projectId");
+  }
+  return path.join(memoryDir(), "projects", projectId);
+}
+
+/** Path to a memory note's `.md` file. */
+export function memoryNoteFile(
+  scope: "global" | "project",
+  slug: string,
+  projectId?: string,
+): string {
+  return path.join(memoryScopeDir(scope, projectId), "notes", `${slug}.md`);
+}
+
+/** Path to a memory scope's `pinned.md` file. */
+export function memoryPinnedFile(
+  scope: "global" | "project",
+  projectId?: string,
+): string {
+  return path.join(memoryScopeDir(scope, projectId), "pinned.md");
+}

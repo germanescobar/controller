@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { AgentsSection } from "../components/agents-section.tsx";
 import { IntegrationsSection } from "../components/integrations-section.tsx";
 import { SkillsSection } from "../components/skills-section.tsx";
+import { MemorySection } from "../components/memory-section.tsx";
 import { ShortcutsSection } from "../components/shortcuts-section.tsx";
 import { SchedulesSection } from "../components/schedules-section.tsx";
 
@@ -10,6 +11,7 @@ export type SettingsSection =
   | "agents"
   | "integrations"
   | "skills"
+  | "memory"
   | "shortcuts"
   | "schedules";
 
@@ -38,6 +40,13 @@ const SECTIONS: SectionSpec[] = [
     label: "Skills",
     shortLabel: "Skills",
     description: "Create and edit app-owned skills available to all agents.",
+  },
+  {
+    id: "memory",
+    label: "Memory",
+    shortLabel: "Memory",
+    description:
+      "Persist facts that survive across sessions — preferences, conventions, deploy notes.",
   },
   {
     id: "shortcuts",
@@ -187,6 +196,7 @@ export function SettingsPage({
           {active.id === "agents" && <AgentsSection />}
           {active.id === "integrations" && <IntegrationsSection />}
           {active.id === "skills" && <SkillsSection />}
+          {active.id === "memory" && <MemorySection />}
           {active.id === "shortcuts" && <ShortcutsSection />}
           {active.id === "schedules" && (
             <SchedulesSection onOpenSession={onOpenSession} />

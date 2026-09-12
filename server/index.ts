@@ -26,6 +26,7 @@ import { terminalRouter } from "./routes/terminal.js";
 import { integrationsRouter } from "./routes/integrations.js";
 import { shortcutsRouter } from "./routes/shortcuts.js";
 import { unifiedSkillsRouter } from "./routes/unified-skills.js";
+import { memoryRouter } from "./routes/memory.js";
 import { schedulesRouter } from "./routes/schedules.js";
 import { getProjects } from "./lib/projects.js";
 import { getSession } from "./lib/sessions.js";
@@ -43,6 +44,7 @@ import {
 } from "./lib/goal-evaluator.js";
 import { startSessionInProcess } from "./lib/session-start.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
+import { ensureMemoryDirs } from "./lib/memory.js";
 import { installControllerCli, controllerCliInstalledPath } from "./lib/controller-cli.js";
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
 
@@ -81,6 +83,7 @@ app.use("/api/terminal", terminalRouter);
 app.use("/api/integrations", integrationsRouter);
 app.use("/api/shortcuts", shortcutsRouter);
 app.use("/api", unifiedSkillsRouter);
+app.use("/api", memoryRouter);
 
 // Available agent providers (installed AND enabled). Kept for the session
 // picker and the Electron health check; richer status lives at /api/agents.
@@ -253,6 +256,14 @@ async function start(): Promise<void> {
   // user skills home so they are available across Anita, Codex, and Claude.
   await installManagedSkills().catch((error: unknown) => {
     console.error("Failed to install managed skills:", error);
+  });
+  // Ensure the Controller-owned memory directory exists (issue #350).
+  // The global scope gets an empty directory on first start so the
+  // agent's preamble can show `(empty)` placeholders; project scopes
+  // are created lazily on first write so an onboarded project with no
+  // memory yet doesn't ship an empty `projects/<id>/` directory.
+  await ensureMemoryDirs().catch((error: unknown) => {
+    console.error("Failed to ensure memory directories:", error);
   });
   // Install the CLI to a stable absolute path and publish the server URL, so
   // agents can reach it without depending on PATH or inherited env vars.

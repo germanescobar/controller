@@ -854,6 +854,145 @@ export async function deleteUnifiedSkill(name: string): Promise<void> {
   await throwIfNotOk(res, "Failed to delete unified skill");
 }
 
+// --- Memory (issue #350) ---
+
+export type MemoryScope = "global" | "project";
+
+export interface MemoryEntry {
+  slug: string;
+  scope: MemoryScope;
+  projectId?: string;
+  preview: string;
+  mtimeMs: number;
+}
+
+export interface MemoryNoteResponse {
+  entry: MemoryEntry;
+  content: string;
+}
+
+export interface MemoryListResponse {
+  entries: MemoryEntry[];
+  pinned?: string;
+}
+
+export interface MemorySearchHit {
+  slug: string;
+  scope: MemoryScope;
+  projectId?: string;
+  preview: string;
+}
+
+function memoryScopeQuery(scope: MemoryScope, projectId?: string): string {
+  const params = new URLSearchParams();
+  params.set("scope", scope);
+  if (projectId) params.set("projectId", projectId);
+  return params.toString();
+}
+
+export async function fetchMemoryNotes(args: {
+  scope: MemoryScope;
+  projectId?: string;
+  includePinned?: boolean;
+}): Promise<MemoryListResponse> {
+  const params = new URLSearchParams();
+  params.set("scope", args.scope);
+  if (args.projectId) params.set("projectId", args.projectId);
+  if (args.includePinned) params.set("includePinned", "1");
+  const res = await fetch(`${BASE}/memory?${params.toString()}`);
+  await throwIfNotOk(res, "Failed to fetch memory notes");
+  return res.json();
+}
+
+export async function fetchMemoryNote(args: {
+  scope: MemoryScope;
+  slug: string;
+  projectId?: string;
+}): Promise<MemoryNoteResponse> {
+  const res = await fetch(
+    `${BASE}/memory/${args.scope}/${encodeURIComponent(args.slug)}?${memoryScopeQuery(args.scope, args.projectId)}`
+  );
+  await throwIfNotOk(res, "Failed to fetch memory note");
+  return res.json();
+}
+
+export async function writeMemoryNote(args: {
+  scope: MemoryScope;
+  slug: string;
+  content: string;
+  projectId?: string;
+}): Promise<void> {
+  const res = await fetch(
+    `${BASE}/memory/${args.scope}/${encodeURIComponent(args.slug)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: args.content,
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+      }),
+    }
+  );
+  await throwIfNotOk(res, "Failed to write memory note");
+}
+
+export async function deleteMemoryNote(args: {
+  scope: MemoryScope;
+  slug: string;
+  projectId?: string;
+}): Promise<void> {
+  const res = await fetch(
+    `${BASE}/memory/${args.scope}/${encodeURIComponent(args.slug)}?${memoryScopeQuery(args.scope, args.projectId)}`,
+    { method: "DELETE" }
+  );
+  await throwIfNotOk(res, "Failed to delete memory note");
+}
+
+export async function fetchPinnedMemory(args: {
+  scope: MemoryScope;
+  projectId?: string;
+}): Promise<string> {
+  const res = await fetch(
+    `${BASE}/memory/${args.scope}/pinned?${memoryScopeQuery(args.scope, args.projectId)}`
+  );
+  await throwIfNotOk(res, "Failed to fetch pinned memory");
+  const body = (await res.json()) as { content?: string };
+  return typeof body.content === "string" ? body.content : "";
+}
+
+export async function writePinnedMemory(args: {
+  scope: MemoryScope;
+  content: string;
+  projectId?: string;
+}): Promise<void> {
+  const res = await fetch(`${BASE}/memory/${args.scope}/pinned`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      content: args.content,
+      ...(args.projectId ? { projectId: args.projectId } : {}),
+    }),
+  });
+  await throwIfNotOk(res, "Failed to write pinned memory");
+}
+
+export async function searchMemory(args: {
+  scope: MemoryScope;
+  query: string;
+  projectId?: string;
+  limit?: number;
+}): Promise<MemorySearchHit[]> {
+  const params = new URLSearchParams();
+  params.set("scope", args.scope);
+  params.set("query", args.query);
+  if (args.projectId) params.set("projectId", args.projectId);
+  if (args.limit != null) params.set("limit", String(args.limit));
+  const res = await fetch(`${BASE}/memory/${args.scope}/search?${params.toString()}`);
+  await throwIfNotOk(res, "Failed to search memory");
+  const body = (await res.json()) as { results?: MemorySearchHit[] };
+  return Array.isArray(body.results) ? body.results : [];
+}
+
 export type ImportableSkillScope = "user" | "system" | "repo";
 
 export interface ImportableSkill {

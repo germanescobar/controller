@@ -1008,7 +1008,12 @@ export async function handleSessionStream(
   //     today (Codex ignores collaboration-mode developer instructions in default
   //     mode; Claude's plan mode flows through the stream-json control channel).
   //     The skill prefix, if any, stays after the preamble.
-  const controllerPreamble = await buildControllerPreamble();
+  //
+  // The preamble threads the active project so the memory block can
+  // surface the project-scoped pinned snippet and notes (issue #350).
+  const controllerPreamble = await buildControllerPreamble({
+    projectId: req.params.projectId,
+  });
   const usesSystemPrompt = providerId === "anita";
   // Resolve the `@`-mentions (issue #312) before composing the prompt so
   // the mention block lands in both the agent message and the persisted

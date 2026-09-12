@@ -348,6 +348,154 @@ test("parseSchedules accepts a missing <project> on list and add", async () => {
   assert.equal(add.action, "add");
 });
 
+// ---------------------------------------------------------------------------
+// memory CLI parser (issue #350)
+// ---------------------------------------------------------------------------
+
+test("parseMemory maps list/read/write/pin to action payloads", async () => {
+  const cli = await loadCli();
+  // `list` defaults to global scope; --scope switches it.
+  const list = cli.parseMemory(["list"]);
+  assert.equal(list.action, "list");
+  assert.equal(list.scope, "global");
+  const listProject = cli.parseMemory(["list", "--scope", "project", "--include-pinned"]);
+  assert.equal(listProject.scope, "project");
+  assert.equal(listProject.includePinned, true);
+  // --scope <projectId> passes the project id through.
+  const listScoped = cli.parseMemory(["list", "--scope", "p-1"]);
+  assert.equal(listScoped.scope, "project");
+  assert.equal(listScoped.projectId, "p-1");
+  // `read`/`write`/`pinned`/`pin` keep <scope> as a positional.
+  const read = cli.parseMemory(["read", "global", "deploy-via-gh"]);
+  assert.equal(read.action, "read");
+  assert.equal(read.scope, "global");
+  assert.equal(read.slug, "deploy-via-gh");
+  const write = cli.parseMemory(["write", "global", "deploy-via-gh", "--content", "use GH action"]);
+  assert.equal(write.action, "write");
+  assert.equal(write.body.contentFlag, "use GH action");
+  // `search` puts the query first; --scope is a flag (default global).
+  const search = cli.parseMemory(["search", "deploy"]);
+  assert.equal(search.action, "search");
+  assert.equal(search.query, "deploy");
+  const searchProject = cli.parseMemory(["search", "deploy", "--scope", "p-1", "--limit", "5"]);
+  assert.equal(searchProject.scope, "project");
+  assert.equal(searchProject.projectId, "p-1");
+  assert.equal(searchProject.limit, 5);
+  assert.equal(searchProject.query, "deploy");
+  const pinned = cli.parseMemory(["pinned", "global"]);
+  assert.equal(pinned.action, "pinned");
+  const pin = cli.parseMemory(["pin", "global", "--content", "always-injected"]);
+  assert.equal(pin.action, "pin");
+  assert.equal(pin.body.contentFlag, "always-injected");
+});
+
+test("parseMemory rejects unknown scopes and missing slugs", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  process.exit = (code) => { exitCode = code; throw new Error("__exit__"); };
+  process.stderr.write = () => true;
+  try {
+    await assert.rejects(async () => cli.parseMemory(["read", "weird", "slug"]), /__exit__/);
+    assert.equal(exitCode, 1);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  // Missing slug for read
+  const originalExit2 = process.exit;
+  const originalStderr2 = process.stderr.write.bind(process.stderr);
+  let exitCode2 = null;
+  process.exit = (code) => { exitCode2 = code; throw new Error("__exit__"); };
+  process.stderr.write = () => true;
+  try {
+    await assert.rejects(async () => cli.parseMemory(["read", "global"]), /__exit__/);
+    assert.equal(exitCode2, 1);
+  } finally {
+    process.exit = originalExit2;
+    process.stderr.write = originalStderr2;
+  }
+});
+
+test("parseMemory write requires --content or --content-file", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  process.exit = (code) => { exitCode = code; throw new Error("__exit__"); };
+  process.stderr.write = () => true;
+  try {
+    await assert.rejects(
+      async () => cli.parseMemory(["write", "global", "slug"]),
+      /__exit__/
+    );
+    assert.equal(exitCode, 1);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+});
+
+test("runMemory list hits GET /api/memory with the scope/projectId params", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (url, init) => {
+    captured = { url: String(url), init };
+    return {
+      status: 200,
+      json: async () => ({ entries: [{ slug: "x", scope: "global", preview: "p", mtimeMs: 1 }] }),
+    };
+  };
+  try {
+    await cli.runMemory(["list", "--scope", "project", "--project", "p-1", "--include-pinned"], "http://controller.test");
+    assert.match(captured.url, /\/api\/memory\?/);
+    assert.match(captured.url, /scope=project/);
+    assert.match(captured.url, /projectId=p-1/);
+    assert.match(captured.url, /includePinned=1/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runMemory write PUTs to /api/memory/<scope>/<slug>", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (url, init) => {
+    captured = { url: String(url), init };
+    return { status: 200, json: async () => ({ ok: true }) };
+  };
+  try {
+    await cli.runMemory(["write", "global", "deploy", "--content", "use GH"], "http://controller.test");
+    assert.equal(captured.init.method, "PUT");
+    assert.match(captured.url, /\/api\/memory\/global\/deploy/);
+    const body = JSON.parse(captured.init.body);
+    assert.equal(body.content, "use GH");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runMemory search GETs the search endpoint with the query", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (url, init) => {
+    captured = { url: String(url), init };
+    return { status: 200, json: async () => ({ results: [] }) };
+  };
+  try {
+    await cli.runMemory(["search", "deploy", "--limit", "5"], "http://controller.test");
+    assert.match(captured.url, /\/api\/memory\/global\/search\?/);
+    assert.match(captured.url, /query=deploy/);
+    assert.match(captured.url, /limit=5/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("resolveProjectId resolves <project> by id", async () => {
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
