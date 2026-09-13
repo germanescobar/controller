@@ -231,6 +231,42 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       "",
       note,
       "",
+      // Memory intro + manifest (issue #350). The catalog is empty in
+      // this test (no notes, no pinned), so the block renders the
+      // explicit `(empty)` / `(no notes yet)` placeholders. The home
+      // gets the global scope dir on startup via `ensureMemoryDirs`,
+      // so `readPinnedMemory` returns "" rather than throwing.
+      "Controller has an app-owned **memory** layer where the user persists",
+      "facts that survive across sessions: preferences, conventions, deploy",
+      "processes, library choices, \"as we discussed X\". The",
+      "`<memory_index>` block in this preamble lists every note by slug + scope +",
+      "first-line preview — read it before answering questions about preferences,",
+      "conventions, deploys, library choice, or anything phrased as \"as we",
+      "discussed\" or \"we agreed\".",
+      "",
+      "Workflow:",
+      `1. Scan the \`<memory_index>\` block. If a slug looks relevant, call \`${cliPath} memory read <scope> <slug>\` to fetch the body.`,
+      `2. \`${cliPath} memory search <query>\` is the broader version — useful when the user's prompt doesn't lexically match any slug.`,
+      `3. When the user gives you a durable preference or fact, offer to write it via \`${cliPath} memory write <scope> <slug> --content <text>\` instead of just acknowledging.`,
+      "",
+      "Scope is `global` (every session) or `project` (per onboarded project).",
+      "When the CLI is invoked from a session, omit `--project` and the server",
+      "resolves the project from the active session. Do not read memory for",
+      "unrelated tasks — the index alone is enough to decide relevance. If",
+      "`memory search` returns nothing relevant, say so; do not fabricate from",
+      "context.",
+      "",
+      "<memory>",
+      "<pinned_global>",
+      "(empty)",
+      "</pinned_global>",
+      "<memory_index>",
+      "(no notes yet)",
+      "</memory_index>",
+      "</memory>",
+      "",
+      note,
+      "",
       // The loop primitives intro (issue #339). Kept stable by re-reading
       // the function output rather than hand-rolling a copy here — any
       // drift between the snapshot and `loopPrimitivesIntro` will fail

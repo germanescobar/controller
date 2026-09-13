@@ -8,6 +8,7 @@
  *   controller skills <action> ...          Search and activate unified skills.
  *   controller worktrees <action> ...       Manage worktrees on a project.
  *   controller sessions <action> ...        Start a session pinned to a worktree.
+ *   controller memory <action> ...          Read/write the app-owned memory layer.
  *
  * Invoked by its absolute install path (`<controllerHome>/bin/controller`,
  * resolved from CONTROLLER_HOME or the platform default — see `paths.ts`)
@@ -165,7 +166,27 @@ const USAGE = `Usage:
   \`--every day|weekday\` fires at \`--at-hour\`:\`--at-minute\` (default 09:00) in
   \`--timezone\` (default the server's). The run fires on the next scheduler
   tick after the target time. <project> is optional on \`list\`/\`add\` and
-  falls back to cwd (see the worktrees section).`;
+  falls back to cwd (see the worktrees section).
+
+  controller memory list [--scope global|<projectId>] [--include-pinned]
+  controller memory read <scope> <slug> [--project <projectId>]
+  controller memory search <query> [--scope global|<projectId>] [--limit N]
+  controller memory write <scope> <slug> --content <text>|--content-file <path> [--project <projectId>]
+  controller memory pinned <scope> [--project <projectId>]            # read the per-scope pinned.md
+  controller memory pin <scope> --content <text>|--content-file <path> [--project <projectId>]
+
+  \`memory <scope>\` is either \`global\` (every session) or \`project\`
+  (per onboarded project, identified by its UUID or \`--scope <projectId>\`
+  on the global/flag form). When \`--project\` is omitted on a project-scope
+  call and the CLI is running inside a session's worktree, the server
+  resolves the project from the active session. The body of a note or
+  pinned snippet can be passed as \`--content <text>\` (inline) or
+  \`--content-file <path>\` (read once, never echoed). \`memory read\` and
+  \`memory pinned\` print the raw Markdown to stdout — pipe to \`wc -l\` or
+  similar. \`memory search\` is a substring search across note bodies
+  (rg-based in v0); the \`<memory_index>\` block in the preamble already
+  lists slug + scope + first-line preview, so reach for \`search\` only
+  when the user's prompt doesn't lexically match a slug.`;
 
 // Exposed for tests: only auto-run `main()` when this file is the script the
 // process was launched as, so unit tests can import the helpers without
@@ -1344,6 +1365,339 @@ export async function runSchedules(argv, serverUrl) {
   fail(`Unknown schedules action: ${parsed.action}`);
 }
 
+// --- memory surface (issue #350) ---
+//
+// `controller memory <action>` reads/writes the Controller-owned memory
+// layer. The scope is `global` (cross-session) or `project` (per
+// onboarded project, requires `--project <id>`). When the CLI is
+// invoked from inside a session's worktree and the user passes
+// `scope=project` without `--project`, the server resolves the
+// project from the session. Otherwise the user must supply it
+// explicitly.
+
+function parseScope(raw, allowProject) {
+  if (raw === "global") return "global";
+  if (allowProject && raw === "project") return "project";
+  return null;
+}
+
+function buildMemoryQuery(parsed) {
+  const params = new URLSearchParams();
+  params.set("scope", parsed.scope);
+  if (parsed.projectId) params.set("projectId", parsed.projectId);
+  if (parsed.query) params.set("query", parsed.query);
+  if (parsed.limit != null) params.set("limit", String(parsed.limit));
+  return params.toString();
+}
+
+export function parseMemory(argv) {
+  const [command, ...rest] = argv;
+  switch (command) {
+    case "list": {
+      // `list --scope <global|projectId>` per the issue spec. The scope
+      // is a flag so the common case `controller memory list` doesn't
+      // have to type `--scope global` every time.
+      const scopeFlag = flagValue(rest, "--scope");
+      const projectFlag = flagValue(rest, "--project");
+      const includePinned = rest.includes("--include-pinned");
+      // `--scope <projectId>` (no `global` literal) means project.
+      // Anything else defaults to `global` so a typo falls back to
+      // the global catalog rather than silently producing an empty
+      // list.
+      let scope = "global";
+      if (scopeFlag) {
+        if (scopeFlag === "global") scope = "global";
+        else if (scopeFlag === "project") scope = "project";
+        else scope = "project"; // treat the value as a projectId
+      }
+      return {
+        action: "list",
+        scope,
+        projectId: scope === "project" ? (scopeFlag && scopeFlag !== "project" ? scopeFlag : projectFlag) ?? null : undefined,
+        includePinned,
+      };
+    }
+    case "read": {
+      // `<scope>` is positional; `project` is the second valid value
+      // alongside `global` (PR review, P1).
+      const scope = parseScope(rest[0], true);
+      if (!scope) fail("memory read requires <scope> as the first positional");
+      const slug = rest[1];
+      if (!slug) fail("memory read requires a <slug>");
+      const projectId = flagValue(rest.slice(2), "--project");
+      return {
+        action: "read",
+        scope,
+        slug,
+        projectId: scope === "project" ? projectId ?? null : undefined,
+      };
+    }
+    case "search": {
+      // `search --scope <global|projectId> <query>`. Scope is a flag
+      // (default `global`); the query is the leftover positional text.
+      // Use the shared flag-collector so unknown flags still error.
+      assertKnownFlags(rest, ["--scope", "--project", "--limit"], "memory search");
+      const scopeFlag = flagValue(rest, "--scope");
+      const projectFlag = flagValue(rest, "--project");
+      const limitFlag = flagValue(rest, "--limit");
+      let scope = "global";
+      if (scopeFlag) {
+        if (scopeFlag === "global") scope = "global";
+        else if (scopeFlag === "project") scope = "project";
+        else scope = "project";
+      }
+      // The query is everything that isn't a known flag or the value
+      // consumed by a known flag. Build an index of consumed positions
+      // to filter them out cleanly.
+      const flagNames = new Set(["--scope", "--project", "--limit"]);
+      const skip = new Set();
+      for (let i = 0; i < rest.length; i += 1) {
+        if (flagNames.has(rest[i])) {
+          skip.add(i);
+          if (rest[i + 1] !== undefined && !rest[i + 1].startsWith("--")) {
+            skip.add(i + 1);
+          }
+        }
+      }
+      const query = rest.filter((_, i) => !skip.has(i)).join(" ").trim();
+      if (!query) fail("memory search requires a <query>");
+      return {
+        action: "search",
+        scope,
+        projectId: scope === "project" ? (scopeFlag && scopeFlag !== "project" ? scopeFlag : projectFlag) ?? null : undefined,
+        query,
+        limit: limitFlag ? Number(limitFlag) : null,
+      };
+    }
+    case "write": {
+      const scope = parseScope(rest[0], true);
+      if (!scope) fail("memory write requires <scope> as the first positional");
+      const slug = rest[1];
+      if (!slug) fail("memory write requires a <slug>");
+      const writeArgs = rest.slice(2);
+      // `--content=-` (one token) means "read the body from stdin",
+      // matching the `--scheme-secret=-` idiom from `integrations
+      // create`. Split the `=` form so `flagValue` can see the value.
+      const expanded = expandEqualsForm(writeArgs, MEMORY_VALUE_FLAGS);
+      assertKnownFlags(
+        expanded,
+        ["--content", "--content-file", "--project"],
+        "memory write"
+      );
+      const contentFlag = flagValue(expanded, "--content");
+      const contentFile = flagValue(expanded, "--content-file");
+      const projectId = flagValue(expanded, "--project");
+      if (contentFlag == null && !contentFile) {
+        fail("memory write requires --content <text> or --content-file <path>");
+      }
+      if (contentFlag != null && contentFile) {
+        fail("memory write accepts only one of --content or --content-file");
+      }
+      return {
+        action: "write",
+        scope,
+        slug,
+        projectId: scope === "project" ? projectId ?? null : undefined,
+        body: { contentFlag, contentFile, projectId },
+      };
+    }
+    case "pinned": {
+      const scope = parseScope(rest[0], true);
+      if (!scope) fail("memory pinned requires <scope> as the first positional");
+      const projectId = flagValue(rest.slice(1), "--project");
+      return {
+        action: "pinned",
+        scope,
+        projectId: scope === "project" ? projectId ?? null : undefined,
+      };
+    }
+    case "pin": {
+      const scope = parseScope(rest[0], true);
+      if (!scope) fail("memory pin requires <scope> as the first positional");
+      const pinArgs = rest.slice(1);
+      // Same `--content=-` stdin idiom as `write` (PR review, P2).
+      const expanded = expandEqualsForm(pinArgs, MEMORY_VALUE_FLAGS);
+      assertKnownFlags(expanded, ["--content", "--content-file", "--project"], "memory pin");
+      const contentFlag = flagValue(expanded, "--content");
+      const contentFile = flagValue(expanded, "--content-file");
+      const projectId = flagValue(expanded, "--project");
+      if (contentFlag == null && !contentFile) {
+        fail("memory pin requires --content <text> or --content-file <path>");
+      }
+      if (contentFlag != null && contentFile) {
+        fail("memory pin accepts only one of --content or --content-file");
+      }
+      return {
+        action: "pin",
+        scope,
+        projectId: scope === "project" ? projectId ?? null : undefined,
+        body: { contentFlag, contentFile, projectId },
+      };
+    }
+    default:
+      fail(`Unknown memory command: ${command ?? ""}\n${USAGE}`);
+  }
+}
+
+// Flags that accept a value in `--flag=value` shorthand. The memory
+// write/pin forms use the same `=`-form as the integrations create
+// surface (e.g. `--scheme-secret=-`); `expandEqualsForm` splits those
+// into two tokens so `flagValue` can see the value.
+const MEMORY_VALUE_FLAGS = new Set(["--content", "--content-file", "--project"]);
+
+async function readMemoryContent({ contentFlag, contentFile }) {
+  // The literal `-` (set when the user wrote `--content=-`) means
+  // "read the body from stdin" — same idiom as
+  // `--scheme-secret=-` on the integrations surface. We strip a
+  // single trailing newline so the common `echo "$body" | controller
+  // ...` pattern doesn't pick up an extra `\n`.
+  if (contentFlag === "-") {
+    const chunks = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    return Buffer.concat(chunks).toString("utf-8").replace(/\r?\n$/, "");
+  }
+  if (contentFlag != null) return contentFlag;
+  if (contentFile) {
+    try {
+      const fs = await import("node:fs/promises");
+      return (await fs.readFile(contentFile, "utf-8")).replace(/\r?\n$/, "");
+    } catch (error) {
+      fail(`Could not read content file: ${error?.message ?? error}`);
+    }
+  }
+  return "";
+}
+
+function formatMemoryEntry(entry) {
+  const scope = entry.scope === "global" ? "global" : `project:${entry.projectId ?? "?"}`;
+  const preview = entry.preview ? `  ${entry.preview}` : "";
+  return `${scope}  ${entry.slug}${preview}`;
+}
+
+export async function runMemory(argv, serverUrl) {
+  const parsed = parseMemory(argv);
+
+  // Resolve the project id lazily, only for project-scope calls
+  // (PR review, P2). The worktrees surface resolves unconditionally
+  // because it always needs a project; memory doesn't, so we defer
+  // until we know we need one. `resolveProjectId` is the same cwd
+  // → project resolver `runWorktrees` uses, so an agent inside a
+  // worktree can omit `--project` and the CLI picks the project
+  // that owns cwd. The fallback fails the process with a clear
+  // error if cwd is not part of any onboarded project, matching
+  // the worktrees UX.
+  const projectId = parsed.scope === "project"
+    ? await resolveProjectId(serverUrl, parsed.projectId ?? undefined)
+    : undefined;
+
+  if (parsed.action === "list") {
+    const query = buildMemoryQuery({
+      scope: parsed.scope,
+      projectId,
+    });
+    const path = `/api/memory?${query}${parsed.includePinned ? `${query ? "&" : ""}includePinned=1` : ""}`;
+    const { response, result } = await getJson(serverUrl, path);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to list memory (HTTP ${response.status})`);
+    }
+    const entries = Array.isArray(result?.entries) ? result.entries : [];
+    if (parsed.includePinned && typeof result?.pinned === "string") {
+      process.stdout.write(`# pinned.md\n${result.pinned}\n\n# notes\n`);
+    }
+    if (entries.length === 0) {
+      process.stdout.write(parsed.includePinned ? "" : "No memory notes.\n");
+      return;
+    }
+    for (const entry of entries) {
+      process.stdout.write(`${formatMemoryEntry(entry)}\n`);
+    }
+    return;
+  }
+
+  if (parsed.action === "read") {
+    const query = buildMemoryQuery({
+      scope: parsed.scope,
+      projectId,
+    });
+    const path = `/api/memory/${parsed.scope}/${encodeURIComponent(parsed.slug)}?${query}`;
+    const { response, result } = await getJson(serverUrl, path);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to read memory (HTTP ${response.status})`);
+    }
+    process.stdout.write(result?.content ?? "");
+    return;
+  }
+
+  if (parsed.action === "search") {
+    const query = buildMemoryQuery({
+      scope: parsed.scope,
+      projectId,
+      query: parsed.query,
+      limit: parsed.limit,
+    });
+    const path = `/api/memory/${parsed.scope}/search?${query}`;
+    const { response, result } = await getJson(serverUrl, path);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to search memory (HTTP ${response.status})`);
+    }
+    const hits = Array.isArray(result?.results) ? result.results : [];
+    if (hits.length === 0) {
+      process.stdout.write("No matches.\n");
+      return;
+    }
+    for (const hit of hits) {
+      process.stdout.write(`${formatMemoryEntry(hit)}\n`);
+    }
+    return;
+  }
+
+  if (parsed.action === "write") {
+    const content = await readMemoryContent(parsed.body);
+    const path = `/api/memory/${parsed.scope}/${encodeURIComponent(parsed.slug)}`;
+    const { response, result } = await putJson(serverUrl, path, {
+      content,
+      ...(projectId ? { projectId } : {}),
+    });
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to write memory (HTTP ${response.status})`);
+    }
+    process.stdout.write(`Wrote memory note "${parsed.slug}".\n`);
+    return;
+  }
+
+  if (parsed.action === "pinned") {
+    const query = buildMemoryQuery({
+      scope: parsed.scope,
+      projectId,
+    });
+    const path = `/api/memory/${parsed.scope}/pinned?${query}`;
+    const { response, result } = await getJson(serverUrl, path);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to read pinned memory (HTTP ${response.status})`);
+    }
+    process.stdout.write(result?.content ?? "");
+    return;
+  }
+
+  if (parsed.action === "pin") {
+    const content = await readMemoryContent(parsed.body);
+    const path = `/api/memory/${parsed.scope}/pinned`;
+    const { response, result } = await putJson(serverUrl, path, {
+      content,
+      ...(projectId ? { projectId } : {}),
+    });
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to write pinned memory (HTTP ${response.status})`);
+    }
+    process.stdout.write(`Updated pinned memory for ${parsed.scope}.\n`);
+    return;
+  }
+
+  fail(`Unknown memory action: ${parsed.action}`);
+}
+
 // --- browser surface (issue #109) ---
 
 export function parseBrowser(argv) {
@@ -2295,7 +2649,8 @@ async function main() {
     surface !== "skills" &&
     surface !== "worktrees" &&
     surface !== "sessions" &&
-    surface !== "schedules"
+    surface !== "schedules" &&
+    surface !== "memory"
   ) {
     fail(`Unknown surface: ${surface}\n${USAGE}`);
   }
@@ -2315,6 +2670,8 @@ async function main() {
     await runSessions(rest, serverUrl);
   } else if (surface === "schedules") {
     await runSchedules(rest, serverUrl);
+  } else if (surface === "memory") {
+    await runMemory(rest, serverUrl);
   }
 }
 
