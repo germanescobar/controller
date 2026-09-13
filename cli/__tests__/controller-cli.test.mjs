@@ -2663,3 +2663,674 @@ test("parseBrowser snapshot / click / type still work", async () => {
     { action: "type", params: { selector: "input[name=q]", text: "hello", submit: true } }
   );
 });
+
+// --- sessions list (issue #353) ---
+
+test("parseSessions list builds a list payload from the new flags", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "list",
+    "demo",
+    "--worktree",
+    "wt-1",
+    "--parent",
+    "sess-parent",
+    "--provider",
+    "codex",
+    "--json",
+    "--limit",
+    "25",
+  ]);
+  assert.equal(parsed.project, "demo");
+  assert.equal(parsed.action, "list");
+  assert.deepEqual(parsed.body, {
+    worktreeId: "wt-1",
+    parentId: "sess-parent",
+    provider: "codex",
+    json: true,
+    limit: 25,
+  });
+});
+
+test("parseSessions list accepts a missing <project> (resolved from cwd)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions(["list"]);
+  assert.equal(parsed.project, "");
+  assert.equal(parsed.action, "list");
+  // No flags supplied → body should be the empty shape so the dispatcher
+  // can spread it without surprises.
+  assert.deepEqual(parsed.body, {});
+});
+
+test("parseSessions list rejects an unknown flag with a clear error (issue #306)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["list", "--online"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Unknown flag for sessions list/);
+  assert.match(stderrText, /--online/);
+  // The error must list the valid flags so the caller can fix the typo
+  // without reading the source.
+  assert.match(stderrText, /--worktree/);
+  assert.match(stderrText, /--parent/);
+  assert.match(stderrText, /--json/);
+});
+
+test("parseSessions list rejects a non-positive --limit with a clear error", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["list", "--limit", "0"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--limit must be a positive integer/);
+});
+
+test("parseSessions start --parent self resolves via $CONTROLLER_SESSION_ID (issue #353)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-42";
+  try {
+    const parsed = cli.parseSessions([
+      "start",
+      "--worktree",
+      "wt-1",
+      "--parent",
+      "self",
+      "--message",
+      "spawn a child",
+    ]);
+    assert.equal(parsed.action, "start");
+    assert.equal(parsed.body.parentId, "sess-self-42");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseSessions start --parent self surfaces a clear error when CONTROLLER_SESSION_ID is unset (issue #353)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "start",
+          "--worktree",
+          "wt-1",
+          "--parent",
+          "self",
+          "--message",
+          "spawn a child",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (savedEnv !== undefined) process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+  assert.match(stderrText, /controller sessions list/);
+});
+
+test("parseSessions list --parent self resolves via $CONTROLLER_SESSION_ID (issue #353)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-99";
+  try {
+    const parsed = cli.parseSessions(["list", "--parent", "self"]);
+    assert.equal(parsed.action, "list");
+    assert.equal(parsed.body.parentId, "sess-self-99");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseSessions start passes an explicit --parent through unchanged", async () => {
+  // The `self` alias is the only string substitution on `--parent`;
+  // any other value is forwarded verbatim so the server can use it
+  // directly. This guards against a future refactor that tries to
+  // resolve the value client-side (e.g. via `locateSessionById`).
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start",
+    "--worktree",
+    "wt-1",
+    "--parent",
+    "sess-explicit",
+    "--message",
+    "hi",
+  ]);
+  assert.equal(parsed.body.parentId, "sess-explicit");
+});
+
+test("parseSessions start without --parent omits the body field", async () => {
+  // The start POST endpoint distinguishes "no parent" (absent key) from
+  // "parent is empty string" — make sure the CLI doesn't accidentally
+  // send a parentId: "" when the flag is missing.
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start",
+    "--worktree",
+    "wt-1",
+    "--message",
+    "hi",
+  ]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(parsed.body, "parentId"),
+    false,
+    "parentId should be absent when --parent is not provided"
+  );
+});
+
+test("runSessions list GETs the per-worktree session list and prints one row per match (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (
+      String(url).endsWith(
+        "/api/projects/proj-uuid-1/sessions?worktreeId=wt-1"
+      )
+    ) {
+      return {
+        status: 200,
+        json: async () => [
+          {
+            id: "sess-a",
+            title: "Triage issue 190",
+            provider: "codex",
+            worktreeId: "wt-1",
+            parentId: "sess-parent",
+            lastActiveAt: "2026-09-13T10:00:00.000Z",
+          },
+          {
+            id: "sess-b",
+            title: "Review PR #42",
+            provider: "claude",
+            worktreeId: "wt-1",
+            lastActiveAt: "2026-09-12T09:00:00.000Z",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--worktree", "wt-1"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // The per-worktree list endpoint is hit directly because --worktree
+  // is supplied (no need to walk every worktree).
+  assert.ok(
+    calls.some((c) =>
+      c.endsWith("/api/projects/proj-uuid-1/sessions?worktreeId=wt-1")
+    ),
+    "expected a GET to the per-worktree sessions endpoint"
+  );
+  const out = stdoutChunks.join("");
+  // Both rows print, one per line.
+  assert.match(out, /sess-a\s+\[codex\]\s+Triage issue 190/);
+  assert.match(out, /sess-b\s+\[claude\]\s+Review PR #42/);
+  // The parent link is surfaced so a coordinator can see children at a glance.
+  assert.match(out, /parent=sess-parent/);
+});
+
+test("runSessions list applies the --parent filter client-side (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "wt-1", name: "main", isMain: true },
+          { id: "wt-2", name: "feature", isMain: false },
+        ],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-uuid-1/sessions?worktreeId=")) {
+      const worktreeId = new URL(url).searchParams.get("worktreeId");
+      // The parent lives on the main worktree, the child on the feature
+      // worktree — exactly the cross-worktree case #351's fix addressed.
+      // The CLI must walk both and pick out the child by `parentId`.
+      if (worktreeId === "wt-1") {
+        return {
+          status: 200,
+          json: async () => [
+            {
+              id: "sess-parent",
+              title: "Coordinator",
+              provider: "codex",
+              worktreeId: "wt-1",
+              lastActiveAt: "2026-09-13T09:00:00.000Z",
+            },
+            {
+              id: "sess-other-on-main",
+              title: "Unrelated",
+              provider: "claude",
+              worktreeId: "wt-1",
+              lastActiveAt: "2026-09-13T08:00:00.000Z",
+            },
+          ],
+        };
+      }
+      if (worktreeId === "wt-2") {
+        return {
+          status: 200,
+          json: async () => [
+            {
+              id: "sess-child",
+              title: "Fix the bug",
+              provider: "claude",
+              worktreeId: "wt-2",
+              parentId: "sess-parent",
+              lastActiveAt: "2026-09-13T10:00:00.000Z",
+            },
+            {
+              id: "sess-other-on-feature",
+              title: "Another",
+              provider: "codex",
+              worktreeId: "wt-2",
+              lastActiveAt: "2026-09-12T10:00:00.000Z",
+            },
+          ],
+        };
+      }
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--parent", "sess-parent"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // Both worktrees are walked; the CLI does not assume a single
+  // per-project session store.
+  assert.ok(
+    calls.some((c) => c.endsWith("/api/projects/proj-uuid-1/worktrees")),
+    "expected a GET to the worktrees endpoint to enumerate them"
+  );
+  assert.ok(
+    calls.some((c) =>
+      c.endsWith("/api/projects/proj-uuid-1/sessions?worktreeId=wt-1")
+    ),
+    "expected a walk of the main worktree's sessions"
+  );
+  assert.ok(
+    calls.some((c) =>
+      c.endsWith("/api/projects/proj-uuid-1/sessions?worktreeId=wt-2")
+    ),
+    "expected a walk of the feature worktree's sessions"
+  );
+  const out = stdoutChunks.join("");
+  // Only the child matches; the parent, the other-on-main, and the
+  // other-on-feature are filtered out client-side. The child row
+  // legitimately contains the parent's id in `parent=<id>` so we
+  // assert on the formatted provider tags and titles, not the parent
+  // id text appearing anywhere in the output.
+  assert.match(out, /sess-child/);
+  assert.match(out, /Fix the bug/);
+  // The other sessions' titles should not appear (Coordinator = the
+  // parent's title; Unrelated / Another = the other two siblings).
+  assert.doesNotMatch(out, /Coordinator/);
+  assert.doesNotMatch(out, /Unrelated/);
+  assert.doesNotMatch(out, /Another/);
+  // The parent's own id appears as a column value for the child, so
+  // check that it does not appear in the row-leading id slot.
+  assert.doesNotMatch(out, /^sess-parent /m);
+  assert.doesNotMatch(out, /^sess-other-on-main /m);
+  assert.doesNotMatch(out, /^sess-other-on-feature /m);
+});
+
+test("runSessions list applies the --provider filter client-side (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-uuid-1/sessions?worktreeId=")) {
+      return {
+        status: 200,
+        json: async () => [
+          {
+            id: "sess-codex",
+            title: "Codex session",
+            provider: "codex",
+            worktreeId: "wt-1",
+            lastActiveAt: "2026-09-13T10:00:00.000Z",
+          },
+          {
+            id: "sess-claude",
+            title: "Claude session",
+            provider: "claude",
+            worktreeId: "wt-1",
+            lastActiveAt: "2026-09-12T10:00:00.000Z",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--provider", "codex"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const out = stdoutChunks.join("");
+  assert.match(out, /sess-codex/);
+  assert.doesNotMatch(out, /sess-claude/);
+});
+
+test("runSessions list --json emits NDJSON (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-uuid-1/sessions?worktreeId=")) {
+      return {
+        status: 200,
+        json: async () => [
+          {
+            id: "sess-a",
+            title: "First",
+            provider: "codex",
+            worktreeId: "wt-1",
+            lastActiveAt: "2026-09-13T10:00:00.000Z",
+          },
+          {
+            id: "sess-b",
+            title: "Second",
+            provider: "claude",
+            worktreeId: "wt-1",
+            lastActiveAt: "2026-09-12T10:00:00.000Z",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--json"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const lines = stdoutChunks.join("").split("\n").filter(Boolean);
+  assert.equal(lines.length, 2);
+  const first = JSON.parse(lines[0]);
+  const second = JSON.parse(lines[1]);
+  assert.equal(first.id, "sess-a");
+  assert.equal(first.title, "First");
+  assert.equal(second.id, "sess-b");
+  assert.equal(second.title, "Second");
+});
+
+test("runSessions list prints 'No sessions match.' for an empty filter result (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-uuid-1/sessions?worktreeId=")) {
+      return { status: 200, json: async () => [] };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--parent", "no-children-here"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(stdoutChunks.join(""), "No sessions match.\n");
+});
+
+test("runSessions list enforces --limit by truncating the result set (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-uuid-1/sessions?worktreeId=")) {
+      // Five rows; --limit 2 should keep the two most-recent.
+      return {
+        status: 200,
+        json: async () => [
+          { id: "sess-1", title: "1", provider: "codex", worktreeId: "wt-1", lastActiveAt: "2026-09-13T10:00:00.000Z" },
+          { id: "sess-2", title: "2", provider: "codex", worktreeId: "wt-1", lastActiveAt: "2026-09-12T10:00:00.000Z" },
+          { id: "sess-3", title: "3", provider: "codex", worktreeId: "wt-1", lastActiveAt: "2026-09-11T10:00:00.000Z" },
+          { id: "sess-4", title: "4", provider: "codex", worktreeId: "wt-1", lastActiveAt: "2026-09-10T10:00:00.000Z" },
+          { id: "sess-5", title: "5", provider: "codex", worktreeId: "wt-1", lastActiveAt: "2026-09-09T10:00:00.000Z" },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--limit", "2"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const out = stdoutChunks.join("");
+  assert.match(out, /sess-1/);
+  assert.match(out, /sess-2/);
+  assert.doesNotMatch(out, /sess-3/);
+  assert.doesNotMatch(out, /sess-4/);
+  assert.doesNotMatch(out, /sess-5/);
+});
+
+test("runSessions start forwards --parent on the POST body (issue #353)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        sessionId: "sess-child",
+        url: "controller://project/proj-uuid-1/worktree/wt-1/session/sess-child",
+      }),
+    };
+  };
+  try {
+    await cli.runSessions(
+      [
+        "start",
+        "controller",
+        "--worktree",
+        "wt-1",
+        "--parent",
+        "sess-parent",
+        "--message",
+        "spawn a child",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const postCall = calls.find(
+    (c) => c.url === "http://controller.test/api/projects/proj-uuid-1/sessions"
+  );
+  assert.ok(postCall, "expected a POST to the sessions endpoint");
+  assert.equal(postCall.init.method, "POST");
+  const body = JSON.parse(postCall.init.body);
+  assert.equal(body.parentId, "sess-parent");
+  assert.equal(body.worktreeId, "wt-1");
+  assert.equal(body.message, "spawn a child");
+});

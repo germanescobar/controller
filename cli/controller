@@ -99,13 +99,39 @@ const USAGE = `Usage:
   running inside a worktree doesn't have to memorize a project name.
 
   controller sessions start [<project>] --worktree <worktreeId> --message <text> \\
-      [--provider|--agent codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]
+      [--provider|--agent codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>] \\
+      [--parent <sessionId|self>]
 
   \`sessions start\` kicks off a new agent run on the given worktree and prints
   a URL the user can open in Controller to follow along. The CLI does not
   stream transcript events; the run is persisted to disk and the UI subscribes
   to the existing event-list endpoint for live updates. <project> is optional
   and falls back to the project that owns cwd (see the worktrees section).
+  \`--parent <sessionId>\` records the new session as a child of the given
+  parent (issue #353) — the value \`self\` resolves to the calling session's
+  id via the \`$CONTROLLER_SESSION_ID\` env var the orchestrator injects, so
+  an agent can spawn a child without first looking up its own id. The CLI
+  surfaces a clear error when \`--parent self\` is used and the env var is
+  not set (e.g. on a brand-new session that hasn't been assigned an id
+  yet), pointing the agent at \`controller sessions list\` to discover its
+  own id.
+
+  controller sessions list [<project>] \\
+      [--worktree <worktreeId>] [--parent <sessionId|self>] [--provider <id>] \\
+      [--json] [--limit <n>]
+
+  \`sessions list\` enumerates sessions in a project (issue #353). \`<project>\`
+  is optional and falls back to the project that owns cwd. \`--worktree\`
+  restricts to one worktree; \`--provider\` filters to one agent provider
+  (\`anita\`/\`codex\`/\`claude\`). \`--parent <sessionId>\` filters to children
+  of the given parent — the value \`self\` resolves the same way as on
+  \`start\`, and the CLI walks every worktree of the project to find the
+  children (a parent on the main worktree and a child on a feature worktree
+  live in different per-worktree stores). \`--json\` prints one JSON object
+  per line (NDJSON) for pipelines like \`jq\` or
+  \`controller sessions send --from $(jq -r .id)\`. \`--limit\` caps the
+  result count; default 100. \`No sessions match.\` is printed when the
+  filter result is empty.
 
   controller sessions wake <sessionId> --message <text> \\
       [--delay <duration>] [--run-at <iso>] \\
@@ -631,6 +657,7 @@ export function parseSessions(argv) {
           "--model",
           "--mode",
           "--skill",
+          "--parent",
         ],
         "sessions start"
       );
@@ -657,6 +684,18 @@ export function parseSessions(argv) {
       const model = flagValue(args, "--model");
       const mode = flagValue(args, "--mode");
       const skill = flagValue(args, "--skill");
+      // `--parent` records the new session as a child of the given
+      // parent (issue #353). The literal value `self` resolves to the
+      // calling session's id via `$CONTROLLER_SESSION_ID` — the
+      // orchestrator injects that env var when spawning an agent, so
+      // the agent can spawn a child without first looking up its own
+      // id. When `self` is used and the env var is missing (e.g. the
+      // agent was spawned outside the orchestrator, or it's a brand-
+      // new session whose id isn't assigned yet), the CLI surfaces a
+      // clear error pointing at the env var so the agent can use
+      // `controller sessions list` to discover its id.
+      const parentFlag = flagValue(args, "--parent");
+      const parentId = resolveParentFlag(parentFlag);
       const trailing = args.slice(messageIdx + 1);
       // Reject any known option flag that appears after `--message`'s
       // value — otherwise the flag and its argument would be appended to
@@ -670,6 +709,7 @@ export function parseSessions(argv) {
         "--model",
         "--mode",
         "--skill",
+        "--parent",
       ];
       const offendingFlag = trailing.find((arg) =>
         RESERVED_FLAGS.includes(arg)
@@ -694,6 +734,55 @@ export function parseSessions(argv) {
           ...(model ? { model } : {}),
           ...(mode ? { mode } : {}),
           ...(skill ? { skillName: skill } : {}),
+          ...(parentId ? { parentId } : {}),
+        },
+      };
+    }
+    case "list": {
+      // `sessions list [<project>] [--worktree <id>] [--parent <id|self>]
+      //  [--provider <id>] [--json] [--limit <n>]` (issue #353).
+      //
+      // Mirrors the positional shape of `worktrees list` / `sessions
+      // start` / `schedules list`: <project> is the optional first
+      // positional and falls back to the project that owns cwd.
+      assertKnownFlags(
+        args,
+        [
+          "--worktree",
+          "--parent",
+          "--provider",
+          "--json",
+          "--limit",
+        ],
+        "sessions list"
+      );
+      const worktreeId = flagValue(args, "--worktree");
+      // `--parent` reuses the same `self` resolution as `start` — the
+      // env var is set by the orchestrator when it spawns the calling
+      // agent, so an agent running `sessions list --parent self` can
+      // see its own children without first looking up its id.
+      const parentFlag = flagValue(args, "--parent");
+      const parentId = resolveParentFlag(parentFlag);
+      const provider = flagValue(args, "--provider");
+      const json = args.includes("--json");
+      const limitRaw = flagValue(args, "--limit");
+      let limit;
+      if (limitRaw != null) {
+        const parsed = Number(limitRaw);
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          fail("sessions list: --limit must be a positive integer");
+        }
+        limit = parsed;
+      }
+      return {
+        project,
+        action: "list",
+        body: {
+          ...(worktreeId ? { worktreeId } : {}),
+          ...(parentId ? { parentId } : {}),
+          ...(provider ? { provider } : {}),
+          ...(json ? { json: true } : {}),
+          ...(limit != null ? { limit } : {}),
         },
       };
     }
@@ -943,7 +1032,144 @@ export async function runSessions(argv, serverUrl) {
     process.stdout.write(`\n`);
     return;
   }
+  if (parsed.action === "list") {
+    await runSessionsList(parsed.body, serverUrl, projectId);
+    return;
+  }
   fail(`Unknown sessions action: ${parsed.action}`);
+}
+
+/*
+ * `sessions list` dispatcher (issue #353). Loads the session summaries
+ * from the server, applies the client-side filters, and prints either a
+ * human-readable table or NDJSON.
+ *
+ * The server already exposes `GET /api/projects/:id/sessions?worktreeId=…`
+ * which returns a summaries array (no transcript, just the metadata the
+ * sidebar needs). For `--worktree` we hit that endpoint directly. For
+ * `--parent`, however, a parent on the main worktree and a child on a
+ * feature worktree live in different per-worktree stores — the server
+ * route is worktree-scoped, so the CLI walks every worktree of the
+ * project and filters client-side. The same fix as #351's
+ * `listChildSessions`, expressed at the CLI layer where every project ×
+ * worktree pair is already addressable.
+ */
+async function runSessionsList(filters, serverUrl, projectId) {
+  const { worktreeId, parentId, provider, json, limit } = filters;
+  const effectiveLimit = typeof limit === "number" && limit > 0 ? limit : 100;
+  const summaries = await fetchSessionSummaries(
+    serverUrl,
+    projectId,
+    worktreeId
+  );
+  let rows = Array.isArray(summaries) ? summaries.slice() : [];
+  // Apply the client-side filters. Each filter is a no-op when its
+  // argument is absent; combining them is the whole point of doing
+  // this in the CLI rather than the server.
+  if (parentId) {
+    rows = rows.filter(
+      (row) => row && typeof row === "object" && row.parentId === parentId
+    );
+  }
+  if (provider) {
+    rows = rows.filter(
+      (row) => row && typeof row === "object" && row.provider === provider
+    );
+  }
+  // Sort by `lastActiveAt` descending to match the server's natural
+  // order; the per-worktree walk may have interleaved rows from
+  // different worktrees otherwise.
+  rows.sort(
+    (a, b) =>
+      new Date(b?.lastActiveAt ?? 0).getTime() -
+      new Date(a?.lastActiveAt ?? 0).getTime()
+  );
+  if (rows.length > effectiveLimit) {
+    rows = rows.slice(0, effectiveLimit);
+  }
+  if (rows.length === 0) {
+    process.stdout.write("No sessions match.\n");
+    return;
+  }
+  if (json) {
+    for (const row of rows) {
+      process.stdout.write(`${JSON.stringify(row)}\n`);
+    }
+    return;
+  }
+  for (const row of rows) {
+    process.stdout.write(`${formatSessionRow(row)}\n`);
+  }
+}
+
+/**
+ * Fetch session summaries from the server. When `worktreeId` is given
+ * we hit the per-worktree endpoint directly. When the caller needs to
+ * walk every worktree (e.g. `--parent <id>`), the server route is
+ * worktree-scoped so we enumerate the project's worktrees first and
+ * merge the results.
+ */
+async function fetchSessionSummaries(serverUrl, projectId, worktreeId) {
+  // `--worktree` short-circuits the per-worktree walk: the user has
+  // already named the worktree, so hit the existing per-worktree
+  // endpoint and apply the other filters on top.
+  if (worktreeId) {
+    const { response, result } = await getJson(
+      serverUrl,
+      `/api/projects/${projectId}/sessions?worktreeId=${encodeURIComponent(worktreeId)}`
+    );
+    if (response.status >= 400) {
+      fail(
+        result?.error ?? `Failed to list sessions (HTTP ${response.status})`
+      );
+    }
+    return Array.isArray(result) ? result : [];
+  }
+  // No `--worktree`: walk every worktree so `--parent` (which has no
+  // worktree-scoped server route yet) can find children that live on
+  // a different worktree than the parent. Main worktree first because
+  // most projects have one and the per-worktree filter above would
+  // have caught the common case.
+  const { response, result } = await getJson(
+    serverUrl,
+    `/api/projects/${projectId}/worktrees`
+  );
+  if (response.status >= 400) {
+    fail(
+      result?.error ?? `Failed to list worktrees (HTTP ${response.status})`
+    );
+  }
+  const worktrees = Array.isArray(result) ? result : [];
+  if (worktrees.length === 0) {
+    return [];
+  }
+  const all = [];
+  for (const worktree of worktrees) {
+    if (!worktree || typeof worktree.id !== "string") continue;
+    const { response: listResponse, result: listResult } = await getJson(
+      serverUrl,
+      `/api/projects/${projectId}/sessions?worktreeId=${encodeURIComponent(worktree.id)}`
+    );
+    if (listResponse.status >= 400) continue;
+    if (Array.isArray(listResult)) {
+      all.push(...listResult);
+    }
+  }
+  return all;
+}
+
+/** Human-readable row for a session summary (issue #353). */
+function formatSessionRow(row) {
+  const provider = row.provider ? `[${row.provider}]` : "[?]";
+  const title =
+    typeof row.title === "string" && row.title.trim()
+      ? row.title
+      : "(untitled)";
+  const lastActive =
+    typeof row.lastActiveAt === "string" ? row.lastActiveAt : "";
+  const worktree = row.worktreeId ? `  wt=${row.worktreeId}` : "";
+  const parent = row.parentId ? `  parent=${row.parentId}` : "";
+  return `${row.id}  ${provider}  ${title}${worktree}${parent}  lastActive=${lastActive}`;
 }
 
 export async function runGoal(argv, serverUrl) {
@@ -1908,6 +2134,34 @@ function parsePairs(rest, flag) {
 function flagValue(rest, flag) {
   const idx = rest.indexOf(flag);
   return idx >= 0 ? rest[idx + 1] : undefined;
+}
+
+// Resolve the `--parent <value>` flag (issue #353). `value` is either
+// `undefined` (no flag), a literal session id, or the special token
+// `self`. `self` resolves to the calling session's id via the
+// `$CONTROLLER_SESSION_ID` env var the orchestrator injects at agent
+// spawn time. When `self` is used and the env var is not set, the CLI
+// surfaces a clear error pointing at the env var — the natural
+// fallback is to use `controller sessions list` to find the calling
+// session's id. The function returns `undefined` when the flag is
+// absent so callers can simply spread the result into an object.
+function resolveParentFlag(value) {
+  if (value == null) return undefined;
+  if (value === "self") {
+    const selfId = process.env.CONTROLLER_SESSION_ID;
+    if (!selfId) {
+      fail(
+        "sessions: --parent self requires the CONTROLLER_SESSION_ID env var. " +
+          "The orchestrator injects it when spawning an agent, so the env var " +
+          "is missing here because this command is running outside the orchestrator's " +
+          "agent process, or because the calling session hasn't been assigned an id yet. " +
+          "Use `controller sessions list` to discover the calling session's id, then " +
+          "pass it explicitly to --parent."
+      );
+    }
+    return selfId;
+  }
+  return value;
 }
 
 // Fails with a clear, actionable error if `args` contains a `--…` token that

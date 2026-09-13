@@ -26,6 +26,15 @@ export interface SessionState {
   createdAt: string;
   lastActiveAt: string;
   status: string;
+  // Optional parent session id (issue #353). Set when the session is
+  // spawned from `controller sessions start --parent <id>` (or `--parent
+  // self`, which the CLI resolves to the calling session via the
+  // `CONTROLLER_SESSION_ID` env var the orchestrator injects). Read by
+  // the `controller sessions list --parent <id>` filter and by the
+  // coordinator pattern from #351. Set once at session creation; never
+  // mutated afterwards. Absent when the session was started without a
+  // parent (the common case for user-initiated sessions).
+  parentId?: string;
   // The three focus-queue fields below are populated by `getSession`
   // and `getSessions` by merging in the Controller-owned sidecar under
   // `<controllerHome>/focus/<sessionId>.json` (e.g.
