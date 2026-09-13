@@ -174,7 +174,13 @@ export class RgMemoryBackend implements MemoryBackend {
       };
       let child;
       try {
-        child = spawn("rg", ["-l", "--no-heading", "--", query, notesDir]);
+        // Use `-F` (fixed strings) and `-i` (ignore case) so the rg
+        // path matches the Node fallback's documented substring
+        // semantics. Without `-F`, a query like `version.1` would
+        // match nearly every note; without `-i`, `DEPLOY` would miss
+        // lowercase content on rg while the fallback would find it
+        // (PR review, P2).
+        child = spawn("rg", ["-l", "-F", "-i", "--no-heading", "--", query, notesDir]);
       } catch {
         settle(null);
         return;

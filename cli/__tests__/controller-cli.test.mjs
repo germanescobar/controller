@@ -442,7 +442,14 @@ test("runMemory list hits GET /api/memory with the scope/projectId params", asyn
   const originalFetch = globalThis.fetch;
   let captured = null;
   globalThis.fetch = async (url, init) => {
-    captured = { url: String(url), init };
+    const u = String(url);
+    // Project-scope calls resolve the projectId via cwd before hitting
+    // /api/memory (PR review, P2). Stub the project list so the
+    // resolver returns the same id the test passed in.
+    if (u.includes("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "p-1", name: "p-1" }] };
+    }
+    captured = { url: u, init };
     return {
       status: 200,
       json: async () => ({ entries: [{ slug: "x", scope: "global", preview: "p", mtimeMs: 1 }] }),
@@ -491,6 +498,105 @@ test("runMemory search GETs the search endpoint with the query", async () => {
     assert.match(captured.url, /\/api\/memory\/global\/search\?/);
     assert.match(captured.url, /query=deploy/);
     assert.match(captured.url, /limit=5/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("parseMemory accepts 'project' as a positional <scope> for read/write/pin/pinned (PR review, P1)", async () => {
+  const cli = await loadCli();
+  // The original code only allowed 'global' positionally; valid
+  // project-scope calls (the documented form per the issue spec)
+  // exited with "Unknown memory command" before making a request.
+  const read = cli.parseMemory(["read", "project", "conventions", "--project", "p-1"]);
+  assert.equal(read.action, "read");
+  assert.equal(read.scope, "project");
+  assert.equal(read.slug, "conventions");
+  assert.equal(read.projectId, "p-1");
+
+  const write = cli.parseMemory(["write", "project", "conventions", "--content", "x", "--project", "p-1"]);
+  assert.equal(write.scope, "project");
+  assert.equal(write.body.contentFlag, "x");
+
+  const pinned = cli.parseMemory(["pinned", "project", "--project", "p-1"]);
+  assert.equal(pinned.action, "pinned");
+  assert.equal(pinned.scope, "project");
+
+  const pin = cli.parseMemory(["pin", "project", "--content", "x", "--project", "p-1"]);
+  assert.equal(pin.action, "pin");
+  assert.equal(pin.scope, "project");
+  assert.equal(pin.body.contentFlag, "x");
+});
+
+test("parseMemory accepts --content=- as a stdin sentinel (PR review, P2)", async () => {
+  const cli = await loadCli();
+  // `expandEqualsForm` should split `--content=-` into two tokens so
+  // `flagValue` sees the literal `-` as the value, which `readMemoryContent`
+  // then resolves from stdin (matches the `--scheme-secret=-` idiom).
+  const write = cli.parseMemory([
+    "write", "global", "long-note", "--content=-", "--project", "p-1",
+  ]);
+  assert.equal(write.body.contentFlag, "-");
+  // `--content -` (space form) should also resolve to the stdin sentinel
+  // so the documented form from the skill body works in both shapes.
+  const writeSpace = cli.parseMemory([
+    "write", "global", "long-note", "--content", "-", "--project", "p-1",
+  ]);
+  assert.equal(writeSpace.body.contentFlag, "-");
+});
+
+test("parseMemory accepts --content=- as a stdin sentinel (PR review, P2)", async () => {
+  const cli = await loadCli();
+  // `expandEqualsForm` should split `--content=-` into two tokens so
+  // `flagValue` sees the literal `-` as the value, which `readMemoryContent`
+  // then resolves from stdin (matches the `--scheme-secret=-` idiom).
+  const write = cli.parseMemory([
+    "write", "global", "long-note", "--content=-", "--project", "p-1",
+  ]);
+  assert.equal(write.body.contentFlag, "-");
+  // `--content -` (space form) should also resolve to the stdin sentinel
+  // so the documented form from the skill body works in both shapes.
+  const writeSpace = cli.parseMemory([
+    "write", "global", "long-note", "--content", "-", "--project", "p-1",
+  ]);
+  assert.equal(writeSpace.body.contentFlag, "-");
+});
+
+// (The end-to-end stdin read happens inside `readMemoryContent`, which
+// reads from `process.stdin` directly. The Node test runner doesn't let
+// us replace `process.stdin` with a stub Readable, so the unit-level
+// coverage here is the parser-shape test above; the run-time branch
+// is exercised by manual use of the `--content=-` form.)
+
+test("runMemory resolves omitted --project from cwd for project-scope calls (PR review, P2)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const fetchedUrls = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    fetchedUrls.push(u);
+    // First the cwd-based project lookup, then the project-scoped list.
+    if (u.endsWith("/api/projects") || u.includes("/api/projects?cwd=")) {
+      return { status: 200, json: async () => ({ project: { id: "cwd-1", name: "cwd" } }) };
+    }
+    return {
+      status: 200,
+      json: async () => ({ entries: [{ slug: "x", scope: "project", projectId: "cwd-1", preview: "p", mtimeMs: 1 }] }),
+    };
+  };
+  try {
+    // The user runs `controller memory list --scope project` with no
+    // --project; the CLI should resolve the project from cwd and
+    // send the request with that projectId.
+    await cli.runMemory(["list", "--scope", "project"], "http://controller.test");
+    assert.ok(
+      fetchedUrls.some((u) => u.includes("/api/projects?cwd=")),
+      "expected a cwd-based project lookup"
+    );
+    assert.ok(
+      fetchedUrls.some((u) => u.includes("projectId=cwd-1")),
+      "expected the resolved projectId to be sent on the /api/memory call"
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

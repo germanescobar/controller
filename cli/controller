@@ -1418,7 +1418,9 @@ export function parseMemory(argv) {
       };
     }
     case "read": {
-      const scope = parseScope(rest[0], false);
+      // `<scope>` is positional; `project` is the second valid value
+      // alongside `global` (PR review, P1).
+      const scope = parseScope(rest[0], true);
       if (!scope) fail("memory read requires <scope> as the first positional");
       const slug = rest[1];
       if (!slug) fail("memory read requires a <slug>");
@@ -1468,19 +1470,23 @@ export function parseMemory(argv) {
       };
     }
     case "write": {
-      const scope = parseScope(rest[0], false);
+      const scope = parseScope(rest[0], true);
       if (!scope) fail("memory write requires <scope> as the first positional");
       const slug = rest[1];
       if (!slug) fail("memory write requires a <slug>");
       const writeArgs = rest.slice(2);
+      // `--content=-` (one token) means "read the body from stdin",
+      // matching the `--scheme-secret=-` idiom from `integrations
+      // create`. Split the `=` form so `flagValue` can see the value.
+      const expanded = expandEqualsForm(writeArgs, MEMORY_VALUE_FLAGS);
       assertKnownFlags(
-        writeArgs,
+        expanded,
         ["--content", "--content-file", "--project"],
         "memory write"
       );
-      const contentFlag = flagValue(writeArgs, "--content");
-      const contentFile = flagValue(writeArgs, "--content-file");
-      const projectId = flagValue(writeArgs, "--project");
+      const contentFlag = flagValue(expanded, "--content");
+      const contentFile = flagValue(expanded, "--content-file");
+      const projectId = flagValue(expanded, "--project");
       if (contentFlag == null && !contentFile) {
         fail("memory write requires --content <text> or --content-file <path>");
       }
@@ -1496,7 +1502,7 @@ export function parseMemory(argv) {
       };
     }
     case "pinned": {
-      const scope = parseScope(rest[0], false);
+      const scope = parseScope(rest[0], true);
       if (!scope) fail("memory pinned requires <scope> as the first positional");
       const projectId = flagValue(rest.slice(1), "--project");
       return {
@@ -1506,13 +1512,15 @@ export function parseMemory(argv) {
       };
     }
     case "pin": {
-      const scope = parseScope(rest[0], false);
+      const scope = parseScope(rest[0], true);
       if (!scope) fail("memory pin requires <scope> as the first positional");
       const pinArgs = rest.slice(1);
-      assertKnownFlags(pinArgs, ["--content", "--content-file", "--project"], "memory pin");
-      const contentFlag = flagValue(pinArgs, "--content");
-      const contentFile = flagValue(pinArgs, "--content-file");
-      const projectId = flagValue(pinArgs, "--project");
+      // Same `--content=-` stdin idiom as `write` (PR review, P2).
+      const expanded = expandEqualsForm(pinArgs, MEMORY_VALUE_FLAGS);
+      assertKnownFlags(expanded, ["--content", "--content-file", "--project"], "memory pin");
+      const contentFlag = flagValue(expanded, "--content");
+      const contentFile = flagValue(expanded, "--content-file");
+      const projectId = flagValue(expanded, "--project");
       if (contentFlag == null && !contentFile) {
         fail("memory pin requires --content <text> or --content-file <path>");
       }
@@ -1531,7 +1539,25 @@ export function parseMemory(argv) {
   }
 }
 
+// Flags that accept a value in `--flag=value` shorthand. The memory
+// write/pin forms use the same `=`-form as the integrations create
+// surface (e.g. `--scheme-secret=-`); `expandEqualsForm` splits those
+// into two tokens so `flagValue` can see the value.
+const MEMORY_VALUE_FLAGS = new Set(["--content", "--content-file", "--project"]);
+
 async function readMemoryContent({ contentFlag, contentFile }) {
+  // The literal `-` (set when the user wrote `--content=-`) means
+  // "read the body from stdin" — same idiom as
+  // `--scheme-secret=-` on the integrations surface. We strip a
+  // single trailing newline so the common `echo "$body" | controller
+  // ...` pattern doesn't pick up an extra `\n`.
+  if (contentFlag === "-") {
+    const chunks = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    return Buffer.concat(chunks).toString("utf-8").replace(/\r?\n$/, "");
+  }
   if (contentFlag != null) return contentFlag;
   if (contentFile) {
     try {
@@ -1553,10 +1579,23 @@ function formatMemoryEntry(entry) {
 export async function runMemory(argv, serverUrl) {
   const parsed = parseMemory(argv);
 
+  // Resolve the project id lazily, only for project-scope calls
+  // (PR review, P2). The worktrees surface resolves unconditionally
+  // because it always needs a project; memory doesn't, so we defer
+  // until we know we need one. `resolveProjectId` is the same cwd
+  // → project resolver `runWorktrees` uses, so an agent inside a
+  // worktree can omit `--project` and the CLI picks the project
+  // that owns cwd. The fallback fails the process with a clear
+  // error if cwd is not part of any onboarded project, matching
+  // the worktrees UX.
+  const projectId = parsed.scope === "project"
+    ? await resolveProjectId(serverUrl, parsed.projectId ?? undefined)
+    : undefined;
+
   if (parsed.action === "list") {
     const query = buildMemoryQuery({
       scope: parsed.scope,
-      projectId: parsed.projectId ?? undefined,
+      projectId,
     });
     const path = `/api/memory?${query}${parsed.includePinned ? `${query ? "&" : ""}includePinned=1` : ""}`;
     const { response, result } = await getJson(serverUrl, path);
@@ -1580,7 +1619,7 @@ export async function runMemory(argv, serverUrl) {
   if (parsed.action === "read") {
     const query = buildMemoryQuery({
       scope: parsed.scope,
-      projectId: parsed.projectId ?? undefined,
+      projectId,
     });
     const path = `/api/memory/${parsed.scope}/${encodeURIComponent(parsed.slug)}?${query}`;
     const { response, result } = await getJson(serverUrl, path);
@@ -1594,7 +1633,7 @@ export async function runMemory(argv, serverUrl) {
   if (parsed.action === "search") {
     const query = buildMemoryQuery({
       scope: parsed.scope,
-      projectId: parsed.projectId ?? undefined,
+      projectId,
       query: parsed.query,
       limit: parsed.limit,
     });
@@ -1616,7 +1655,6 @@ export async function runMemory(argv, serverUrl) {
 
   if (parsed.action === "write") {
     const content = await readMemoryContent(parsed.body);
-    const projectId = parsed.body.projectId ?? parsed.projectId;
     const path = `/api/memory/${parsed.scope}/${encodeURIComponent(parsed.slug)}`;
     const { response, result } = await putJson(serverUrl, path, {
       content,
@@ -1632,7 +1670,7 @@ export async function runMemory(argv, serverUrl) {
   if (parsed.action === "pinned") {
     const query = buildMemoryQuery({
       scope: parsed.scope,
-      projectId: parsed.projectId ?? undefined,
+      projectId,
     });
     const path = `/api/memory/${parsed.scope}/pinned?${query}`;
     const { response, result } = await getJson(serverUrl, path);
@@ -1645,7 +1683,6 @@ export async function runMemory(argv, serverUrl) {
 
   if (parsed.action === "pin") {
     const content = await readMemoryContent(parsed.body);
-    const projectId = parsed.body.projectId ?? parsed.projectId;
     const path = `/api/memory/${parsed.scope}/pinned`;
     const { response, result } = await putJson(serverUrl, path, {
       content,

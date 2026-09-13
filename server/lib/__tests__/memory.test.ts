@@ -379,6 +379,31 @@ test("RgMemoryBackend honours the limit", async () => {
   });
 });
 
+test("RgMemoryBackend matches case-insensitively and treats queries as literal strings (PR review, P2)", async () => {
+  // Without `-i`, an uppercase query against lowercase content misses on
+  // rg. Without `-F`, a query like `version.1` is interpreted as a regex
+  // and matches almost everything. The Node fallback already does the
+  // right thing, so this test only proves the rg path now matches the
+  // fallback's documented substring semantics.
+  await withTempHome(async () => {
+    await seedGlobalNote("deploy-note", "we use Jest, not Vitest");
+    await seedGlobalNote("unrelated", "we deploy on Tuesdays");
+    await seedGlobalNote("version-note", "shipped v1.2.3 today");
+    await seedGlobalNote("would-be-false-positive", "versionX1X2X3 ships Tuesday");
+    const backend = new RgMemoryBackend();
+
+    // Case-insensitive: uppercase query against lowercase content.
+    const upper = await backend.search({ scope: "global", query: "JEST" });
+    assert.equal(upper.length >= 1, true, "uppercase query must match lowercase body");
+    assert.equal(upper.some((h) => h.slug === "deploy-note"), true);
+
+    // Literal: `version.1` should NOT match `versionX1X2X3` (the `.`
+    // is a regex metacharacter that would match `X` without `-F`).
+    const literal = await backend.search({ scope: "global", query: "version.1" });
+    assert.equal(literal.length, 0, "the `.` must be treated as a literal, not a regex metacharacter");
+  });
+});
+
 test("NullMemoryBackend returns no results regardless of input", async () => {
   const backend = new NullMemoryBackend();
   const hits = await backend.search({ scope: "global", query: "anything" });
