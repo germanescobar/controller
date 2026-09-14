@@ -3233,6 +3233,65 @@ test("runSessions list prints 'No sessions match.' for an empty filter result (i
   assert.equal(stdoutChunks.join(""), "No sessions match.\n");
 });
 
+test("runSessions list --json emits nothing on an empty filter result (PR #354 review)", async () => {
+  // The PR #354 review pointed out that the human-only `No sessions
+  // match.` copy broke NDJSON pipelines on a legitimate zero-result
+  // query — `jq` could not parse a string literal where it expected a
+  // JSON object. `--json` mode must emit zero records (no stdout
+  // writes at all) so consumers can iterate / count rows without
+  // special-casing the empty case. Exit code is still 0 so a
+  // zero-result query is not an error.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const originalExit = process.exit;
+  let exitCode = null;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-1/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-uuid-1/sessions?worktreeId=")) {
+      return { status: 200, json: async () => [] };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  process.exit = (code) => {
+    exitCode = code;
+  };
+  try {
+    await cli.runSessions(
+      ["list", "controller", "--parent", "no-children-here", "--json"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+    process.exit = originalExit;
+  }
+  // Empty output, no human-only copy mixed in. NDJSON consumers
+  // (jq, wc -l, xargs) treat this as "zero rows" naturally.
+  assert.equal(
+    stdoutChunks.join(""),
+    "",
+    "an empty --json filter result must produce no stdout writes"
+  );
+  assert.notEqual(exitCode, 1, "an empty result is not an error");
+});
+
 test("runSessions list enforces --limit by truncating the result set (issue #353)", async () => {
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;

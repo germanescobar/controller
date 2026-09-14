@@ -3288,6 +3288,14 @@ sessionsRouter.get("/:projectId/sessions", async (req, res) => {
   // The sidebar only needs session metadata to render its tree and focus
   // queue, so return summaries without the (potentially multi-megabyte)
   // message history. The full session is fetched on demand when opened.
+  //
+  // `Cache-Control: no-store` is required so the sidebar re-fetches after
+  // a new session starts in this worktree. Without it, `res.json()`'s
+  // auto-ETag makes the browser (or Electron) reply `304 Not Modified` on
+  // soft refreshes and the sidebar keeps rendering the pre-spawn list,
+  // which is exactly the bug that hid this session under `issue-353`
+  // while the focus queue saw the fresh data.
+  res.set("Cache-Control", "no-store");
   const sessions = await getSessionSummaries(worktree.path);
   res.json(sessions);
 });

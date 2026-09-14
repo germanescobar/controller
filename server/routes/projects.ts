@@ -20,6 +20,12 @@ projectsRouter.get("/", async (req, res) => {
     // preserved when the query param is absent, so existing callers —
     // including the CLI's name-lookup in `resolveProjectId` — keep
     // working unchanged.
+    //
+    // `Cache-Control: no-store` keeps the sidebar from rendering a stale
+    // project list when a new worktree is created or removed (the
+    // auto-ETag `res.json()` sets would otherwise 304 the response
+    // and the user would see the old list until a hard refresh).
+    res.set("Cache-Control", "no-store");
     const cwd = typeof req.query.cwd === "string" ? req.query.cwd.trim() : "";
     if (cwd) {
       const project = await findProjectByPath(cwd);

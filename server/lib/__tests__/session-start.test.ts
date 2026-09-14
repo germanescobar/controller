@@ -773,3 +773,33 @@ exit 0
     }
   );
 });
+
+test("GET /api/projects/:projectId/sessions sets Cache-Control: no-store so the sidebar re-fetches after a new session starts", async () => {
+  // Regression test: without `Cache-Control: no-store`, `res.json()`'s
+  // auto-ETag makes the browser (or Electron) reply `304 Not Modified`
+  // on soft refreshes, and the sidebar keeps rendering the pre-spawn
+  // session list. The result: a freshly-started session is invisible
+  // under the worktree in the sidebar even though the focus queue
+  // (which has its own refetch path) sees it. The endpoint must opt
+  // out of caching so the sidebar always re-reads the worktree's
+  // current session list.
+  const sessionId = "sess-issue-cache-header";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId);
+    },
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions?worktreeId=${worktreeId}`);
+      assert.equal(res.status, 200);
+      // `no-store` is the strictest of the no-cache directives — it
+      // tells the browser to neither cache the response nor store it
+      // anywhere. That's the right call here because the session list
+      // changes every time an agent run starts in the worktree.
+      assert.equal(
+        res.headers.get("cache-control"),
+        "no-store",
+        `Cache-Control: no-store is required so the sidebar re-fetches after a new session starts, got: ${res.headers.get("cache-control")}`
+      );
+    }
+  );
+});

@@ -1088,7 +1088,16 @@ async function runSessionsList(filters, serverUrl, projectId) {
     rows = rows.slice(0, effectiveLimit);
   }
   if (rows.length === 0) {
-    process.stdout.write("No sessions match.\n");
+    // Empty filter result: in `--json` mode emit nothing so the output
+    // stays machine-readable for pipelines (a literal `No sessions
+    // match.` text would break `jq`, `wc -l`, etc. on a legitimate
+    // zero-result query — issue #353 review). The exit code is still
+    // 0 so consumers can treat the absence of rows as "no matches"
+    // rather than as an error. In human-readable mode the empty-state
+    // copy is still printed.
+    if (!json) {
+      process.stdout.write("No sessions match.\n");
+    }
     return;
   }
   if (json) {
