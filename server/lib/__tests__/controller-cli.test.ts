@@ -92,6 +92,29 @@ test("controllerAgentEnv handles an empty inherited PATH", () => {
   }
 });
 
+test("controllerAgentEnv stamps CONTROLLER_SESSION_ID when a sessionId is supplied (issue #353)", () => {
+  // The orchestrator injects the calling session's id so the agent's
+  // `controller sessions start --parent self` resolves to itself when
+  // it spawns a child. Only set when the orchestrator actually knows
+  // the id (resumed / queue-replay sessions) — brand-new sessions
+  // get their id from the agent's first `run.started` event and the
+  // CLI's `--parent self` surfaces a clear error in that case.
+  const env = controllerAgentEnv({ sessionId: "sess-abc-123" });
+  assert.equal(env.CONTROLLER_SESSION_ID, "sess-abc-123");
+});
+
+test("controllerAgentEnv omits CONTROLLER_SESSION_ID when no sessionId is supplied (issue #353)", () => {
+  // The env var must be absent (not set to an empty string) so the
+  // CLI's `--parent self` handler sees it as "not set" and surfaces
+  // its error pointing at the env var.
+  const env = controllerAgentEnv();
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(env, "CONTROLLER_SESSION_ID"),
+    false,
+    "CONTROLLER_SESSION_ID should be omitted when no sessionId is passed"
+  );
+});
+
 /**
  * The cleanup targets `os.homedir() + "/.local/bin"`. To avoid touching the
  * real user home (which, for the bug reporter, actually contains the

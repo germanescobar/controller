@@ -313,6 +313,48 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       "",
       "These primitives are not a sandbox — they're plain Controller",
       "subcommands you can invoke like any other shell command.",
+      "",
+      note,
+      "",
+      // Cross-session discoverability intro (issue #353). Closes the
+      // "how does the agent learn its own id" gap that motivates
+      // `controller sessions list --parent self`. The intro inlines
+      // worked-example commands so the agent can copy/paste them.
+      "Cross-session discoverability (issue #353):",
+      "",
+      `  - \`${cliPath} sessions list [<project>]\` enumerates every session in`,
+      `    the project. \`--worktree <id>\`, \`--parent <id|self>\`, and`,
+      `    \`--provider <id>\` filter the result; \`--json\` emits NDJSON for`,
+      `    pipelines. \`--limit <n>\` caps the result (default 100).`,
+      `  - \`--parent <id>\` walks every worktree of the project, so a parent`,
+      `    on the main worktree and a child on a feature worktree are both`,
+      `    found. The server has no combined-filter endpoint yet — the CLI`,
+      `    stitches the per-worktree results itself.`,
+      `  - \`--parent self\` resolves to your own session id via the`,
+      `    \`CONTROLLER_SESSION_ID\` env var the orchestrator injects. On a`,
+      `    brand-new session that env var isn't set yet (the id is assigned`,
+      `    on the agent's first \`run.started\` event); the CLI surfaces a`,
+      `    clear error and points you at \`sessions list\` to discover your`,
+      `    own id.`,
+      `  - \`${cliPath} sessions start --parent <id|self>\` records the new`,
+      `    session as a child of the given parent. Use \`self\` to spawn a`,
+      `    child of yourself (the coordinator pattern from #351).`,
+      "",
+      "Typical coordinator startup:",
+      "",
+      `   # 1. Learn your own session id (works on every turn; env var is`,
+      `   #    only set for resumed sessions). Each session-list line is`,
+      `   #    emitted as a separate JSON object (NDJSON), so the per-line`,
+      `   #    \`select\` runs first — \`.[]\` after \`select\` would iterate`,
+      `   #    each scalar field value of the object instead of the`,
+      `   #    collection, and jq would reject it with "Cannot index string`,
+      `   #    with string 'provider'".`,
+      `   SELF=$(${cliPath} sessions list --json | jq -r 'select(.provider == "codex") | .id' | head -1)`,
+      `   # 2. Spawn a child pinned to yourself.`,
+      `   ${cliPath} sessions start --worktree <wtId> --parent "$SELF" \\`,
+      `     --agent claude --message "Review the PR from session $SELF"`,
+      `   # 3. Later, see your children.`,
+      `   ${cliPath} sessions list --parent "$SELF" --json`,
     ].join("\n");
     assert.equal(preamble, expected);
   });
@@ -344,13 +386,14 @@ test("full preamble inlines the absolute controller CLI path so agents can copy/
     assert.match(preamble, new RegExp(`\`${escaped} integrations call <name> <tool>\``));
     // And it warns that the bare `controller` command is unreliable on PATH.
     assert.match(preamble, /not guaranteed to be on your PATH/);
-    // The worktrees + sessions CLI surfaces moved into the managed
+    // The worktrees CLI surface still lives in the managed
     // `controller-worktrees` skill; the preamble no longer inlines
-    // them. Locking the negative assertion in keeps the layering
-    // intact (skills describe surfaces the new entry; the preamble
-    // doesn't duplicate it).
+    // it. The cross-session discoverability intro (issue #353) does
+    // surface `sessions list` and `sessions start --parent` because
+    // the agent can't discover its own session id any other way —
+    // that's the gap the new intro closes.
     assert.doesNotMatch(preamble, /worktrees list/);
-    assert.doesNotMatch(preamble, /sessions start/);
+    assert.match(preamble, new RegExp(`sessions list \\[<project>\\]`));
   });
 });
 

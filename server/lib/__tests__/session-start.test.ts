@@ -479,3 +479,327 @@ exit 0
     }
   );
 });
+
+/*
+ * Issue #353: cross-session parent plumbing. The CLI passes `parentId` on
+ * the POST body (or as `--parent self`, which the CLI resolves to the
+ * calling session via $CONTROLLER_SESSION_ID before the request). The
+ * server must:
+ *   1. Persist `parentId` on the new session file when present, and
+ *      *omit* the field when absent (so the absence is meaningful on
+ *      read — coordinators filter `parentId === <self>` client-side).
+ *   2. Leave the existing `parentId` alone on the resume path. A later
+ *      `--parent` flag on a queue-replay must not re-parent a session.
+ *   3. Stamp `CONTROLLER_SESSION_ID` on the agent's env when the
+ *      session id is known at spawn time (i.e. on the resume path).
+ *      On the brand-new-session path the id isn't known yet — it's
+ *      assigned on the agent's first `run.started` event — so the
+ *      env var is omitted and the CLI's `--parent self` surfaces a
+ *      clear "env var missing" error if the agent tries to spawn
+ *      a child before learning its own id.
+ *
+ * These tests stand up the real `sessionsRouter` so the headless POST
+ * endpoint runs through the same `handleSessionStream` code path the
+ * composer's SSE call uses, and inspect the persisted session file +
+ * the agent's recorded env to lock the contract in.
+ */
+
+test("POST /api/projects/:projectId/sessions persists parentId on the session file when supplied (issue #353)", async () => {
+  const sessionId = "sess-issue-353-child";
+  const parentId = "sess-issue-353-parent";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId);
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Spawn a child session.",
+          provider: "anita",
+          parentId,
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+      assert.equal(body.sessionId, sessionId);
+
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const sessionFile = path.join(
+        projectStoreDir(projectPath),
+        "sessions",
+        `${sessionId}.json`
+      );
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      // The `parentId` round-trips through the headless POST endpoint
+      // → `handleSessionStream` → `persistSessionStart` → `saveSession`
+      // and lands on the session file as a literal field. The CLI's
+      // `sessions list --parent <id>` filter reads it back from here.
+      assert.equal(
+        session.parentId,
+        parentId,
+        `parentId should be persisted on the session file, got: ${JSON.stringify(session)}`
+      );
+    }
+  );
+});
+
+test("POST /api/projects/:projectId/sessions omits parentId on the session file when not supplied (issue #353)", async () => {
+  const sessionId = "sess-issue-353-no-parent";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId);
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Start a session with no parent.",
+          provider: "anita",
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+      assert.equal(body.sessionId, sessionId);
+
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const sessionFile = path.join(
+        projectStoreDir(projectPath),
+        "sessions",
+        `${sessionId}.json`
+      );
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      // The field must be *absent*, not set to `null` or `""`. The
+      // CLI's filter is `row.parentId === parentId` — a stored
+      // `parentId: ""` would never match a real id, and a stored
+      // `parentId: null` would be a surprise for downstream readers.
+      assert.ok(
+        !Object.prototype.hasOwnProperty.call(session, "parentId"),
+        `parentId should be absent from the session file when not supplied, got: ${JSON.stringify(session)}`
+      );
+    }
+  );
+});
+
+test("POST /api/projects/:projectId/sessions preserves an existing parentId on resume (issue #353)", async () => {
+  // A queue-replay POST that includes BOTH `resumeSessionId` (the
+  // session being replayed) and a different `parentId` (e.g. the
+  // agent was re-spawned from a different coordinator) must not
+  // re-parent the existing session. The new-session-only path in
+  // `persistSessionStart` gates `parentId` writes on `!existing`,
+  // so a later `--parent` flag is a no-op for resumed sessions.
+  const sessionId = "sess-issue-353-resume";
+  const originalParentId = "sess-issue-353-original-parent";
+  const attemptedParentId = "sess-issue-353-attempted-reparent";
+  await withSessionStartEnv(
+    async ({ binDir, projectPath }) => {
+      await installFakeAgent(binDir, sessionId);
+      // Pre-seed the session file as if it had been created by a
+      // previous `start` call with `parentId: originalParentId`.
+      // `persistSessionStart` will read this with `getSession` and
+      // see `existing`, which gates the `parentId` write.
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const storeDir = projectStoreDir(projectPath);
+      const sessionsDir = path.join(storeDir, "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      const sessionFile = path.join(sessionsDir, `${sessionId}.json`);
+      await fs.writeFile(
+        sessionFile,
+        JSON.stringify({
+          id: sessionId,
+          title: "Pre-existing session",
+          workingDirectory: projectPath,
+          worktreeId: "wt-main", // overwritten on resume
+          model: "",
+          provider: "anita",
+          mode: "default",
+          messages: [],
+          parentId: originalParentId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          lastActiveAt: "2026-01-01T00:00:00.000Z",
+          status: "active",
+        })
+      );
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Resume an already-parented session.",
+          provider: "anita",
+          resumeSessionId: sessionId,
+          // Different value — must NOT overwrite the existing parentId.
+          parentId: attemptedParentId,
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+      assert.equal(body.sessionId, sessionId);
+
+      // Re-read the same session file and assert the original parentId
+      // is intact.
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const sessionFile = path.join(
+        projectStoreDir(projectPath),
+        "sessions",
+        `${sessionId}.json`
+      );
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      assert.equal(
+        session.parentId,
+        originalParentId,
+        `existing parentId must be preserved on resume, got: ${JSON.stringify(session)}`
+      );
+    }
+  );
+});
+
+test("POST /api/projects/:projectId/sessions does NOT inject CONTROLLER_SESSION_ID on the brand-new-session path (issue #353)", async () => {
+  // Brand-new sessions get their id from the agent's first `run.started`
+  // event, so the orchestrator doesn't know the id at spawn time. The
+  // env var is omitted so a `--parent self` invocation in the child
+  // surfaces a clear "env var missing" error and the agent uses
+  // `controller sessions list` to learn its own id instead. Stamping
+  // an empty string would make the CLI think the env was set to an
+  // invalid id and surface a less actionable error.
+  const sessionId = "sess-issue-353-no-env-var";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir }) => {
+      // Shim dumps the entire env at spawn time. The orchestrator
+      // passes `env` to `provider.spawn`; `provider.spawn` hands it
+      // to `child_process.spawn`; the bash script inherits it.
+      const script = `#!/usr/bin/env bash
+set -e
+# Record the orchestrator-injected env (issue #353). We dump the
+# whole env so the test can assert presence/absence of specific
+# keys without re-tokenizing a flattened string.
+env > "${homeDir}/spawned-env.txt"
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Brand-new session, no resumeSessionId.",
+          provider: "anita",
+          // Include parentId to prove the brand-new env-var rule
+          // applies regardless of whether a parent was supplied.
+          parentId: "sess-issue-353-parent",
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+
+      const envText = await fs.readFile(path.join(homeDir, "spawned-env.txt"), "utf-8");
+      // Parse `env`-style `KEY=VALUE` lines. The dump uses no
+      // quoting because bash's `env` builtin renders each var on
+      // its own line; values with newlines are rare here and we
+      // only care about presence/absence of `CONTROLLER_SESSION_ID`.
+      const envLines = envText.split("\n");
+      const sessionIdLine = envLines.find((line) =>
+        line.startsWith("CONTROLLER_SESSION_ID=")
+      );
+      assert.equal(
+        sessionIdLine,
+        undefined,
+        `CONTROLLER_SESSION_ID must be absent for brand-new sessions, got env line: ${sessionIdLine}\nfull env:\n${envText}`
+      );
+    }
+  );
+});
+
+test("POST /api/projects/:projectId/sessions injects CONTROLLER_SESSION_ID on the resume path (issue #353)", async () => {
+  // The resume path already knows the session id (it came from the
+  // persisted `resumeSessionId`). The orchestrator stamps it on the
+  // agent's env so a `--parent self` invocation in the resumed
+  // agent resolves to its own id without first looking itself up
+  // in `controller sessions list`. Without this, the coordinator
+  // pattern from #351 can't reliably spawn children of resumed
+  // sessions.
+  const sessionId = "sess-issue-353-resume-with-env";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir }) => {
+      const script = `#!/usr/bin/env bash
+set -e
+env > "${homeDir}/spawned-env.txt"
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Resume an existing session.",
+          provider: "anita",
+          resumeSessionId: sessionId,
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+
+      const envText = await fs.readFile(path.join(homeDir, "spawned-env.txt"), "utf-8");
+      const envLines = envText.split("\n");
+      const sessionIdLine = envLines.find((line) =>
+        line.startsWith("CONTROLLER_SESSION_ID=")
+      );
+      assert.ok(
+        sessionIdLine,
+        `CONTROLLER_SESSION_ID must be present on the resume path, got env:\n${envText}`
+      );
+      assert.equal(
+        sessionIdLine,
+        `CONTROLLER_SESSION_ID=${sessionId}`,
+        `CONTROLLER_SESSION_ID should equal the resumeSessionId, got: ${sessionIdLine}`
+      );
+    }
+  );
+});
+
+test("GET /api/projects/:projectId/sessions sets Cache-Control: no-store so the sidebar re-fetches after a new session starts", async () => {
+  // Regression test: without `Cache-Control: no-store`, `res.json()`'s
+  // auto-ETag makes the browser (or Electron) reply `304 Not Modified`
+  // on soft refreshes, and the sidebar keeps rendering the pre-spawn
+  // session list. The result: a freshly-started session is invisible
+  // under the worktree in the sidebar even though the focus queue
+  // (which has its own refetch path) sees it. The endpoint must opt
+  // out of caching so the sidebar always re-reads the worktree's
+  // current session list.
+  const sessionId = "sess-issue-cache-header";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId);
+    },
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions?worktreeId=${worktreeId}`);
+      assert.equal(res.status, 200);
+      // `no-store` is the strictest of the no-cache directives — it
+      // tells the browser to neither cache the response nor store it
+      // anywhere. That's the right call here because the session list
+      // changes every time an agent run starts in the worktree.
+      assert.equal(
+        res.headers.get("cache-control"),
+        "no-store",
+        `Cache-Control: no-store is required so the sidebar re-fetches after a new session starts, got: ${res.headers.get("cache-control")}`
+      );
+    }
+  );
+});

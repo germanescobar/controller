@@ -240,6 +240,11 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
     res.status(404).json({ error: "Project not found" });
     return;
   }
+  // `Cache-Control: no-store` keeps the sidebar from rendering a stale
+  // worktree list when a new worktree is created or removed (matches
+  // the same fix on the per-worktree sessions endpoint at
+  // `server/routes/sessions.ts`).
+  res.set("Cache-Control", "no-store");
   const worktrees = await getProjectWorktrees(project.id);
   res.json(worktrees);
 });

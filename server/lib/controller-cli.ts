@@ -179,7 +179,7 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
 
 /** Best-effort environment for agents that inherit it (Claude, Anita, Codex).
  *
- *  Layers three things on top of the inherited env:
+ *  Layers four things on top of the inherited env:
  *  - `CONTROLLER_SERVER_URL` so the CLI can skip the runtime-file lookup.
  *  - `CONTROLLER_HOME` with the resolved Controller home, so the CLI (and
  *    any future tool) can locate state without re-implementing the
@@ -188,17 +188,35 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
  *    invocation resolves inside the agent's shell (issue #187). Existing
  *    entries are kept first and the bin dir is appended only if missing,
  *    matching the dedup behavior of `mergePathEntries`.
+ *  - `CONTROLLER_SESSION_ID` (optional, issue #353) so the agent's own
+ *    CLI invocations can use `--parent self` to refer to itself when
+ *    spawning child sessions. Only set when the orchestrator knows the
+ *    session id at spawn time — i.e. resumed / queue-replay sessions
+ *    where the id comes from the persisted `resumeSessionId`. Brand-new
+ *    sessions get their id from the agent's first `run.started` event,
+ *    so the env var is empty for them; the CLI surfaces a clear error
+ *    telling the agent to use `controller sessions list` to find its
+ *    own id instead.
  *
  *  Providers that sanitize env vars are still expected to invoke the CLI by
  *  its absolute install path; that path is what the agent preamble and the
  *  managed browser skill document.
  */
-export function controllerAgentEnv(): Record<string, string> {
+export function controllerAgentEnv(options?: { sessionId?: string }): Record<string, string> {
   const basePath = process.env.PATH ?? "";
   const mergedPath = mergePathEntries(basePath, controllerCliBinDir());
-  return {
+  const env: Record<string, string> = {
     CONTROLLER_SERVER_URL: serverUrl(),
     CONTROLLER_HOME: orchestratorHome(),
     PATH: mergedPath,
   };
+  // `CONTROLLER_SESSION_ID` is set only when the orchestrator knows the
+  // id at spawn time. Stamping an empty value would make the CLI think
+  // the env was set but to an invalid id, so we omit the key entirely
+  // for brand-new sessions and let the CLI's `--parent self` handler
+  // surface a clear "the env var is not set" error.
+  if (options?.sessionId) {
+    env.CONTROLLER_SESSION_ID = options.sessionId;
+  }
+  return env;
 }

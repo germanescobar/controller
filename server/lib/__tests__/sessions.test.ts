@@ -413,6 +413,31 @@ test("getSessionSummaries strips the transcript but keeps metadata", async () =>
   });
 });
 
+test("getSessionSummaries surfaces parentId (issue #353)", async () => {
+  // The CLI's `sessions list --parent <id>` filter reads parentId from
+  // the JSON shape returned by `GET /api/projects/:id/sessions`. The
+  // session file already persists parentId, but the explicit summary
+  // allowlist in `getSessionSummaries` had silently dropped it before
+  // the PR #354 review caught it. This regression test guards against
+  // the field being dropped from the allowlist again.
+  await withTempProject(async (projectPath) => {
+    // `makeSession` doesn't model the optional `parentId` field
+    // (it was added after the helper), so spread it in here.
+    await saveSession(projectPath, {
+      ...makeSession({ id: "session-child", provider: "codex" }),
+      parentId: "session-parent",
+    } as SessionState);
+
+    const [summary] = await getSessionSummaries(projectPath);
+    assert.ok(summary, "summary should be returned");
+    assert.equal(
+      summary.parentId,
+      "session-parent",
+      "parentId should round-trip through the summary allowlist"
+    );
+  });
+});
+
 test("resolveSessionFocusState pins a brand-new session", () => {
   const state = resolveSessionFocusState(null);
   assert.ok(state.focusPinnedAt, "new session should be auto-pinned");

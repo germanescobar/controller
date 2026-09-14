@@ -202,6 +202,64 @@ function loopPrimitivesIntro(): string {
   ].join("\n");
 }
 
+/**
+ * Document the cross-session discoverability surface (issue #353).
+ *
+ * The same-session primitives above assume you already know your own
+ * session id. They don't — the agent preamble is rendered before the
+ * session id is assigned, and there's no other way for the agent to
+ * learn it. `sessions list` is the CLI verb that closes the gap: it
+ * enumerates every session on the project, and `--parent self` resolves
+ * to the calling session's id via the `CONTROLLER_SESSION_ID` env var
+ * the orchestrator injects at agent spawn time. With it, the agent can
+ * (a) discover its own id from `controller sessions list --json | jq
+ * -r '.[] | select(.provider == "codex") | .id'` (the row whose
+ * `provider` matches the agent that was just spawned), and (b) find its
+ * own children via `controller sessions list --parent self`.
+ */
+function sessionsListIntro(): string | null {
+  const cli = controllerCliShellPath();
+  return [
+    controllerCliNote(),
+    "",
+    "Cross-session discoverability (issue #353):",
+    "",
+    `  - \`${cli} sessions list [<project>]\` enumerates every session in`,
+    `    the project. \`--worktree <id>\`, \`--parent <id|self>\`, and`,
+    `    \`--provider <id>\` filter the result; \`--json\` emits NDJSON for`,
+    `    pipelines. \`--limit <n>\` caps the result (default 100).`,
+    `  - \`--parent <id>\` walks every worktree of the project, so a parent`,
+    `    on the main worktree and a child on a feature worktree are both`,
+    `    found. The server has no combined-filter endpoint yet — the CLI`,
+    `    stitches the per-worktree results itself.`,
+    `  - \`--parent self\` resolves to your own session id via the`,
+    `    \`CONTROLLER_SESSION_ID\` env var the orchestrator injects. On a`,
+    `    brand-new session that env var isn't set yet (the id is assigned`,
+    `    on the agent's first \`run.started\` event); the CLI surfaces a`,
+    `    clear error and points you at \`sessions list\` to discover your`,
+    `    own id.`,
+    `  - \`${cli} sessions start --parent <id|self>\` records the new`,
+    `    session as a child of the given parent. Use \`self\` to spawn a`,
+    `    child of yourself (the coordinator pattern from #351).`,
+    "",
+    "Typical coordinator startup:",
+    "",
+    `   # 1. Learn your own session id (works on every turn; env var is`,
+    `   #    only set for resumed sessions). Each session-list line is`,
+    `   #    emitted as a separate JSON object (NDJSON), so the per-line`,
+    `   #    \`select\` runs first — \`.[]\` after \`select\` would iterate`,
+    `   #    each scalar field value of the object instead of the`,
+    `   #    collection, and jq would reject it with "Cannot index string`,
+    `   #    with string 'provider'".`,
+    `   SELF=$(${cli} sessions list --json | jq -r 'select(.provider == "codex") | .id' | head -1)`,
+    `   # 2. Spawn a child pinned to yourself.`,
+    `   ${cli} sessions start --worktree <wtId> --parent "$SELF" \\`,
+    `     --agent claude --message "Review the PR from session $SELF"`,
+    `   # 3. Later, see your children.`,
+    `   ${cli} sessions list --parent "$SELF" --json`,
+  ].join("\n");
+}
+
 const EMPTY_SKILLS =
   "<additional_skills>\n(none configured)\n</additional_skills>";
 const EMPTY_INTEGRATIONS =
@@ -282,6 +340,8 @@ export async function buildControllerPreamble(
     memoryBlock,
     "",
     loopPrimitivesIntro(),
+    "",
+    sessionsListIntro(),
   ].join("\n");
 }
 

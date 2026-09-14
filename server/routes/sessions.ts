@@ -605,6 +605,16 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
     resumeSessionId?: string;
+    // Optional parent session id (issue #353). When the CLI runs
+    // `controller sessions start --parent <id>` (or `--parent self`,
+    // which the CLI resolves to the calling session via the
+    // `CONTROLLER_SESSION_ID` env var the orchestrator injects), the
+    // resolved id is sent here. The new session's `SessionState.parentId`
+    // is set to it before the run starts; subsequent
+    // `controller sessions list --parent <id>` calls filter on it, and
+    // the coordinator pattern from #351 reads it. Set once; never
+    // mutated afterwards.
+    parentId?: string;
   };
   const worktreeId = body.worktreeId;
   const message = body.message;
@@ -652,6 +662,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
         reasoningEffort: body.reasoningEffort,
         serviceTier: body.serviceTier,
         resumeSessionId: body.resumeSessionId,
+        parentId: body.parentId,
       }),
       shim.res
     );
@@ -683,6 +694,12 @@ export function makeHeadlessSessionStartRequest(
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
     resumeSessionId?: string;
+    // Optional parent session id (issue #353). Forwarded as a query
+    // string so the SSE handler can stash it on the new session's
+    // SessionState before persisting. Only honored on the
+    // create-new-session path; queue-replay passes `resumeSessionId`
+    // and never sets `parentId`.
+    parentId?: string;
   }
 ): Request<{ projectId: string }> {
   const query: Record<string, string> = {
@@ -709,6 +726,7 @@ export function makeHeadlessSessionStartRequest(
   // callers should leave this undefined for the POST endpoint — it is
   // a new-session-only API.
   if (body.resumeSessionId) query.resumeSessionId = body.resumeSessionId;
+  if (body.parentId) query.parentId = body.parentId;
   return {
     params: { projectId },
     query,
@@ -975,6 +993,11 @@ export async function handleSessionStream(
   // whole turn.
   const mentionRequests = parseMentionsQuery(req.query.mentions as string | undefined);
   const skillName = (req.query.skillName as string | undefined)?.trim() || undefined;
+  // Optional parent session id (issue #353). Only set on the
+  // create-new-session branch — `persistSessionStart` honors it when
+  // writing a brand-new session, and ignores it on resumed sessions
+  // (the existing session's `parentId` is the source of truth there).
+  const parentId = (req.query.parentId as string | undefined)?.trim() || undefined;
 
   const provider = getAgentProvider(providerId);
   if (!provider) {
@@ -1067,6 +1090,7 @@ export async function handleSessionStream(
       providerId,
       attachments,
       autoApprove,
+      parentId,
     });
     return;
   }
@@ -1094,7 +1118,18 @@ export async function handleSessionStream(
   const child = provider.spawn({
     message: agentMessage,
     cwd: worktree.path,
-    env: { ...apiKeyEnv, ...controllerAgentEnv() },
+    // Inject `CONTROLLER_SESSION_ID` for resumed sessions so the agent
+    // can use `--parent self` when spawning child sessions. Brand-new
+    // sessions get their id from the agent's first `run.started` event
+    // (issue #353), so the env var is omitted there — the CLI surfaces
+    // a clear error if the agent tries `--parent self` before knowing
+    // its own id.
+    env: {
+      ...apiKeyEnv,
+      ...controllerAgentEnv(
+        resumeSessionId ? { sessionId: resumeSessionId } : undefined
+      ),
+    },
     command: resolvedCommand,
     attachments,
     resumeSessionId,
@@ -1208,6 +1243,21 @@ export async function handleSessionStream(
       provider: providerId,
       mode,
       messages: existing?.messages ?? [],
+      // `parentId` is set on brand-new sessions only (issue #353). The
+      // resumed-session path deliberately preserves the existing
+      // `parentId` so a child can't be re-parented by a later
+      // `--parent` flag on a queue-replay. A later `parentId` on the
+      // request is **ignored** when `existing` is set — the existing
+      // file is the source of truth. The `existing?.parentId`
+      // fallback is the bit that prevents `saveSession`'s full-file
+      // overwrite from silently dropping the field on resume.
+      ...(existing
+        ? existing.parentId
+          ? { parentId: existing.parentId }
+          : {}
+        : parentId
+        ? { parentId }
+        : {}),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
@@ -1793,6 +1843,10 @@ async function streamCodexPlanSession(
     providerId: string;
     attachments: AttachmentMetadata[];
     autoApprove: boolean;
+    // Optional parent session id (issue #353). Forwarded through
+    // the same query → `persistSessionStart` path the SSE handler
+    // uses; only honored on brand-new sessions.
+    parentId?: string;
   }
 ) {
   const {
@@ -1810,6 +1864,7 @@ async function streamCodexPlanSession(
     providerId,
     attachments,
     autoApprove,
+    parentId,
   } = options;
 
   res.writeHead(200, {
@@ -1908,6 +1963,17 @@ async function streamCodexPlanSession(
       provider: providerId,
       mode,
       messages: existing?.messages ?? [],
+      // `parentId` is set on brand-new sessions only (issue #353);
+      // see the SSE-stream variant for the rationale. A later
+      // `parentId` on the request is **ignored** when `existing` is
+      // set, and the existing file's `parentId` is preserved.
+      ...(existing
+        ? existing.parentId
+          ? { parentId: existing.parentId }
+          : {}
+        : parentId
+        ? { parentId }
+        : {}),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
@@ -1981,7 +2047,15 @@ async function streamCodexPlanSession(
       {
         message,
         cwd: worktreePath,
-        env: { ...(await getApiKeyEnvVars()), ...controllerAgentEnv() },
+        // Same env-injection contract as the SSE-stream path: stamp
+        // `CONTROLLER_SESSION_ID` for resumed sessions, omit it for
+        // brand-new ones (issue #353).
+        env: {
+          ...(await getApiKeyEnvVars()),
+          ...controllerAgentEnv(
+            resumeSessionId ? { sessionId: resumeSessionId } : undefined
+          ),
+        },
         resumeSessionId,
         model,
         reasoningEffort,
@@ -3214,6 +3288,14 @@ sessionsRouter.get("/:projectId/sessions", async (req, res) => {
   // The sidebar only needs session metadata to render its tree and focus
   // queue, so return summaries without the (potentially multi-megabyte)
   // message history. The full session is fetched on demand when opened.
+  //
+  // `Cache-Control: no-store` is required so the sidebar re-fetches after
+  // a new session starts in this worktree. Without it, `res.json()`'s
+  // auto-ETag makes the browser (or Electron) reply `304 Not Modified` on
+  // soft refreshes and the sidebar keeps rendering the pre-spawn list,
+  // which is exactly the bug that hid this session under `issue-353`
+  // while the focus queue saw the fresh data.
+  res.set("Cache-Control", "no-store");
   const sessions = await getSessionSummaries(worktree.path);
   res.json(sessions);
 });

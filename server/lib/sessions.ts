@@ -11,6 +11,8 @@ import {
   type SessionFocus,
 } from "./focus-state.js";
 import { projectStoreDir } from "./paths.js";
+import { getProjects } from "./projects.js";
+import { getProjectWorktrees } from "./worktrees.js";
 
 export interface SessionState {
   id: string;
@@ -26,6 +28,15 @@ export interface SessionState {
   createdAt: string;
   lastActiveAt: string;
   status: string;
+  // Optional parent session id (issue #353). Set when the session is
+  // spawned from `controller sessions start --parent <id>` (or `--parent
+  // self`, which the CLI resolves to the calling session via the
+  // `CONTROLLER_SESSION_ID` env var the orchestrator injects). Read by
+  // the `controller sessions list --parent <id>` filter and by the
+  // coordinator pattern from #351. Set once at session creation; never
+  // mutated afterwards. Absent when the session was started without a
+  // parent (the common case for user-initiated sessions).
+  parentId?: string;
   // The three focus-queue fields below are populated by `getSession`
   // and `getSessions` by merging in the Controller-owned sidecar under
   // `<controllerHome>/focus/<sessionId>.json` (e.g.
@@ -226,6 +237,81 @@ export async function getSessionSummaries(
     focusPinnedAt: s.focusPinnedAt,
     focusDoneAt: s.focusDoneAt,
     userUnpinned: s.userUnpinned,
+    // `parentId` round-trips through the summary mapping so the CLI's
+    // `sessions list --parent <id>` filter (issue #353) can match
+    // sessions by their declared parent. Without this line the
+    // allowlist would silently drop the field — `SessionSummary`
+    // declares it via `Omit<SessionState, "messages">`, but the
+    // implementation maps fields explicitly so the typing doesn't
+    // save us here.
+    parentId: s.parentId,
+  }));
+}
+
+/**
+ * Return every session whose `parentId` matches the supplied parent
+ * (issue #351 + issue #353). Walks every project × worktree the
+ * orchestrator knows about so a parent on the main worktree and a
+ * child on a feature worktree are both found. The earlier
+ * single-project implementation was the latent bug: a parent on the
+ * Controller project's main worktree and a child on its `issue-351`
+ * worktree live in different per-worktree stores
+ * (`projectStoreDir(worktreePath)` keys by hash of the absolute
+ * path), so scoping the search to one worktree missed the cross-
+ * worktree case entirely. The `controller sessions children <id>`
+ * CLI and the strict-archive rule both call into this helper, so
+ * getting the walk right fixes both.
+ *
+ * Archived children are excluded (matching the rest of the surface).
+ * The summary allowlist mirrors `getSessionSummaries` and adds
+ * `parentId` so the children endpoint can echo it back to the
+ * client (the sidebar's coordinator tree reads it).
+ */
+export async function listChildSessions(
+  parentId: string
+): Promise<SessionSummary[]> {
+  const projects = await getProjects();
+  const seen = new Set<string>();
+  const collected: SessionState[] = [];
+  for (const project of projects) {
+    const worktrees = await getProjectWorktrees(project.id).catch(() => []);
+    for (const worktree of worktrees) {
+      // Per-worktree session store. `getSessions` already merges the
+      // focus sidecar and filters archived; we keep that here so the
+      // strict-archive caller doesn't have to repeat the filter.
+      const sessions = await getSessions(worktree.path).catch(() => []);
+      for (const session of sessions) {
+        if (session.parentId !== parentId) continue;
+        if (seen.has(session.id)) continue;
+        seen.add(session.id);
+        collected.push(session);
+      }
+    }
+  }
+  // Sort by last-active descending so the sidebar / CLI list reads
+  // naturally. `getSessions` already sorts per-worktree, but a
+  // cross-worktree merge can interleave, so re-sort.
+  collected.sort(
+    (a, b) =>
+      new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
+  );
+  return collected.map((s) => ({
+    id: s.id,
+    title: s.title,
+    workingDirectory: s.workingDirectory,
+    worktreeId: s.worktreeId,
+    model: s.model,
+    reasoningEffort: s.reasoningEffort,
+    serviceTier: s.serviceTier,
+    provider: s.provider,
+    mode: s.mode,
+    createdAt: s.createdAt,
+    lastActiveAt: s.lastActiveAt,
+    status: s.status,
+    focusPinnedAt: s.focusPinnedAt,
+    focusDoneAt: s.focusDoneAt,
+    userUnpinned: s.userUnpinned,
+    parentId: s.parentId,
   }));
 }
 
