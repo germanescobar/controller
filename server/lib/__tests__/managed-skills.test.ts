@@ -262,7 +262,7 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
     assert.match(
       worktrees,
-      cliCommandRegex(cliPath, "sessions start [<project>] --worktree <worktreeId>")
+      cliCommandRegex(cliPath, "sessions start [<project>] <message> --worktree <worktreeId>")
     );
     // Notes that `<project>` accepts an id or a human name, and how to discover it.
     // The path is derived from the CLI itself so it follows the install.
@@ -273,9 +273,14 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       /~\/\.coding-orchestrator\/projects\.json/,
       "Picking-a-project snippet must not reference the stale home-dir path"
     );
-    // Reminds callers that `--message` must be the last flag, since the
-    // parser rejects reserved flags that appear after it.
-    assert.match(worktrees, /--message\` must be \*\*last\*\* on the command line/);
+    // Issue #355: documents the new positional-message shape (no
+    // `--message` flag, no last-flag rule). Replaces the old guard
+    // about `--message must be **last** on the command line`.
+    assert.match(worktrees, /is the agent prompt \(issue #355\)/);
+    assert.match(
+      worktrees,
+      /positional[\s\S]*?flag-like tokens/
+    );
   });
 });
 

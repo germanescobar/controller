@@ -537,7 +537,7 @@ conversation on it.
 - \`${cliPath} worktrees list [<project>]\` — list the worktrees on a project. \`<project>\` is optional: if omitted, the CLI resolves the project from the current working directory.
 - \`${cliPath} worktrees create [<project>] --name <name> [--branch <branch>] [--base <baseBranch>]\` — create a new worktree. Streams the setup-script output as it runs; the new worktree's id is printed on success. \`<project>\` is optional and falls back to the project that owns cwd.
 - \`${cliPath} worktrees delete <project> <worktreeId>\` — delete a worktree. The worktree must not have an active session.
-- \`${cliPath} sessions start [<project>] --worktree <worktreeId> --message <text> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]\` — kick off a new agent turn on a worktree and print the session URL. \`<project>\` is optional and falls back to the project that owns cwd.
+- \`${cliPath} sessions start [<project>] <message> --worktree <worktreeId> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]\` — kick off a new agent turn on a worktree and print the session URL. \`<message>\` is a positional argument in the new shape (issue #355) and \`<project>\` is optional and falls back to the project that owns cwd.
 
 ## Picking a project
 
@@ -576,27 +576,34 @@ ${cliPath} worktrees create "Coding Orchestrator" --name issue-42
 
 # 2. Start a session on the new worktree
 ${cliPath} sessions start "Coding Orchestrator" \\
+  "Work on GitHub issue #42 in the germanescobar/controller repo" \\
   --worktree f1247ed6-3a1b-4c9d-b8e2-9f0a1c2d3e4f \\
   --provider claude \\
-  --skill github-issues \\
-  --message "Work on GitHub issue #42 in the germanescobar/controller repo"
+  --skill github-issues
 # → Started session abc123 — controller://project/<projectId>/worktree/f1247ed6-3a1b-4c9d-b8e2-9f0a1c2d3e4f/session/abc123
 \`\`\`
 
 Key ordering rules shown above:
 - \`<project>\` is **positional** and comes immediately after the subcommand.
-- All flags (\`--provider\`, \`--skill\`, etc.) come **before** \`--message\`.
-- \`--message\` is always **last**; everything after it is treated as prompt text.
+- The prompt is the second positional \`<message>\` (issue #355); it can
+  sit before or after the flag pairs, but every other bare token is
+  rejected.
+- Flags (\`--provider\`, \`--skill\`, etc.) can come in any order. The
+  \`--flag=value\` shorthand is rejected on the sessions surfaces — use
+  a space separator (\`--worktree wt-1\`) for consistency.
 
 The second command prints \`Started session <id>\` and a \`controller://...\`
 URL — open that URL in the Controller app to see the live transcript.
 
 ## Flags to remember
 
-- \`--message\` must be **last** on the command line. Everything after it is
-  the prompt text, verbatim. Putting another flag after \`--message\` will
-  fail the parse with a clear error rather than silently corrupting the
-  prompt.
+- \`<message>\` is the agent prompt (issue #355). It's a positional
+  argument, so prompts that contain flag-like tokens (\`"explain the
+  --json flag"\`) work without escaping the leading \`--\`. If the
+  prompt itself starts with \`--\` (e.g. \`"--help me diagnose this"\`),
+  pass it after \`--\` so the parser treats the leading dash as literal
+  text: \`controller sessions start ... -- "--help me"\`. The \`--\`
+  end-of-flags marker matches \`git\`, \`kubectl\`, and \`gh\`.
 - \`--provider\` accepts \`codex\`, \`claude\`, or \`anita\`. The session URL
   works regardless of provider; the transcript is rendered by the existing
   in-app event stream, so no client-side streaming changes are involved.
