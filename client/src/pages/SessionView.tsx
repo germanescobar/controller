@@ -2791,45 +2791,144 @@ function PreviewPanel({
   );
 }
 
-function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] }) {
-  if (!attachments || attachments.length === 0) return null;
+interface ImagePreviewItem {
+  src: string;
+  name: string;
+  mimeType: string;
+}
+
+/*
+ * Full-size image viewer used by the message-feed `AttachmentStrip`
+ * and the composer thumbnail. Built on the shared `Dialog` primitive
+ * so Escape, the backdrop click, and the close button all dismiss the
+ * viewer for free. The popup is sized to a 90vw x 90vh surface on
+ * desktop and falls back to the dialog's mobile padding so it looks
+ * good on a narrow viewport (#360).
+ */
+function ImagePreviewDialog({
+  open,
+  item,
+  onOpenChange,
+}: {
+  open: boolean;
+  item: ImagePreviewItem | null;
+  onOpenChange: (open: boolean) => void;
+}) {
   return (
-    <div className="mb-2 flex flex-wrap justify-end gap-2">
-      {attachments.map((attachment, index) => {
-        const id = normalizeMarkdownText(attachment.id) || `attachment-${index}`;
-        const name = normalizeMarkdownText(attachment.name) || "attachment";
-        const mimeType = normalizeMarkdownText(attachment.mimeType);
-        const path = normalizeMarkdownText(attachment.path);
-        const url = normalizeMarkdownText(attachment.url);
-        const size = typeof attachment.size === "number" ? attachment.size : Number.NaN;
-        const canPreview = PREVIEWABLE_IMAGE_TYPES.has(mimeType);
-        return (
-        <div
-          key={id}
-          className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
-          title={path}
-        >
-          {attachment.isImage && url && canPreview ? (
-            <img
-              src={url}
-              alt=""
-              className="h-8 w-8 shrink-0 rounded object-cover"
-            />
-          ) : (
-            <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-          )}
-          <div className="min-w-0">
-            <div className="truncate text-foreground">{name}</div>
-            {Number.isFinite(size) ? (
-              <div className="text-[10px] text-muted-foreground">
-                {formatBytes(size)}
-              </div>
-            ) : null}
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="max-w-[90vw] max-h-[90vh] w-auto sm:max-w-[90vw] p-3 sm:p-4"
+        aria-describedby={undefined}
+      >
+        <DialogHeader className="gap-1">
+          <DialogTitle className="break-all">
+            {item?.name ?? "Image preview"}
+          </DialogTitle>
+          {item?.mimeType ? (
+            <p className="font-mono text-[10px] text-muted-foreground">
+              {item.mimeType}
+            </p>
+          ) : null}
+        </DialogHeader>
+        {item ? (
+          <img
+            src={item.src}
+            alt={item.name}
+            className="block max-w-[90vw] max-h-[80vh] object-contain mx-auto select-none"
+          />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AttachmentStrip({ attachments }: { attachments?: SessionAttachment[] }) {
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  if (!attachments || attachments.length === 0) return null;
+  const previewable = attachments.filter(
+    (attachment) =>
+      attachment.isImage &&
+      typeof attachment.url === "string" &&
+      PREVIEWABLE_IMAGE_TYPES.has(attachment.mimeType ?? ""),
+  );
+  const previewItem =
+    previewIndex !== null && previewIndex < previewable.length
+      ? previewable[previewIndex]
+      : null;
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap justify-end gap-2">
+        {attachments.map((attachment, index) => {
+          const id = normalizeMarkdownText(attachment.id) || `attachment-${index}`;
+          const name = normalizeMarkdownText(attachment.name) || "attachment";
+          const mimeType = normalizeMarkdownText(attachment.mimeType);
+          const path = normalizeMarkdownText(attachment.path);
+          const url = normalizeMarkdownText(attachment.url);
+          const size = typeof attachment.size === "number" ? attachment.size : Number.NaN;
+          const canPreview =
+            attachment.isImage &&
+            url !== "" &&
+            PREVIEWABLE_IMAGE_TYPES.has(mimeType);
+          // Map this attachment's index back into the previewable list so a
+          // non-image attachment between two image attachments opens the
+          // correct one. Falling back to -1 (not previewable) leaves the
+          // thumbnail as a non-interactive icon.
+          const previewableIndex = canPreview
+            ? previewable.findIndex(
+                (entry) => normalizeMarkdownText(entry.url) === url,
+              )
+            : -1;
+          return (
+          <div
+            key={id}
+            className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
+            title={path}
+          >
+            {canPreview ? (
+              <button
+                type="button"
+                onClick={() => previewableIndex >= 0 && setPreviewIndex(previewableIndex)}
+                aria-label={`Preview ${name}`}
+                title="Preview image"
+                className="flex h-8 w-8 shrink-0 cursor-zoom-in items-center justify-center overflow-hidden rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <img
+                  src={url}
+                  alt=""
+                  className="h-full w-full object-cover"
+                />
+              </button>
+            ) : (
+              <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+            )}
+            <div className="min-w-0">
+              <div className="truncate text-foreground">{name}</div>
+              {Number.isFinite(size) ? (
+                <div className="text-[10px] text-muted-foreground">
+                  {formatBytes(size)}
+                </div>
+              ) : null}
+            </div>
           </div>
-        </div>
-        );
-      })}
-    </div>
+          );
+        })}
+      </div>
+      <ImagePreviewDialog
+        open={previewItem !== null}
+        item={
+          previewItem
+            ? {
+                src: normalizeMarkdownText(previewItem.url),
+                name: normalizeMarkdownText(previewItem.name) || "attachment",
+                mimeType: normalizeMarkdownText(previewItem.mimeType),
+              }
+            : null
+        }
+        onOpenChange={(open) => {
+          if (!open) setPreviewIndex(null);
+        }}
+      />
+    </>
   );
 }
 
@@ -2946,6 +3045,11 @@ export function SessionView({
   const [pendingAttachments, setPendingAttachments] = useState<SessionAttachment[]>([]);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  // Index of the composer attachment currently shown in the full-size image
+  // preview. `null` keeps the dialog closed (#360). Each attachment is keyed
+  // by `attachment.id`, which is also used to look the attachment up when the
+  // dialog opens.
+  const [composerPreviewId, setComposerPreviewId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   // True while this component has its own live SSE for the viewed session.
   // Distinct from `streaming`, which stays true across server-driven queue
@@ -6093,6 +6197,37 @@ export function SessionView({
         bindings={shortcutBindings ?? null}
       />
 
+      {/* Composer attachment preview (#360). Sits at the SessionView
+          root next to the rename and file-finder dialogs so the
+          portal lands at the same layer regardless of which surface
+          the user is currently looking at. */}
+      <ImagePreviewDialog
+        open={composerPreviewId !== null}
+        item={
+          composerPreviewId
+            ? (() => {
+                const target = composerAttachments.find(
+                  (attachment) => attachment.id === composerPreviewId,
+                );
+                if (!target) return null;
+                const fileName = getFileDisplayName(target.file);
+                const mimeType = getFileMimeType(target.file);
+                if (!target.previewUrl || !PREVIEWABLE_IMAGE_TYPES.has(mimeType)) {
+                  return null;
+                }
+                return {
+                  src: target.previewUrl,
+                  name: fileName,
+                  mimeType,
+                };
+              })()
+            : null
+        }
+        onOpenChange={(open) => {
+          if (!open) setComposerPreviewId(null);
+        }}
+      />
+
       {/* Main content area: chat + terminal side by side on desktop, tabbed on mobile */}
       <div className="flex flex-1 min-h-0">
         {/* Chat panel — hidden on mobile when terminal or changes tab is active */}
@@ -6832,17 +6967,28 @@ export function SessionView({
                     <div className="mt-2 flex flex-wrap gap-2">
                       {composerAttachments.map((attachment) => {
                         const fileName = getFileDisplayName(attachment.file);
+                        const mimeType = getFileMimeType(attachment.file);
+                        const canPreview =
+                          !!attachment.previewUrl && PREVIEWABLE_IMAGE_TYPES.has(mimeType);
                         return (
                         <div
                           key={attachment.id}
                           className="flex max-w-56 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2 py-1.5 text-xs"
                         >
-                          {attachment.previewUrl ? (
-                            <img
-                              src={attachment.previewUrl}
-                              alt=""
-                              className="h-8 w-8 shrink-0 rounded object-cover"
-                            />
+                          {canPreview ? (
+                            <button
+                              type="button"
+                              onClick={() => setComposerPreviewId(attachment.id)}
+                              aria-label={`Preview ${fileName}`}
+                              title="Preview image"
+                              className="flex h-8 w-8 shrink-0 cursor-zoom-in items-center justify-center overflow-hidden rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <img
+                                src={attachment.previewUrl}
+                                alt=""
+                                className="h-full w-full object-cover"
+                              />
+                            </button>
                           ) : (
                             <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                           )}
