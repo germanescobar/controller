@@ -2664,6 +2664,176 @@ test("parseBrowser snapshot / click / type still work", async () => {
   );
 });
 
+// `controller browser set-files` parser (issue #356).
+// ---------------------------------------------------------------------------
+
+test("parseBrowser set-files builds the canonical payload from a single path", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseBrowser(["set-files", "ref=e3", "/worktree/dist/file.png"]),
+    {
+      action: "setFiles",
+      params: {
+        selector: "ref=e3",
+        paths: ["/worktree/dist/file.png"],
+        allowOutside: false,
+      },
+    }
+  );
+});
+
+test("parseBrowser set-files threads --path through for additional files", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseBrowser([
+      "set-files",
+      "input[type=file][multiple]",
+      "/worktree/a.pdf",
+      "--path",
+      "/worktree/b.pdf",
+      "--path",
+      "/worktree/c.pdf",
+    ]),
+    {
+      action: "setFiles",
+      params: {
+        selector: "input[type=file][multiple]",
+        paths: ["/worktree/a.pdf", "/worktree/b.pdf", "/worktree/c.pdf"],
+        allowOutside: false,
+      },
+    }
+  );
+});
+
+test("parseBrowser set-files forwards --allow-outside", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseBrowser([
+      "set-files",
+      "ref=e3",
+      "/tmp/external.pdf",
+      "--allow-outside",
+    ]),
+    {
+      action: "setFiles",
+      params: {
+        selector: "ref=e3",
+        paths: ["/tmp/external.pdf"],
+        allowOutside: true,
+      },
+    }
+  );
+});
+
+test("parseBrowser set-files rejects a missing selector", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseBrowser(["set-files"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /requires a <selector>/);
+});
+
+test("parseBrowser set-files rejects a missing initial path", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseBrowser(["set-files", "ref=e3"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /requires a <path>/);
+});
+
+test("parseBrowser set-files rejects --path with no value", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseBrowser(["set-files", "ref=e3", "/a", "--path"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--path requires a value/);
+});
+
+test("parseBrowser set-files rejects unknown flags", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseBrowser(["set-files", "ref=e3", "/a", "--bogus"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Unknown flag for browser set-files/);
+  assert.match(stderrText, /--bogus/);
+});
+
 // --- sessions list (issue #353) ---
 
 test("parseSessions list builds a list payload from the new flags", async () => {

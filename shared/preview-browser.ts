@@ -20,7 +20,7 @@
  */
 
 /** Actions supported. */
-export type BrowserAction = "open" | "snapshot" | "click" | "type";
+export type BrowserAction = "open" | "snapshot" | "click" | "type" | "setFiles";
 
 /**
  * Refs emitted by an accessibility snapshot. Each key is a short opaque id
@@ -44,6 +44,8 @@ export interface BrowserCommandResultData {
   refCount?: number;
   /** Human-readable one-line summary of what happened. */
   summary?: string;
+  /** Per-file outcome from a `setFiles` action — input order, one row each. */
+  files?: BrowserSetFilesResultEntry[];
 }
 
 export type BrowserCommandResult =
@@ -86,6 +88,73 @@ export interface BrowserEnsurePaneMessage {
 export interface BrowserOpenParams {
   url: string;
   insecure?: boolean;
+}
+
+/**
+ * Per-file metadata carried over the wire for a `setFiles` call (issue #356).
+ *
+ * The server has already validated each path against the worktree policy
+ * before forwarding; the bytes themselves come from the Electron main
+ * process via `controller.readPreviewFile` (the renderer asks for them
+ * once the server's canonical path list arrives). Two shapes flow over
+ * the wire:
+ *
+ *  - `BrowserSetFilesFileMeta` — what the server → renderer hop carries.
+ *    No bytes; just enough metadata for the renderer to ask the main
+ *    process for the right file and to correlate the per-file outcome
+ *    back to the original CLI argument (via `path`).
+ *  - `BrowserSetFilesFileInput` — what the renderer → webview hop
+ *    carries after the bytes have been loaded by the main process.
+ *    Base64 keeps the payload inside one `executeJavaScript` round-trip
+ *    without an additional streaming channel.
+ *
+ * The split exists because the policy lives on the server side
+ * (canonical path resolution + symlink defense) and the file IO lives
+ * in the Electron main process (size cap, user confirmation prompt);
+ * the renderer is just the bridge that stitches them together.
+ */
+export interface BrowserSetFilesFileMeta {
+  /** Canonical absolute path the file lives at, as resolved by the server-side policy. */
+  path: string;
+  /** Filename the page will see on the resulting `File` object. */
+  name: string;
+  /** MIME type best-effort inferred from extension; refined by the main process on read. */
+  type: string;
+  /** File size in bytes, observed by the server before forwarding. */
+  size: number;
+}
+
+export interface BrowserSetFilesFileInput extends BrowserSetFilesFileMeta {
+  /** Base64-encoded file contents. */
+  contentBase64: string;
+}
+
+export interface BrowserSetFilesParams {
+  selector: string;
+  /** Canonical per-file metadata the renderer must ask the main process to read. */
+  files: BrowserSetFilesFileMeta[];
+  /** Pass-through of the CLI's `--allow-outside` flag. */
+  allowOutside?: boolean;
+}
+
+/** Per-file outcome reported back so the agent can detect rejections. */
+export interface BrowserSetFilesResultEntry {
+  /** Canonical absolute path the renderer read from (or that the server rejected). */
+  path: string;
+  /** Filename the page will see on the resulting `File` object. */
+  name: string;
+  /** Input-list position. Lets the renderer correlate even when basenames collide. */
+  index: number;
+  /** True when the file was accepted onto the input element. */
+  accepted: boolean;
+  /**
+   * Page-observed rejection reason (when `accepted=false`):
+   * `type-mismatch`, `too-large`, `single-file-input`, `no-files-set`,
+   * `read-failed`, the Electron main process's policy text for
+   * outside-worktree / oversized / user-denied, or a free-form string
+   * the page dispatched.
+   */
+  reason?: string;
 }
 
 export type BrowserServerMessage = BrowserCommandMessage | BrowserEnsurePaneMessage;

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import {
   buildClickScript,
+  buildSetFilesScript,
   buildSnapshotScript,
   buildTypeScript,
 } from "./browser-scripts.ts";
@@ -54,8 +55,16 @@ function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
     el.children.push(child);
     child.parent = el;
   }
-  for (const [k, v] of Object.entries(init.attributes ?? {})) {
-    el.attributes.set(k, v);
+  // `init.attributes` is typed as `Map<string, string>`, but a plain
+  // object is also accepted for ergonomic test code. Branch on the
+  // shape so a `Map` (used by the set-files tests to thread both
+  // `type` and `accept` attributes through `makeEl`) is copied the
+  // same way as a literal object would be.
+  const initAttrs = init.attributes;
+  if (initAttrs instanceof Map) {
+    for (const [k, v] of initAttrs) el.attributes.set(k, v);
+  } else if (initAttrs) {
+    for (const [k, v] of Object.entries(initAttrs)) el.attributes.set(k, v);
   }
   return el;
 }
@@ -108,6 +117,11 @@ function elApi(root: MockElement) {
     return {
       nodeType: 1,
       tagName: el.tagName,
+      // Surface the `type` attribute as a property too, the same way
+      // a real HTMLInputElement does. The set-files script reads
+      // `target.type` (not `target.getAttribute('type')`) when it
+      // decides whether the resolved element is a file input.
+      type: el.attributes.get("type") ?? "",
       id: el.id,
       children: childNodes,
       parentElement: parentNode,
@@ -257,6 +271,14 @@ function elApi(root: MockElement) {
  * breaks parsing.
  */
 function runScript<T>(script: string, body: unknown): T {
+  // Minimal File / DataTransfer / DragEvent shims. The setFiles script
+  // runs in a real Electron `<webview>` with the full DOM; here we just
+  // need enough surface to assert the per-file acceptance contract and
+  // observe dispatched events. The implementation mirrors what Chromium
+  // exposes: `File` carries `name`/`type`/`size`/`bytes`, `DataTransfer`
+  // holds items, and `DragEvent` exposes `dataTransfer`. The vm shim
+  // skips `Blob` entirely — the script falls back to its non-Blob
+  // constructor path because `new File` succeeds on a Uint8Array.
   const ctx = {
     document: body as Record<string, unknown>,
     window: {
@@ -270,6 +292,60 @@ function runScript<T>(script: string, body: unknown): T {
     location: { href: "about:blank" },
     NodeFilter: { SHOW_ELEMENT: 1 },
     console,
+    atob: (b64: string) => Buffer.from(b64, "base64").toString("binary"),
+    btoa: (s: string) => Buffer.from(s, "binary").toString("base64"),
+    File: function FileShim(
+      this: unknown,
+      parts: unknown[],
+      name: string,
+      opts: { type?: string } = {}
+    ) {
+      const bytes = parts[0] as Uint8Array;
+      (this as Record<string, unknown>).name = name;
+      (this as Record<string, unknown>).type = opts.type ?? "";
+      (this as Record<string, unknown>).size = (bytes as Uint8Array).byteLength;
+    } as unknown as typeof File,
+    DataTransfer: function DataTransferShim(this: unknown) {
+      const items: Array<{ kind: "file"; file: unknown }> = [];
+      (this as Record<string, unknown>).items = {
+        add: (file: unknown) => {
+          items.push({ kind: "file", file });
+        },
+      };
+      (this as Record<string, unknown>).files = {
+        length: items.length,
+        item: (i: number) => items[i]?.file ?? null,
+        [0]: items[0]?.file,
+      };
+      // Each call to `files` should reflect the current items list — the
+      // script re-reads `dt.files` after re-populating for single-file
+      // inputs. Wrap in a getter so the existing length/item stay in sync.
+      Object.defineProperty((this as Record<string, unknown>).files, "length", {
+        get: () => items.length,
+      });
+    } as unknown as typeof DataTransfer,
+    DragEvent: function DragEventShim(
+      this: unknown,
+      _type: string,
+      init: { dataTransfer?: unknown } = {}
+    ) {
+      (this as Record<string, unknown>).dataTransfer = init.dataTransfer;
+    } as unknown as typeof DragEvent,
+    Event: function EventShim(
+      this: unknown,
+      _type: string,
+      init: { bubbles?: boolean; cancelable?: boolean } = {}
+    ) {
+      (this as Record<string, unknown>).bubbles = init.bubbles === true;
+      (this as Record<string, unknown>).cancelable = init.cancelable === true;
+    } as unknown as typeof Event,
+    HTMLInputElement: {
+      prototype: {
+        // buildSetFilesScript reads HTMLInputElement.prototype.files in the
+        // error path; the mock doesn't enforce the descriptor, so any
+        // assignment succeeds.
+      },
+    },
   };
   vm.createContext(ctx);
   return vm.runInContext(script, ctx) as T;
@@ -538,4 +614,238 @@ test("a11y snapshot skips visibility:hidden controls (issue #170 P2)", () => {
   // The hidden second button is never addressable via a ref.
   const selectors = Object.values(result.refs ?? {});
   assert.ok(selectors.every((s) => !/:nth-of-type\(2\)/.test(s)));
+});
+
+// ---------------------------------------------------------------------------
+// buildSetFilesScript (issue #356)
+// ---------------------------------------------------------------------------
+//
+// The set-files script runs inside a real Electron `<webview>`. These tests
+// only assert the per-file acceptance contract — the wiring (path → main
+// process → bytes → renderer → webview) is covered end-to-end by the
+// `controller browser set-files` CLI tests and the policy tests in
+// `server/lib/__tests__/browser-policy.test.ts`. The mock here is a
+// pragmatic DOM shim, not a real Chromium, so we focus on the parts that
+// differ from the existing engines: page-observed validation, multiple
+// vs single-file input, and the dropzone fallback.
+
+interface SetFilesResult {
+  ok: boolean;
+  engine?: string;
+  error?: string;
+  files?: Array<{ index?: number; name: string; accepted: boolean; reason?: string }>;
+}
+
+test("buildSetFilesScript accepts a single file on an input[type=file]", () => {
+  const inputAttrs = new Map<string, string>([["type", "file"]]);
+  const input = makeEl("input", { id: "upload", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#upload",
+    refs: {},
+    files: [{ name: "report.pdf", type: "application/pdf", contentBase64: "AAEC" }],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.length, 1);
+  assert.equal(result.files?.[0]?.name, "report.pdf");
+  assert.equal(result.files?.[0]?.accepted, true);
+});
+
+test("buildSetFilesScript rejects a file that fails the page's accept filter", () => {
+  const inputAttrs = new Map<string, string>([
+    ["type", "file"],
+    ["accept", "image/png,image/jpeg"],
+  ]);
+  const input = makeEl("input", { id: "photo", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#photo",
+    refs: {},
+    files: [{ name: "report.pdf", type: "application/pdf", contentBase64: "AAEC" }],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.[0]?.accepted, false);
+  assert.equal(result.files?.[0]?.reason, "type-mismatch");
+});
+
+test("buildSetFilesScript rejects a file that exceeds the page's maxFileSize", () => {
+  const inputAttrs = new Map<string, string>([
+    ["type", "file"],
+    ["max-file-size", "4"],
+  ]);
+  const input = makeEl("input", { id: "tiny", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  // 10 bytes of base64 -> bytes; the input advertises a 4-byte cap.
+  const script = buildSetFilesScript({
+    selector: "#tiny",
+    refs: {},
+    files: [{ name: "big.bin", type: "application/octet-stream", contentBase64: "AAAAAAAAAAAAAA==" }],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.[0]?.accepted, false);
+  assert.equal(result.files?.[0]?.reason, "too-large");
+});
+
+test("buildSetFilesScript accepts every file on a multiple input", () => {
+  const inputAttrs = new Map<string, string>([
+    ["type", "file"],
+    ["multiple", ""],
+  ]);
+  const input = makeEl("input", { id: "gallery", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#gallery",
+    refs: {},
+    files: [
+      { name: "a.png", type: "image/png", contentBase64: "AAAA" },
+      { name: "b.png", type: "image/png", contentBase64: "AAAA" },
+      { name: "c.png", type: "image/png", contentBase64: "AAAA" },
+    ],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.length, 3);
+  assert.ok(result.files?.every((f) => f.accepted));
+});
+
+test("buildSetFilesScript marks extras as rejected when the input is single-file", () => {
+  const inputAttrs = new Map<string, string>([["type", "file"]]);
+  const input = makeEl("input", { id: "single", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#single",
+    refs: {},
+    files: [
+      { name: "a.png", type: "image/png", contentBase64: "AAAA" },
+      { name: "b.png", type: "image/png", contentBase64: "AAAA" },
+    ],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.[0]?.accepted, true);
+  assert.equal(result.files?.[1]?.accepted, false);
+  assert.equal(result.files?.[1]?.reason, "single-file-input");
+});
+
+test("buildSetFilesScript returns a per-file outcome when every file is rejected", () => {
+  // All-rejected path: no DataTransfer is assigned, no change event
+  // dispatched — the agent should be able to detect "nothing landed"
+  // from the response alone.
+  const inputAttrs = new Map<string, string>([
+    ["type", "file"],
+    ["accept", "image/png"],
+  ]);
+  const input = makeEl("input", { id: "photo", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#photo",
+    refs: {},
+    files: [
+      { name: "doc.pdf", type: "application/pdf", contentBase64: "AAEC" },
+      { name: "page.html", type: "text/html", contentBase64: "AAEC" },
+    ],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  for (const entry of result.files ?? []) {
+    assert.equal(entry.accepted, false);
+    assert.equal(entry.reason, "type-mismatch");
+  }
+});
+
+test("buildSetFilesScript synthesizes a drop event on a non-input dropzone", () => {
+  // Pages that use a drag-and-drop wrapper (no visible <input>) should
+  // still get the bytes via a drop event with the same DataTransfer
+  // shape. We can't inspect the synthesized event directly with this
+  // mock (drag events don't bubble through dispatchEvent in jsdom-
+  // style shims), but we can assert the script returned ok and the
+  // per-file row is accepted.
+  const dropzone = makeEl("div", { id: "dropzone" });
+  const root = makeEl("body", { children: [dropzone] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#dropzone",
+    refs: {},
+    files: [{ name: "shot.png", type: "image/png", contentBase64: "AAAA" }],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.[0]?.accepted, true);
+});
+
+test("buildSetFilesScript surfaces 'unknown ref' for a stale ref id", () => {
+  // The selector dispatch shares the same resolve() helper as
+  // click/type, so the per-engine error strings (unknown ref / stale
+  // ref) come back unchanged. This guards the contract that the
+  // renderer in `usePreviewBrowserHost` translates those into the
+  // agent-friendly messages.
+  const root = makeEl("body", { children: [makeEl("div", {})] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "ref=e42",
+    refs: {},
+    files: [{ name: "shot.png", type: "image/png", contentBase64: "AAAA" }],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "unknown ref");
+  assert.equal(result.engine, "ref");
+});
+
+test("buildSetFilesScript threads each file's index through to the outcome (issue #356 P2)", () => {
+  // The renderer correlates the script's per-file outcome by index,
+  // not by basename — two files at different paths with the same
+  // name must not collapse into a single row on the way back. The
+  // script returns `index` on every accepted/rejected entry so the
+  // renderer can build an index-keyed map without re-deriving
+  // identity from `name`.
+  const inputAttrs = new Map<string, string>([
+    ["type", "file"],
+    ["multiple", ""],
+    ["accept", "image/png"],
+  ]);
+  const input = makeEl("input", { id: "many", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#many",
+    refs: {},
+    files: [
+      { index: 0, name: "photo.png", type: "image/png", contentBase64: "AAEC" },
+      { index: 1, name: "doc.pdf", type: "application/pdf", contentBase64: "AAEC" },
+      { index: 2, name: "photo.png", type: "image/png", contentBase64: "AAEC" },
+    ],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.length, 3);
+  // Index 1 is type-mismatch (PDF, accept="image/png"). The two
+  // `photo.png` rows at indexes 0 and 2 must stay distinguished by
+  // `index`; the renderer uses that to keep a row per CLI argument
+  // even when basenames collide.
+  assert.equal(result.files?.[0]?.index, 0);
+  assert.equal(result.files?.[0]?.accepted, true);
+  assert.equal(result.files?.[1]?.index, 1);
+  assert.equal(result.files?.[1]?.accepted, false);
+  assert.equal(result.files?.[1]?.reason, "type-mismatch");
+  assert.equal(result.files?.[2]?.index, 2);
+  assert.equal(result.files?.[2]?.accepted, true);
 });

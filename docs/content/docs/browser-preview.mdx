@@ -45,6 +45,33 @@ bypass can never be used to talk to an arbitrary external host without cert
 validation. Human users running the same flow in a normal browser can keep
 clicking through the "Advanced → Proceed" interstitial.
 
+## Uploading files from the agent
+
+When the page you're testing contains an `<input type="file">` (single or
+`multiple`) or a drag-and-drop dropzone, the agent can attach a file
+without you touching the OS picker (issue #356):
+
+```sh
+controller browser set-files ref=e3 ./dist/screenshot.png
+controller browser set-files "input[type=file][multiple]" ./a.pdf --path ./b.pdf
+```
+
+By default the file must live inside the active worktree, mirroring the
+`file://` URL policy. To attach a file outside the worktree, pass
+`--allow-outside`; the Electron main process re-checks the path and
+surfaces a confirmation prompt you must approve before the bytes leave
+the worktree boundary.
+
+The host enforces a 100 MiB cap per file before the bytes are buffered
+into memory — the page's own `max-file-size` only runs after the
+upload reaches the webview, so a multi-GB path needs to be rejected on
+the host side to avoid an OOM in the Electron process.
+
+The CLI prints a per-file outcome (accepted / rejected with reason), so
+the agent can detect a size or `accept` mismatch without re-snapping the
+page. The native picker still works — the user can click the input
+themselves at any time; `set-files` is purely additive.
+
 ## When to use the system browser instead
 
 The preview browser is for verifying your own running app. Prefer the **system

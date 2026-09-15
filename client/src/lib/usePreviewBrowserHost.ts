@@ -14,13 +14,16 @@
  */
 
 import { useEffect, useRef } from "react";
+import { getController, isControllerAvailable } from "@/lib/controller";
 import type {
   BrowserCommandMessage,
   BrowserCommandResult,
   BrowserServerMessage,
+  BrowserSetFilesFileMeta,
 } from "../../../shared/preview-browser.ts";
 import {
   buildClickScript,
+  buildSetFilesScript,
   buildSnapshotScript,
   buildTypeScript,
 } from "./browser-scripts.ts";
@@ -43,6 +46,13 @@ export interface PreviewBrowserHostOptions {
   getWebview: () => PreviewWebview | null;
   /** Trigger the visible navigation flow (validates + switches to Preview). */
   openUrl: (url: string, options?: { insecure?: boolean }) => void;
+  /**
+   * Worktree path the pane is bound to. Used by `setFiles` so the
+   * Electron main process can re-check the path policy on read
+   * (issue #356). Optional: when omitted, `setFiles` is rejected
+   * because the renderer cannot prove the path is project-scoped.
+   */
+  projectRoot?: string;
 }
 
 const RECONNECT_DELAY_MS = 1500;
@@ -58,14 +68,16 @@ export function previewBrowserWsUrl(): string {
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {
-  const { enabled, browserKey, getWebview, openUrl } = options;
+  const { enabled, browserKey, getWebview, openUrl, projectRoot } = options;
 
   // Keep the latest callbacks in refs so the long-lived socket effect doesn't
   // reconnect on every render.
   const getWebviewRef = useRef(getWebview);
   const openUrlRef = useRef(openUrl);
+  const projectRootRef = useRef(projectRoot);
   getWebviewRef.current = getWebview;
   openUrlRef.current = openUrl;
+  projectRootRef.current = projectRoot;
 
   useEffect(() => {
     if (!enabled || !browserKey) return;
@@ -111,6 +123,15 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               String(message.params.text ?? ""),
               Boolean(message.params.submit),
               refs
+            );
+          case "setFiles":
+            return await handleSetFiles(
+              getWebviewRef.current(),
+              String(message.params.selector ?? ""),
+              refs,
+              (message.params.files ?? []) as BrowserSetFilesFileMeta[],
+              projectRootRef.current,
+              Boolean(message.params.allowOutside)
             );
           default:
             return { ok: false, error: `Unsupported action` };
@@ -297,6 +318,178 @@ async function handleType(
   return {
     ok: true,
     summary: `Typed into ${selector}${submit ? " and submitted" : ""} (${result.engine})`,
+  };
+}
+
+/**
+ * Drive a `<input type="file">` (or dropzone) on the active page
+ * (issue #356). The server has already run the path policy; this
+ * handler reads each file via the Electron main process and ships
+ * the bytes into the guest via a single `executeJavaScript` round-trip.
+ * The page's own validation (`accept`, `max-file-size`) runs inside
+ * the script and returns a per-file outcome the agent can act on.
+ *
+ * The per-file outcome is correlated by **input index**, not by
+ * basename (issue #356 review, P2): two files named `photo.png` in
+ * different directories would otherwise collapse to a single script
+ * result row, and a multi-file input that accepts only the first
+ * would appear to accept both.
+ */
+async function handleSetFiles(
+  webview: PreviewWebview | null,
+  selector: string,
+  refs: Record<string, string>,
+  rawFiles: BrowserSetFilesFileMeta[],
+  projectRoot: string | undefined,
+  allowOutside: boolean
+): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  if (!selector) return { ok: false, error: "Missing selector" };
+  if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
+    return { ok: false, error: "setFiles requires at least one file" };
+  }
+  if (!projectRoot) {
+    return {
+      ok: false,
+      error:
+        "setFiles requires an active worktree path; the renderer cannot prove " +
+        "the file is project-scoped without it.",
+    };
+  }
+  if (!isControllerAvailable()) {
+    return {
+      ok: false,
+      error:
+        "setFiles is only available in the Electron app (the readPreviewFile IPC is not " +
+        "available to the browser preview).",
+    };
+  }
+  // Pull bytes through the main process. Read in parallel — the agent
+  // typically passes a small handful of files and the disk I/O dominates
+  // the latency here. Each read independently surfaces a structured
+  // error (`file does not exist`, `outside project`, `too large`,
+  // `user denied`) which we surface verbatim so the CLI's per-file
+  // output makes the cause obvious without a separate `getStatus`/log
+  // dive.
+  const controller = getController();
+  const readResults = await Promise.all(
+    rawFiles.map((entry, index) =>
+      controller
+        .readPreviewFile(entry.path, { projectRoot, allowOutside })
+        .then((result) => ({ index, entry, result }))
+    )
+  );
+  const preloaded: Array<{ index: number; name: string; type: string; contentBase64: string; path: string }> = [];
+  // `earlyResults` carries the policy/IPC verdict for every requested
+  // file, keyed by index. We keep the full length even when some files
+  // were rejected by the policy layer so the CLI's per-file output is
+  // one row per CLI argument, never collapsed by basename collisions.
+  const earlyResults: Array<{ index: number; path: string; name: string; accepted: boolean; reason?: string }> = [];
+  for (const { index, entry, result } of readResults) {
+    if (!result.ok) {
+      earlyResults.push({
+        index,
+        path: entry.path,
+        name: entry.name,
+        accepted: false,
+        reason: result.error ?? "read-failed",
+      });
+      continue;
+    }
+    if (
+      !result.name ||
+      typeof result.contentBase64 !== "string" ||
+      typeof result.size !== "number"
+    ) {
+      earlyResults.push({
+        index,
+        path: entry.path,
+        name: entry.name,
+        accepted: false,
+        reason: "read-failed",
+      });
+      continue;
+    }
+    earlyResults.push({
+      index,
+      path: entry.path,
+      name: result.name,
+      accepted: true,
+    });
+    preloaded.push({
+      index,
+      name: result.name,
+      type: result.type ?? entry.type ?? "application/octet-stream",
+      contentBase64: result.contentBase64,
+      path: entry.path,
+    });
+  }
+  if (preloaded.length === 0) {
+    // All files were rejected by the policy layer; skip the in-page
+    // round-trip and return the per-file outcome verbatim.
+    return {
+      ok: true,
+      summary: `Set 0 files on ${selector} (all ${rawFiles.length} rejected by policy)`,
+      files: earlyResults,
+    };
+  }
+  const scriptResult = (await webview.executeJavaScript(
+    buildSetFilesScript({
+      selector,
+      refs,
+      files: preloaded.map(({ index, name, type, contentBase64 }) => ({
+        index,
+        name,
+        type,
+        contentBase64,
+      })),
+      maxSize: null,
+    })
+  )) as
+    | {
+        ok: boolean;
+        engine?: string;
+        error?: string;
+        files?: Array<{ index: number; name: string; accepted: boolean; reason?: string }>;
+      }
+    | null;
+  if (!scriptResult) return { ok: false, error: "Renderer returned no result" };
+  if (!scriptResult.ok) {
+    return {
+      ok: false,
+      error:
+        scriptResult.error === "unknown ref"
+          ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
+          : scriptResult.error === "stale ref"
+            ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
+            : `No element matches: ${selector} (engine: ${scriptResult.engine ?? "?"})`,
+    };
+  }
+  // The script returns its outcome keyed by **index**, not basename,
+  // so two files with the same name at different paths correlate
+  // back to the right CLI argument. Build the index map from the
+  // script result once and look up each pre-loaded entry by its index.
+  const byIndex = new Map<number, { accepted: boolean; reason?: string }>();
+  for (const row of scriptResult.files ?? []) {
+    // `Number.isInteger` guards against malformed script output that
+    // forgets to thread the index through (defensive: the script
+    // always emits it, but a future refactor shouldn't silently
+    // collapse basenames again).
+    if (typeof row.index === "number") byIndex.set(row.index, row);
+  }
+  const finalFiles = earlyResults.map((row) => {
+    if (!row.accepted) return row;
+    const observed = byIndex.get(row.index);
+    if (!observed) {
+      return { ...row, accepted: false, reason: "no-files-set" };
+    }
+    return { ...row, accepted: observed.accepted, reason: observed.reason };
+  });
+  const acceptedCount = finalFiles.filter((row) => row.accepted).length;
+  return {
+    ok: true,
+    summary: `Set ${acceptedCount}/${rawFiles.length} files on ${selector}`,
+    files: finalFiles,
   };
 }
 

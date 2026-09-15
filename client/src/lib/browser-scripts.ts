@@ -41,11 +41,51 @@ export interface ScriptBindings {
   submit?: boolean;
 }
 
+/**
+ * Bound values for `buildSetFilesScript` (issue #356).
+ *
+ * `files` carries the path→name→bytes triples pre-loaded by the Electron
+ * main process. Bytes are base64-encoded so they survive a single
+ * `executeJavaScript` round-trip without needing a streaming channel.
+ * `maxSize` is the page-observed `maxFileSize` if the input advertised
+ * one — `null`/`undefined` means the page did not opt in. The script
+ * uses it to short-circuit `too-large` decisions without waiting for
+ * the page's own validation event.
+ *
+ * Each file carries a per-call `index` (its position in the input
+ * list) so the renderer can correlate the per-file outcome back to
+ * the original CLI argument even when two paths share a basename
+ * (issue #356 review, P2).
+ */
+export interface SetFilesBindings {
+  selector: string;
+  refs: Record<string, string>;
+  files: Array<{
+    index: number;
+    name: string;
+    type: string;
+    contentBase64: string;
+  }>;
+  /** Best-effort `maxFileSize` from the input element (in bytes). */
+  maxSize?: number | null;
+}
+
+/** Per-file outcome returned by the set-files script. */
+export interface SetFilesResultEntry {
+  /** Echoed back from the input binding so the renderer can map by position. */
+  index: number;
+  name: string;
+  accepted: boolean;
+  reason?: string;
+}
+
 /** Result shape returned by the action scripts. */
 export interface ActionResult {
   ok: boolean;
   engine?: string;
   error?: string;
+  /** `setFiles` only: per-file outcome, in input order, keyed by index. */
+  files?: SetFilesResultEntry[];
 }
 
 /** Shared JS body for resolving a selector to an element. */
@@ -224,6 +264,207 @@ export function buildClickScript(b: ScriptBindings): string {
     return { ok: true, engine: r.engine };
   })(${JSON.stringify(b.selector)}, ${JSON.stringify(b.refs)})`;
 }
+
+/**
+ * Build a script that resolves `selector` to an `<input type="file">` (or
+ * dropzone container) and attaches the supplied files (issue #356).
+ *
+ * The script handles the three target shapes a real page uses:
+ *
+ * - `<input type="file">` — assigns `input.files` from a `DataTransfer`
+ *   and dispatches `change`/`input` so the page's listeners fire.
+ * - `<input type="file" multiple>` — same, but accepts every file in
+ *   the input list. Per-file validation (`accept`/`maxFileSize`) is
+ *   surfaced as a structured reason so the agent can retry.
+ * - Dropzone container — synthesizes a `drop` event carrying a
+ *   `DataTransfer` with `File` objects. This is the fallback for
+ *   pages that wire `dragenter`/`dragover`/`drop` instead of a
+ *   visible input; the page's existing listener observes the same
+ *   shape it would from a real OS drop.
+ *
+ * Bytes arrive base64-encoded (from the Electron main process); the
+ * script decodes to `Uint8Array` before constructing each `File`. The
+ * page's own validation (size/type) runs first in this script so the
+ * agent gets a clean "rejected: too-large" error instead of guessing
+ * why `change` never fired.
+ *
+ * Returns `{ ok, files? }` so the agent can see exactly which files
+ * landed. `ok=true` with `files=[…accepted=false…]` is a valid outcome
+ * (partial success on a multi-file input).
+ */
+export function buildSetFilesScript(b: SetFilesBindings): string {
+  return `(function(selector, refs, files, maxSize){
+    ${RESOLVE_BODY}
+    ${SET_FILES_BODY}
+    return runSetFiles(selector, refs, files, maxSize);
+  })(${JSON.stringify(b.selector)}, ${JSON.stringify(b.refs)}, ${JSON.stringify(b.files)}, ${JSON.stringify(b.maxSize ?? null)})`;
+}
+
+/**
+ * JS body for `buildSetFilesScript`. Exposed so tests can assert the
+ * per-file acceptance contract against a mocked DOM (mirrors how
+ * `SNAPSHOT_BODY` is reused by `browser-scripts.test.ts`).
+ */
+export const SET_FILES_BODY = `
+    function b64ToBytes(b64){
+      // atob is available in every browser/Electron we ship; the inverse
+      // (btoa -> Uint8Array) is what we use to ship bytes back from main.
+      var bin = atob(b64);
+      var len = bin.length;
+      var out = new Uint8Array(len);
+      for (var i = 0; i < len; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    function matchesAccept(file, accept){
+      if (!accept || accept.trim() === '') return true;
+      var parts = accept.split(',').map(function(p){ return p.trim(); }).filter(Boolean);
+      var name = (file.name || '').toLowerCase();
+      var type = (file.type || '').toLowerCase();
+      for (var i = 0; i < parts.length; i++) {
+        var part = parts[i];
+        if (part.charAt(0) === '.') {
+          if (name.endsWith(part.toLowerCase())) return true;
+        } else if (part.endsWith('/*')) {
+          var prefix = part.slice(0, -1).toLowerCase();
+          if (type.indexOf(prefix) === 0) return true;
+        } else {
+          if (type === part.toLowerCase()) return true;
+        }
+      }
+      return false;
+    }
+    function buildFile(entry){
+      var bytes = b64ToBytes(entry.contentBase64);
+      // Wrap in an ArrayBuffer; the File constructor expects an ArrayBuffer
+      // or a string of bytes, but Uint8Array's underlying buffer is
+      // accepted directly in Chromium.
+      try {
+        return new File([bytes], entry.name, { type: entry.type || 'application/octet-stream' });
+      } catch (e) {
+        // Older runtimes (and some test shims) only accept BlobPart arrays.
+        return new File([new Blob([bytes])], entry.name, { type: entry.type || 'application/octet-stream' });
+      }
+    }
+    function fire(target, type, dt){
+      var evt;
+      try {
+        evt = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt });
+      } catch (e) {
+        // jsdom-style environments may not implement DragEvent with
+        // DataTransfer; fall back to a plain Event and assign the
+        // dataTransfer manually so the listener can read it.
+        evt = new Event(type, { bubbles: true, cancelable: true });
+      }
+      try { Object.defineProperty(evt, 'dataTransfer', { value: dt }); } catch (e) {}
+      target.dispatchEvent(evt);
+    }
+    function runSetFiles(selector, refs, files, maxSize){
+      var r = resolve(selector, refs);
+      if (!r.ok) return { ok: false, engine: r.engine, error: r.error };
+      var target = r.element;
+      var isFileInput = target && target.tagName === 'INPUT'
+        && (target.type || '').toLowerCase() === 'file';
+      if (!isFileInput && files.length > 0) {
+        // Walk up to the nearest input[type=file] for the validation path
+        // — dropzone wrappers themselves never carry the accept/maxSize
+        // attributes the page uses for filtering. We still synthesize a
+        // drop event on the requested element so the page's drop handler
+        // fires on the right node.
+        var walker = target;
+        while (walker && walker !== document.body) {
+          if (walker.tagName === 'INPUT' && (walker.type || '').toLowerCase() === 'file') {
+            target = walker; isFileInput = true; break;
+          }
+          walker = walker.parentElement;
+        }
+      }
+      var accept = isFileInput ? target.getAttribute('accept') : null;
+      var pageMaxSize = isFileInput && target.hasAttribute('max-file-size')
+        ? Number(target.getAttribute('max-file-size'))
+        : null;
+      var effectiveMaxSize = (typeof pageMaxSize === 'number' && isFinite(pageMaxSize)) ? pageMaxSize : maxSize;
+      var results = [];
+      var acceptedFiles = [];
+      for (var i = 0; i < files.length; i++) {
+        var entry = files[i];
+        var file = buildFile(entry);
+        var entryIndex = (typeof entry.index === 'number') ? entry.index : i;
+        if (!matchesAccept(file, accept)) {
+          results.push({ index: entryIndex, name: entry.name, accepted: false, reason: 'type-mismatch' });
+          continue;
+        }
+        if (typeof effectiveMaxSize === 'number' && isFinite(effectiveMaxSize) && file.size > effectiveMaxSize) {
+          results.push({ index: entryIndex, name: entry.name, accepted: false, reason: 'too-large' });
+          continue;
+        }
+        acceptedFiles.push(file);
+        results.push({ index: entryIndex, name: entry.name, accepted: true });
+      }
+      if (isFileInput) {
+        if (!acceptedFiles.length) {
+          // Nothing to attach. Emit the per-file outcome so the agent
+          // knows every file was rejected; we do not dispatch a change
+          // event because the page would observe an empty file list
+          // and the listener might log it as success.
+          return { ok: true, files: results, engine: r.engine };
+        }
+        var dt = new DataTransfer();
+        for (var j = 0; j < acceptedFiles.length; j++) dt.items.add(acceptedFiles[j]);
+        // Multi-file inputs accept the whole list in one assignment;
+        // single-file inputs overwrite the prior selection with the
+        // first file only (matching the OS picker behavior). If the
+        // agent sent more than one file to a single-file input we
+        // surface that as an explicit rejection on the extras so the
+        // agent doesn't believe they all landed.
+        var isMultiple = target.hasAttribute('multiple');
+        if (!isMultiple) {
+          if (acceptedFiles.length > 1) {
+            // Keep only the first; mark the rest as rejected for
+            // mismatch-with-input-shape so the agent can split the
+            // call. The per-file outcomes are correlated by index
+            // (issue #356 review, P2), so a basename collision can't
+            // collapse the result back to the first match.
+            for (var k = 1; k < results.length; k++) {
+              if (results[k].accepted) {
+                results[k] = { index: results[k].index, name: results[k].name, accepted: false, reason: 'single-file-input' };
+              }
+            }
+            dt = new DataTransfer();
+            dt.items.add(acceptedFiles[0]);
+          }
+        }
+        try {
+          // Direct assignment is the standard setter; some browsers
+          // require the getOwnPropertyDescriptor trick from the type
+          // script above. Try the simple path first.
+          target.files = dt.files;
+        } catch (e) {
+          var proto = HTMLInputElement.prototype;
+          var desc = Object.getOwnPropertyDescriptor(proto, 'files');
+          if (desc && desc.set) desc.set.call(target, dt.files);
+          else throw e;
+        }
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, files: results, engine: r.engine };
+      }
+      // Dropzone path: synthesize a drop event with the same
+      // DataTransfer. Pages that listen for the drop on a wrapper
+      // (and never expose an <input>) get exactly the data shape
+      // they'd see from a real OS drop, including preventDefault
+      // cancellation tokens.
+      if (!acceptedFiles.length) {
+        return { ok: true, files: results, engine: r.engine };
+      }
+      var ddt = new DataTransfer();
+      for (var m = 0; m < acceptedFiles.length; m++) ddt.items.add(acceptedFiles[m]);
+      var dropTarget = target;
+      fire(dropTarget, 'dragenter', ddt);
+      fire(dropTarget, 'dragover', ddt);
+      fire(dropTarget, 'drop', ddt);
+      return { ok: true, files: results, engine: r.engine };
+    }
+`;
 
 /** Build a script that resolves `selector`, focuses it, types `text`, and
  *  optionally submits its form. */
