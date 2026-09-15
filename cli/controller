@@ -98,7 +98,8 @@ const USAGE = `Usage:
   to the project that owns the current working directory, so an agent
   running inside a worktree doesn't have to memorize a project name.
 
-  controller sessions start [<project>] --worktree <worktreeId> --message <text> \\
+  controller sessions start [<project>] <message> \\
+      --worktree <worktreeId> \\
       [--provider|--agent codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>] \\
       [--parent <sessionId|self>]
 
@@ -133,7 +134,7 @@ const USAGE = `Usage:
   result count; default 100. \`No sessions match.\` is printed when the
   filter result is empty.
 
-  controller sessions wake <sessionId> --message <text> \\
+  controller sessions wake <sessionId> <message> \\
       [--delay <duration>] [--run-at <iso>] \\
       [--provider|--agent codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]
 
@@ -636,22 +637,22 @@ export function parseSessions(argv) {
   }
   switch (command) {
     case "start": {
-      const messageIdx = args.indexOf("--message");
-      if (messageIdx < 0) {
-        fail("sessions start requires --message <text>");
-      }
-      // `--message` is the last flag: everything after it is the message
-      // text, verbatim. This matches the shell idiom of quoting the
-      // prompt at the end of the command and avoids forcing the agent
-      // to escape whitespace inside the body. Because of that, the
-      // unknown-flag check has to be scoped to the tokens *before*
-      // `--message` — otherwise natural prompts like
-      // `--message "explain --json"` would be rejected as typos.
-      assertKnownFlags(
-        args.slice(0, messageIdx),
+      // Issue #355: the message is a positional argument (the second
+      // positional, after the optional `<project>`), not a `--message`
+      // flag. The positional is the only "free" non-`--…` token in
+      // `args` — every other non-`--…` token is consumed as the value
+      // of the preceding known flag. So `start "Fix" --worktree wt-1`
+      // (positional first, then flag pair) and `start --worktree wt-1
+      // "Fix"` (flag pair first, then positional) both parse cleanly.
+      //
+      // The previous `--message` flag and last-flag guard are gone —
+      // the message no longer competes with flags for the same
+      // trailing position, and prompts like `"explain the --json
+      // flag"` work without escaping the leading `--`.
+      const messageResult = extractMessageAndFlagArgs(
+        args,
         [
           "--worktree",
-          "--message",
           "--provider",
           "--agent",
           "--model",
@@ -661,14 +662,15 @@ export function parseSessions(argv) {
         ],
         "sessions start"
       );
-      const worktreeId = flagValue(args, "--worktree");
+      const { message, flagArgs } = messageResult;
+      const worktreeId = flagValue(flagArgs, "--worktree");
       if (!worktreeId) fail("sessions start requires --worktree <worktreeId>");
       // `--agent` is a forgiving alias for `--provider` (issue #306). The
       // canonical name stays `--provider` in docs and skill examples; this
       // alias just keeps a natural typo from silently swapping the agent
       // to the default provider.
-      const providerFromFlag = flagValue(args, "--provider");
-      const providerFromAlias = flagValue(args, "--agent");
+      const providerFromFlag = flagValue(flagArgs, "--provider");
+      const providerFromAlias = flagValue(flagArgs, "--agent");
       let provider = undefined;
       if (providerFromFlag != null && providerFromAlias != null) {
         if (providerFromFlag !== providerFromAlias) {
@@ -681,9 +683,9 @@ export function parseSessions(argv) {
       } else {
         provider = providerFromFlag ?? providerFromAlias;
       }
-      const model = flagValue(args, "--model");
-      const mode = flagValue(args, "--mode");
-      const skill = flagValue(args, "--skill");
+      const model = flagValue(flagArgs, "--model");
+      const mode = flagValue(flagArgs, "--mode");
+      const skill = flagValue(flagArgs, "--skill");
       // `--parent` records the new session as a child of the given
       // parent (issue #353). The literal value `self` resolves to the
       // calling session's id via `$CONTROLLER_SESSION_ID` — the
@@ -694,36 +696,8 @@ export function parseSessions(argv) {
       // new session whose id isn't assigned yet), the CLI surfaces a
       // clear error pointing at the env var so the agent can use
       // `controller sessions list` to discover its id.
-      const parentFlag = flagValue(args, "--parent");
+      const parentFlag = flagValue(flagArgs, "--parent");
       const parentId = resolveParentFlag(parentFlag);
-      const trailing = args.slice(messageIdx + 1);
-      // Reject any known option flag that appears after `--message`'s
-      // value — otherwise the flag and its argument would be appended to
-      // the prompt and silently corrupt the agent's first turn. Unknown
-      // `--…` tokens here are left alone, because they may be part of
-      // the prompt itself (e.g. `--message "explain --help"`).
-      const RESERVED_FLAGS = [
-        "--worktree",
-        "--provider",
-        "--agent",
-        "--model",
-        "--mode",
-        "--skill",
-        "--parent",
-      ];
-      const offendingFlag = trailing.find((arg) =>
-        RESERVED_FLAGS.includes(arg)
-      );
-      if (offendingFlag) {
-        fail(
-          `--message must be the last flag on the command line, but found ${offendingFlag} after it. ` +
-            `Quote the prompt at the end, e.g. --message "<prompt>" ${offendingFlag === "--worktree" ? "" : "..."}`
-        );
-      }
-      const message = trailing.join(" ").trim();
-      if (!message) {
-        fail("sessions start requires --message <text>");
-      }
       return {
         project,
         action: "start",
@@ -800,15 +774,14 @@ export function parseSessions(argv) {
       if (!sessionId || sessionId.startsWith("--")) {
         fail("sessions wake requires a sessionId");
       }
+      // Issue #355: the message is a positional argument (the second
+      // positional, after the session id), not a `--message` flag. It
+      // can come before or after the wake-specific flags (`--delay`,
+      // `--run-at`, ...); the previous last-flag guard is gone.
       const wakeArgs = rest.slice(1);
-      const messageIdx = wakeArgs.indexOf("--message");
-      if (messageIdx < 0) {
-        fail("sessions wake requires --message <text>");
-      }
-      assertKnownFlags(
-        wakeArgs.slice(0, messageIdx),
+      const { message, flagArgs } = extractMessageAndFlagArgs(
+        wakeArgs,
         [
-          "--message",
           "--delay",
           "--run-at",
           "--provider",
@@ -819,13 +792,13 @@ export function parseSessions(argv) {
         ],
         "sessions wake"
       );
-      const delay = flagValue(wakeArgs, "--delay");
-      const runAt = flagValue(wakeArgs, "--run-at");
+      const delay = flagValue(flagArgs, "--delay");
+      const runAt = flagValue(flagArgs, "--run-at");
       if (delay && runAt) {
         fail("sessions wake: --delay and --run-at are mutually exclusive; pick one.");
       }
-      const providerFromFlag = flagValue(wakeArgs, "--provider");
-      const providerFromAlias = flagValue(wakeArgs, "--agent");
+      const providerFromFlag = flagValue(flagArgs, "--provider");
+      const providerFromAlias = flagValue(flagArgs, "--agent");
       let provider = undefined;
       if (providerFromFlag != null && providerFromAlias != null) {
         if (providerFromFlag !== providerFromAlias) {
@@ -838,35 +811,9 @@ export function parseSessions(argv) {
       } else {
         provider = providerFromFlag ?? providerFromAlias;
       }
-      const model = flagValue(wakeArgs, "--model");
-      const mode = flagValue(wakeArgs, "--mode");
-      const skill = flagValue(wakeArgs, "--skill");
-      const trailing = wakeArgs.slice(messageIdx + 1);
-      // Reuse the same post-message flag guard as `start`. A trailing
-      // `--delay` / `--run-at` after the prompt would silently corrupt
-      // the wake message.
-      const WAKE_RESERVED = [
-        "--delay",
-        "--run-at",
-        "--provider",
-        "--agent",
-        "--model",
-        "--mode",
-        "--skill",
-      ];
-      const offendingFlag = trailing.find((arg) =>
-        WAKE_RESERVED.includes(arg)
-      );
-      if (offendingFlag) {
-        fail(
-          `--message must be the last flag on the command line, but found ${offendingFlag} after it. ` +
-            `Quote the prompt at the end, e.g. --message "<prompt>" …`
-        );
-      }
-      const message = trailing.join(" ").trim();
-      if (!message) {
-        fail("sessions wake requires --message <text>");
-      }
+      const model = flagValue(flagArgs, "--model");
+      const mode = flagValue(flagArgs, "--mode");
+      const skill = flagValue(flagArgs, "--skill");
       // `--delay` is the documented default; `--run-at` exists for the UI
       // (date picker) and for tests. The server resolves either into an
       // ISO timestamp before persisting — sending the raw form keeps
@@ -2143,6 +2090,79 @@ function parsePairs(rest, flag) {
 function flagValue(rest, flag) {
   const idx = rest.indexOf(flag);
   return idx >= 0 ? rest[idx + 1] : undefined;
+}
+
+// Pull the message positional and the flag-pair slice out of an args
+// array for `sessions start` / `sessions wake` (issue #355). The
+// positional can sit before or after the flag pairs (so a message like
+// `"Fix issue #351"` either ends the argv or starts it), and every
+// non-`--…` token that is NOT the positional is consumed as the value
+// of the preceding known flag. A stray bare token that's not a flag
+// value and not the positional is rejected with a clear "unexpected
+// positional after the message" error so the user can fix the call.
+//
+// We walk argv once, tracking the index of the message positional and
+// every flag / flag-value pair. Walking (rather than slicing from a
+// found index) keeps flag values like `wt-123` from being mistaken
+// for the message — a previous version used a `findIndex` and ate the
+// first flag value as the message, which is the bug this helper was
+// extracted to prevent.
+function extractMessageAndFlagArgs(args, knownFlags, commandLabel) {
+  const knownSet = new Set(knownFlags);
+  const flagArgs = [];
+  // Index of the message positional in `args`. There is at most one;
+  // a second bare token after the first one is rejected below.
+  let messageIdx = -1;
+  // When set, the next non-`--…` token is the value of `pendingFlag`
+  // and is appended to `flagArgs` (consumed), not inspected as a
+  // candidate for the positional or a stray-token error.
+  let pendingFlag = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (pendingFlag) {
+      // The next arg is the value for `pendingFlag` — even if it
+      // doesn't start with `--`, it's already claimed by the flag
+      // (e.g. `--worktree wt-123`).
+      flagArgs.push(pendingFlag);
+      flagArgs.push(arg);
+      pendingFlag = null;
+      continue;
+    }
+    if (typeof arg === "string" && arg.startsWith("--")) {
+      if (!knownSet.has(arg)) {
+        fail(
+          `Unknown flag for ${commandLabel}: ${arg}\n` +
+            `Valid flags: ${knownFlags.join(", ")}`
+        );
+      }
+      // Every known flag in this list takes a value. The old `--message`
+      // bool flag is gone; in the positional model the message arg is
+      // not a flag at all.
+      pendingFlag = arg;
+      continue;
+    }
+    // Bare (non-`--…`) token. It's either the first positional we've
+    // seen (the message), or it's a stray second positional — the
+    // issue's "one positional only" rule rejects the latter.
+    if (messageIdx < 0) {
+      messageIdx = i;
+      continue;
+    }
+    fail(
+      `Unexpected positional argument after the message: "${arg}". ` +
+        `Only one positional (the prompt) is allowed; pass any extra flags before or after it.`
+    );
+  }
+  if (pendingFlag) {
+    fail(`${commandLabel}: ${pendingFlag} requires a value`);
+  }
+  if (messageIdx < 0) {
+    fail(
+      "Missing message: the last positional argument is the prompt to send the agent. " +
+        `Example: controller ${commandLabel} <message> [${knownFlags.join(" ")} ...]`
+    );
+  }
+  return { message: args[messageIdx], flagArgs };
 }
 
 // Resolve the `--parent <value>` flag (issue #353). `value` is either

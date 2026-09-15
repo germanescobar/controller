@@ -322,7 +322,6 @@ test("parseSessions accepts a missing <project> (resolved later from cwd)", asyn
     "start",
     "--worktree",
     "wt-123",
-    "--message",
     "Implement the project-mgmt block",
   ]);
   assert.equal(parsed.project, "");
@@ -868,11 +867,14 @@ test("runWorktrees list with no <project> resolves the project from cwd", async 
   assert.match(stdoutChunks.join(""), /wt-1  main  main  \[main\]/);
 });
 
-test("parseSessions maps start to a session-start payload, including the verbatim --message text", async () => {
+test("parseSessions maps start to a session-start payload, including the verbatim message text (issue #355)", async () => {
   const cli = await loadCli();
+  // Issue #355: the message is a positional argument, not a `--message`
+  // flag. Flags come after the positional in any order.
   const parsed = cli.parseSessions([
     "start",
     "demo",
+    "Implement the project-mgmt block",
     "--worktree",
     "wt-123",
     "--provider",
@@ -883,8 +885,6 @@ test("parseSessions maps start to a session-start payload, including the verbati
     "plan",
     "--skill",
     "github-issues",
-    "--message",
-    "Implement the project-mgmt block",
   ]);
   assert.equal(parsed.project, "demo");
   assert.equal(parsed.action, "start");
@@ -898,42 +898,123 @@ test("parseSessions maps start to a session-start payload, including the verbati
   });
 });
 
-test("parseSessions treats the message as the rest of argv (whitespace + trailing args stay verbatim)", async () => {
+test("parseSessions accepts the message positional in either order relative to the flags (issue #355)", async () => {
   const cli = await loadCli();
-  // Simulate the shell joining a quoted multi-word message plus an extra
-  // trailing argument — `--message`'s value is everything after the flag.
-  const parsed = cli.parseSessions([
+  // Form 1: flags first, message last.
+  const flagsFirst = cli.parseSessions([
     "start",
     "demo",
     "--worktree",
     "wt-123",
-    "--message",
-    "look at issue 190 and",
-    "implement",
-    "the CLI surfaces",
+    "look at issue 190 and implement the CLI surfaces",
   ]);
-  assert.equal(parsed.body.message, "look at issue 190 and implement the CLI surfaces");
+  assert.equal(flagsFirst.body.message, "look at issue 190 and implement the CLI surfaces");
+  assert.equal(flagsFirst.body.worktreeId, "wt-123");
+  // Form 2: message first, flags after. The positional scan matches by
+  // position, not by being-last-among-flags.
+  const messageFirst = cli.parseSessions([
+    "start",
+    "demo",
+    "look at issue 190 and implement the CLI surfaces",
+    "--worktree",
+    "wt-123",
+  ]);
+  assert.equal(messageFirst.body.message, "look at issue 190 and implement the CLI surfaces");
+  assert.equal(messageFirst.body.worktreeId, "wt-123");
 });
 
-test("parseSessions allows unknown --… tokens inside the --message prompt text (issue #306 regression)", async () => {
+test("parseSessions keeps --flag-like tokens literal in the message body (issue #355)", async () => {
   const cli = await loadCli();
-  // The unknown-flag check must not scan the message body itself, since
-  // `--message` is documented to consume the rest of argv as prompt text
-  // verbatim. Natural phrasings like "explain --help" or "run --json on
-  // the API" must keep working.
+  // The prompt is a positional argument, so `--json` / `--help` / etc.
+  // inside it stay as part of the message text — no leading-dash
+  // escaping needed.
   const parsed = cli.parseSessions([
     "start",
     "demo",
     "--worktree",
     "wt-123",
-    "--message",
     "explain --help and run --json on the API",
   ]);
   assert.equal(parsed.body.message, "explain --help and run --json on the API");
   assert.equal(parsed.body.worktreeId, "wt-123");
 });
 
-test("parseSessions rejects a reserved flag that appears after --message", async () => {
+test("parseSessions errors clearly when the message positional is missing (issue #355)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "start",
+          "demo",
+          "--worktree",
+          "wt-123",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Missing message/);
+});
+
+test("parseSessions rejects --flag=value shorthand on sessions start (issue #355)", async () => {
+  const cli = await loadCli();
+  // The positional parser deliberately doesn't expand `--flag=value` —
+  // the unknown-flag check should reject it, the same as before. This
+  // closes the dual-syntax ambiguity class: only `--flag value` is
+  // accepted, and only a single space separator.
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "start",
+          "demo",
+          "--worktree=wt-123",
+          "hi",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--worktree=wt-123/);
+});
+
+test("parseSessions rejects a stray trailing flag-pair after the message positional (issue #355)", async () => {
+  // The new positional shape forbids a second positional: anything after
+  // the message must be a `--flag value` pair. A bare `--provider` after
+  // the message would be flagged as unknown — closing the issue's
+  // "post-message flag guard" with a clearer error and the same
+  // `Unknown flag` umbrella used elsewhere.
   const cli = await loadCli();
   const originalExit = process.exit;
   const originalStderr = process.stderr.write.bind(process.stderr);
@@ -949,7 +1030,10 @@ test("parseSessions rejects a reserved flag that appears after --message", async
   };
   try {
     // Wrap in an async fn so the synchronous throw surfaces as a
-    // rejection that `assert.rejects` can capture.
+    // rejection that `assert.rejects` can capture. Issue #355 forbids
+    // a second positional: `--provider` after the message positional is
+    // a bare token, not a flag pair, and gets rejected by the unknown-
+    // flag guard.
     await assert.rejects(
       async () =>
         cli.parseSessions([
@@ -957,10 +1041,8 @@ test("parseSessions rejects a reserved flag that appears after --message", async
           "demo",
           "--worktree",
           "wt-123",
-          "--message",
           "hi",
-          "--provider",
-          "anita",
+          "--bogus",
         ]),
       /__exit__/
     );
@@ -969,9 +1051,9 @@ test("parseSessions rejects a reserved flag that appears after --message", async
     process.stderr.write = originalStderr;
   }
   assert.equal(exitCode, 1);
-  // The error must name the offending flag so the caller can fix it.
-  assert.match(stderrText, /--message must be the last flag/);
-  assert.match(stderrText, /--provider/);
+  // The error must name the offending token so the caller can fix it.
+  assert.match(stderrText, /Unknown flag for sessions start/);
+  assert.match(stderrText, /--bogus/);
 });
 
 test("parseSessions rejects an unknown flag with a clear error listing valid flags (issue #306)", async () => {
@@ -997,7 +1079,6 @@ test("parseSessions rejects an unknown flag with a clear error listing valid fla
           "wt-1",
           "--frobnicate",
           "yes",
-          "--message",
           "hi",
         ]),
       /__exit__/
@@ -1015,7 +1096,7 @@ test("parseSessions rejects an unknown flag with a clear error listing valid fla
   assert.match(stderrText, /--agent/);
 });
 
-test("parseSessions accepts --agent as an alias of --provider (issue #306)", async () => {
+test("parseSessions accepts --agent as an alias of --provider (issue #306, #355)", async () => {
   const cli = await loadCli();
   const parsed = cli.parseSessions([
     "start",
@@ -1023,7 +1104,6 @@ test("parseSessions accepts --agent as an alias of --provider (issue #306)", asy
     "wt-1",
     "--agent",
     "claude",
-    "--message",
     "hi",
   ]);
   assert.equal(parsed.body.provider, "claude");
@@ -1031,7 +1111,7 @@ test("parseSessions accepts --agent as an alias of --provider (issue #306)", asy
   assert.equal(parsed.body.message, "hi");
 });
 
-test("parseSessions accepts --agent and --provider when they agree (issue #306)", async () => {
+test("parseSessions accepts --agent and --provider when they agree (issue #306, #355)", async () => {
   const cli = await loadCli();
   const parsed = cli.parseSessions([
     "start",
@@ -1041,7 +1121,6 @@ test("parseSessions accepts --agent and --provider when they agree (issue #306)"
     "claude",
     "--provider",
     "claude",
-    "--message",
     "hi",
   ]);
   assert.equal(parsed.body.provider, "claude");
@@ -1072,7 +1151,6 @@ test("parseSessions rejects --agent and --provider when they disagree (issue #30
           "claude",
           "--provider",
           "codex",
-          "--message",
           "hi",
         ]),
       /__exit__/
@@ -1224,7 +1302,6 @@ test("runSessions start POSTs to the new sessions endpoint and prints the URL", 
         "controller",
         "--worktree",
         "wt-1",
-        "--message",
         "work on issue 190",
       ],
       "http://controller.test"
@@ -1246,14 +1323,15 @@ test("runSessions start POSTs to the new sessions endpoint and prints the URL", 
 
 // --- sessions wake (issue #339) ---
 
-test("parseSessions wake builds a wake payload with --delay", async () => {
+test("parseSessions wake builds a wake payload with --delay (issue #355)", async () => {
   const cli = await loadCli();
+  // Issue #355: the message is a positional argument. It can come
+  // before or after the wake-specific flags.
   const parsed = cli.parseSessions([
     "wake",
     "sess-abc",
     "--delay",
     "30s",
-    "--message",
     "Check `gh pr checks 42`",
   ]);
   assert.equal(parsed.action, "wake");
@@ -1263,14 +1341,37 @@ test("parseSessions wake builds a wake payload with --delay", async () => {
   assert.equal(parsed.body.runAtIso, undefined);
 });
 
-test("parseSessions wake accepts --run-at and rejects combining --delay with --run-at", async () => {
+test("parseSessions wake accepts the message positional before or after the flags (issue #355)", async () => {
+  const cli = await loadCli();
+  // Form 1: flags first, message last.
+  const flagsFirst = cli.parseSessions([
+    "wake",
+    "sess-abc",
+    "--delay",
+    "30s",
+    "ring in the new year",
+  ]);
+  assert.equal(flagsFirst.body.message, "ring in the new year");
+  assert.equal(flagsFirst.body.delay, "30s");
+  // Form 2: message first, flags after.
+  const messageFirst = cli.parseSessions([
+    "wake",
+    "sess-abc",
+    "ring in the new year",
+    "--delay",
+    "30s",
+  ]);
+  assert.equal(messageFirst.body.message, "ring in the new year");
+  assert.equal(messageFirst.body.delay, "30s");
+});
+
+test("parseSessions wake accepts --run-at and rejects combining --delay with --run-at (issue #355)", async () => {
   const cli = await loadCli();
   const parsed = cli.parseSessions([
     "wake",
     "sess-abc",
     "--run-at",
     "2026-12-31T23:59:59.000Z",
-    "--message",
     "ring in the new year",
   ]);
   assert.equal(parsed.body.runAtIso, "2026-12-31T23:59:59.000Z");
@@ -1299,7 +1400,6 @@ test("parseSessions wake accepts --run-at and rejects combining --delay with --r
           "30s",
           "--run-at",
           "2026-12-31T23:59:59.000Z",
-          "--message",
           "x",
         ]),
       /__exit__/
@@ -1312,7 +1412,7 @@ test("parseSessions wake accepts --run-at and rejects combining --delay with --r
   assert.match(stderrText, /--delay and --run-at are mutually exclusive/);
 });
 
-test("parseSessions wake requires sessionId", async () => {
+test("parseSessions wake requires sessionId (issue #355)", async () => {
   const cli = await loadCli();
   const originalExit = process.exit;
   const originalStderr = process.stderr.write.bind(process.stderr);
@@ -1331,8 +1431,6 @@ test("parseSessions wake requires sessionId", async () => {
       async () =>
         cli.parseSessions([
           "wake",
-          "--message",
-          "hi",
         ]),
       /__exit__/
     );
@@ -1344,14 +1442,46 @@ test("parseSessions wake requires sessionId", async () => {
   assert.match(stderrText, /sessions wake requires a sessionId/);
 });
 
-test("parseSessions wake accepts --agent alias for --provider", async () => {
+test("parseSessions wake errors clearly when the message positional is missing (issue #355)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "wake",
+          "sess-abc",
+          "--delay",
+          "30s",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Missing message/);
+});
+
+test("parseSessions wake accepts --agent alias for --provider (issue #355)", async () => {
   const cli = await loadCli();
   const parsed = cli.parseSessions([
     "wake",
     "sess-abc",
     "--agent",
     "claude",
-    "--message",
     "hi",
   ]);
   assert.equal(parsed.body.provider, "claude");
@@ -1395,7 +1525,6 @@ test("runSessions wake POSTs to the per-session wake endpoint", async () => {
         "sess-abc",
         "--delay",
         "30s",
-        "--message",
         "Check CI",
       ],
       "http://controller.test"
@@ -2762,7 +2891,7 @@ test("parseSessions list rejects a non-positive --limit with a clear error", asy
   assert.match(stderrText, /--limit must be a positive integer/);
 });
 
-test("parseSessions start --parent self resolves via $CONTROLLER_SESSION_ID (issue #353)", async () => {
+test("parseSessions start --parent self resolves via $CONTROLLER_SESSION_ID (issue #353, #355)", async () => {
   const cli = await loadCli();
   const savedEnv = process.env.CONTROLLER_SESSION_ID;
   process.env.CONTROLLER_SESSION_ID = "sess-self-42";
@@ -2773,7 +2902,6 @@ test("parseSessions start --parent self resolves via $CONTROLLER_SESSION_ID (iss
       "wt-1",
       "--parent",
       "self",
-      "--message",
       "spawn a child",
     ]);
     assert.equal(parsed.action, "start");
@@ -2784,7 +2912,7 @@ test("parseSessions start --parent self resolves via $CONTROLLER_SESSION_ID (iss
   }
 });
 
-test("parseSessions start --parent self surfaces a clear error when CONTROLLER_SESSION_ID is unset (issue #353)", async () => {
+test("parseSessions start --parent self surfaces a clear error when CONTROLLER_SESSION_ID is unset (issue #353, #355)", async () => {
   const cli = await loadCli();
   const savedEnv = process.env.CONTROLLER_SESSION_ID;
   delete process.env.CONTROLLER_SESSION_ID;
@@ -2809,7 +2937,6 @@ test("parseSessions start --parent self surfaces a clear error when CONTROLLER_S
           "wt-1",
           "--parent",
           "self",
-          "--message",
           "spawn a child",
         ]),
       /__exit__/
@@ -2838,7 +2965,7 @@ test("parseSessions list --parent self resolves via $CONTROLLER_SESSION_ID (issu
   }
 });
 
-test("parseSessions start passes an explicit --parent through unchanged", async () => {
+test("parseSessions start passes an explicit --parent through unchanged (issue #355)", async () => {
   // The `self` alias is the only string substitution on `--parent`;
   // any other value is forwarded verbatim so the server can use it
   // directly. This guards against a future refactor that tries to
@@ -2850,13 +2977,12 @@ test("parseSessions start passes an explicit --parent through unchanged", async 
     "wt-1",
     "--parent",
     "sess-explicit",
-    "--message",
     "hi",
   ]);
   assert.equal(parsed.body.parentId, "sess-explicit");
 });
 
-test("parseSessions start without --parent omits the body field", async () => {
+test("parseSessions start without --parent omits the body field (issue #355)", async () => {
   // The start POST endpoint distinguishes "no parent" (absent key) from
   // "parent is empty string" — make sure the CLI doesn't accidentally
   // send a parentId: "" when the flag is missing.
@@ -2865,7 +2991,6 @@ test("parseSessions start without --parent omits the body field", async () => {
     "start",
     "--worktree",
     "wt-1",
-    "--message",
     "hi",
   ]);
   assert.equal(
@@ -3375,7 +3500,6 @@ test("runSessions start forwards --parent on the POST body (issue #353)", async 
         "wt-1",
         "--parent",
         "sess-parent",
-        "--message",
         "spawn a child",
       ],
       "http://controller.test"

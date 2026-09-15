@@ -76,6 +76,8 @@ and run it; no install required.
 
 ## [Unreleased]
 
+- **CLI: positional message argument for `sessions start` / `sessions wake` (#355)**. The `--message <text>` flag is gone — the message is now the second positional (after the optional `<project>` on `start`, or after the `<sessionId>` on `wake`). Flags come before or after the message in any order, and prompts that contain flag-like tokens (`"explain the --json flag"`) no longer need escaping. The previous "last-flag guard" plus the hand-curated `RESERVED_FLAGS` / `WAKE_RESERVED` arrays are removed; the parser walks argv once and the message is whichever bare token isn't a flag value. Missing message errors read `"Missing message: the last positional argument is the prompt to send the agent"`. The `--flag=value` shorthand is still rejected on the sessions surfaces (only space-separated `--flag value` is accepted), closing the dual-syntax ambiguity class. The agent preamble's worked examples and the `controller-worktrees` managed skill were updated to teach the new shape; the `wake <self> --message "..." --delay 30s` and `sessions start --message "..."` snippets are now `wake <self> "..." --delay 30s` and `sessions start "..."` respectively.
+
 ## [0.3.5] - 2026-08-19
 
 ### Fixed

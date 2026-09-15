@@ -276,10 +276,10 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       "queue: a follow-up turn runs once the current turn ends, in the same",
       "session, with full context.",
       "",
-      "  1. Deferred follow-up. `wake <self> --message \"...\" --delay 30s`",
+      "  1. Deferred follow-up. `wake <self> \"...\" --delay 30s`",
       `     enqueues a follow-up and holds it for the duration (forms: 30s,`,
       `     5m, 1h, 2d). The wakes consumer fires it on the next scheduler`,
-      `     tick via \`${cliPath} sessions wake <self> --message "..." --delay 30s\`.`,
+      `     tick via \`${cliPath} sessions wake <self> "..." --delay 30s\`.`,
       "",
       "  2. Goal-driven loop. `goal set <self> --condition \"<text>\"`",
       `     attaches a completion condition. After every turn the`,
@@ -300,7 +300,7 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       `   gh pr create --fill`,
       `   ${cliPath} sessions goal set <self> --condition \\`,
       `     "all required CI checks on PR #N are SUCCESS" --max-turns 5`,
-      `   ${cliPath} sessions wake <self> --message "Check gh pr checks <N>; if all`,
+      `   ${cliPath} sessions wake <self> "Check gh pr checks <N>; if all`,
       `     SUCCESS, stop the goal; if any FAILURE, read the failing job log,`,
       `     fix, push, and re-set the goal" --delay 30s`,
       "",
@@ -336,9 +336,11 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       `    on the agent's first \`run.started\` event); the CLI surfaces a`,
       `    clear error and points you at \`sessions list\` to discover your`,
       `    own id.`,
-      `  - \`${cliPath} sessions start --parent <id|self>\` records the new`,
-      `    session as a child of the given parent. Use \`self\` to spawn a`,
-      `    child of yourself (the coordinator pattern from #351).`,
+      `  - \`${cliPath} sessions start <message> --parent <id|self>\` records`,
+      `    the new session as a child of the given parent. Use \`self\` to`,
+      `    spawn a child of yourself (the coordinator pattern from #351).`,
+      `    \`<message>\` is a positional argument in the new shape`,
+      `    (issue #355).`,
       "",
       "Typical coordinator startup:",
       "",
@@ -351,8 +353,8 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       `   #    with string 'provider'".`,
       `   SELF=$(${cliPath} sessions list --json | jq -r 'select(.provider == "codex") | .id' | head -1)`,
       `   # 2. Spawn a child pinned to yourself.`,
-      `   ${cliPath} sessions start --worktree <wtId> --parent "$SELF" \\`,
-      `     --agent claude --message "Review the PR from session $SELF"`,
+      `   ${cliPath} sessions start "Review the PR from session $SELF" \\`,
+      `     --worktree <wtId> --parent "$SELF" --agent claude`,
       `   # 3. Later, see your children.`,
       `   ${cliPath} sessions list --parent "$SELF" --json`,
     ].join("\n");
@@ -434,7 +436,7 @@ test("preamble documents the same-session loop primitives (issue #339)", async (
   await withTempHome(async () => {
     const preamble = await buildControllerPreamble();
     assert.match(preamble, /Controller ships three same-session primitives/);
-    assert.match(preamble, /wake <self> --message "\.\.\." --delay 30s/);
+    assert.match(preamble, /wake <self> "\.\.\." --delay 30s/);
     assert.match(preamble, /goal set <self> --condition/);
     assert.match(preamble, /monitor start <self>/);
     assert.match(preamble, /Worked example — open a PR and stay until CI is green/);
