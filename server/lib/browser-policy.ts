@@ -60,6 +60,29 @@ function isPathInside(parent: string, child: string): boolean {
   );
 }
 
+/**
+ * Canonicalize a path so the boundary check cannot be bypassed by a
+ * symlink in or out of the worktree (issue #356 review, P1). The lexical
+ * `path.relative` comparison above is fooled by a symlink that lives
+ * inside the worktree but points to `/etc/passwd` — the relative path
+ * stays empty/positive because the symlink itself is in-worktree, while
+ * `fs.readFile` follows the link and reads the target. `realpath` walks
+ * the entire chain so both sides of the comparison refer to the same
+ * canonical location.
+ *
+ * Errors are swallowed and the input is returned unchanged so the
+ * caller still sees the user-typed path in the error message; a
+ * subsequent `statSync` will surface a clean "does not exist" / "not a
+ * file" reason instead.
+ */
+function canonicalizeForBoundary(input: string): string {
+  try {
+    return fs.realpathSync(input);
+  } catch {
+    return input;
+  }
+}
+
 export interface PreviewUrlCheck {
   allowed: boolean;
   url?: string;
@@ -89,6 +112,15 @@ export interface ValidateBrowserFileOptions {
    * URL side.
    */
   allowOutside?: boolean;
+  /**
+   * Working directory the user-typed path is relative to. The CLI
+   * advertises relative paths in its help text
+   * (`set-files ref=e3 ./dist/screenshot.png`), and the server's own
+   * `process.cwd()` is unrelated to the agent's shell in packaged
+   * builds. Default `undefined` — only absolute paths are accepted when
+   * the caller doesn't pass a cwd.
+   */
+  cwd?: string;
 }
 
 /**
@@ -96,6 +128,13 @@ export interface ValidateBrowserFileOptions {
  * Mirrors `validateBrowserUrl` for symmetry: inside-project paths are
  * always allowed; outside-project paths require `allowOutside`. The
  * Electron main process re-checks this at file-read time.
+ *
+ * Both `projectRoot` and the resolved target are run through
+ * `realpath` before the boundary comparison so a symlink in or out of
+ * the worktree cannot be used to bypass the policy (issue #356 review,
+ * P1). A relative path is resolved against `options.cwd` so the
+ * agent's `cwd` — supplied in the request body — is the source of
+ * truth for `./…` inputs.
  */
 export function validateBrowserFilePath(
   input: string,
@@ -107,7 +146,11 @@ export function validateBrowserFilePath(
   }
   let resolved: string;
   try {
-    resolved = path.resolve(input);
+    if (path.isAbsolute(input) || !options.cwd) {
+      resolved = path.resolve(input);
+    } else {
+      resolved = path.resolve(options.cwd, input);
+    }
   } catch {
     return { allowed: false, error: "Could not resolve path" };
   }
@@ -126,11 +169,17 @@ export function validateBrowserFilePath(
       error: "File uploads can only run from inside an active worktree",
     };
   }
-  if (isPathInside(projectRoot, resolved)) {
-    return { allowed: true, path: resolved, scope: "inside-project" };
+  // Canonicalize both sides so the in/out comparison uses the
+  // symlink-resolved target. A symlink that lives in the worktree but
+  // points to `/etc/passwd` would otherwise be classified as
+  // `inside-project` because the link itself is in-worktree.
+  const canonicalRoot = canonicalizeForBoundary(projectRoot);
+  const canonicalResolved = canonicalizeForBoundary(resolved);
+  if (isPathInside(canonicalRoot, canonicalResolved)) {
+    return { allowed: true, path: canonicalResolved, scope: "inside-project" };
   }
   if (options.allowOutside) {
-    return { allowed: true, path: resolved, scope: "outside-project" };
+    return { allowed: true, path: canonicalResolved, scope: "outside-project" };
   }
   return {
     allowed: false,

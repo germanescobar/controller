@@ -135,7 +135,13 @@ test("validateBrowserFilePath allows a real file inside the worktree", () => {
   try {
     const result = validateBrowserFilePath(file, tmp);
     assert.equal(result.allowed, true);
-    assert.equal(result.path, path.resolve(file));
+    // The policy canonicalizes both sides via `realpath` (issue #356
+    // review, P1) so the comparison cannot be tricked by a symlink
+    // in the worktree. On macOS `os.tmpdir()` itself is a symlink
+    // (e.g. `/var/folders/...` → `/private/var/folders/...`), so the
+    // canonicalized path differs from `path.resolve` even when the
+    // file itself has no symlink component.
+    assert.equal(result.path, fs.realpathSync(file));
     assert.equal(result.scope, "inside-project");
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -166,8 +172,56 @@ test("validateBrowserFilePath allows an outside file when --allow-outside is set
   try {
     const result = validateBrowserFilePath(file, inside, { allowOutside: true });
     assert.equal(result.allowed, true);
-    assert.equal(result.path, path.resolve(file));
+    // See the inside-project test above for why this is `realpathSync`
+    // rather than `path.resolve`.
+    assert.equal(result.path, fs.realpathSync(file));
     assert.equal(result.scope, "outside-project");
+  } finally {
+    fs.rmSync(inside, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("validateBrowserFilePath resolves a relative path against the supplied cwd", () => {
+  // Documented as `./dist/screenshot.png` in the CLI help text. The
+  // server's own `process.cwd()` is unrelated to the agent's shell
+  // in packaged builds, so the route threads the request `cwd`
+  // through (issue #356 review, P1).
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-"));
+  const subdir = path.join(tmp, "dist");
+  fs.mkdirSync(subdir);
+  const file = path.join(subdir, "screenshot.png");
+  fs.writeFileSync(file, "png");
+  try {
+    const result = validateBrowserFilePath("./dist/screenshot.png", tmp, {
+      cwd: tmp,
+    });
+    assert.equal(result.allowed, true);
+    assert.equal(result.path, fs.realpathSync(file));
+    assert.equal(result.scope, "inside-project");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("validateBrowserFilePath rejects a symlink that escapes the worktree", () => {
+  // The lexical `path.relative` check the v1 Preview pane used (and
+  // the original file-path policy used) is fooled by a symlink that
+  // lives in the worktree but points to a target outside it. After
+  // `realpath`, the symlink's resolved target lands outside the
+  // canonical worktree root, so the canonicalized comparison
+  // correctly classifies it as outside-project (issue #356 review,
+  // P1).
+  const inside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-outside-"));
+  const real = path.join(outside, "secret.txt");
+  fs.writeFileSync(real, "shh");
+  const link = path.join(inside, "link.txt");
+  try {
+    fs.symlinkSync(real, link);
+    const result = validateBrowserFilePath(link, inside);
+    assert.equal(result.allowed, false);
+    assert.match(result.error ?? "", /--allow-outside/);
   } finally {
     fs.rmSync(inside, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });

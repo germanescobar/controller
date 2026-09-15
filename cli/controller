@@ -30,7 +30,9 @@ const USAGE = `Usage:
   the active page (issue #356). By default the paths must live inside the
   active worktree; pass \`--allow-outside\` to attach a file outside the
   worktree, which the Electron main process gates behind a confirmation
-  prompt before the file is read.
+  prompt before the file is read. The host enforces a 100 MiB per-file
+  cap before any bytes are buffered; larger uploads are rejected with a
+  structured error so the Electron app does not OOM on a hostile path.
 
   Selectors for click/type (issue #170) accept a plain CSS selector, or a
   locator-style prefix: \`text=...\`, \`role=<role>[name="..."]\`,

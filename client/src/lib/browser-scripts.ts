@@ -51,11 +51,17 @@ export interface ScriptBindings {
  * one — `null`/`undefined` means the page did not opt in. The script
  * uses it to short-circuit `too-large` decisions without waiting for
  * the page's own validation event.
+ *
+ * Each file carries a per-call `index` (its position in the input
+ * list) so the renderer can correlate the per-file outcome back to
+ * the original CLI argument even when two paths share a basename
+ * (issue #356 review, P2).
  */
 export interface SetFilesBindings {
   selector: string;
   refs: Record<string, string>;
   files: Array<{
+    index: number;
     name: string;
     type: string;
     contentBase64: string;
@@ -66,6 +72,8 @@ export interface SetFilesBindings {
 
 /** Per-file outcome returned by the set-files script. */
 export interface SetFilesResultEntry {
+  /** Echoed back from the input binding so the renderer can map by position. */
+  index: number;
   name: string;
   accepted: boolean;
   reason?: string;
@@ -76,7 +84,7 @@ export interface ActionResult {
   ok: boolean;
   engine?: string;
   error?: string;
-  /** `setFiles` only: per-file outcome, in input order. */
+  /** `setFiles` only: per-file outcome, in input order, keyed by index. */
   files?: SetFilesResultEntry[];
 }
 
@@ -380,16 +388,17 @@ export const SET_FILES_BODY = `
       for (var i = 0; i < files.length; i++) {
         var entry = files[i];
         var file = buildFile(entry);
+        var entryIndex = (typeof entry.index === 'number') ? entry.index : i;
         if (!matchesAccept(file, accept)) {
-          results.push({ name: entry.name, accepted: false, reason: 'type-mismatch' });
+          results.push({ index: entryIndex, name: entry.name, accepted: false, reason: 'type-mismatch' });
           continue;
         }
         if (typeof effectiveMaxSize === 'number' && isFinite(effectiveMaxSize) && file.size > effectiveMaxSize) {
-          results.push({ name: entry.name, accepted: false, reason: 'too-large' });
+          results.push({ index: entryIndex, name: entry.name, accepted: false, reason: 'too-large' });
           continue;
         }
         acceptedFiles.push(file);
-        results.push({ name: entry.name, accepted: true });
+        results.push({ index: entryIndex, name: entry.name, accepted: true });
       }
       if (isFileInput) {
         if (!acceptedFiles.length) {
@@ -412,10 +421,12 @@ export const SET_FILES_BODY = `
           if (acceptedFiles.length > 1) {
             // Keep only the first; mark the rest as rejected for
             // mismatch-with-input-shape so the agent can split the
-            // call.
+            // call. The per-file outcomes are correlated by index
+            // (issue #356 review, P2), so a basename collision can't
+            // collapse the result back to the first match.
             for (var k = 1; k < results.length; k++) {
               if (results[k].accepted) {
-                results[k] = { name: results[k].name, accepted: false, reason: 'single-file-input' };
+                results[k] = { index: results[k].index, name: results[k].name, accepted: false, reason: 'single-file-input' };
               }
             }
             dt = new DataTransfer();

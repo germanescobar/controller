@@ -19,7 +19,7 @@ import type {
   BrowserCommandMessage,
   BrowserCommandResult,
   BrowserServerMessage,
-  BrowserSetFilesFileInput,
+  BrowserSetFilesFileMeta,
 } from "../../../shared/preview-browser.ts";
 import {
   buildClickScript,
@@ -129,7 +129,7 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               getWebviewRef.current(),
               String(message.params.selector ?? ""),
               refs,
-              (message.params.files ?? []) as BrowserSetFilesFileInput[],
+              (message.params.files ?? []) as BrowserSetFilesFileMeta[],
               projectRootRef.current,
               Boolean(message.params.allowOutside)
             );
@@ -323,18 +323,23 @@ async function handleType(
 
 /**
  * Drive a `<input type="file">` (or dropzone) on the active page
- * (issue #356). The CLI has already run the path policy on the
- * server; this handler reads each file via the Electron main process
- * and ships the bytes into the guest via a single `executeJavaScript`
- * round-trip. The page's own validation (`accept`, `max-file-size`)
- * runs inside the script and returns a per-file outcome the agent
- * can act on.
+ * (issue #356). The server has already run the path policy; this
+ * handler reads each file via the Electron main process and ships
+ * the bytes into the guest via a single `executeJavaScript` round-trip.
+ * The page's own validation (`accept`, `max-file-size`) runs inside
+ * the script and returns a per-file outcome the agent can act on.
+ *
+ * The per-file outcome is correlated by **input index**, not by
+ * basename (issue #356 review, P2): two files named `photo.png` in
+ * different directories would otherwise collapse to a single script
+ * result row, and a multi-file input that accepts only the first
+ * would appear to accept both.
  */
 async function handleSetFiles(
   webview: PreviewWebview | null,
   selector: string,
   refs: Record<string, string>,
-  rawFiles: BrowserSetFilesFileInput[],
+  rawFiles: BrowserSetFilesFileMeta[],
   projectRoot: string | undefined,
   allowOutside: boolean
 ): Promise<BrowserCommandResult> {
@@ -362,22 +367,28 @@ async function handleSetFiles(
   // Pull bytes through the main process. Read in parallel — the agent
   // typically passes a small handful of files and the disk I/O dominates
   // the latency here. Each read independently surfaces a structured
-  // error (`file does not exist`, `outside project`, `too large`) which
-  // we surface verbatim so the CLI's per-file output makes the cause
-  // obvious without a separate `getStatus`/log dive.
+  // error (`file does not exist`, `outside project`, `too large`,
+  // `user denied`) which we surface verbatim so the CLI's per-file
+  // output makes the cause obvious without a separate `getStatus`/log
+  // dive.
   const controller = getController();
   const readResults = await Promise.all(
-    rawFiles.map((entry) =>
+    rawFiles.map((entry, index) =>
       controller
         .readPreviewFile(entry.path, { projectRoot, allowOutside })
-        .then((result) => ({ entry, result }))
+        .then((result) => ({ index, entry, result }))
     )
   );
-  const preloaded: Array<{ name: string; type: string; contentBase64: string }> = [];
-  const earlyResults: Array<{ path: string; name: string; accepted: boolean; reason?: string }> = [];
-  for (const { entry, result } of readResults) {
+  const preloaded: Array<{ index: number; name: string; type: string; contentBase64: string; path: string }> = [];
+  // `earlyResults` carries the policy/IPC verdict for every requested
+  // file, keyed by index. We keep the full length even when some files
+  // were rejected by the policy layer so the CLI's per-file output is
+  // one row per CLI argument, never collapsed by basename collisions.
+  const earlyResults: Array<{ index: number; path: string; name: string; accepted: boolean; reason?: string }> = [];
+  for (const { index, entry, result } of readResults) {
     if (!result.ok) {
       earlyResults.push({
+        index,
         path: entry.path,
         name: entry.name,
         accepted: false,
@@ -391,6 +402,7 @@ async function handleSetFiles(
       typeof result.size !== "number"
     ) {
       earlyResults.push({
+        index,
         path: entry.path,
         name: entry.name,
         accepted: false,
@@ -399,14 +411,17 @@ async function handleSetFiles(
       continue;
     }
     earlyResults.push({
+      index,
       path: entry.path,
       name: result.name,
       accepted: true,
     });
     preloaded.push({
+      index,
       name: result.name,
       type: result.type ?? entry.type ?? "application/octet-stream",
       contentBase64: result.contentBase64,
+      path: entry.path,
     });
   }
   if (preloaded.length === 0) {
@@ -422,7 +437,12 @@ async function handleSetFiles(
     buildSetFilesScript({
       selector,
       refs,
-      files: preloaded,
+      files: preloaded.map(({ index, name, type, contentBase64 }) => ({
+        index,
+        name,
+        type,
+        contentBase64,
+      })),
       maxSize: null,
     })
   )) as
@@ -430,7 +450,7 @@ async function handleSetFiles(
         ok: boolean;
         engine?: string;
         error?: string;
-        files?: Array<{ name: string; accepted: boolean; reason?: string }>;
+        files?: Array<{ index: number; name: string; accepted: boolean; reason?: string }>;
       }
     | null;
   if (!scriptResult) return { ok: false, error: "Renderer returned no result" };
@@ -445,16 +465,21 @@ async function handleSetFiles(
             : `No element matches: ${selector} (engine: ${scriptResult.engine ?? "?"})`,
     };
   }
-  // The script returns its outcome keyed by `name`. Cross-reference with
-  // the pre-loaded input list so the CLI gets one row per requested
-  // file even when names collide.
-  const byName = new Map<string, { accepted: boolean; reason?: string }>();
+  // The script returns its outcome keyed by **index**, not basename,
+  // so two files with the same name at different paths correlate
+  // back to the right CLI argument. Build the index map from the
+  // script result once and look up each pre-loaded entry by its index.
+  const byIndex = new Map<number, { accepted: boolean; reason?: string }>();
   for (const row of scriptResult.files ?? []) {
-    if (!byName.has(row.name)) byName.set(row.name, row);
+    // `Number.isInteger` guards against malformed script output that
+    // forgets to thread the index through (defensive: the script
+    // always emits it, but a future refactor shouldn't silently
+    // collapse basenames again).
+    if (typeof row.index === "number") byIndex.set(row.index, row);
   }
   const finalFiles = earlyResults.map((row) => {
     if (!row.accepted) return row;
-    const observed = byName.get(row.name);
+    const observed = byIndex.get(row.index);
     if (!observed) {
       return { ...row, accepted: false, reason: "no-files-set" };
     }

@@ -161,6 +161,19 @@ function validatePreviewUrl(
 }
 
 /**
+ * Hard cap on the file size the Electron main process will read into
+ * memory for a `setFiles` upload (issue #356 review, P2). The page's
+ * own `max-file-size` attribute runs inside the webview *after* the
+ * bytes have already been buffered here, so we need a backstop on the
+ * host side: a multi-GB upload would otherwise allocate a `Buffer`
+ * + base64 string + IPC payload + `executeJavaScript` payload, all
+ * before the page got a chance to refuse. 100 MiB is well above what
+ * any real "upload an artifact" workflow sends and well below what
+ * would threaten the Electron process.
+ */
+const MAX_PREVIEW_FILE_BYTES = 100 * 1024 * 1024;
+
+/**
  * Read a file from disk for the agent-driven preview browser (issue #356).
  *
  * Mirrors `validateBrowserUrl` from the server-side policy: paths must be
@@ -169,6 +182,21 @@ function validatePreviewUrl(
  * the renderer asked for bytes; this is the final gate before the
  * bytes leave the sandboxed main process.
  *
+ * Three review-driven guards sit in front of `fs.readFile`:
+ *
+ *  1. Symlink resolution — `realpath` runs on both `projectRoot` and
+ *     the resolved target so a symlink in or out of the worktree
+ *     cannot be used to bypass the boundary check.
+ *  2. Size cap — `stat.size` is compared against `MAX_PREVIEW_FILE_BYTES`
+ *     before any allocation, so a hostile 10 GiB path returns a
+ *     structured error without buffering the file.
+ *  3. Confirmation prompt — when `allowOutside` is true and the
+ *     canonical target lands outside the worktree, a
+ *     `dialog.showMessageBox` is shown modal to the requesting
+ *     window. The bytes are only read when the user clicks
+ *     "Allow"; "Deny" returns a structured rejection. This is the
+ *     user-visible gate the CLI help text promises.
+ *
  * The Electron `<webview>` guest page cannot read local files directly,
  * so the bytes cross the IPC boundary base64-encoded inside a single
  * `executeJavaScript` round-trip. The renderer wraps them in `File`
@@ -176,6 +204,7 @@ function validatePreviewUrl(
  * synthesizes a drop event for a dropzone).
  */
 async function readPreviewFile(
+  event: { sender: Electron.WebContents },
   input: unknown,
   options: unknown
 ): Promise<{
@@ -193,16 +222,29 @@ async function readPreviewFile(
   }
   const opts =
     options && typeof options === "object"
-      ? (options as { projectRoot?: unknown; allowOutside?: unknown })
+      ? (options as {
+          projectRoot?: unknown;
+          allowOutside?: unknown;
+          // Optional CLI cwd so relative paths resolve against the
+          // agent's shell, not the server's process (issue #356
+          // review, P1).
+          cwd?: unknown;
+        })
       : {};
   const projectRoot =
     typeof opts.projectRoot === "string" && opts.projectRoot.trim()
       ? opts.projectRoot
       : undefined;
   const allowOutside = opts.allowOutside === true;
+  const cwd =
+    typeof opts.cwd === "string" && opts.cwd.trim() ? opts.cwd : undefined;
   let resolved: string;
   try {
-    resolved = path.resolve(input);
+    if (path.isAbsolute(input) || !cwd) {
+      resolved = path.resolve(input);
+    } else {
+      resolved = path.resolve(cwd, input);
+    }
   } catch {
     return { ok: false, error: "Could not resolve path" };
   }
@@ -221,7 +263,12 @@ async function readPreviewFile(
       error: "File uploads can only run from inside an active worktree",
     };
   }
-  if (!isPathInside(projectRoot, resolved)) {
+  // (1) Canonicalize both sides. A symlink in-worktree that points
+  // to /etc/passwd would otherwise be classified as inside-project
+  // because the link itself is in-worktree.
+  const canonicalRoot = await canonicalizeForBoundary(projectRoot);
+  const canonicalResolved = await canonicalizeForBoundary(resolved);
+  if (!isPathInside(canonicalRoot, canonicalResolved)) {
     if (!allowOutside) {
       return {
         ok: false,
@@ -231,18 +278,60 @@ async function readPreviewFile(
           "the user must approve before the file leaves the worktree boundary.",
       };
     }
+    // (3) Confirmation prompt. The agent-supplied flag is not the
+    // approval — the user is. Modal to the requesting window so the
+    // dialog sits next to the page the file is about to enter.
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const promptOptions: Electron.MessageBoxOptions = {
+      type: "question",
+      buttons: ["Deny", "Allow"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Allow file upload outside the worktree?",
+      message: `The agent is asking to attach a file outside the active worktree:\n\n${canonicalResolved}`,
+      detail:
+        `Size: ${formatBytes(stat.size)}\n` +
+        `Worktree: ${canonicalRoot}\n\n` +
+        "Choose Allow to attach the file to the preview, or Deny to leave the page unchanged.",
+      noLink: true,
+    };
+    const choice = win
+      ? await dialog.showMessageBox(win, promptOptions)
+      : await dialog.showMessageBox(promptOptions);
+    if (choice.response !== 1) {
+      return {
+        ok: false,
+        scope: "outside-project",
+        error: "User denied the out-of-worktree file upload",
+      };
+    }
+  }
+  // (2) Size cap before any allocation. The page's own max-file-size
+  // attribute is enforced inside the webview, but it only runs after
+  // the bytes are already buffered here.
+  if (stat.size > MAX_PREVIEW_FILE_BYTES) {
+    return {
+      ok: false,
+      scope: isPathInside(canonicalRoot, canonicalResolved)
+        ? "inside-project"
+        : "outside-project",
+      error:
+        `File is ${formatBytes(stat.size)}, which exceeds the host-side ` +
+        `cap of ${formatBytes(MAX_PREVIEW_FILE_BYTES)}. ` +
+        `Compress or split the file and try again.`,
+    };
   }
   let bytes: Buffer;
   try {
-    bytes = await fs.readFile(resolved);
+    bytes = await fs.readFile(canonicalResolved);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, error: `Could not read file: ${message}` };
   }
-  const scope = isPathInside(projectRoot, resolved)
+  const scope = isPathInside(canonicalRoot, canonicalResolved)
     ? "inside-project"
     : "outside-project";
-  const name = path.basename(resolved);
+  const name = path.basename(canonicalResolved);
   // MIME: best-effort extension map. The renderer lets the page's own
   // `accept` filter override whatever we send — what we return is
   // just the value Chromium's `File` constructor will observe, so a
@@ -253,13 +342,34 @@ async function readPreviewFile(
   const type = mimeFromName(name);
   return {
     ok: true,
-    path: resolved,
+    path: canonicalResolved,
     name,
     type,
     size: bytes.byteLength,
     contentBase64: bytes.toString("base64"),
     scope,
   };
+}
+
+/** Async wrapper around `realpath` for the Electron main path
+ * (the policy side uses the sync variant because it runs in the
+ * server process). Returns the input unchanged on error so the
+ * caller's downstream "does not exist" / "not a file" messages
+ * still see the user-typed path. */
+async function canonicalizeForBoundary(input: string): Promise<string> {
+  try {
+    return await fs.realpath(input);
+  } catch {
+    return input;
+  }
+}
+
+/** Human-readable byte size for the confirmation prompt detail. */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -771,8 +881,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     "controller:read-preview-file",
-    async (_event, input: unknown, options: unknown) => {
-      return readPreviewFile(input, options);
+    async (event, input: unknown, options: unknown) => {
+      // `event` is threaded through so the confirmation dialog can
+      // be modal'd to the requesting window (issue #356 review, P1).
+      return readPreviewFile(event, input, options);
     }
   );
 

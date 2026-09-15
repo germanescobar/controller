@@ -633,7 +633,7 @@ interface SetFilesResult {
   ok: boolean;
   engine?: string;
   error?: string;
-  files?: Array<{ name: string; accepted: boolean; reason?: string }>;
+  files?: Array<{ index?: number; name: string; accepted: boolean; reason?: string }>;
 }
 
 test("buildSetFilesScript accepts a single file on an input[type=file]", () => {
@@ -807,4 +807,45 @@ test("buildSetFilesScript surfaces 'unknown ref' for a stale ref id", () => {
   assert.equal(result.ok, false);
   assert.equal(result.error, "unknown ref");
   assert.equal(result.engine, "ref");
+});
+
+test("buildSetFilesScript threads each file's index through to the outcome (issue #356 P2)", () => {
+  // The renderer correlates the script's per-file outcome by index,
+  // not by basename — two files at different paths with the same
+  // name must not collapse into a single row on the way back. The
+  // script returns `index` on every accepted/rejected entry so the
+  // renderer can build an index-keyed map without re-deriving
+  // identity from `name`.
+  const inputAttrs = new Map<string, string>([
+    ["type", "file"],
+    ["multiple", ""],
+    ["accept", "image/png"],
+  ]);
+  const input = makeEl("input", { id: "many", attributes: inputAttrs });
+  const root = makeEl("body", { children: [input] });
+  const { toBody } = elApi(root);
+  const script = buildSetFilesScript({
+    selector: "#many",
+    refs: {},
+    files: [
+      { index: 0, name: "photo.png", type: "image/png", contentBase64: "AAEC" },
+      { index: 1, name: "doc.pdf", type: "application/pdf", contentBase64: "AAEC" },
+      { index: 2, name: "photo.png", type: "image/png", contentBase64: "AAEC" },
+    ],
+    maxSize: null,
+  });
+  const result = runScript<SetFilesResult>(script, toBody());
+  assert.equal(result.ok, true);
+  assert.equal(result.files?.length, 3);
+  // Index 1 is type-mismatch (PDF, accept="image/png"). The two
+  // `photo.png` rows at indexes 0 and 2 must stay distinguished by
+  // `index`; the renderer uses that to keep a row per CLI argument
+  // even when basenames collide.
+  assert.equal(result.files?.[0]?.index, 0);
+  assert.equal(result.files?.[0]?.accepted, true);
+  assert.equal(result.files?.[1]?.index, 1);
+  assert.equal(result.files?.[1]?.accepted, false);
+  assert.equal(result.files?.[1]?.reason, "type-mismatch");
+  assert.equal(result.files?.[2]?.index, 2);
+  assert.equal(result.files?.[2]?.accepted, true);
 });

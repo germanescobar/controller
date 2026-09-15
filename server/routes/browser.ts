@@ -25,6 +25,41 @@ export const browserRouter = Router();
 
 const KNOWN_ACTIONS = new Set(["open", "snapshot", "click", "type", "setFiles"]);
 
+/**
+ * Best-effort MIME inference from filename, used for the per-file
+ * metadata the route emits on `setFiles`. The Electron main process
+ * re-infers (with the same lookup) at read time, so this value is
+ * mostly a hint to the renderer about what to expect — the page's
+ * own `accept` filter is the source of truth for "should this file
+ * be on the input". The lookup is duplicated from
+ * `electron/main.ts:MIME_BY_EXT` to keep the wire shape independent
+ * of the IPC module.
+ */
+const MIME_BY_EXT: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".xml": "application/xml",
+  ".zip": "application/zip",
+  ".html": "text/html",
+  ".htm": "text/html",
+};
+
+function mimeFromName(name: string): string {
+  const lower = name.toLowerCase();
+  const idx = lower.lastIndexOf(".");
+  if (idx <= 0) return "application/octet-stream";
+  return MIME_BY_EXT[lower.slice(idx)] ?? "application/octet-stream";
+}
+
 browserRouter.post("/command", async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   // The CLI runs in the agent's shell, whose cwd is the worktree. We map that
@@ -75,6 +110,11 @@ browserRouter.post("/command", async (req: Request, res: Response) => {
     // policy-approved shape. The renderer still owns the final file
     // assignment against the input element — this gate is just the
     // server-side pre-check the URL side already has.
+    //
+    // The server emits per-file metadata (no bytes); the renderer asks
+    // the Electron main process to read each file under its canonical
+    // path. That split mirrors the URL side's two-step policy: server
+    // validates the shape, Electron re-checks + reads.
     const selector = typeof params.selector === "string" ? params.selector : "";
     if (!selector) {
       res.status(400).json({ ok: false, error: "Missing selector" });
@@ -86,22 +126,42 @@ browserRouter.post("/command", async (req: Request, res: Response) => {
       return;
     }
     const allowOutside = params.allowOutside === true;
-    const canonical: string[] = [];
+    const files: Array<{ path: string; name: string; type: string; size: number }> = [];
     for (const candidate of rawPaths) {
       if (typeof candidate !== "string" || candidate.trim() === "") {
         res.status(400).json({ ok: false, error: "Each --path must be a non-empty string" });
         return;
       }
-      const check = validateBrowserFilePath(candidate, worktree.path, { allowOutside });
+      const check = validateBrowserFilePath(candidate, worktree.path, {
+        allowOutside,
+        cwd,
+      });
       if (!check.allowed || !check.path) {
         res.status(400).json({ ok: false, error: check.error ?? "Path not allowed" });
         return;
       }
-      canonical.push(check.path);
+      // The server-side policy doesn't read file contents, but it
+      // does stat the file (to confirm it's a regular file). Reuse
+      // that stat for the size field so the renderer has it without
+      // a second round-trip; the main process re-stats at read time
+      // to defend against a TOCTOU race between the two checks
+      // (issue #356 review, P1).
+      const stat = await import("node:fs/promises").then((m) =>
+        m.stat(check.path!).catch(() => null)
+      );
+      const name = check.path.split(/[\\/]/).pop() ?? check.path;
+      const type = mimeFromName(name);
+      files.push({
+        path: check.path,
+        name,
+        type,
+        size: stat?.isFile() ? stat.size : 0,
+      });
     }
     params.selector = selector;
-    params.paths = canonical;
+    params.files = files;
     params.allowOutside = allowOutside;
+    delete params.paths;
   }
 
   const key = `${worktree.projectId}:${worktree.id}`;

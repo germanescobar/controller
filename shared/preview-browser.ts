@@ -93,47 +93,66 @@ export interface BrowserOpenParams {
 /**
  * Per-file metadata carried over the wire for a `setFiles` call (issue #356).
  *
- * `contentBase64` is the file bytes encoded as base64 so the JSON envelope
- * survives `executeJavaScript` without an extra IPC round-trip per file.
- * The Electron main process is the source of truth for path policy
- * (see `electron/main.ts:controller:resolve-preview-file`) — by the time
- * the renderer has these bytes, the file has already been read off disk
- * inside the sandboxed main process. The base64 round-trip is the
- * intentional price for keeping the file-payload inside one IPC channel
- * and avoiding the alternative (a streaming protocol just for file
- * uploads). The `accept`/`maxSize`/`multiple` fields let the page's
- * validation surface up as a structured error so the agent can retry
- * instead of guessing.
+ * The server has already validated each path against the worktree policy
+ * before forwarding; the bytes themselves come from the Electron main
+ * process via `controller.readPreviewFile` (the renderer asks for them
+ * once the server's canonical path list arrives). Two shapes flow over
+ * the wire:
+ *
+ *  - `BrowserSetFilesFileMeta` — what the server → renderer hop carries.
+ *    No bytes; just enough metadata for the renderer to ask the main
+ *    process for the right file and to correlate the per-file outcome
+ *    back to the original CLI argument (via `path`).
+ *  - `BrowserSetFilesFileInput` — what the renderer → webview hop
+ *    carries after the bytes have been loaded by the main process.
+ *    Base64 keeps the payload inside one `executeJavaScript` round-trip
+ *    without an additional streaming channel.
+ *
+ * The split exists because the policy lives on the server side
+ * (canonical path resolution + symlink defense) and the file IO lives
+ * in the Electron main process (size cap, user confirmation prompt);
+ * the renderer is just the bridge that stitches them together.
  */
-export interface BrowserSetFilesFileInput {
-  /** Absolute local path the file was loaded from. Echoed back in the result. */
+export interface BrowserSetFilesFileMeta {
+  /** Canonical absolute path the file lives at, as resolved by the server-side policy. */
   path: string;
   /** Filename the page will see on the resulting `File` object. */
   name: string;
-  /** MIME type the page will see (best-effort from extension + sniff). */
+  /** MIME type best-effort inferred from extension; refined by the main process on read. */
   type: string;
-  /** File size in bytes, as observed by the main process before send. */
+  /** File size in bytes, observed by the server before forwarding. */
   size: number;
+}
+
+export interface BrowserSetFilesFileInput extends BrowserSetFilesFileMeta {
   /** Base64-encoded file contents. */
   contentBase64: string;
 }
 
 export interface BrowserSetFilesParams {
   selector: string;
-  /** File contents the page should accept. */
-  files: BrowserSetFilesFileInput[];
+  /** Canonical per-file metadata the renderer must ask the main process to read. */
+  files: BrowserSetFilesFileMeta[];
+  /** Pass-through of the CLI's `--allow-outside` flag. */
+  allowOutside?: boolean;
 }
 
 /** Per-file outcome reported back so the agent can detect rejections. */
 export interface BrowserSetFilesResultEntry {
+  /** Canonical absolute path the renderer read from (or that the server rejected). */
   path: string;
+  /** Filename the page will see on the resulting `File` object. */
   name: string;
+  /** Input-list position. Lets the renderer correlate even when basenames collide. */
+  index: number;
   /** True when the file was accepted onto the input element. */
   accepted: boolean;
   /**
    * Page-observed rejection reason (when `accepted=false`):
-   * `missing-input`, `not-file-input`, `type-mismatch`, `too-large`,
-   * `no-files-set`, or a free-form string the page dispatched.
+   * `type-mismatch`, `too-large`, `single-file-input`, `no-files-set`,
+   * `read-failed`, the Electron main process's policy text for
+   * outside-worktree / oversized / user-denied, or a free-form string
+   * the page dispatched.
    */
   reason?: string;
 }

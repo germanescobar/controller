@@ -200,9 +200,12 @@ below is run as \`${cliPath} browser <command>\`:
 - \`${cliPath} browser set-files <selector> <path> [--path <path> ...]
   [--allow-outside]\` — drive a \`<input type="file">\` (single or
   \`multiple\`) or a drag-and-drop dropzone on the active page
-  (issue #356). Pass \`--allow-outside\` only when the file lives
-  outside the active worktree; the Electron main process gates that
-  path behind an explicit confirmation prompt. The CLI prints a
+  (issue #356). By default the path must live inside the active
+  worktree; pass \`--allow-outside\` to attach a file outside it,
+  which the Electron main process gates behind a confirmation
+  prompt the user must approve before the file is read. The host
+  also enforces a 100 MiB cap per file (the page's own
+  \`max-file-size\` is enforced after that). The CLI prints a
   per-file outcome (accepted / rejected with reason) so the agent
   can detect a size or \`accept\` mismatch without re-snapping the
   page.

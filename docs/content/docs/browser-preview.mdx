@@ -62,6 +62,11 @@ By default the file must live inside the active worktree, mirroring the
 surfaces a confirmation prompt you must approve before the bytes leave
 the worktree boundary.
 
+The host enforces a 100 MiB cap per file before the bytes are buffered
+into memory — the page's own `max-file-size` only runs after the
+upload reaches the webview, so a multi-GB path needs to be rejected on
+the host side to avoid an OOM in the Electron process.
+
 The CLI prints a per-file outcome (accepted / rejected with reason), so
 the agent can detect a size or `accept` mismatch without re-snapping the
 page. The native picker still works — the user can click the input
