@@ -24,6 +24,13 @@ const USAGE = `Usage:
   controller browser snapshot [--a11y] [selector]
   controller browser click <selector>
   controller browser type <selector> <text> [--submit]
+  controller browser set-files <selector> <path> [--path <path> ...] [--allow-outside]
+
+  set-files drives a \`<input type="file">\` (or drag-and-drop dropzone) on
+  the active page (issue #356). By default the paths must live inside the
+  active worktree; pass \`--allow-outside\` to attach a file outside the
+  worktree, which the Electron main process gates behind a confirmation
+  prompt before the file is read.
 
   Selectors for click/type (issue #170) accept a plain CSS selector, or a
   locator-style prefix: \`text=...\`, \`role=<role>[name="..."]\`,
@@ -1976,6 +1983,75 @@ export function parseBrowser(argv) {
       if (!positional[0]) fail("browser type requires a <selector>");
       return { action: "type", params: { selector: positional[0], text: positional.slice(1).join(" "), submit } };
     }
+    case "set-files": {
+      // `controller browser set-files <selector> <path> [--path <path> ...]
+      //  [--allow-outside]` (issue #356).
+      //
+      // The first positional is the selector; the second is a required
+      // initial path (so the natural invocation `set-files ref=e3 /a.png`
+      // works without typing `--path` for the common single-file case).
+      // Subsequent paths are appended via `--path` so the agent can pass
+      // any number of files without ambiguity. The flag is the same
+      // shape as `open --insecure`: server-side pre-check + Electron
+      // main process re-check, so outside-the-worktree access is
+      // explicit on both ends.
+      if (!rest[0]) fail("browser set-files requires a <selector>");
+      const selector = rest[0];
+      const paths = [];
+      let allowOutside = false;
+      // Walk the rest starting at index 1; everything that doesn't look
+      // like a known flag and isn't the second positional is treated as
+      // a path. We keep the loop explicit (rather than reusing
+      // `assertKnownFlags` / `flagValue`) because the second positional
+      // is the only one that's required — every other path is opt-in.
+      let i = 1;
+      // Initial positional path. Accept any token that isn't `--path` /
+      // `--allow-outside`; an omitted initial path is a user error so
+      // the failure mode reads naturally.
+      if (rest[i] && !rest[i].startsWith("--")) {
+        paths.push(rest[i]);
+        i += 1;
+      } else {
+        fail(
+          "browser set-files requires a <path> after the selector " +
+            "(use --path <path> to attach additional files)"
+        );
+      }
+      while (i < rest.length) {
+        const arg = rest[i];
+        if (arg === "--path") {
+          const next = rest[i + 1];
+          if (!next || next.startsWith("--")) {
+            fail("browser set-files: --path requires a value");
+          }
+          paths.push(next);
+          i += 2;
+          continue;
+        }
+        if (arg === "--allow-outside") {
+          allowOutside = true;
+          i += 1;
+          continue;
+        }
+        if (arg.startsWith("--")) {
+          fail(
+            `Unknown flag for browser set-files: ${arg}\n` +
+              `Valid flags: --path, --allow-outside`
+          );
+        }
+        fail(
+          `browser set-files: unexpected positional argument "${arg}" ` +
+            `(use --path <path> to attach additional files)`
+        );
+      }
+      if (paths.length === 0) {
+        fail("browser set-files requires at least one <path>");
+      }
+      return {
+        action: "setFiles",
+        params: { selector, paths, allowOutside },
+      };
+    }
     default:
       fail(`Unknown browser command: ${command ?? ""}\n${USAGE}`);
   }
@@ -2000,6 +2076,20 @@ async function runBrowser(argv, serverUrl) {
   if (result.summary) lines.push(result.summary);
   if (result.title) lines.push(`Title: ${result.title}`);
   if (result.url) lines.push(`URL: ${result.url}`);
+  // `setFiles` returns a per-file outcome so the agent can detect
+  // rejections (size/type/validation) without re-snapping. Print each
+  // row so the human watching the terminal sees what landed on the
+  // input — accepted files appear as "ok", rejections as a one-liner
+  // with the page-observed reason.
+  if (action === "setFiles" && Array.isArray(result.files)) {
+    for (const entry of result.files) {
+      if (entry && entry.accepted) {
+        lines.push(`  ✓ ${entry.name} (${entry.path ?? ""})`);
+      } else if (entry) {
+        lines.push(`  ✗ ${entry.name}: ${entry.reason ?? "rejected"}`);
+      }
+    }
+  }
   process.stdout.write(`${lines.join("\n") || "OK"}\n`);
 }
 

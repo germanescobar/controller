@@ -14,13 +14,16 @@
  */
 
 import { useEffect, useRef } from "react";
+import { getController, isControllerAvailable } from "@/lib/controller";
 import type {
   BrowserCommandMessage,
   BrowserCommandResult,
   BrowserServerMessage,
+  BrowserSetFilesFileInput,
 } from "../../../shared/preview-browser.ts";
 import {
   buildClickScript,
+  buildSetFilesScript,
   buildSnapshotScript,
   buildTypeScript,
 } from "./browser-scripts.ts";
@@ -43,6 +46,13 @@ export interface PreviewBrowserHostOptions {
   getWebview: () => PreviewWebview | null;
   /** Trigger the visible navigation flow (validates + switches to Preview). */
   openUrl: (url: string, options?: { insecure?: boolean }) => void;
+  /**
+   * Worktree path the pane is bound to. Used by `setFiles` so the
+   * Electron main process can re-check the path policy on read
+   * (issue #356). Optional: when omitted, `setFiles` is rejected
+   * because the renderer cannot prove the path is project-scoped.
+   */
+  projectRoot?: string;
 }
 
 const RECONNECT_DELAY_MS = 1500;
@@ -58,14 +68,16 @@ export function previewBrowserWsUrl(): string {
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {
-  const { enabled, browserKey, getWebview, openUrl } = options;
+  const { enabled, browserKey, getWebview, openUrl, projectRoot } = options;
 
   // Keep the latest callbacks in refs so the long-lived socket effect doesn't
   // reconnect on every render.
   const getWebviewRef = useRef(getWebview);
   const openUrlRef = useRef(openUrl);
+  const projectRootRef = useRef(projectRoot);
   getWebviewRef.current = getWebview;
   openUrlRef.current = openUrl;
+  projectRootRef.current = projectRoot;
 
   useEffect(() => {
     if (!enabled || !browserKey) return;
@@ -111,6 +123,15 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               String(message.params.text ?? ""),
               Boolean(message.params.submit),
               refs
+            );
+          case "setFiles":
+            return await handleSetFiles(
+              getWebviewRef.current(),
+              String(message.params.selector ?? ""),
+              refs,
+              (message.params.files ?? []) as BrowserSetFilesFileInput[],
+              projectRootRef.current,
+              Boolean(message.params.allowOutside)
             );
           default:
             return { ok: false, error: `Unsupported action` };
@@ -297,6 +318,153 @@ async function handleType(
   return {
     ok: true,
     summary: `Typed into ${selector}${submit ? " and submitted" : ""} (${result.engine})`,
+  };
+}
+
+/**
+ * Drive a `<input type="file">` (or dropzone) on the active page
+ * (issue #356). The CLI has already run the path policy on the
+ * server; this handler reads each file via the Electron main process
+ * and ships the bytes into the guest via a single `executeJavaScript`
+ * round-trip. The page's own validation (`accept`, `max-file-size`)
+ * runs inside the script and returns a per-file outcome the agent
+ * can act on.
+ */
+async function handleSetFiles(
+  webview: PreviewWebview | null,
+  selector: string,
+  refs: Record<string, string>,
+  rawFiles: BrowserSetFilesFileInput[],
+  projectRoot: string | undefined,
+  allowOutside: boolean
+): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  if (!selector) return { ok: false, error: "Missing selector" };
+  if (!Array.isArray(rawFiles) || rawFiles.length === 0) {
+    return { ok: false, error: "setFiles requires at least one file" };
+  }
+  if (!projectRoot) {
+    return {
+      ok: false,
+      error:
+        "setFiles requires an active worktree path; the renderer cannot prove " +
+        "the file is project-scoped without it.",
+    };
+  }
+  if (!isControllerAvailable()) {
+    return {
+      ok: false,
+      error:
+        "setFiles is only available in the Electron app (the readPreviewFile IPC is not " +
+        "available to the browser preview).",
+    };
+  }
+  // Pull bytes through the main process. Read in parallel — the agent
+  // typically passes a small handful of files and the disk I/O dominates
+  // the latency here. Each read independently surfaces a structured
+  // error (`file does not exist`, `outside project`, `too large`) which
+  // we surface verbatim so the CLI's per-file output makes the cause
+  // obvious without a separate `getStatus`/log dive.
+  const controller = getController();
+  const readResults = await Promise.all(
+    rawFiles.map((entry) =>
+      controller
+        .readPreviewFile(entry.path, { projectRoot, allowOutside })
+        .then((result) => ({ entry, result }))
+    )
+  );
+  const preloaded: Array<{ name: string; type: string; contentBase64: string }> = [];
+  const earlyResults: Array<{ path: string; name: string; accepted: boolean; reason?: string }> = [];
+  for (const { entry, result } of readResults) {
+    if (!result.ok) {
+      earlyResults.push({
+        path: entry.path,
+        name: entry.name,
+        accepted: false,
+        reason: result.error ?? "read-failed",
+      });
+      continue;
+    }
+    if (
+      !result.name ||
+      typeof result.contentBase64 !== "string" ||
+      typeof result.size !== "number"
+    ) {
+      earlyResults.push({
+        path: entry.path,
+        name: entry.name,
+        accepted: false,
+        reason: "read-failed",
+      });
+      continue;
+    }
+    earlyResults.push({
+      path: entry.path,
+      name: result.name,
+      accepted: true,
+    });
+    preloaded.push({
+      name: result.name,
+      type: result.type ?? entry.type ?? "application/octet-stream",
+      contentBase64: result.contentBase64,
+    });
+  }
+  if (preloaded.length === 0) {
+    // All files were rejected by the policy layer; skip the in-page
+    // round-trip and return the per-file outcome verbatim.
+    return {
+      ok: true,
+      summary: `Set 0 files on ${selector} (all ${rawFiles.length} rejected by policy)`,
+      files: earlyResults,
+    };
+  }
+  const scriptResult = (await webview.executeJavaScript(
+    buildSetFilesScript({
+      selector,
+      refs,
+      files: preloaded,
+      maxSize: null,
+    })
+  )) as
+    | {
+        ok: boolean;
+        engine?: string;
+        error?: string;
+        files?: Array<{ name: string; accepted: boolean; reason?: string }>;
+      }
+    | null;
+  if (!scriptResult) return { ok: false, error: "Renderer returned no result" };
+  if (!scriptResult.ok) {
+    return {
+      ok: false,
+      error:
+        scriptResult.error === "unknown ref"
+          ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
+          : scriptResult.error === "stale ref"
+            ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
+            : `No element matches: ${selector} (engine: ${scriptResult.engine ?? "?"})`,
+    };
+  }
+  // The script returns its outcome keyed by `name`. Cross-reference with
+  // the pre-loaded input list so the CLI gets one row per requested
+  // file even when names collide.
+  const byName = new Map<string, { accepted: boolean; reason?: string }>();
+  for (const row of scriptResult.files ?? []) {
+    if (!byName.has(row.name)) byName.set(row.name, row);
+  }
+  const finalFiles = earlyResults.map((row) => {
+    if (!row.accepted) return row;
+    const observed = byName.get(row.name);
+    if (!observed) {
+      return { ...row, accepted: false, reason: "no-files-set" };
+    }
+    return { ...row, accepted: observed.accepted, reason: observed.reason };
+  });
+  const acceptedCount = finalFiles.filter((row) => row.accepted).length;
+  return {
+    ok: true,
+    summary: `Set ${acceptedCount}/${rawFiles.length} files on ${selector}`,
+    files: finalFiles,
   };
 }
 

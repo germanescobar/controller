@@ -462,6 +462,9 @@ function PaneFrame({
         openUrl(paneKey, next, options),
       [openUrl, paneKey]
     ),
+    // Issue #356: `setFiles` needs the worktree path so the Electron
+    // main process can re-check the path policy at read time.
+    projectRoot: store.getRoot(paneKey),
   });
 
   // Mirror the live page's load lifecycle into pane state. Intercept in-page

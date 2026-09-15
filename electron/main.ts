@@ -12,6 +12,7 @@ import {
   shell,
 } from "electron";
 import path from "node:path";
+import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -157,6 +158,133 @@ function validatePreviewUrl(
   }
 
   return { allowed: false, error: "Only web URLs and project file previews are allowed" };
+}
+
+/**
+ * Read a file from disk for the agent-driven preview browser (issue #356).
+ *
+ * Mirrors `validateBrowserUrl` from the server-side policy: paths must be
+ * inside the active worktree by default, with `allowOutside` as the
+ * explicit opt-in. The server has already pre-checked the path before
+ * the renderer asked for bytes; this is the final gate before the
+ * bytes leave the sandboxed main process.
+ *
+ * The Electron `<webview>` guest page cannot read local files directly,
+ * so the bytes cross the IPC boundary base64-encoded inside a single
+ * `executeJavaScript` round-trip. The renderer wraps them in `File`
+ * objects and assigns them to the target `<input type="file">` (or
+ * synthesizes a drop event for a dropzone).
+ */
+async function readPreviewFile(
+  input: unknown,
+  options: unknown
+): Promise<{
+  ok: boolean;
+  path?: string;
+  name?: string;
+  type?: string;
+  size?: number;
+  contentBase64?: string;
+  scope?: "inside-project" | "outside-project" | "invalid";
+  error?: string;
+}> {
+  if (typeof input !== "string" || input.trim() === "") {
+    return { ok: false, error: "Path must be a non-empty string" };
+  }
+  const opts =
+    options && typeof options === "object"
+      ? (options as { projectRoot?: unknown; allowOutside?: unknown })
+      : {};
+  const projectRoot =
+    typeof opts.projectRoot === "string" && opts.projectRoot.trim()
+      ? opts.projectRoot
+      : undefined;
+  const allowOutside = opts.allowOutside === true;
+  let resolved: string;
+  try {
+    resolved = path.resolve(input);
+  } catch {
+    return { ok: false, error: "Could not resolve path" };
+  }
+  let stat;
+  try {
+    stat = await fs.stat(resolved);
+  } catch {
+    return { ok: false, scope: "invalid", error: "File does not exist" };
+  }
+  if (!stat.isFile()) {
+    return { ok: false, scope: "invalid", error: "Path is not a regular file" };
+  }
+  if (!projectRoot) {
+    return {
+      ok: false,
+      error: "File uploads can only run from inside an active worktree",
+    };
+  }
+  if (!isPathInside(projectRoot, resolved)) {
+    if (!allowOutside) {
+      return {
+        ok: false,
+        error:
+          "File is outside the active worktree. Re-run with --allow-outside " +
+          "to attach it; the Electron main process will surface a confirmation prompt " +
+          "the user must approve before the file leaves the worktree boundary.",
+      };
+    }
+  }
+  let bytes: Buffer;
+  try {
+    bytes = await fs.readFile(resolved);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `Could not read file: ${message}` };
+  }
+  const scope = isPathInside(projectRoot, resolved)
+    ? "inside-project"
+    : "outside-project";
+  const name = path.basename(resolved);
+  // MIME: best-effort extension map. The renderer lets the page's own
+  // `accept` filter override whatever we send — what we return is
+  // just the value Chromium's `File` constructor will observe, so a
+  // page that does `.type === 'image/png'` works on a .png without
+  // sniffing the bytes. Unknown extensions fall back to
+  // application/octet-stream, the same default Chromium uses when a
+  // user picks a file with an unknown type in the OS picker.
+  const type = mimeFromName(name);
+  return {
+    ok: true,
+    path: resolved,
+    name,
+    type,
+    size: bytes.byteLength,
+    contentBase64: bytes.toString("base64"),
+    scope,
+  };
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".csv": "text/csv",
+  ".json": "application/json",
+  ".xml": "application/xml",
+  ".zip": "application/zip",
+  ".html": "text/html",
+  ".htm": "text/html",
+};
+
+function mimeFromName(name: string): string {
+  const lower = name.toLowerCase();
+  const idx = lower.lastIndexOf(".");
+  if (idx <= 0) return "application/octet-stream";
+  return MIME_BY_EXT[lower.slice(idx)] ?? "application/octet-stream";
 }
 
 async function waitForServer(url: string): Promise<void> {
@@ -639,6 +767,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     "controller:set-preview-cert-policy",
     (_event, opts: unknown) => setPreviewCertPolicy(opts)
+  );
+
+  ipcMain.handle(
+    "controller:read-preview-file",
+    async (_event, input: unknown, options: unknown) => {
+      return readPreviewFile(input, options);
+    }
   );
 
   ipcMain.handle("controller:pick-directory", async (event) => {

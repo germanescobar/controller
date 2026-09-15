@@ -20,7 +20,7 @@
  */
 
 /** Actions supported. */
-export type BrowserAction = "open" | "snapshot" | "click" | "type";
+export type BrowserAction = "open" | "snapshot" | "click" | "type" | "setFiles";
 
 /**
  * Refs emitted by an accessibility snapshot. Each key is a short opaque id
@@ -44,6 +44,8 @@ export interface BrowserCommandResultData {
   refCount?: number;
   /** Human-readable one-line summary of what happened. */
   summary?: string;
+  /** Per-file outcome from a `setFiles` action — input order, one row each. */
+  files?: BrowserSetFilesResultEntry[];
 }
 
 export type BrowserCommandResult =
@@ -86,6 +88,54 @@ export interface BrowserEnsurePaneMessage {
 export interface BrowserOpenParams {
   url: string;
   insecure?: boolean;
+}
+
+/**
+ * Per-file metadata carried over the wire for a `setFiles` call (issue #356).
+ *
+ * `contentBase64` is the file bytes encoded as base64 so the JSON envelope
+ * survives `executeJavaScript` without an extra IPC round-trip per file.
+ * The Electron main process is the source of truth for path policy
+ * (see `electron/main.ts:controller:resolve-preview-file`) — by the time
+ * the renderer has these bytes, the file has already been read off disk
+ * inside the sandboxed main process. The base64 round-trip is the
+ * intentional price for keeping the file-payload inside one IPC channel
+ * and avoiding the alternative (a streaming protocol just for file
+ * uploads). The `accept`/`maxSize`/`multiple` fields let the page's
+ * validation surface up as a structured error so the agent can retry
+ * instead of guessing.
+ */
+export interface BrowserSetFilesFileInput {
+  /** Absolute local path the file was loaded from. Echoed back in the result. */
+  path: string;
+  /** Filename the page will see on the resulting `File` object. */
+  name: string;
+  /** MIME type the page will see (best-effort from extension + sniff). */
+  type: string;
+  /** File size in bytes, as observed by the main process before send. */
+  size: number;
+  /** Base64-encoded file contents. */
+  contentBase64: string;
+}
+
+export interface BrowserSetFilesParams {
+  selector: string;
+  /** File contents the page should accept. */
+  files: BrowserSetFilesFileInput[];
+}
+
+/** Per-file outcome reported back so the agent can detect rejections. */
+export interface BrowserSetFilesResultEntry {
+  path: string;
+  name: string;
+  /** True when the file was accepted onto the input element. */
+  accepted: boolean;
+  /**
+   * Page-observed rejection reason (when `accepted=false`):
+   * `missing-input`, `not-file-input`, `type-mismatch`, `too-large`,
+   * `no-files-set`, or a free-form string the page dispatched.
+   */
+  reason?: string;
 }
 
 export type BrowserServerMessage = BrowserCommandMessage | BrowserEnsurePaneMessage;

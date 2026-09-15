@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type {
   ControllerBridge,
   ControllerCheckResult,
+  PreviewFileReadResult,
   PreviewUrlCheckResult,
   ControllerStatus,
 } from "../shared/controller.js";
@@ -64,6 +65,12 @@ const bridge: ControllerBridge = {
       "controller:set-preview-cert-policy",
       opts
     ) as Promise<{ ok: boolean; error?: string }>,
+  readPreviewFile: (path, options) =>
+    ipcRenderer.invoke(
+      "controller:read-preview-file",
+      path,
+      options
+    ) as Promise<PreviewFileReadResult>,
   pickDirectory: () =>
     ipcRenderer.invoke(
       "controller:pick-directory"

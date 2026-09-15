@@ -197,6 +197,15 @@ below is run as \`${cliPath} browser <command>\`:
 - \`${cliPath} browser click <selector>\` — click an element.
 - \`${cliPath} browser type <selector> <text> [--submit]\` — type text into a
   field. Add \`--submit\` to submit its form.
+- \`${cliPath} browser set-files <selector> <path> [--path <path> ...]
+  [--allow-outside]\` — drive a \`<input type="file">\` (single or
+  \`multiple\`) or a drag-and-drop dropzone on the active page
+  (issue #356). Pass \`--allow-outside\` only when the file lives
+  outside the active worktree; the Electron main process gates that
+  path behind an explicit confirmation prompt. The CLI prints a
+  per-file outcome (accepted / rejected with reason) so the agent
+  can detect a size or \`accept\` mismatch without re-snapping the
+  page.
 
 ## Selectors for click / type
 

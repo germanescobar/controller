@@ -9,6 +9,7 @@
  */
 
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 function isLocalhostUrl(input: string): boolean {
@@ -63,6 +64,81 @@ export interface PreviewUrlCheck {
   allowed: boolean;
   url?: string;
   error?: string;
+}
+
+export interface PreviewFileCheck {
+  allowed: boolean;
+  /** Canonical absolute path on disk; populated when allowed. */
+  path?: string;
+  /**
+   * `inside-project` — the path is under the worktree root.
+   * `outside-project` — the path is outside the worktree root and the
+   *   caller has explicitly opted in via `--allow-outside`.
+   * `invalid` — the path could not be resolved (missing, symlink loop, etc.).
+   */
+  scope?: "inside-project" | "outside-project" | "invalid";
+  error?: string;
+}
+
+export interface ValidateBrowserFileOptions {
+  /**
+   * Caller has acknowledged the path is outside the active worktree and is
+   * intentionally granting access. Default `false` — paths outside the
+   * worktree are rejected unless the user (or the calling agent, with
+   * appropriate consent) opts in. Mirrors the `--insecure` opt-in for the
+   * URL side.
+   */
+  allowOutside?: boolean;
+}
+
+/**
+ * Validate a path the agent wants to upload through a `<input type="file">`.
+ * Mirrors `validateBrowserUrl` for symmetry: inside-project paths are
+ * always allowed; outside-project paths require `allowOutside`. The
+ * Electron main process re-checks this at file-read time.
+ */
+export function validateBrowserFilePath(
+  input: string,
+  projectRoot: string | undefined,
+  options: ValidateBrowserFileOptions = {}
+): PreviewFileCheck {
+  if (typeof input !== "string" || input.trim() === "") {
+    return { allowed: false, error: "Path must be a non-empty string" };
+  }
+  let resolved: string;
+  try {
+    resolved = path.resolve(input);
+  } catch {
+    return { allowed: false, error: "Could not resolve path" };
+  }
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    return { allowed: false, scope: "invalid", error: "File does not exist" };
+  }
+  if (!stat.isFile()) {
+    return { allowed: false, scope: "invalid", error: "Path is not a regular file" };
+  }
+  if (!projectRoot) {
+    return {
+      allowed: false,
+      error: "File uploads can only run from inside an active worktree",
+    };
+  }
+  if (isPathInside(projectRoot, resolved)) {
+    return { allowed: true, path: resolved, scope: "inside-project" };
+  }
+  if (options.allowOutside) {
+    return { allowed: true, path: resolved, scope: "outside-project" };
+  }
+  return {
+    allowed: false,
+    error:
+      "File is outside the active worktree. Re-run with --allow-outside " +
+      "to attach it; the Electron main process will surface a confirmation prompt " +
+      "the user must approve before the file leaves the worktree boundary.",
+  };
 }
 
 export interface ValidateBrowserUrlOptions {
