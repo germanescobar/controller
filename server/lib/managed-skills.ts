@@ -587,7 +587,11 @@ URL — open that URL in the Controller app to see the live transcript.
 
 - \`<message>\` is the agent prompt (issue #355). It's a positional
   argument, so prompts that contain flag-like tokens (\`"explain the
-  --json flag"\`) work without escaping the leading \`--\`.
+  --json flag"\`) work without escaping the leading \`--\`. If the
+  prompt itself starts with \`--\` (e.g. \`"--help me diagnose this"\`),
+  pass it after \`--\` so the parser treats the leading dash as literal
+  text: \`controller sessions start ... -- "--help me"\`. The \`--\`
+  end-of-flags marker matches \`git\`, \`kubectl\`, and \`gh\`.
 - \`--provider\` accepts \`codex\`, \`claude\`, or \`anita\`. The session URL
   works regardless of provider; the transcript is rendered by the existing
   in-app event stream, so no client-side streaming changes are involved.

@@ -900,37 +900,50 @@ test("parseSessions maps start to a session-start payload, including the verbati
 
 test("parseSessions accepts the message positional in either order relative to the flags (issue #355)", async () => {
   const cli = await loadCli();
-  // Form 1: flags first, message last.
+  // Form 1: flags first, message last. <project> defaults to cwd (the
+  // documented message-only form).
   const flagsFirst = cli.parseSessions([
     "start",
-    "demo",
     "--worktree",
     "wt-123",
     "look at issue 190 and implement the CLI surfaces",
   ]);
   assert.equal(flagsFirst.body.message, "look at issue 190 and implement the CLI surfaces");
   assert.equal(flagsFirst.body.worktreeId, "wt-123");
-  // Form 2: message first, flags after. The positional scan matches by
-  // position, not by being-last-among-flags.
+  // Form 2: message first, flags after. <project> still defaults to cwd
+  // because only one bare token precedes any flag.
   const messageFirst = cli.parseSessions([
     "start",
-    "demo",
     "look at issue 190 and implement the CLI surfaces",
     "--worktree",
     "wt-123",
   ]);
   assert.equal(messageFirst.body.message, "look at issue 190 and implement the CLI surfaces");
   assert.equal(messageFirst.body.worktreeId, "wt-123");
+  // Form 3: explicit <project> + <message> before the flags. Two
+  // leading bare tokens disambiguate: the first is the project and
+  // the second is the message.
+  const projectFirst = cli.parseSessions([
+    "start",
+    "demo",
+    "look at issue 190 and implement the CLI surfaces",
+    "--worktree",
+    "wt-123",
+  ]);
+  assert.equal(projectFirst.project, "demo");
+  assert.equal(projectFirst.body.message, "look at issue 190 and implement the CLI surfaces");
+  assert.equal(projectFirst.body.worktreeId, "wt-123");
 });
 
 test("parseSessions keeps --flag-like tokens literal in the message body (issue #355)", async () => {
   const cli = await loadCli();
   // The prompt is a positional argument, so `--json` / `--help` / etc.
   // inside it stay as part of the message text — no leading-dash
-  // escaping needed.
+  // escaping needed. <project> falls back to cwd (no project
+  // positional supplied) since the message is the only bare token
+  // before any flag.
   const parsed = cli.parseSessions([
     "start",
-    "demo",
     "--worktree",
     "wt-123",
     "explain --help and run --json on the API",
@@ -958,7 +971,6 @@ test("parseSessions errors clearly when the message positional is missing (issue
       async () =>
         cli.parseSessions([
           "start",
-          "demo",
           "--worktree",
           "wt-123",
         ]),
@@ -970,6 +982,178 @@ test("parseSessions errors clearly when the message positional is missing (issue
   }
   assert.equal(exitCode, 1);
   assert.match(stderrText, /Missing message/);
+  // The missing-message error must hint at the `--` end-of-flags
+  // marker so an agent whose prompt happens to start with `--…`
+  // (e.g. `--help me`) knows how to opt in.
+  assert.match(stderrText, /-- /);
+});
+
+test("parseSessions accepts a message-first form when <project> is omitted (PR review, P1)", async () => {
+  // Issue #355 PR review (Codex): the documented cwd-inferred form
+  // `start \"<message>\" --worktree <id>` previously failed because the
+  // outer parser ate the leading bare token as the optional project.
+  // With the leading-bare count disambiguation, one bare token before
+  // any flag is the message itself; <project> falls back to cwd.
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start",
+    "Review the PR from session sess-self-42",
+    "--worktree",
+    "wt-1",
+    "--parent",
+    "sess-self-42",
+    "--agent",
+    "claude",
+  ]);
+  assert.equal(parsed.project, "");
+  assert.equal(parsed.action, "start");
+  assert.equal(parsed.body.worktreeId, "wt-1");
+  assert.equal(
+    parsed.body.message,
+    "Review the PR from session sess-self-42"
+  );
+  assert.equal(parsed.body.parentId, "sess-self-42");
+  assert.equal(parsed.body.provider, "claude");
+});
+
+test("parseSessions rejects an explicit project + flags + bare-token form (PR review, P1)", async () => {
+  // The disambiguation has a corner case: `start <bare> --worktree wt-1 \"<bare>\"`
+  // is ambiguous (project vs message). With 1 leading bare token the
+  // parser treats it as the message; the trailing bare token is a
+  // stray positional that gets rejected. Users who want the explicit
+  // project + flags + message shape should write
+  // `start <project> <message> --worktree wt-1` (two leading bare
+  // tokens) or use `--` to end the flag block.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "start",
+          "demo",
+          "--worktree",
+          "wt-123",
+          "fix the thing",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Unexpected positional argument after the message/);
+});
+
+test("parseSessions accepts a prompt that begins with `--` after the `--` end-of-flags marker (PR review, P2)", async () => {
+  // Issue #355 PR review (Codex): a quoted prompt whose first chars
+  // are flag-like (`\"--help me diagnose this\"`) was rejected because
+  // the walker treated every `--…` token as a flag. The standard Unix
+  // `--` end-of-flags marker opts into the verbatim-tail shape:
+  // anything after `--` is the message, joined with spaces.
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start",
+    "--worktree",
+    "wt-1",
+    "--",
+    "--help me diagnose this",
+  ]);
+  assert.equal(parsed.body.message, "--help me diagnose this");
+  assert.equal(parsed.body.worktreeId, "wt-1");
+});
+
+test("parseSessions accepts multi-token prompt after `--` (PR review, P2)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start",
+    "--worktree",
+    "wt-1",
+    "--",
+    "--help",
+    "me",
+    "diagnose",
+    "this",
+  ]);
+  assert.equal(parsed.body.message, "--help me diagnose this");
+});
+
+test("parseSessions wake accepts a prompt that begins with `--` after `--` (PR review, P2)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "wake",
+    "sess-1",
+    "--",
+    "--help me diagnose this",
+  ]);
+  assert.equal(parsed.action, "wake");
+  assert.equal(parsed.sessionId, "sess-1");
+  assert.equal(parsed.body.message, "--help me diagnose this");
+});
+
+test("parseSessions wake combines flags + `--` end-of-flags (PR review, P2)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "wake",
+    "sess-1",
+    "--delay",
+    "30s",
+    "--",
+    "--help me diagnose this",
+  ]);
+  assert.equal(parsed.body.delay, "30s");
+  assert.equal(parsed.body.message, "--help me diagnose this");
+});
+
+test("parseSessions rejects a stray `--` after the message positional (PR review, P2)", async () => {
+  // Only one positional (the message) is allowed. Putting `--` after
+  // a positional is a stray token, not a flag, and gets rejected by
+  // the same "Unexpected positional argument after the message" guard
+  // that catches other bare tokens after the message.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "start",
+          "--worktree",
+          "wt-1",
+          "fix the thing",
+          "--",
+          "more text",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Unexpected positional argument after the message/);
 });
 
 test("parseSessions rejects --flag=value shorthand on sessions start (issue #355)", async () => {
@@ -1031,14 +1215,13 @@ test("parseSessions rejects a stray trailing flag-pair after the message positio
   try {
     // Wrap in an async fn so the synchronous throw surfaces as a
     // rejection that `assert.rejects` can capture. Issue #355 forbids
-    // a second positional: `--provider` after the message positional is
-    // a bare token, not a flag pair, and gets rejected by the unknown-
+    // a second positional: `--bogus` after the message positional is a
+    // bare token, not a flag pair, and gets rejected by the unknown-
     // flag guard.
     await assert.rejects(
       async () =>
         cli.parseSessions([
           "start",
-          "demo",
           "--worktree",
           "wt-123",
           "hi",
@@ -1300,9 +1483,9 @@ test("runSessions start POSTs to the new sessions endpoint and prints the URL", 
       [
         "start",
         "controller",
+        "work on issue 190",
         "--worktree",
         "wt-1",
-        "work on issue 190",
       ],
       "http://controller.test"
     );
@@ -3496,11 +3679,11 @@ test("runSessions start forwards --parent on the POST body (issue #353)", async 
       [
         "start",
         "controller",
+        "spawn a child",
         "--worktree",
         "wt-1",
         "--parent",
         "sess-parent",
-        "spawn a child",
       ],
       "http://controller.test"
     );
