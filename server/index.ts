@@ -13,10 +13,10 @@ import { apiKeysRouter } from "./routes/api-keys.js";
 import { agentsRouter } from "./routes/agents.js";
 import { skillsRouter } from "./routes/skills.js";
 import { getAvailableAgentProviders } from "./lib/agents.js";
+import { listSessionRuntimes } from "./lib/session-runtime.js";
 import {
-  listSessionRuntimes,
-  stopAllSessionRuntimes,
-} from "./lib/session-runtime.js";
+  installSessionRuntimeShutdownHandlers,
+} from "./lib/process-shutdown.js";
 import { listPersistedAttentionSessionIds } from "./lib/session-attention.js";
 import { getProject } from "./lib/projects.js";
 import { resolveWorktree } from "./lib/worktrees.js";
@@ -67,12 +67,7 @@ const DEV_API_BASE_PORT = 3102;
 
 const app = express();
 
-// Isolated agent process groups do not inherit Controller's termination
-// signal. Reap them synchronously during normal Electron/server shutdown so a
-// quit never leaves agent CLIs or their tool subprocesses orphaned.
-process.once("exit", () => {
-  stopAllSessionRuntimes();
-});
+installSessionRuntimeShutdownHandlers();
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
