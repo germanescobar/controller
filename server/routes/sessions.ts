@@ -43,6 +43,7 @@ import {
   resolveAgentCommand,
   sendAnitaApprovalDecision,
   sendClaudeApprovalDecision,
+  signalAgentProcess,
   type AgentStreamEvent,
   type ClaudeApprovalDecision,
   type ClaudeApprovalRequest,
@@ -1350,9 +1351,9 @@ export async function handleSessionStream(
     // `run.cancelled` we already streamed (issue #94).
     if (runCancelled) {
       if (child.exitCode === null && !child.killed) {
-        child.kill("SIGTERM");
+        signalAgentProcess(child, "SIGTERM");
         setTimeout(() => {
-          if (child.exitCode === null) child.kill("SIGKILL");
+          if (child.exitCode === null) signalAgentProcess(child, "SIGKILL");
         }, 2000);
       }
       return;
@@ -1372,9 +1373,9 @@ export async function handleSessionStream(
       .then(() => persistAgentEvent(failureEvent))
       .catch(() => {});
     if (child.exitCode === null && !child.killed) {
-      child.kill("SIGTERM");
+      signalAgentProcess(child, "SIGTERM");
       setTimeout(() => {
-        if (child.exitCode === null) child.kill("SIGKILL");
+        if (child.exitCode === null) signalAgentProcess(child, "SIGKILL");
       }, 2000);
     }
   }
@@ -1463,7 +1464,7 @@ export async function handleSessionStream(
               .catch(() => {});
             if (providerId === "claude" && event.type === "user.input_requested") {
               pausedForClaudeUserInput = true;
-              child.kill("SIGTERM");
+              signalAgentProcess(child, "SIGTERM");
             }
             // Stand the watchdog down while an approval is pending, and re-arm
             // it the moment Claude resumes with any other event. Done

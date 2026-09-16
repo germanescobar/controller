@@ -7,7 +7,10 @@ import {
   markSessionInactive,
   recordSessionAttentionEvent,
   setSessionAwaitingUserInput,
+  stopAllSessionRuntimes,
 } from "../session-runtime.js";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
 
 function runtimeSummary(sessionId: string) {
   return listSessionRuntimes().find((entry) => entry.sessionId === sessionId);
@@ -45,4 +48,23 @@ test("approval attention clears when the response consumes the request", () => {
   assert.equal(runtimeSummary(sessionId)?.awaitingInput, true);
   assert.ok(consumePendingApproval(sessionId, "approval-1"));
   assert.equal(runtimeSummary(sessionId)?.awaitingInput, undefined);
+});
+
+test("shutdown signals every active agent runtime and marks it inactive", () => {
+  const signals: string[] = [];
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null,
+    killed: false,
+    kill(signal: NodeJS.Signals) {
+      signals.push(signal);
+      this.killed = true;
+      return true;
+    },
+  }) as unknown as ChildProcess;
+
+  markSessionActive("runtime-shutdown", { provider: "anita", child });
+
+  assert.equal(stopAllSessionRuntimes(), 1);
+  assert.deepEqual(signals, ["SIGTERM"]);
+  assert.equal(runtimeSummary("runtime-shutdown")?.active, false);
 });
