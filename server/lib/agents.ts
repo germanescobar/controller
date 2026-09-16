@@ -1,4 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type SpawnOptions as NodeSpawnOptions,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   resolveCommand,
@@ -191,6 +195,62 @@ export interface AgentProvider {
 }
 
 export type AgentStreamParseResult = AgentStreamEvent | AgentStreamEvent[] | null;
+
+/*
+ * Agent CLIs can run arbitrary descendant process trees. Keep those trees in
+ * a process group that is separate from Controller's Electron/server process:
+ * a tool runner or test framework may legitimately signal its whole group,
+ * and without this boundary that signal also terminates Controller.
+ *
+ * The WeakSet lets signalAgentProcess distinguish provider children from
+ * arbitrary ChildProcess instances supplied by tests or other subsystems.
+ */
+const isolatedAgentProcesses = new WeakSet<ChildProcess>();
+
+function spawnAgentProcess(
+  command: string,
+  args: readonly string[],
+  options: NodeSpawnOptions
+): ChildProcess {
+  const isolateProcessGroup = process.platform !== "win32";
+  const child = spawn(command, args, {
+    ...options,
+    // POSIX: make the agent the leader of a new session/process group. A
+    // descendant's kill(0, signal) is then contained to the agent tree.
+    // Windows has different detached-process semantics, so retain the
+    // existing direct-child lifecycle there.
+    detached: isolateProcessGroup,
+  });
+  if (isolateProcessGroup) {
+    isolatedAgentProcesses.add(child);
+  }
+  return child;
+}
+
+/** Signal an agent and all descendants in its isolated POSIX process group. */
+export function signalAgentProcess(
+  child: ChildProcess,
+  signal: NodeJS.Signals
+): boolean {
+  if (
+    process.platform !== "win32" &&
+    child.pid !== undefined &&
+    isolatedAgentProcesses.has(child)
+  ) {
+    try {
+      process.kill(-child.pid, signal);
+      return true;
+    } catch (error) {
+      // The group may have disappeared between the exitCode check and kill.
+      // Fall back to ChildProcess.kill so callers retain the old behavior and
+      // its boolean result for already-exited children.
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw error;
+      }
+    }
+  }
+  return child.kill(signal);
+}
 
 function normalizeToolResultContent(value: unknown): string {
   if (typeof value === "string") return value;
@@ -600,7 +660,7 @@ const anitaProvider: AgentProvider = {
     const fullCmd = `anita ${[...cmdArgs, ...args].join(" ")}`;
     console.log(`[anita] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn(command ?? "anita", [...cmdArgs, ...args], {
+    return spawnAgentProcess(command ?? "anita", [...cmdArgs, ...args], {
       cwd,
       env: childProcessEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
@@ -669,7 +729,7 @@ const codexProvider: AgentProvider = {
     const fullCmd = `codex ${args.join(" ")}`;
     console.log(`[codex] ${fullCmd.slice(0, 100)}...`);
 
-    return spawn(command ?? "codex", args, {
+    return spawnAgentProcess(command ?? "codex", args, {
       cwd,
       env: childProcessEnv(env),
       stdio: ["pipe", "pipe", "pipe"],
@@ -757,7 +817,7 @@ const claudeProvider: AgentProvider = {
     const fullCmd = `claude ${args.join(" ")}`;
     console.log(`[claude] ${fullCmd.slice(0, 100)}...`);
 
-    const child = spawn(command ?? "claude", args, {
+    const child = spawnAgentProcess(command ?? "claude", args, {
       cwd,
       env: childProcessEnv(env),
       // Control-channel turns keep stdin open for the live approval channel;

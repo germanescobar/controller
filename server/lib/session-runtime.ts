@@ -1,5 +1,9 @@
 import type { ChildProcess } from "node:child_process";
-import type { AgentStreamEvent, ClaudeApprovalRequest } from "./agents.js";
+import {
+  signalAgentProcess,
+  type AgentStreamEvent,
+  type ClaudeApprovalRequest,
+} from "./agents.js";
 
 export interface SessionRuntimeMetadata {
   projectId: string;
@@ -170,6 +174,27 @@ export function listSessionRuntimes(
   return summaries;
 }
 
+/**
+ * Best-effort synchronous shutdown hook for the Electron/server host. Agent
+ * processes live in isolated groups, so they no longer receive Controller's
+ * own termination signal implicitly and must be reaped explicitly.
+ */
+export function stopAllSessionRuntimes(): number {
+  let stopped = 0;
+  for (const [sessionId, runtime] of runtimes) {
+    const child = runtime.child;
+    if (!runtime.active || !child || child.exitCode !== null) continue;
+    try {
+      if (signalAgentProcess(child, "SIGTERM")) stopped += 1;
+    } catch {
+      // Process exit cleanup cannot recover or await; continue reaping the
+      // remaining agent groups.
+    }
+    markSessionInactive(sessionId);
+  }
+  return stopped;
+}
+
 export async function stopSessionRuntime(sessionId: string): Promise<void> {
   const runtime = runtimes.get(sessionId);
   if (!runtime?.active) {
@@ -210,14 +235,14 @@ export async function stopSessionRuntime(sessionId: string): Promise<void> {
 
     const forceKillTimer = setTimeout(() => {
       if (child.exitCode === null) {
-        child.kill("SIGKILL");
+        signalAgentProcess(child, "SIGKILL");
       }
     }, 2000);
 
     child.once("exit", onExit);
     child.once("error", onError);
 
-    const signalled = child.kill("SIGINT");
+    const signalled = signalAgentProcess(child, "SIGINT");
     if (!signalled) {
       finish();
     }

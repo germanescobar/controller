@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
-import { spawn as childSpawn } from "node:child_process";
+import { execFileSync, spawn as childSpawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { getAgentProvider } from "../agents.js";
+import { getAgentProvider, signalAgentProcess } from "../agents.js";
 
 const anita = getAgentProvider("anita");
 assert.ok(anita, "anita provider must be registered");
@@ -191,6 +191,66 @@ test("child_process.spawn resolves an installed binary (sanity)", () => {
     });
   });
 });
+
+test(
+  "agent spawn isolates the CLI from Controller's POSIX process group",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "anita-process-group-"));
+    const shim = path.join(dir, "anita");
+    writeFileSync(shim, "#!/bin/sh\nsleep 30\n");
+    chmodSync(shim, 0o755);
+
+    const child = anita!.spawn({
+      message: "Hello",
+      cwd: dir,
+      env: {},
+      command: shim,
+      model: "test/model",
+    });
+
+    try {
+      assert.ok(child.pid, "spawned agent must have a pid");
+      const agentPgid = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(child.pid)], {
+          encoding: "utf8",
+        }).trim()
+      );
+      const controllerPgid = Number(
+        execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], {
+          encoding: "utf8",
+        }).trim()
+      );
+
+      assert.equal(
+        agentPgid,
+        child.pid,
+        "the agent must lead its own process group"
+      );
+      assert.notEqual(
+        agentPgid,
+        controllerPgid,
+        "the agent process group must not include Controller"
+      );
+
+      const closed = new Promise<NodeJS.Signals | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (_code, signal) => resolve(signal));
+      });
+      assert.equal(signalAgentProcess(child, "SIGTERM"), true);
+      assert.equal(await closed, "SIGTERM");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        try {
+          signalAgentProcess(child, "SIGKILL");
+        } catch {
+          // Best-effort cleanup for a failed assertion.
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+);
 
 const codex = getAgentProvider("codex");
 assert.ok(codex, "codex provider must be registered");
