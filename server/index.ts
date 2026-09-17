@@ -5,7 +5,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { projectsRouter } from "./routes/projects.js";
-import { sessionsRouter, wakeBySessionIdRouter, goalBySessionIdRouter, monitorBySessionIdRouter } from "./routes/sessions.js";
+import {
+  sessionsRouter,
+  wakeBySessionIdRouter,
+  goalBySessionIdRouter,
+  monitorBySessionIdRouter,
+  sendBySessionIdRouter,
+  childrenBySessionIdRouter,
+} from "./routes/sessions.js";
 import { worktreesRouter } from "./routes/worktrees.js";
 import { eventsRouter } from "./routes/events.js";
 import { modelsRouter } from "./routes/models.js";
@@ -79,6 +86,8 @@ app.use("/api/projects", schedulesRouter);
 app.use("/api/sessions", wakeBySessionIdRouter);
 app.use("/api/sessions", goalBySessionIdRouter);
 app.use("/api/sessions", monitorBySessionIdRouter);
+app.use("/api/sessions", sendBySessionIdRouter);
+app.use("/api/sessions", childrenBySessionIdRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/agents", agentsRouter);

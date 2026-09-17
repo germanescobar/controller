@@ -45,11 +45,33 @@ export interface Monitor {
   startedAt: string;
   /** Number of stdout lines captured so far. Capped at `limits.maxLines`. */
   lineCount: number;
+  /**
+   * Pattern (compiled server-side) used to filter stdout lines that
+   * should be re-injected as user messages (issue #351). When a line
+   * matches, the route's delivery hook enqueues a follow-up whose text is
+   * the canonical
+   * `[/monitor: <description>] <line>` marker — same shape as the
+   * `[/from: …]` marker the cross-session send uses, so the same
+   * client-side dedupe + linkifier logic handles both.
+   *
+   * `null` (the default) means "no filter" — every line is captured
+   * as a `monitor_event`, but none are re-injected as a user turn.
+   * The field is intentionally exposed on the wire (the route echoes
+   * it back) so the UI can show whether a monitor has a filter.
+   */
+  onLinePattern: string | null;
 }
 
 interface ActiveMonitor {
   monitor: Monitor;
-  child: ChildProcess;
+  /**
+   * The live child process. `null` for test-only entries
+   * seeded via `__seedMonitorForTests` — production code
+   * always populates this with the spawned `ChildProcess`.
+   * `stopMonitor` guards the `kill` call so a `null` here
+   * is safe (the SIGTERM is a no-op).
+   */
+  child: ChildProcess | null;
   buffer: string;
   /** Pending event-log writes — chained so they serialize per monitor. */
   writeChain: Promise<unknown>;
@@ -73,6 +95,34 @@ export function startMonitor(params: {
   persistent: boolean;
   timeoutMs?: number;
   limits?: Partial<MonitorLimits>;
+  /**
+   * Optional pre-compiled regex used to filter stdout lines that
+   * should be re-injected as user messages (issue #351). When a line
+   * matches, `onLineMatch` receives the canonical
+   * `[/monitor: <description>] <line>` marker for durable delivery.
+   * Compiled by the route layer (so a bad pattern returns 400
+   * before the monitor is started). `null` / `undefined` means no
+   * filter — every line is captured as a `monitor_event` but none
+   * are re-injected.
+   */
+  onLine?: RegExp | null;
+  /**
+   * The original pattern string the route received (issue #351).
+   * Stored on the `Monitor` so the wire response and the UI can
+   * echo back what filter was actually applied.
+   */
+  onLinePattern?: string | null;
+  /**
+   * Delivery hook for an `onLine` match. The route layer supplies a hook
+   * that enqueues a durable follow-up and advances the session when it is
+   * idle. Keeping execution outside this process primitive avoids a
+   * monitors -> routes import cycle and makes delivery directly testable.
+   */
+  onLineMatch?: (input: {
+    monitor: Monitor;
+    line: string;
+    text: string;
+  }) => Promise<void>;
 }): Monitor {
   const limits = {
     maxPerSession: params.limits?.maxPerSession ?? MAX_MONITORS_PER_SESSION,
@@ -103,6 +153,7 @@ export function startMonitor(params: {
     deadlineAt,
     startedAt: new Date().toISOString(),
     lineCount: 0,
+    onLinePattern: params.onLinePattern ?? null,
   };
   // We shell out via `spawn` with `shell: true` so the agent can use a
   // bare command string (matches the CLI surface) rather than having to
@@ -121,6 +172,10 @@ export function startMonitor(params: {
     writeChain: Promise.resolve(),
   };
   monitors.set(id, active);
+  // The compiled regex is `null` for unfiltered monitors. Local
+  // reference so the per-line closure avoids re-reading
+  // `params.onLine` on every chunk.
+  const onLine = params.onLine ?? null;
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => {
     active.buffer += chunk;
@@ -132,7 +187,8 @@ export function startMonitor(params: {
       // the latest count even before the disk write resolves, then
       // chain the event-log append onto the monitor's write chain so
       // on-disk order matches emission order.
-      if (monitor.lineCount < limits.maxLines) {
+      const captured = monitor.lineCount < limits.maxLines;
+      if (captured) {
         monitor.lineCount += 1;
         const event: AgentEvent = {
           id: randomUUID(),
@@ -149,6 +205,29 @@ export function startMonitor(params: {
               // advanced.
             }
           )
+        );
+      }
+      // Issue #351: when the monitor has an `--on-line` regex, also
+      // deliver a queued follow-up for matching lines. The text
+      // is the canonical `[/monitor: <description>] <line>` marker
+      // — same shape as the `[/from: …]` marker from `sessions
+      // send`, so the existing client-side dedupe + linkifier logic
+      // handles both. We deliberately throttle the write onto the
+      // same write chain as the monitor_event so on-disk order
+      // matches emission order: an agent reading its event log will
+      // see the monitor_event first, then enqueue the follow-up, for any
+      // given line.
+      if (captured && onLine && onLine.test(line) && params.onLineMatch) {
+        const markerLine = `[/monitor: ${monitor.description}] ${line}`;
+        active.writeChain = active.writeChain.then(() =>
+          params.onLineMatch!({
+            monitor: { ...monitor },
+            line,
+            text: markerLine,
+          }).catch(() => {
+            // Best-effort: a failed enqueue must not interrupt the
+            // monitor process. The monitor_event remains the audit trail.
+          })
         );
       }
       newlineIndex = active.buffer.indexOf("\n");
@@ -246,9 +325,11 @@ export function stopMonitor(monitorIdId: string): Monitor | null {
   if (!active) return null;
   monitors.delete(monitorIdId);
   try {
-    active.child.kill("SIGTERM");
+    active.child?.kill("SIGTERM");
   } catch {
-    // Already exited.
+    // Already exited, or no child handle (test-only seeded
+    // entries from `__seedMonitorForTests` have `child: null`).
+    // Either way, the map entry is gone; the SIGTERM is moot.
   }
   return { ...active.monitor };
 }
@@ -292,4 +373,30 @@ export function monitorCount(): number {
  *  exercise the route layer without spawning. */
 export function __resetMonitorsForTests(): void {
   monitors.clear();
+}
+
+/**
+ * Test-only helper that inserts a synthetic monitor entry into the
+ * in-process map WITHOUT spawning a child process.
+ *
+ * Used by the archive-route tests so the strict-archive rule can
+ * be exercised without `sleep 30` subprocesses racing the test
+ * runner's SIGTERM. The synthetic entry satisfies `listMonitors`,
+ * `countMonitorsForSession`, and the archive-route blocker check;
+ * `stopMonitor` removes it without trying to kill a non-existent
+ * child because the process handle is optional.
+ *
+ * Production code MUST NOT call this. The `__` prefix + the
+ * `_ForTests` suffix flag it as a test seam so any production
+ * caller is obvious in code review.
+ */
+export function __seedMonitorForTests(monitor: Monitor): void {
+  const active: ActiveMonitor = {
+    monitor,
+    // Keeping this null makes the test-only intent explicit.
+    child: null,
+    buffer: "",
+    writeChain: Promise.resolve(),
+  };
+  monitors.set(monitor.id, active);
 }

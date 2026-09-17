@@ -316,11 +316,14 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       "",
       note,
       "",
-      // Cross-session discoverability intro (issue #353). Closes the
-      // "how does the agent learn its own id" gap that motivates
-      // `controller sessions list --parent self`. The intro inlines
-      // worked-example commands so the agent can copy/paste them.
-      "Cross-session discoverability (issue #353):",
+      // Cross-session discoverability + coordinator primitives intro
+      // (issue #353 + #351). Closes the "how does the agent learn its
+      // own id" gap that motivates `controller sessions list
+      // --parent self`, and adds `sessions send` /
+      // `sessions children` / `sessions monitor start --on-line`
+      // primitives. The intro inlines worked-example commands so the
+      // agent can copy/paste them.
+      "Cross-session discoverability + coordinator primitives (issue #353 + #351):",
       "",
       `  - \`${cliPath} sessions list [<project>]\` enumerates every session in`,
       `    the project. \`--worktree <id>\`, \`--parent <id|self>\`, and`,
@@ -343,6 +346,27 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       `    (issue #355); flags can sit before or after it. If the prompt`,
       `    starts with \`--\`, pass it after \`--\` so the leading dash is`,
       `    treated as literal text: \`... -- "--help me"\`.`,
+      `  - \`${cliPath} sessions send <targetSessionId> <message> --from <id|self>\``,
+      `    enqueues a durable user turn on the target session whose text is`,
+      `    the canonical \`[/from: <parentTitle>] <message>\` marker. The`,
+      `    child session runs the message after its current turn (or immediately`,
+      `    when idle); the linkifier in the UI turns the parent title into a`,
+      `    \`controller://\` deep link. Use this when a coordinator wants to`,
+      `    give a child new work without spawning a fresh session — the child`,
+      `    keeps its existing transcript and continues from the sent message.`,
+      `  - \`${cliPath} sessions children <parentId|self>\` lists the children of`,
+      `    a session (every project × worktree, cross-worktree). The same`,
+      `    \`self\` shortcut works: \`sessions children self\` returns your own`,
+      `    children without first looking up your id.`,
+      `  - \`${cliPath} sessions monitor start <sessionId> --description <text>\``,
+      `    \`--command <shell> [--on-line <regex>]\` spawns a long-running`,
+      `    child process per session. When \`--on-line\` is set, every stdout`,
+      `    line that matches is enqueued as a durable user turn with`,
+      `    the marker \`[/monitor: <description>] <line>\` — same shape as`,
+      `    the \`[/from: …]\` marker from \`sessions send\`. Use this when you`,
+      `    want a background log stream to nudge the agent into action:`,
+      `    e.g. a CI monitor that re-injects the \`[CI] passed\` line so the`,
+      `    agent can react to completion without polling.`,
       "",
       "Typical coordinator startup:",
       "",
@@ -354,11 +378,24 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       `   #    collection, and jq would reject it with "Cannot index string`,
       `   #    with string 'provider'".`,
       `   SELF=$(${cliPath} sessions list --json | jq -r 'select(.provider == "codex") | .id' | head -1)`,
-      `   # 2. Spawn a child pinned to yourself.`,
+      `   # 2. Spawn a child pinned to yourself, capture the child's id from`,
+      `   #    the start-line output ("Started session <id>").`,
       `   ${cliPath} sessions start "Review the PR from session $SELF" \\`,
       `     --worktree <wtId> --parent "$SELF" --agent claude`,
-      `   # 3. Later, see your children.`,
-      `   ${cliPath} sessions list --parent "$SELF" --json`,
+      `   # 3. Send it follow-up work without spawning a fresh session.`,
+      `   ${cliPath} sessions send "$CHILD" "look at issue 190 first" --from "$SELF"`,
+      `   # Both the target and \`--from\` accept \`self\`; the orchestrator`,
+      `   # fills in your own id from \`$CONTROLLER_SESSION_ID\`.)`,
+      `   # 4. Watch for completion via a monitor that re-injects a marker`,
+      `   #    when CI finishes — the \`--on-line\` filter turns each match`,
+      `   #    into a queued \`[/monitor: <description>] <line>\` turn so`,
+      `   #    the coordinator reacts without polling.`,
+      `   ${cliPath} sessions monitor start "$CHILD" \\`,
+      `     --description "CI" \\`,
+      `     --command "gh pr checks --watch" \\`,
+      `     --on-line '^\\[CI\\] (passed|failed)$'`,
+      `   # 5. Later, see your children.`,
+      `   ${cliPath} sessions children self`,
     ].join("\n");
     assert.equal(preamble, expected);
   });

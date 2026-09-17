@@ -301,4 +301,95 @@ test("__resetMonitorsForTests clears the in-process map", async () => {
   });
 });
 
+// Issue #351: when a monitor has an `--on-line` filter, every
+// stdout line that matches is handed to the route's durable follow-up
+// delivery hook with the canonical `[/monitor: <description>] <line>`
+// marker. Lines that don't match are still captured as
+// `monitor_event` records (the monitor's normal behavior) — the
+// filter is additive, not exclusive.
+test("startMonitor delivers matching stdout lines to the follow-up hook (issue #351)", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const delivered: Array<{ line: string; text: string; monitorId: string }> = [];
+    const monitor = startMonitor({
+      sessionId: "s-on-line",
+      worktreePath: proj,
+      description: "CI watcher",
+      command: "printf 'noise 1\n[CI] passed\nnoise 2\n[CI] failed\n'",
+      persistent: false,
+      timeoutMs: 2_000,
+      limits: { maxPerSession: 8, maxLines: 100 },
+      onLine: /^\[CI\] (passed|failed)$/,
+      onLinePattern: "^\\[CI\\] (passed|failed)$",
+      onLineMatch: async ({ line, text, monitor: matchedMonitor }) => {
+        delivered.push({ line, text, monitorId: matchedMonitor.id });
+      },
+    });
+    // The Monitor carries the pattern back so the route response
+    // can echo it (the UI uses this to render an `--on-line` chip).
+    assert.equal(monitor.onLinePattern, "^\\[CI\\] (passed|failed)$");
+    await waitFor(
+      () => listMonitors("s-on-line").some((m) => m.lineCount >= 4),
+      2_000
+    );
+    await waitFor(() => delivered.length === 2, 2_000);
+    const events = await getEvents(proj, "s-on-line");
+    const monitorEvents = events
+      .filter((e) => e.type === "monitor_event")
+      .map((e) => e.data.line);
+    // Every line is captured as a monitor_event — the filter
+    // doesn't suppress capture, only decides which lines are
+    // re-injected.
+    assert.deepEqual(monitorEvents, [
+      "noise 1",
+      "[CI] passed",
+      "noise 2",
+      "[CI] failed",
+    ]);
+    // Only the two `[CI] …` lines match; noise never reaches the
+    // delivery hook. The route turns these hook calls into queued turns.
+    assert.deepEqual(delivered, [
+      {
+        line: "[CI] passed",
+        text: "[/monitor: CI watcher] [CI] passed",
+        monitorId: monitor.id,
+      },
+      {
+        line: "[CI] failed",
+        text: "[/monitor: CI watcher] [CI] failed",
+        monitorId: monitor.id,
+      },
+    ]);
+    stopMonitor(monitor.id);
+  });
+});
+
+// Without a filter the monitor records only `monitor_event`s —
+// user_message must not be re-injected. This is the unchanged
+// behavior contract for monitors started without `--on-line`.
+test("startMonitor without an --on-line filter does NOT re-inject user messages (issue #351)", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const monitor = startMonitor({
+      sessionId: "s-no-filter",
+      worktreePath: proj,
+      description: "plain",
+      command: "printf 'one\ntwo\n'",
+      persistent: false,
+      timeoutMs: 2_000,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    assert.equal(monitor.onLinePattern, null);
+    await waitFor(
+      () => listMonitors("s-no-filter").some((m) => m.lineCount >= 2),
+      2_000
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const events = await getEvents(proj, "s-no-filter");
+    const userMessages = events.filter((e) => e.type === "user_message");
+    assert.equal(userMessages.length, 0);
+    stopMonitor(monitor.id);
+  });
+});
+
 void existsSync; // keep imports used even when guards add nothing

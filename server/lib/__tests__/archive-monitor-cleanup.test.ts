@@ -114,23 +114,36 @@ async function withArchiveRoutes(
 }
 
 test("archiveSession route stops persistent monitors for the session", async () => {
+  // Issue #351: the strict-archive rule refuses to archive a
+  // session with an active monitor (HTTP 409 with the monitor in
+  // the `blockers` array). The original motivation for this test —
+  // "the archive path must explicitly stop persistent monitors
+  // BEFORE the archive completes so a SIGTERM doesn't outlive the
+  // route handler" — still applies, but the new contract is:
+  // archive is unreachable while a monitor is alive.
+  //
+  // We use `__seedMonitorForTests` to inject a synthetic monitor
+  // entry without spawning a child process. The previous version
+  // of this test ran `sleep 30` via `startMonitor`, and the
+  // SIGTERM race against the test runner's own shutdown was
+  // tearing down the parent process. The seeded entry satisfies
+  // `listMonitors` / the blocker check / `stopMonitor` cleanup
+  // without any subprocess involvement.
   await withArchiveRoutes(async ({ baseUrl, projectId, sessionId }) => {
-    const { startMonitor, listMonitors } = await import("../monitors.js");
-    // Start a persistent monitor (no timeout → no auto-kill). The
-    // archive path must explicitly stop it.
-    const wtPath = path.join(
-      process.env.CONTROLLER_HOME ?? ".",
-      "feature"
-    );
-    startMonitor({
+    const { __seedMonitorForTests, listMonitors, __resetMonitorsForTests } =
+      await import("../monitors.js");
+    const wtPath = path.join(process.env.CONTROLLER_HOME ?? ".", "feature");
+    __seedMonitorForTests({
+      id: "monitor-test-1",
       sessionId,
       worktreePath: wtPath,
       description: "persistent watcher",
-      command: "sleep 30",
+      command: "echo seeded",
       persistent: true,
-      // Bypasses the 1s MIN_TIMEOUT_MS clamp by going persistent.
-      timeoutMs: undefined,
-      limits: { maxPerSession: 8, maxLines: 100 },
+      deadlineAt: null,
+      startedAt: new Date().toISOString(),
+      lineCount: 0,
+      onLinePattern: null,
     });
     assert.equal(listMonitors(sessionId).length, 1);
 
@@ -138,19 +151,76 @@ test("archiveSession route stops persistent monitors for the session", async () 
       `${baseUrl}/${projectId}/sessions/${sessionId}/archive?worktreeId=${"wt-1"}`,
       { method: "POST" }
     );
-    if (response.status !== 200) {
-      const body = await response.text();
-      assert.fail(
-        `archive returned ${response.status}: ${body}\n` +
-          `projectId=${projectId}\n` +
-          `baseUrl=${baseUrl}\n`
-      );
-    }
-    // The monitor should be gone from the in-process map after
-    // archive. Persistent monitors that were killed via SIGTERM
-    // also drop out of the map; the consumer of this test only
-    // cares that `listMonitors` is empty.
+    // Strict-archive: a live monitor is now a blocker, so the
+    // route returns 409 with the monitor in the `blockers` array
+    // rather than silently stopping the monitor. The operator
+    // must drain the monitor explicitly.
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as {
+      ok: boolean;
+      blockers: Array<{ kind: string; descriptions?: string[] }>;
+    };
+    assert.equal(body.ok, false);
+    const monitorBlocker = body.blockers.find(
+      (b) => b.kind === "active-monitors"
+    );
+    assert.ok(monitorBlocker);
+    assert.deepEqual(
+      (monitorBlocker as { descriptions: string[] }).descriptions,
+      ["persistent watcher"]
+    );
+    // The monitor is still seeded — the route didn't drain it.
+    assert.equal(listMonitors(sessionId).length, 1);
+
+    __resetMonitorsForTests();
+  });
+});
+
+test("archiveSession route cleanup drains monitors when the strict-archive blocker is empty (issue #351)", async () => {
+  // Companion test to the one above: after the operator drains
+  // every monitor (matching what the strict-archive UI expects),
+  // archive succeeds and the in-process monitor map is empty.
+  // Covers the post-archive `stopMonitorsForSession` cleanup path
+  // without needing a live subprocess — `__seedMonitorForTests`
+  // injects a synthetic entry, we `stopMonitor` it ourselves,
+  // then verify the archive proceeds.
+  await withArchiveRoutes(async ({ baseUrl, projectId, sessionId }) => {
+    const {
+      __seedMonitorForTests,
+      listMonitors,
+      stopMonitor,
+      __resetMonitorsForTests,
+    } = await import("../monitors.js");
+    const wtPath = path.join(process.env.CONTROLLER_HOME ?? ".", "feature");
+    const monitor = {
+      id: "monitor-cleanup-test",
+      sessionId,
+      worktreePath: wtPath,
+      description: "drained",
+      command: "echo seeded",
+      persistent: true,
+      deadlineAt: null,
+      startedAt: new Date().toISOString(),
+      lineCount: 0,
+      onLinePattern: null,
+    } as const;
+    __seedMonitorForTests(monitor);
+    assert.equal(listMonitors(sessionId).length, 1);
+    // Operator drains the monitor (this is exactly what the UI's
+    // disabled-Archive tooltip expects the operator to do).
+    stopMonitor(monitor.id);
     assert.equal(listMonitors(sessionId).length, 0);
+
+    const response = await fetch(
+      `${baseUrl}/${projectId}/sessions/${sessionId}/archive?worktreeId=${"wt-1"}`,
+      { method: "POST" }
+    );
+    assert.equal(response.status, 200);
+
+    // Defensive: clear the map so a follow-up test sees a clean
+    // slate (the seed above is already gone, but `stopAllMonitors`
+    // is the canonical reset the rest of the suite expects).
+    __resetMonitorsForTests();
   });
 });
 

@@ -32,6 +32,7 @@ export interface Session {
   // queue. Used by the server to prevent auto-pin from silently
   // re-pinning a session the user removed.
   userUnpinned?: boolean;
+  parentId?: string;
 }
 
 /**
@@ -429,15 +430,40 @@ export async function fetchActiveRuntimes(): Promise<SessionRuntimeEntry[]> {
   );
 }
 
+export type ArchiveBlocker =
+  | { kind: "live-agent"; message: string }
+  | { kind: "queued-messages"; count: number }
+  | {
+      kind: "active-monitors";
+      count: number;
+      monitorIds: string[];
+      descriptions: string[];
+    }
+  | { kind: "live-children"; count: number; childIds: string[] };
+
+export async function fetchArchiveBlockers(
+  projectId: string,
+  sessionId: string,
+  worktreeId?: string,
+): Promise<ArchiveBlocker[]> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/archive-blockers${withWorktree(worktreeId)}`,
+  );
+  await throwIfNotOk(res, "Failed to check whether this session can be archived");
+  const body = (await res.json()) as { blockers?: unknown };
+  return Array.isArray(body.blockers) ? (body.blockers as ArchiveBlocker[]) : [];
+}
+
 export async function archiveSession(
   projectId: string,
   sessionId: string,
   worktreeId?: string
 ): Promise<void> {
-  await fetch(
+  const res = await fetch(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/archive${withWorktree(worktreeId)}`,
     { method: "POST" }
   );
+  await throwIfNotOk(res, "Failed to archive session");
 }
 
 async function updateSessionFocus(
