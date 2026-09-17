@@ -50,22 +50,47 @@ export interface QueuedMessage {
 /** Fields the caller supplies; `id` and `createdAt` are assigned on enqueue. */
 export type QueuedMessageInput = Omit<QueuedMessage, "id" | "createdAt">;
 
+export interface SessionQueueTransaction {
+  list(): Promise<QueuedMessage[]>;
+  enqueue(input: QueuedMessageInput): Promise<QueuedMessage>;
+  clear(): Promise<void>;
+}
+
+/** Run a lifecycle operation under the lock used by every queue mutation. */
+export function withSessionQueueTransaction<T>(
+  sessionId: string,
+  run: (queue: SessionQueueTransaction) => Promise<T>
+): Promise<T> {
+  return withLock(sessionId, () =>
+    run({
+      list: () => readQueue(sessionId),
+      enqueue: (input) => enqueueUnlocked(sessionId, input),
+      clear: () => clearQueueUnlocked(sessionId),
+    })
+  );
+}
+
 /** Append a message to the end of a session's queue and return the stored item. */
 export async function enqueue(
   sessionId: string,
   input: QueuedMessageInput
 ): Promise<QueuedMessage> {
-  return withLock(sessionId, async () => {
-    const queue = await readQueue(sessionId);
-    const message: QueuedMessage = {
-      ...input,
-      id: randomUUID(),
-      createdAt: new Date().toISOString(),
-    };
-    queue.push(message);
-    await writeQueue(sessionId, queue);
-    return message;
-  });
+  return withLock(sessionId, () => enqueueUnlocked(sessionId, input));
+}
+
+async function enqueueUnlocked(
+  sessionId: string,
+  input: QueuedMessageInput
+): Promise<QueuedMessage> {
+  const queue = await readQueue(sessionId);
+  const message: QueuedMessage = {
+    ...input,
+    id: randomUUID(),
+    createdAt: new Date().toISOString(),
+  };
+  queue.push(message);
+  await writeQueue(sessionId, queue);
+  return message;
 }
 
 /** Return the session's queued messages in order (empty if none). */
@@ -155,9 +180,11 @@ export async function dequeueFirst(
 
 /** Delete a session's queue file entirely (e.g. when the session is archived). */
 export async function clearQueue(sessionId: string): Promise<void> {
-  await withLock(sessionId, async () => {
-    await fs.rm(sessionQueueFile(sessionId), { force: true });
-  });
+  await withLock(sessionId, () => clearQueueUnlocked(sessionId));
+}
+
+async function clearQueueUnlocked(sessionId: string): Promise<void> {
+  await fs.rm(sessionQueueFile(sessionId), { force: true });
 }
 
 async function readQueue(sessionId: string): Promise<QueuedMessage[]> {

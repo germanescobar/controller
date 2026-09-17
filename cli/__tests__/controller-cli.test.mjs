@@ -3870,3 +3870,596 @@ test("runSessions start forwards --parent on the POST body (issue #353)", async 
   assert.equal(body.worktreeId, "wt-1");
   assert.equal(body.message, "spawn a child");
 });
+
+test("parseSessions send builds a send payload with targetSessionId, fromSessionId, and message (issue #351)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "send",
+    "sess-target",
+    "Hello from coordinator",
+    "--from",
+    "sess-parent",
+  ]);
+  assert.equal(parsed.action, "send");
+  assert.equal(parsed.targetSessionId, "sess-target");
+  assert.equal(parsed.fromSessionId, "sess-parent");
+  assert.deepEqual(parsed.body, { message: "Hello from coordinator" });
+});
+
+test("parseSessions send resolves --from self via $CONTROLLER_SESSION_ID (issue #351)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-coord";
+  try {
+    const parsed = cli.parseSessions([
+      "send",
+      "sess-target",
+      "ping the child",
+      "--from",
+      "self",
+    ]);
+    assert.equal(parsed.fromSessionId, "sess-self-coord");
+    assert.equal(parsed.body.message, "ping the child");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseSessions send resolves a self target via $CONTROLLER_SESSION_ID", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-target";
+  try {
+    const parsed = cli.parseSessions([
+      "send",
+      "self",
+      "follow up with myself",
+      "--from",
+      "sess-parent",
+    ]);
+    assert.equal(parsed.targetSessionId, "sess-self-target");
+    assert.equal(parsed.fromSessionId, "sess-parent");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseSessions send surfaces a clear error when --from self has no env (issue #351)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("EXIT");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => {
+      cli.parseSessions([
+        "send",
+        "sess-target",
+        "ping the child",
+        "--from",
+        "self",
+      ]);
+    }, /EXIT/);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+});
+
+test("parseSessions send rejects a missing target (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("EXIT");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => {
+      cli.parseSessions(["send", "--from", "sess-parent", "hi"]);
+    }, /EXIT/);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /targetSessionId/);
+});
+
+test("parseSessions send keeps --flag-like tokens literal in the message body (issue #351 + #355)", async () => {
+  const cli = await loadCli();
+  // The prompt quotes `--json` — the leading `--` would otherwise be
+  // mistaken for a flag. The `--` end-of-flags marker must let the
+  // parser treat `--json` as literal message text. `--from` must
+  // appear before the `--` marker so the parser can extract the
+  // parent id from the flag args; after `--`, every token is part of
+  // the message verbatim.
+  const parsed = cli.parseSessions([
+    "send",
+    "sess-target",
+    "--from",
+    "sess-parent",
+    "--",
+    "--help me",
+    "explain the --json flag",
+  ]);
+  assert.equal(parsed.body.message, "--help me explain the --json flag");
+  assert.equal(parsed.fromSessionId, "sess-parent");
+});
+
+test("parseSessions children builds a children payload with the resolved parentId (issue #351)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions(["children", "sess-parent"]);
+  assert.equal(parsed.action, "children");
+  assert.equal(parsed.parentId, "sess-parent");
+});
+
+test("parseSessions children resolves 'self' via $CONTROLLER_SESSION_ID (issue #351)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-coord";
+  try {
+    const parsed = cli.parseSessions(["children", "self"]);
+    assert.equal(parsed.parentId, "sess-self-coord");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseSessions children rejects 'self' when the env var is unset (issue #351)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("EXIT");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => {
+      cli.parseSessions(["children", "self"]);
+    }, /EXIT/);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+});
+
+test("runSessions send posts to /api/sessions/<target>/send-from with the message body (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    // `runSessions` resolves the project from cwd first (matching
+    // every other action), then dispatches. The send route is mounted
+    // under `/api/sessions/:sessionId/send-from` and the project id
+    // is unused — the stub just needs to return a project.
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    return {
+      status: 201,
+      json: async () => ({
+        eventId: "evt-123",
+        parentSessionId: "sess-parent",
+        parentTitle: "Coordinator",
+      }),
+    };
+  };
+  let stdoutText = "";
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    stdoutText += String(chunk);
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      [
+        "send",
+        "sess-target",
+        "Hello from coordinator",
+        "--from",
+        "sess-parent",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const postCall = calls.find(
+    (c) => c.url === "http://controller.test/api/sessions/sess-target/send-from"
+  );
+  assert.ok(postCall, "expected a POST to the send-from endpoint");
+  assert.equal(postCall.init.method, "POST");
+  const body = JSON.parse(postCall.init.body);
+  assert.equal(body.message, "Hello from coordinator");
+  assert.equal(body.fromSessionId, "sess-parent");
+  assert.match(stdoutText, /Enqueued send evt-123 on sess-target/);
+});
+
+test("runSessions send surfaces a non-2xx server error as a clear exit (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    return {
+      status: 404,
+      json: async () => ({ error: "Session not found" }),
+    };
+  };
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("EXIT");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => {
+      await cli.runSessions(
+        [
+          "send",
+          "sess-missing",
+          "x",
+          "--from",
+          "sess-parent",
+        ],
+        "http://controller.test"
+      );
+    }, /EXIT/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Session not found/);
+});
+
+test("runSessions children GETs /api/sessions/<parent>/children and prints one row per match (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    assert.equal(
+      String(url),
+      "http://controller.test/api/sessions/sess-parent/children"
+    );
+    return {
+      status: 200,
+      json: async () => ({
+        parent: "sess-parent",
+        children: [
+          {
+            id: "sess-child-1",
+            title: "Plan the rollout",
+            provider: "claude",
+            status: "active",
+          },
+          {
+            id: "sess-child-2",
+            title: "(untitled)",
+            provider: "codex",
+            status: "queued",
+          },
+        ],
+      }),
+    };
+  };
+  let stdoutText = "";
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    stdoutText += String(chunk);
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["children", "sess-parent"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.match(stdoutText, /sess-child-1/);
+  assert.match(stdoutText, /\[claude\]/);
+  assert.match(stdoutText, /Plan the rollout/);
+  assert.match(stdoutText, /sess-child-2/);
+  assert.match(stdoutText, /\[codex\]/);
+  assert.match(stdoutText, /status=queued/);
+});
+
+test("runSessions children prints 'No children.' for an empty parent (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({ parent: "sess-parent", children: [] }),
+    };
+  };
+  let stdoutText = "";
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    stdoutText += String(chunk);
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["children", "sess-parent"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.match(stdoutText, /No children\./);
+});
+
+test("parseMonitor start accepts --on-line and forwards the pattern on the body (issue #351)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseMonitor([
+    "start",
+    "sess-abc",
+    "--description",
+    "watch CI",
+    "--command",
+    "gh pr checks 42 --watch",
+    "--on-line",
+    "^\\[CI\\] (passed|failed)$",
+  ]);
+  assert.equal(parsed.action, "start");
+  assert.equal(parsed.sessionId, "sess-abc");
+  assert.equal(parsed.body.onLine, "^\\[CI\\] (passed|failed)$");
+  assert.equal(parsed.body.description, "watch CI");
+  assert.equal(parsed.body.command, "gh pr checks 42 --watch");
+});
+
+test("parseMonitor start omits --on-line from the body when it is absent (issue #351)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseMonitor([
+    "start",
+    "sess-abc",
+    "--description",
+    "watch CI",
+    "--command",
+    "gh pr checks 42 --watch",
+  ]);
+  assert.equal("onLine" in parsed.body, false);
+});
+
+test("parseMonitor start rejects a blank --on-line pattern (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("EXIT");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => {
+      cli.parseMonitor([
+        "start",
+        "sess-abc",
+        "--description",
+        "watch CI",
+        "--command",
+        "echo",
+        "--on-line",
+        "",
+      ]);
+    }, /EXIT/);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--on-line/);
+});
+
+test("parseSessions monitor delegates to parseMonitor (issue #351 + #339 wiring)", async () => {
+  const cli = await loadCli();
+  const outer = cli.parseSessions([
+    "monitor",
+    "start",
+    "sess-abc",
+    "--description",
+    "watch CI",
+    "--command",
+    "gh pr checks 42 --watch",
+    "--on-line",
+    "^\\[CI\\]",
+  ]);
+  assert.equal(outer.action, "monitor");
+  const inner = cli.parseMonitor(outer.monitorArgv);
+  assert.equal(inner.action, "start");
+  assert.equal(inner.sessionId, "sess-abc");
+  assert.equal(inner.body.onLine, "^\\[CI\\]");
+});
+
+test("runMonitor start echoes the onLine pattern when the server returns it (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    assert.equal(
+      String(url),
+      "http://controller.test/api/sessions/sess-abc/monitors"
+    );
+    const sentBody = JSON.parse(String(init?.body));
+    assert.equal(sentBody.onLine, "^\\[CI\\] (passed|failed)$");
+    return {
+      status: 201,
+      json: async () => ({
+        monitor: {
+          id: "monitor-1",
+          sessionId: "sess-abc",
+          description: "watch CI",
+          command: "gh pr checks 42 --watch",
+          persistent: false,
+          deadlineAt: null,
+          startedAt: new Date().toISOString(),
+          lineCount: 0,
+          onLinePattern: "^\\[CI\\] (passed|failed)$",
+        },
+      }),
+    };
+  };
+  let stdoutText = "";
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk) => {
+    stdoutText += String(chunk);
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      [
+        "monitor",
+        "start",
+        "sess-abc",
+        "--description",
+        "watch CI",
+        "--command",
+        "gh pr checks 42 --watch",
+        "--on-line",
+        "^\\[CI\\] (passed|failed)$",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.match(stdoutText, /Started monitor monitor-1/);
+  assert.match(stdoutText, /onLine=/);
+  // JSON.stringify doubles each backslash. The literal pattern
+  // `^\[CI\] (passed|failed)$` (one backslash before each bracket)
+  // serializes to `"^\\\\[CI\\\\] (passed|failed)$"`. Match the
+  // substrings that survive double-escaping.
+  assert.match(stdoutText, /\(passed\|failed\)/);
+  assert.match(stdoutText, /\\\\\[CI\\\\\]/);
+});
+
+test("runMonitor start surfaces a 400 for an invalid --on-line pattern (issue #351)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    return {
+      status: 400,
+      json: async () => ({ error: "Invalid --on-line pattern: /[unterminated/" }),
+    };
+  };
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("EXIT");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => {
+      await cli.runSessions(
+        [
+          "monitor",
+          "start",
+          "sess-abc",
+          "--description",
+          "watch CI",
+          "--command",
+          "echo",
+          "--on-line",
+          "/[unterminated/",
+        ],
+        "http://controller.test"
+      );
+    }, /EXIT/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Invalid --on-line pattern/);
+});

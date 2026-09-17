@@ -889,6 +889,99 @@ export function parseSessions(argv) {
         },
       };
     }
+    case "send": {
+      // `sessions send <targetSessionId> <message> --from <parentId|self>`
+      // (issue #351).
+      //
+      // The route accepts a positional message and a `--from` flag
+      // naming the parent (issue #351 coordinator primitive). When
+      // `--from self` is used, the CLI resolves the literal `self`
+      // to the calling session's id via `$CONTROLLER_SESSION_ID` —
+      // an agent that doesn't know its own id can still send with
+      // `controller sessions send <target> "..." --from self`.
+      //
+      // Same positional-message + `--` end-of-flags shape as
+      // `sessions start` / `wake` (issue #355).
+      const targetFlag = rest[0];
+      if (!targetFlag || targetFlag.startsWith("--")) {
+        fail("sessions send requires a <targetSessionId>");
+      }
+      const targetSessionId = resolveParentFlag(targetFlag);
+      if (!targetSessionId) {
+        fail(
+          `sessions send: target 'self' requires $CONTROLLER_SESSION_ID; ` +
+            `the agent that ran this command was not spawned by the orchestrator. ` +
+            `Run \`controller sessions list\` to discover your id and pass it explicitly.`
+        );
+      }
+      const sendArgs = rest.slice(1);
+      const { message, flagArgs } = extractMessageAndFlagArgs(
+        sendArgs,
+        ["--from"],
+        "sessions send"
+      );
+      const fromFlag = flagValue(flagArgs, "--from");
+      if (!fromFlag) {
+        fail("sessions send requires --from <parentSessionId|self>");
+      }
+      const fromSessionId = resolveParentFlag(fromFlag);
+      if (!fromSessionId) {
+        fail(
+          `sessions send: --from self requires $CONTROLLER_SESSION_ID; ` +
+            `the agent that ran this command was not spawned by the orchestrator. ` +
+            `Run \`controller sessions list\` to discover your id and pass it explicitly.`
+        );
+      }
+      return {
+        project: "",
+        action: "send",
+        targetSessionId,
+        fromSessionId,
+        body: { message },
+      };
+    }
+    case "children": {
+      // `sessions children <parentSessionId>` (issue #351). No
+      // project qualifier — the route walks every project × worktree
+      // pair (the same cross-worktree walk `listChildSessions`
+      // already does on the server) so a parent on the main worktree
+      // and a child on a feature worktree are both returned.
+      //
+      // `<parentSessionId>` accepts the same `self` shortcut as
+      // `--parent` on `start` / `list` — the agent can discover its
+      // own children without first looking up its id.
+      const parentFlag = rest[0];
+      if (!parentFlag || parentFlag.startsWith("--")) {
+        fail("sessions children requires a <parentSessionId|self>");
+      }
+      const parentId = resolveParentFlag(parentFlag);
+      if (!parentId) {
+        fail(
+          `sessions children: 'self' requires $CONTROLLER_SESSION_ID; ` +
+            `the agent that ran this command was not spawned by the orchestrator. ` +
+            `Run \`controller sessions list\` to discover your id and pass it explicitly.`
+        );
+      }
+      return {
+        project: "",
+        action: "children",
+        parentId,
+      };
+    }
+    case "monitor": {
+      // `sessions monitor <start|list|stop> ...` (issue #339). The
+      // surface is parsed by a dedicated `parseMonitor` (the same
+      // shape as `goal` — a sub-shape that takes its own positional
+      // args), and dispatched by `runMonitor`. The route is mounted
+      // under `/api/sessions/:sessionId/monitors` so the agent
+      // doesn't need a project id — the same per-session walker the
+      // wake + goal surfaces use.
+      return {
+        project: "",
+        action: "monitor",
+        monitorArgv: rest,
+      };
+    }
     default:
       fail(`Unknown sessions command: ${command}\n${USAGE}`);
   }
@@ -1031,8 +1124,60 @@ export async function runSessions(argv, serverUrl) {
     process.stdout.write(`\n`);
     return;
   }
+  if (parsed.action === "send") {
+    // Cross-session send (issue #351). Posts to a per-session route
+    // that walks every project × worktree pair to resolve the
+    // target (the same `locateSessionById` walk the wake + goal +
+    // monitor surfaces use). The server records a `user_message`
+    // event on the target whose text is the canonical
+    // `[/from: <parentTitle>] <message>` marker so the agent can
+    // round-trip the message through its own transcript and the
+    // linkifier can render the parent title as a `controller://`
+    // deep link.
+    const route = `/api/sessions/${parsed.targetSessionId}/send-from`;
+    const body = { ...parsed.body, fromSessionId: parsed.fromSessionId };
+    const { response, result } = await postJson(serverUrl, route, body);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to send (HTTP ${response.status})`);
+    }
+    const queuedId = result?.eventId;
+    if (typeof queuedId !== "string" || !queuedId) {
+      fail("Server did not return an event id");
+    }
+    process.stdout.write(`Enqueued send ${queuedId} on ${parsed.targetSessionId}\n`);
+    return;
+  }
+  if (parsed.action === "children") {
+    // Cross-worktree children enumeration (issue #351). The route
+    // walks every project × worktree pair so a parent on the main
+    // worktree and a child on a feature worktree are both found.
+    const route = `/api/sessions/${parsed.parentId}/children`;
+    const { response, result } = await getJson(serverUrl, route);
+    if (response.status >= 400) {
+      fail(result?.error ?? `Failed to list children (HTTP ${response.status})`);
+    }
+    const children = Array.isArray(result?.children) ? result.children : [];
+    if (children.length === 0) {
+      process.stdout.write("No children.\n");
+      return;
+    }
+    for (const child of children) {
+      process.stdout.write(`${formatChildRow(child)}\n`);
+    }
+    return;
+  }
   if (parsed.action === "list") {
     await runSessionsList(parsed.body, serverUrl, projectId);
+    return;
+  }
+  if (parsed.action === "monitor") {
+    // Delegate to the dedicated `runMonitor` dispatcher (issue #339).
+    // The parse pass is re-done inside `runMonitor` because the
+    // monitor sub-shape (`start | list | stop`) takes its own
+    // positional args; `parseSessions` only knows the surface
+    // exists. The `projectId` is unused — the per-session monitor
+    // route resolves its own session.
+    await runMonitor(parsed.monitorArgv, serverUrl);
     return;
   }
   fail(`Unknown sessions action: ${parsed.action}`);
@@ -1180,6 +1325,29 @@ function formatSessionRow(row) {
   return `${row.id}  ${provider}  ${title}${worktree}${parent}  lastActive=${lastActive}`;
 }
 
+/**
+ * Format one child row for the `sessions children` output (issue #351).
+ * Mirrors the focus-queue row style so the terminal output stays
+ * legible at a glance. The id is the canonical handle (the agent can
+ * paste it into a `wake` / `send` invocation), the title is whatever
+ * the user renamed the child to (or a placeholder when none has been
+ * set yet), and `agent=` is the provider so the agent can tell at a
+ * glance whether the child is its own kind or a sibling.
+ */
+function formatChildRow(child) {
+  const id = typeof child?.id === "string" ? child.id : "?";
+  const title =
+    typeof child?.title === "string" && child.title.trim()
+      ? child.title
+      : "(untitled)";
+  const provider =
+    typeof child?.provider === "string" && child.provider
+      ? child.provider
+      : "unknown";
+  const status = typeof child?.status === "string" ? child.status : "?";
+  return `${id}  [${provider}]  ${title}  status=${status}`;
+}
+
 export async function runGoal(argv, serverUrl) {
   const parsed = parseGoal(argv);
   if (parsed.action === "show") {
@@ -1250,7 +1418,13 @@ export function parseMonitor(argv) {
       const monitorArgs = rest.slice(1);
       assertKnownFlags(
         monitorArgs,
-        ["--description", "--command", "--timeout-ms", "--persistent"],
+        [
+          "--description",
+          "--command",
+          "--timeout-ms",
+          "--persistent",
+          "--on-line",
+        ],
         "sessions monitor start"
       );
       const description = flagValue(monitorArgs, "--description");
@@ -1271,6 +1445,19 @@ export function parseMonitor(argv) {
         timeoutMs = parsed;
       }
       const persistent = monitorArgs.includes("--persistent");
+      // Issue #351: optional `--on-line <regex>` filter. When set,
+      // every stdout line that matches is re-injected as a
+      // `user_message` event whose text is
+      // `[/monitor: <description>] <line>` — same marker shape as
+      // `sessions send`'s `[/from: …]`. The server compiles the
+      // pattern; the CLI just passes the raw string through. A
+      // blank value is rejected so the agent can't accidentally
+      // turn the monitor into a "match every line" echo (which
+      // would flood the event log).
+      const onLine = flagValue(monitorArgs, "--on-line");
+      if (onLine != null && !onLine.trim()) {
+        fail("sessions monitor start: --on-line must be a non-empty regex");
+      }
       return {
         action: "start",
         sessionId,
@@ -1279,6 +1466,7 @@ export function parseMonitor(argv) {
           command,
           ...(timeoutMs != null ? { timeoutMs } : {}),
           ...(persistent ? { persistent: true } : {}),
+          ...(onLine && onLine.trim() ? { onLine: onLine.trim() } : {}),
         },
       };
     }
@@ -1318,6 +1506,13 @@ export async function runMonitor(argv, serverUrl) {
     process.stdout.write(`Started monitor ${monitor.id}\n`);
     process.stdout.write(`  description=${JSON.stringify(monitor.description)}\n`);
     process.stdout.write(`  command=${JSON.stringify(monitor.command)}\n`);
+    // Issue #351: when the monitor has an `--on-line` filter, echo
+    // it so the agent can confirm the pattern landed. `null` means
+    // no filter — every line is captured as a `monitor_event` but
+    // none are re-injected as user turns.
+    if (typeof monitor.onLinePattern === "string" && monitor.onLinePattern) {
+      process.stdout.write(`  onLine=${JSON.stringify(monitor.onLinePattern)}\n`);
+    }
     return;
   }
   if (parsed.action === "list") {
@@ -1352,7 +1547,17 @@ function formatMonitorRow(monitor) {
   const command = monitor.command ?? "";
   const lineCount = monitor.lineCount ?? 0;
   const persistent = monitor.persistent ? "persistent" : "transient";
-  return `${monitor.id}  [${persistent}]  session=${sessionId}  lines=${lineCount}\n  description: ${description}\n  command: ${command}`;
+  // Issue #351: when the monitor has an `--on-line` filter, surface
+  // it as a third line so the agent can read the active pattern at a
+  // glance. When the field is absent (older server, or a monitor
+  // started without the flag), the line is omitted entirely — the
+  // absence is itself a signal that "this monitor does not re-inject
+  // matched lines as user messages".
+  const onLine =
+    typeof monitor.onLinePattern === "string" && monitor.onLinePattern
+      ? `\n  onLine: ${monitor.onLinePattern}`
+      : "";
+  return `${monitor.id}  [${persistent}]  session=${sessionId}  lines=${lineCount}\n  description: ${description}\n  command: ${command}${onLine}`;
 }
 
 // --- schedules surface (issue #243) ---

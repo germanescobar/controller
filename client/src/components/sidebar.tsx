@@ -26,6 +26,7 @@ import {
   deleteProject,
   deleteWorktree,
   archiveSession,
+  fetchArchiveBlockers,
   markSessionFocusDone,
   updateSessionTitle,
   fetchWorktreeSetupLog,
@@ -34,7 +35,12 @@ import {
   type SessionSummary,
   type Worktree,
   type WorktreeSetupEvent,
+  type ArchiveBlocker,
 } from "../api.ts";
+import {
+  groupSessionsByParent,
+  isSubtreeExpandedByDefault,
+} from "../lib/parent-child.ts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -404,11 +410,106 @@ export function Sidebar({
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<
     Record<string, number>
   >({});
+  // Issue #351: parents whose children-subtree is currently
+  // expanded. The set is keyed by parent id; a parent with no
+  // entry is collapsed (or auto-expanded on first render via
+  // `isSubtreeExpandedByDefault`). The state is per-component
+  // instance — the sidebar starts fresh on every mount, which
+  // matches the existing focus-queue behavior.
+  const [expandedSubtreeIds, setExpandedSubtreeIds] = useState<
+    Set<string>
+  >(new Set());
+  const toggleSubtree = (parentId: string, currentlyExpanded: boolean) => {
+    setExpandedSubtreeIds((prev) => {
+      const next = new Set(prev);
+      const collapsedKey = `__collapsed__${parentId}`;
+      next.delete(parentId);
+      next.delete(collapsedKey);
+      if (currentlyExpanded) next.add(collapsedKey);
+      else next.add(parentId);
+      return next;
+    });
+  };
   const [confirmArchiveSession, setConfirmArchiveSession] = useState<{
     projectId: string;
     sessionId: string;
     worktreeId: string;
   } | null>(null);
+  const [archiveBlockersBySession, setArchiveBlockersBySession] = useState<
+    Record<string, ArchiveBlocker[]>
+  >({});
+  const [checkingArchiveIds, setCheckingArchiveIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [archivingSession, setArchivingSession] = useState(false);
+
+  const describeArchiveBlockers = (blockers: ArchiveBlocker[]): string =>
+    blockers
+      .map((blocker) => {
+        switch (blocker.kind) {
+          case "live-agent":
+            return blocker.message || "agent is running";
+          case "awaiting-input":
+            return blocker.message || "session is waiting for input";
+          case "queued-messages":
+            return `${blocker.count} queued message${blocker.count === 1 ? "" : "s"}`;
+          case "active-monitors":
+            return `${blocker.count} active monitor${blocker.count === 1 ? "" : "s"}`;
+          case "live-children":
+            return `${blocker.count} child session${blocker.count === 1 ? " has" : "s have"} unfinished work`;
+        }
+      })
+      .join(", ");
+
+  const loadArchiveBlockers = async (
+    projectId: string,
+    sessionId: string,
+    worktreeId: string,
+  ): Promise<ArchiveBlocker[]> => {
+    setCheckingArchiveIds((prev) => new Set(prev).add(sessionId));
+    try {
+      const blockers = await fetchArchiveBlockers(
+        projectId,
+        sessionId,
+        worktreeId,
+      );
+      setArchiveBlockersBySession((prev) => ({
+        ...prev,
+        [sessionId]: blockers,
+      }));
+      return blockers;
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to check archive status",
+      );
+      return [{ kind: "live-agent", message: "Archive status is unknown" }];
+    } finally {
+      setCheckingArchiveIds((prev) => {
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
+    }
+  };
+
+  const requestArchive = async (
+    projectId: string,
+    sessionId: string,
+    worktreeId: string,
+  ) => {
+    const blockers = await loadArchiveBlockers(
+      projectId,
+      sessionId,
+      worktreeId,
+    );
+    if (blockers.length > 0) {
+      toast.error(`Cannot archive: ${describeArchiveBlockers(blockers)}`);
+      return;
+    }
+    setConfirmArchiveSession({ projectId, sessionId, worktreeId });
+  };
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<
     string | null
   >(null);
@@ -1154,90 +1255,340 @@ export function Sidebar({
                                   </span>
                                 ) : (
                                   <>
-                                    {visibleSessions.map((session) => (
-                                      <div
-                                        key={session.id}
-                                        className="group/session flex items-center"
-                                      >
-                                        <button
-                                          onClick={() =>
-                                            onSelectSession(
-                                              project.id,
+                                    {/* Issue #351: parent / child
+                                        subtree. Group the visible
+                                        sessions by `parentId` so a
+                                        parent can render its children
+                                        inline below, indented one
+                                        level. Parents whose children
+                                        include at least one `active`
+                                        child are auto-expanded on
+                                        first render; the user can
+                                        collapse / re-expand via a
+                                        chevron on the parent row.
+                                        Cross-worktree children (a
+                                        parent on the main worktree
+                                        with a child on a feature
+                                        worktree) are NOT rendered
+                                        here — `visibleSessions` is
+                                        already worktree-scoped, and
+                                        issue #351's "Decisions"
+                                        section explicitly excludes
+                                        cross-worktree recursion in
+                                        v1. */}
+                                    {(() => {
+                                      const parentGroups =
+                                        groupSessionsByParent(
+                                          visibleSessions,
+                                        );
+                                      const expandedSet =
+                                        expandedSubtreeIds;
+                                      return parentGroups.roots.map(
+                                        (session) => {
+                                          const children =
+                                            parentGroups.childrenByParent.get(
                                               session.id,
-                                              worktree.id,
-                                            )
-                                          }
-                                          className={cn(
-                                            "flex flex-1 items-center justify-between gap-3 rounded-md px-4 py-1.5 text-sm transition-colors min-w-0",
-                                            session.id === activeSessionId
-                                              ? "bg-sidebar-accent text-sidebar-foreground"
-                                              : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
-                                          )}
-                                        >
-                                          <span className="flex min-w-0 flex-1 items-center gap-2 truncate pr-2">
-                                            <SessionProviderIcon
-                                              provider={session.provider}
-                                              className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
-                                            />
-                                            {/* Awaiting-input dot: the agent has paused on
-                                                a user-input request or has a pending
-                                                approval. Most urgent state — surfaced
-                                                at the top of the queue with a coloured
-                                                dot so the user can spot it at a glance. */}
-                                            {awaitingInputSessionIds.has(session.id) ? (
-                                              <span
-                                                className="h-2 w-2 shrink-0 rounded-full bg-amber-400"
-                                                title="Awaiting your input"
-                                                aria-label="Awaiting your input"
-                                              />
-                                            ) : null}
-                                            <span className="truncate">
-                                              {session.title ||
-                                                session.id.slice(0, 8)}
-                                            </span>
-                                          </span>
-                                          {activeSessionIds.has(session.id) ? (
-                                            <Loader2 className="hidden h-3 w-3 shrink-0 animate-spin text-muted-foreground md:inline md:group-hover/session:hidden" />
-                                          ) : (
-                                            <span className="hidden shrink-0 text-xs text-muted-foreground md:inline md:group-hover/session:hidden">
-                                              {formatTime(session.lastActiveAt)}
-                                            </span>
-                                          )}
-                                          <span
-                                            role="button"
-                                            tabIndex={0}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              openRenameDialog(
-                                                project.id,
-                                                worktree.id,
-                                                session,
-                                              );
-                                            }}
-                                            className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
-                                            title="Rename conversation"
-                                          >
-                                            <Pencil className="h-3.5 w-3.5" />
-                                          </span>
-                                          <span
-                                            role="button"
-                                            tabIndex={0}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setConfirmArchiveSession({
-                                                projectId: project.id,
-                                                sessionId: session.id,
-                                                worktreeId: worktree.id,
-                                              });
-                                            }}
-                                            className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
-                                            title="Archive session"
-                                          >
-                                            <Archive className="h-3.5 w-3.5" />
-                                          </span>
-                                        </button>
-                                      </div>
-                                    ))}
+                                            );
+                                          const hasChildren =
+                                            !!children &&
+                                            children.length > 0;
+                                          // Auto-expand on first
+                                          // render when the helper
+                                          // says so. The check uses
+                                          // `expandedSet.has(...)` as
+                                          // a proxy for "the user has
+                                          // explicitly toggled this
+                                          // parent" so an explicit
+                                          // collapse sticks.
+                                          const isExpanded =
+                                            hasChildren &&
+                                            (expandedSet.has(session.id) ||
+                                              (isSubtreeExpandedByDefault(
+                                                children ?? [],
+                                              ) &&
+                                                !expandedSet.has(
+                                                  `__collapsed__${session.id}`,
+                                                )));
+                                          return (
+                                            <div
+                                              key={session.id}
+                                              className="flex flex-col"
+                                            >
+                                              <div className="group/session flex items-center">
+                                                <button
+                                                  onClick={() =>
+                                                    onSelectSession(
+                                                      project.id,
+                                                      session.id,
+                                                      worktree.id,
+                                                    )
+                                                  }
+                                                  className={cn(
+                                                    "flex flex-1 items-center justify-between gap-3 rounded-md px-4 py-1.5 text-sm transition-colors min-w-0",
+                                                    session.id ===
+                                                      activeSessionId
+                                                      ? "bg-sidebar-accent text-sidebar-foreground"
+                                                      : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
+                                                  )}
+                                                >
+                                                  <span className="flex min-w-0 flex-1 items-center gap-2 truncate pr-2">
+                                                    {hasChildren ? (
+                                                      <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          toggleSubtree(
+                                                            session.id,
+                                                            isExpanded,
+                                                          );
+                                                        }}
+                                                        aria-label={
+                                                          isExpanded
+                                                            ? "Collapse children"
+                                                            : "Expand children"
+                                                        }
+                                                        aria-expanded={
+                                                          isExpanded
+                                                        }
+                                                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground"
+                                                      >
+                                                        {isExpanded ? (
+                                                          <ChevronDown className="h-3 w-3" />
+                                                        ) : (
+                                                          <ChevronRight className="h-3 w-3" />
+                                                        )}
+                                                      </button>
+                                                    ) : null}
+                                                    <SessionProviderIcon
+                                                      provider={
+                                                        session.provider
+                                                      }
+                                                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                                                    />
+                                                    {awaitingInputSessionIds.has(
+                                                      session.id,
+                                                    ) ? (
+                                                      <span
+                                                        className="h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                                                        title="Awaiting your input"
+                                                        aria-label="Awaiting your input"
+                                                      />
+                                                    ) : null}
+                                                    <span className="truncate">
+                                                      {session.title ||
+                                                        session.id.slice(0, 8)}
+                                                    </span>
+                                                    {hasChildren ? (
+                                                      <span
+                                                        className="ml-1 shrink-0 rounded-full bg-sidebar-accent px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                                                        title={`${children.length} child session${children.length === 1 ? "" : "s"}`}
+                                                      >
+                                                        {children.length}
+                                                      </span>
+                                                    ) : null}
+                                                  </span>
+                                                  {activeSessionIds.has(
+                                                    session.id,
+                                                  ) ? (
+                                                    <Loader2 className="hidden h-3 w-3 shrink-0 animate-spin text-muted-foreground md:inline md:group-hover/session:hidden" />
+                                                  ) : (
+                                                    <span className="hidden shrink-0 text-xs text-muted-foreground md:inline md:group-hover/session:hidden">
+                                                      {formatTime(
+                                                        session.lastActiveAt,
+                                                      )}
+                                                    </span>
+                                                  )}
+                                                  <span
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      openRenameDialog(
+                                                        project.id,
+                                                        worktree.id,
+                                                        session,
+                                                      );
+                                                    }}
+                                                    className="inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex"
+                                                    title="Rename conversation"
+                                                  >
+                                                    <Pencil className="h-3.5 w-3.5" />
+                                                  </span>
+                                                  <span
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      void requestArchive(
+                                                        project.id,
+                                                        session.id,
+                                                        worktree.id,
+                                                      );
+                                                    }}
+                                                    onMouseEnter={() => {
+                                                      void loadArchiveBlockers(
+                                                        project.id,
+                                                        session.id,
+                                                        worktree.id,
+                                                      );
+                                                    }}
+                                                    aria-disabled={
+                                                      checkingArchiveIds.has(
+                                                        session.id,
+                                                      ) ||
+                                                      (archiveBlockersBySession[
+                                                        session.id
+                                                      ]?.length ?? 0) > 0
+                                                    }
+                                                    className={cn(
+                                                      "inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/session:inline-flex",
+                                                      (checkingArchiveIds.has(
+                                                        session.id,
+                                                      ) ||
+                                                        (archiveBlockersBySession[
+                                                          session.id
+                                                        ]?.length ?? 0) > 0) &&
+                                                        "cursor-not-allowed opacity-50",
+                                                    )}
+                                                    title={
+                                                      checkingArchiveIds.has(
+                                                        session.id,
+                                                      )
+                                                        ? "Checking archive status…"
+                                                        : archiveBlockersBySession[
+                                                              session.id
+                                                            ]?.length
+                                                          ? `Cannot archive: ${describeArchiveBlockers(archiveBlockersBySession[session.id])}`
+                                                          : "Archive session"
+                                                    }
+                                                  >
+                                                    <Archive className="h-3.5 w-3.5" />
+                                                  </span>
+                                                </button>
+                                              </div>
+                                              {hasChildren && isExpanded ? (
+                                                <div
+                                                  className="ml-6 flex flex-col border-l border-sidebar-border pl-2"
+                                                  data-testid={`subtree-${session.id}`}
+                                                >
+                                                  {children.map((child) => (
+                                                    <div
+                                                      key={child.id}
+                                                      className="group/child flex items-center"
+                                                    >
+                                                      <button
+                                                        onClick={() =>
+                                                          onSelectSession(
+                                                            project.id,
+                                                            child.id,
+                                                            worktree.id,
+                                                          )
+                                                        }
+                                                        className={cn(
+                                                          "flex flex-1 items-center justify-between gap-3 rounded-md px-3 py-1.5 text-sm transition-colors min-w-0",
+                                                          child.id ===
+                                                            activeSessionId
+                                                            ? "bg-sidebar-accent text-sidebar-foreground"
+                                                            : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
+                                                        )}
+                                                      >
+                                                        <span className="flex min-w-0 flex-1 items-center gap-2 truncate pr-2">
+                                                          <SessionProviderIcon
+                                                            provider={
+                                                              child.provider
+                                                            }
+                                                            className="h-3 w-3 shrink-0 text-muted-foreground"
+                                                          />
+                                                          {awaitingInputSessionIds.has(
+                                                            child.id,
+                                                          ) ? (
+                                                            <span
+                                                              className="h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                                                              title="Awaiting your input"
+                                                              aria-label="Awaiting your input"
+                                                            />
+                                                          ) : null}
+                                                          <span className="truncate text-xs">
+                                                            {child.title ||
+                                                              child.id.slice(
+                                                                0,
+                                                                8,
+                                                              )}
+                                                          </span>
+                                                        </span>
+                                                        {activeSessionIds.has(
+                                                          child.id,
+                                                        ) ? (
+                                                          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+                                                        ) : (
+                                                          <span className="text-xs text-muted-foreground">
+                                                            {formatTime(
+                                                              child.lastActiveAt,
+                                                            )}
+                                                          </span>
+                                                        )}
+                                                        <span
+                                                          role="button"
+                                                          tabIndex={0}
+                                                          onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            void requestArchive(
+                                                              project.id,
+                                                              child.id,
+                                                              worktree.id,
+                                                            );
+                                                          }}
+                                                          onMouseEnter={() => {
+                                                            void loadArchiveBlockers(
+                                                              project.id,
+                                                              child.id,
+                                                              worktree.id,
+                                                            );
+                                                          }}
+                                                          aria-disabled={
+                                                            checkingArchiveIds.has(
+                                                              child.id,
+                                                            ) ||
+                                                            (archiveBlockersBySession[
+                                                              child.id
+                                                            ]?.length ?? 0) >
+                                                              0
+                                                          }
+                                                          className={cn(
+                                                            "inline-flex shrink-0 rounded p-0.5 text-muted-foreground hover:text-sidebar-foreground transition-colors md:hidden md:group-hover/child:inline-flex",
+                                                            (checkingArchiveIds.has(
+                                                              child.id,
+                                                            ) ||
+                                                              (archiveBlockersBySession[
+                                                                child.id
+                                                              ]?.length ?? 0) >
+                                                                0) &&
+                                                              "cursor-not-allowed opacity-50",
+                                                          )}
+                                                          title={
+                                                            checkingArchiveIds.has(
+                                                              child.id,
+                                                            )
+                                                              ? "Checking archive status…"
+                                                              : archiveBlockersBySession[
+                                                                    child.id
+                                                                  ]?.length
+                                                                ? `Cannot archive: ${describeArchiveBlockers(archiveBlockersBySession[child.id])}`
+                                                                : "Archive session"
+                                                          }
+                                                        >
+                                                          <Archive className="h-3 w-3" />
+                                                        </span>
+                                                      </button>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          );
+                                        },
+                                      );
+                                    })()}
                                     {remainingSessionCount > 0 && (
                                       <button
                                         type="button"
@@ -1526,38 +1877,55 @@ export function Sidebar({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={archivingSession}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              onClick={async () => {
+              disabled={archivingSession}
+              onClick={async (event) => {
+                event.preventDefault();
                 if (!confirmArchiveSession) return;
                 const { projectId, sessionId, worktreeId } = confirmArchiveSession;
-                setArchivedIds((prev) => new Set(prev).add(sessionId));
-                setProjectData((prev) =>
-                  prev.map((p) =>
-                    p.id === projectId
-                      ? {
-                          ...p,
-                          worktrees: p.worktrees.map((w) =>
-                            w.id === worktreeId
-                              ? {
-                                  ...w,
-                                  sessions: w.sessions.filter(
-                                    (s) => s.id !== sessionId,
-                                  ),
-                                }
-                              : w,
-                          ),
-                        }
-                      : p,
-                  ),
-                );
-                setConfirmArchiveSession(null);
-                toast.success("Session archived");
-                await archiveSession(projectId, sessionId, worktreeId);
+                setArchivingSession(true);
+                try {
+                  await archiveSession(projectId, sessionId, worktreeId);
+                  setArchivedIds((prev) => new Set(prev).add(sessionId));
+                  setProjectData((prev) =>
+                    prev.map((p) =>
+                      p.id === projectId
+                        ? {
+                            ...p,
+                            worktrees: p.worktrees.map((w) =>
+                              w.id === worktreeId
+                                ? {
+                                    ...w,
+                                    sessions: w.sessions.filter(
+                                      (s) => s.id !== sessionId,
+                                    ),
+                                  }
+                                : w,
+                            ),
+                          }
+                        : p,
+                    ),
+                  );
+                  setConfirmArchiveSession(null);
+                  toast.success("Session archived");
+                } catch (error) {
+                  // The server re-checks blockers atomically at archive time;
+                  // a monitor or queued message can appear after preflight.
+                  // Keep the row/dialog intact and surface that rejection.
+                  toast.error(
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to archive session",
+                  );
+                  await loadArchiveBlockers(projectId, sessionId, worktreeId);
+                } finally {
+                  setArchivingSession(false);
+                }
               }}
             >
-              Archive
+              {archivingSession ? "Archiving…" : "Archive"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

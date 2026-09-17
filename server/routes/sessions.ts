@@ -80,6 +80,7 @@ import {
   dequeueFirst,
   resolveQueuedMessage,
   clearQueue,
+  withSessionQueueTransaction,
   type QueuedMessage,
   type QueuedMessageInput,
 } from "../lib/session-queue.js";
@@ -2624,6 +2625,157 @@ wakeBySessionIdRouter.post("/:sessionId/wake", async (req, res) => {
   res.status(201).json({ message, projectId: owningProjectId });
 });
 
+// --- Cross-session send (issue #351) ---
+//
+// `controller sessions send <target> <message> --from <parentId|self>`.
+// Enqueues a durable follow-up on the target session whose text is the
+// canonical `[/from: <parentTitle>] <controller-uri> <message>` marker. The
+// marker distinguishes it from a typed user message, while the literal URI is
+// linkified by the client and navigates back to the parent conversation.
+//
+// The route is mounted under `/api/sessions/:sessionId/...` so the CLI
+// doesn't need to thread a project id — the same cross-worktree
+// `locateSessionById` walk the wake + goal + monitor surfaces use
+// (issue #339 review).
+//
+// This shares the regular queue/replay pipeline: idle targets start a
+// headless continuation immediately, while active targets drain the
+// message after their current turn completes.
+
+export const sendBySessionIdRouter = Router();
+
+type FollowUpTarget = {
+  session: NonNullable<Awaited<ReturnType<typeof getSession>>>;
+  projectId: string;
+  worktreeId: string;
+};
+
+/**
+ * Enqueue an externally-generated user turn using the target session's
+ * continuation settings. If the target is idle, start the existing
+ * serialized queue-advance path immediately; an active target will drain
+ * the message from its normal run-finalization handler.
+ */
+async function enqueueExternalFollowUp(
+  target: FollowUpTarget,
+  text: string
+): Promise<QueuedMessage> {
+  const { session, projectId, worktreeId } = target;
+  const message = await withSessionQueueTransaction(session.id, async (queue) => {
+    // The target may have been archived since the caller located it. Re-read
+    // under the queue/lifecycle lock so archive and enqueue cannot cross.
+    const current = await locateSessionById(session.id);
+    if (!current || current.session.status === "archived") {
+      throw new Error(`Session ${session.id} is archived`);
+    }
+    return queue.enqueue({
+      text,
+      visibleText: text,
+      provider: current.session.provider ?? "claude",
+      model: current.session.model,
+      reasoningEffort: current.session.reasoningEffort,
+      serviceTier: current.session.serviceTier === "fast" ? "fast" : undefined,
+      mode: current.session.mode === "plan" ? "plan" : "default",
+      attachmentIds: [],
+    });
+  });
+  if (!getSessionRuntime(session.id).active) {
+    void scheduleSessionQueueAdvance(projectId, worktreeId, session.id);
+  }
+  return message;
+}
+
+sendBySessionIdRouter.post(
+  "/:sessionId/send-from",
+  async (req, res) => {
+    const located = await locateSessionById(req.params.sessionId);
+    if (!located) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const { session, projectId } = located;
+    const raw = (req.body ?? {}) as Record<string, unknown>;
+    const text = typeof raw.message === "string" ? raw.message : "";
+    if (!text.trim()) {
+      res.status(400).json({ error: "message is required" });
+      return;
+    }
+    const fromSessionId =
+      typeof raw.fromSessionId === "string" && raw.fromSessionId.trim()
+        ? raw.fromSessionId.trim()
+        : "";
+    if (!fromSessionId) {
+      res.status(400).json({ error: "fromSessionId is required" });
+      return;
+    }
+    // Resolve the parent session. The CLI's `send` already does the
+    // self-resolution (so the caller's id is the literal env value);
+    // here we only echo it after confirming the parent exists, so the
+    // persisted `[/from: title]` marker is accurate and the
+    // linkifier can deep-link to a real session.
+    const parent = await locateSessionById(fromSessionId);
+    if (!parent) {
+      res.status(404).json({
+        error: `From session ${fromSessionId} not found`,
+      });
+      return;
+    }
+    const parentTitle =
+      typeof parent.session.title === "string" && parent.session.title.trim()
+        ? parent.session.title.trim()
+        : "(untitled)";
+    const parentUrl = `controller://project/${parent.projectId}/worktree/${parent.worktreeId}/session/${parent.session.id}`;
+    const markerText = `[/from: ${parentTitle}] ${parentUrl} ${text}`;
+    let message: QueuedMessage;
+    try {
+      message = await enqueueExternalFollowUp(located, markerText);
+    } catch (error) {
+      if (error instanceof Error && error.message.endsWith(" is archived")) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+    res.status(201).json({
+      // Preserve the original response field for CLI compatibility. The
+      // identifier now belongs to the durable queued message rather than a
+      // transcript-only event.
+      eventId: message.id,
+      message,
+      projectId,
+      worktreeId: session.worktreeId,
+      sessionId: session.id,
+      parentSessionId: parent.session.id,
+      parentTitle,
+    });
+  }
+);
+
+// --- Children enumeration (issue #351) ---
+//
+// `controller sessions children <parentId>` and the sidebar's
+// coordinator tree both call this route. The walk is the same
+// `listChildSessions` helper `sessions list --parent` uses on the
+// server; we expose it under `/api/sessions/:sessionId/children` so
+// neither the CLI nor the sidebar has to thread a project id.
+
+export const childrenBySessionIdRouter = Router();
+
+childrenBySessionIdRouter.get(
+  "/:sessionId/children",
+  async (_req, res) => {
+    const parentId = _req.params.sessionId;
+    const located = await locateSessionById(parentId);
+    if (!located) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const { listChildSessions } = await import("../lib/sessions.js");
+    const children = await listChildSessions(parentId);
+    res.json({ parent: parentId, children });
+  }
+);
+
 // --- Goals (issue #339) ---
 //
 // `controller sessions goal set|clear|show <project> <sessionId> ...`.
@@ -2834,6 +2986,25 @@ sessionsRouter.post(
       typeof raw.timeoutMs === "number" && raw.timeoutMs > 0
         ? raw.timeoutMs
         : undefined;
+    // Issue #351: optional `--on-line` filter. Compiled server-side
+    // so a bad pattern returns 400 before the monitor is started.
+    const onLinePattern =
+      typeof raw.onLine === "string" && raw.onLine.trim()
+        ? raw.onLine.trim()
+        : null;
+    let onLine: RegExp | null = null;
+    if (onLinePattern) {
+      try {
+        onLine = new RegExp(onLinePattern);
+      } catch (error) {
+        res.status(400).json({
+          error: `Invalid --on-line pattern: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+        return;
+      }
+    }
     try {
       const monitor = startMonitor({
         sessionId: req.params.sessionId,
@@ -2843,6 +3014,17 @@ sessionsRouter.post(
         persistent,
         timeoutMs,
         limits: { maxPerSession: MAX_MONITORS_PER_SESSION, maxLines: MAX_LINE_BUFFER },
+        onLine,
+        onLinePattern,
+        onLineMatch: ({ text }) =>
+          enqueueExternalFollowUp(
+            {
+              session,
+              projectId: req.params.projectId,
+              worktreeId: worktree.id,
+            },
+            text
+          ).then(() => undefined),
       });
       res.status(201).json({ monitor });
     } catch (error) {
@@ -2910,6 +3092,30 @@ monitorBySessionIdRouter.post(
       typeof raw.timeoutMs === "number" && raw.timeoutMs > 0
         ? raw.timeoutMs
         : undefined;
+    // Issue #351: optional `--on-line` filter. When set, every
+    // stdout line that matches is enqueued as a follow-up whose text is
+    // `[/monitor: <description>] <line>`. We
+    // compile the regex server-side so a bad pattern returns 400
+    // before the monitor is started — agents that pass a typo
+    // get a clear error rather than a silent "monitor started
+    // but never fires" misconfiguration.
+    const onLinePattern =
+      typeof raw.onLine === "string" && raw.onLine.trim()
+        ? raw.onLine.trim()
+        : null;
+    let onLine: RegExp | null = null;
+    if (onLinePattern) {
+      try {
+        onLine = new RegExp(onLinePattern);
+      } catch (error) {
+        res.status(400).json({
+          error: `Invalid --on-line pattern: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+        return;
+      }
+    }
     try {
       const monitor = startMonitor({
         sessionId: req.params.sessionId,
@@ -2919,6 +3125,10 @@ monitorBySessionIdRouter.post(
         persistent,
         timeoutMs,
         limits: { maxPerSession: MAX_MONITORS_PER_SESSION, maxLines: MAX_LINE_BUFFER },
+        onLine,
+        onLinePattern,
+        onLineMatch: ({ text }) =>
+          enqueueExternalFollowUp(located, text).then(() => undefined),
       });
       res.status(201).json({ monitor });
     } catch (error) {
@@ -3225,6 +3435,33 @@ registerFocusActionRoute("/:projectId/sessions/:sessionId/focus-unpin", "unpin")
 registerFocusActionRoute("/:projectId/sessions/:sessionId/focus-done", "done");
 
 // Archive a session
+sessionsRouter.get(
+  "/:projectId/sessions/:sessionId/archive-blockers",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const worktree = await resolveWorktree(
+      req.params.projectId,
+      req.query.worktreeId as string | undefined
+    );
+    if (!worktree) {
+      res.status(404).json({ error: "Worktree not found" });
+      return;
+    }
+    const session = await getSession(worktree.path, req.params.sessionId);
+    if (!session) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const { archiveBlockersFor } = await import("../lib/archive-blockers.js");
+    const blockers = await archiveBlockersFor(req.params.sessionId);
+    res.json({ blockers });
+  }
+);
+
 sessionsRouter.post(
   "/:projectId/sessions/:sessionId/archive",
   async (req, res) => {
@@ -3241,14 +3478,59 @@ sessionsRouter.post(
       res.status(404).json({ error: "Worktree not found" });
       return;
     }
-    const archived = await archiveSession(worktree.path, req.params.sessionId);
-    if (!archived) {
+    // Issue #351: strict-archive rule. A session cannot be
+    // archived while it has a live agent, queued messages,
+    // active monitors, or live children — archiving while any
+    // of these is true leaves the agent or the operator in an
+    // inconsistent state (a queued message firing into an
+    // archived session, a monitor's events landing on a session
+    // the agent no longer sees, a child recording into a parent
+    // that's already been archived). The UI surfaces the
+    // blockers as a tooltip on a disabled Archive button; this
+    // route returns 409 with a structured `blockers` array so
+    // the UI can render the specific reasons rather than a
+    // generic "failed to archive" string.
+    const { archiveBlockersFor } = await import("../lib/archive-blockers.js");
+    const outcome = await withSessionQueueTransaction(
+      req.params.sessionId,
+      async (queue) => {
+        const blockers = await archiveBlockersFor(req.params.sessionId);
+        if (blockers.length > 0) return { kind: "blocked" as const, blockers };
+        const archived = await archiveSession(worktree.path, req.params.sessionId);
+        if (!archived) return { kind: "missing" as const };
+        await queue.clear();
+        return { kind: "archived" as const };
+      }
+    );
+    if (outcome.kind === "blocked") {
+      const blockers = outcome.blockers;
+      const summary = blockers
+        .map((b) => {
+          switch (b.kind) {
+            case "live-agent":
+              return "live agent";
+            case "awaiting-input":
+              return "pending user input";
+            case "queued-messages":
+              return `${b.count} queued message${b.count === 1 ? "" : "s"}`;
+            case "active-monitors":
+              return `${b.count} active monitor${b.count === 1 ? "" : "s"}`;
+            case "live-children":
+              return `${b.count} live child${b.count === 1 ? "" : "ren"}`;
+          }
+        })
+        .join(", ");
+      res.status(409).json({
+        ok: false,
+        error: `Cannot archive session while it has ${summary}.`,
+        blockers,
+      });
+      return;
+    }
+    if (outcome.kind === "missing") {
       res.status(404).json({ error: "Session not found" });
       return;
     }
-    // Drop any pending enqueued messages so an archived session leaves no
-    // orphaned queue file behind.
-    await clearQueue(req.params.sessionId);
     // Stop every monitor for the archived session (issue #339 review).
     // Persistent monitors otherwise keep executing their shell command
     // and appending events to the now-archived session's event log

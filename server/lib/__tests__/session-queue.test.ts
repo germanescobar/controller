@@ -10,6 +10,7 @@ import {
   resolveQueuedMessage,
   dequeueFirst,
   clearQueue,
+  withSessionQueueTransaction,
   type QueuedMessageInput,
 } from "../session-queue.js";
 import { sessionQueueFile } from "../paths.js";
@@ -149,5 +150,30 @@ test("concurrent enqueues are serialized without dropping writes", async () => {
     const queue = await listQueue("s1");
     assert.equal(queue.length, 10);
     assert.equal(new Set(queue.map((m) => m.text)).size, 10);
+  });
+});
+
+test("lifecycle transactions serialize concurrent enqueues", async () => {
+  await withTempHome(async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+
+    const transaction = withSessionQueueTransaction("s1", async (queue) => {
+      entered();
+      await held;
+      await queue.clear();
+    });
+    await started;
+    let enqueued = false;
+    const pending = enqueue("s1", input("after archive")).then(() => {
+      enqueued = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(enqueued, false);
+    release();
+    await Promise.all([transaction, pending]);
+    assert.equal(enqueued, true);
   });
 });
