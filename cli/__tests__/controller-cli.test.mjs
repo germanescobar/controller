@@ -4463,3 +4463,416 @@ test("runMonitor start surfaces a 400 for an invalid --on-line pattern (issue #3
   assert.equal(exitCode, 1);
   assert.match(stderrText, /Invalid --on-line pattern/);
 });
+
+// =============================================================================
+// sessions branch — issue #364
+// =============================================================================
+
+test("parseSessions branch maps a positional source + message + flags to a branch payload (issue #364)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "branch",
+    "sess-source-1",
+    "Review the design",
+    "--agent",
+    "claude",
+    "--model",
+    "opus-5",
+    "--mode",
+    "plan",
+    "--title",
+    "Opus review",
+  ]);
+  assert.equal(parsed.action, "branch");
+  assert.equal(parsed.sourceSessionId, "sess-source-1");
+  assert.equal(parsed.body.sourceSessionId, "sess-source-1");
+  assert.equal(parsed.body.message, "Review the design");
+  assert.equal(parsed.body.provider, "claude");
+  assert.equal(parsed.body.model, "opus-5");
+  assert.equal(parsed.body.mode, "plan");
+  assert.equal(parsed.body.title, "Opus review");
+});
+
+test("parseSessions branch with no overrides drops provider/model/mode/title from the body (issue #364)", async () => {
+  // The server falls back to the source session's defaults when these
+  // are absent — the issue's design §2 precedence. Keeping them out
+  // of the wire body means "same-agent sibling continuation".
+  const cli = await loadCli();
+  const parsed = cli.parseSessions(["branch", "sess-source-1", "Continue"]);
+  assert.equal(parsed.action, "branch");
+  assert.equal(parsed.sourceSessionId, "sess-source-1");
+  assert.equal(parsed.body.message, "Continue");
+  assert.equal(parsed.body.provider, undefined);
+  assert.equal(parsed.body.model, undefined);
+  assert.equal(parsed.body.mode, undefined);
+  assert.equal(parsed.body.title, undefined);
+});
+
+test("parseSessions branch resolves --from <source> the same as the positional (issue #364)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "branch",
+    "--from",
+    "sess-source-2",
+    "Review the design",
+  ]);
+  assert.equal(parsed.action, "branch");
+  assert.equal(parsed.sourceSessionId, "sess-source-2");
+  assert.equal(parsed.body.message, "Review the design");
+});
+
+test("parseSessions branch resolves 'self' via $CONTROLLER_SESSION_ID (issue #364)", async () => {
+  const cli = await loadCli();
+  const prev = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-42";
+  try {
+    const parsed = cli.parseSessions(["branch", "self", "Continue"]);
+    assert.equal(parsed.sourceSessionId, "sess-self-42");
+  } finally {
+    if (prev === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = prev;
+  }
+});
+
+test("parseSessions branch surfaces a clear error when 'self' has no env var (issue #364)", async () => {
+  const cli = await loadCli();
+  const prev = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["branch", "self", "Continue"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (prev !== undefined) process.env.CONTROLLER_SESSION_ID = prev;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+});
+
+test("parseSessions branch rejects a missing source (issue #364)", async () => {
+  // A branch call with flags + a positional message but no source
+  // (neither positional nor `--from`) errors with "Missing
+  // sourceSessionId". A bare positional message also qualifies
+  // as a missing source because the parser treats the first bare
+  // token as a source-id candidate — but here we want a clear
+  // missing-source error path, so we use flags + message with
+  // no source at all.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions(["branch", "--agent", "claude", "Continue"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /sourceSessionId/);
+});
+
+test("parseSessions branch rejects a missing message (issue #364)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["branch", "sess-source-1"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Missing message/);
+});
+
+test("parseSessions branch rejects --agent/--provider disagreement (issue #306 + #364)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "branch",
+          "sess-source-1",
+          "Review",
+          "--provider",
+          "claude",
+          "--agent",
+          "codex",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /disagree/);
+});
+
+test("parseSessions branch rejects --flag=value shorthand (issue #355 + #364)", async () => {
+  // Consistent with `start` — only `--flag value` is accepted.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "branch",
+          "sess-source-1",
+          "--model=opus-5",
+          "Review",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--model=opus-5/);
+});
+
+test("parseSessions branch keeps --flag-like tokens literal in the message body (issue #355 + #364)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "branch",
+    "sess-source-1",
+    "explain --json flag and run --help",
+  ]);
+  assert.equal(parsed.body.message, "explain --json flag and run --help");
+});
+
+test("parseSessions branch accepts a prompt that begins with `--` after `--` (issue #355 + #364)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "branch",
+    "sess-source-1",
+    "--",
+    "--help me diagnose",
+  ]);
+  assert.equal(parsed.body.message, "--help me diagnose");
+  assert.equal(parsed.sourceSessionId, "sess-source-1");
+});
+
+test("parseSessions branch positional source + --from disagreement errors (issue #364)", async () => {
+  // When both forms are supplied, the positional wins per the issue's
+  // recommendation, but only if they refer to the same session. A
+  // disagreement is a typo and gets a clear error.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseSessions([
+          "branch",
+          "sess-source-1",
+          "--from",
+          "sess-source-2",
+          "Continue",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /disagree/);
+});
+
+test("runSessions branch POSTs to /sessions/branch and prints sessionId + url (issue #364)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    // Mirror the existing `start` tests: the project resolution
+    // walks /api/projects (and /api/projects?cwd=… for the cwd
+    // fallback) when no <project> is supplied, and the branch
+    // route is mounted under the resolved project id. We return a
+    // single fake project from both shapes so the route URL is
+    // deterministic.
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-uuid-1", name: "controller" } }),
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        sessionId: "sess-branch-new",
+        url: "controller://project/proj-uuid-1/worktree/wt-1/session/sess-branch-new",
+      }),
+    };
+  };
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      [
+        "branch",
+        "sess-source-1",
+        "Review the design",
+        "--agent",
+        "claude",
+        "--model",
+        "opus-5",
+      ],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const postCall = calls.find(
+    (c) => c.url === "http://controller.test/api/projects/proj-uuid-1/sessions/branch"
+  );
+  assert.ok(postCall, "expected a POST to the branch endpoint");
+  assert.equal(postCall.init.method, "POST");
+  const sent = JSON.parse(postCall.init.body);
+  assert.equal(sent.sourceSessionId, "sess-source-1");
+  assert.equal(sent.message, "Review the design");
+  assert.equal(sent.provider, "claude");
+  assert.equal(sent.model, "opus-5");
+  const out = stdoutChunks.join("");
+  assert.match(out, /Branched session sess-branch-new/);
+  assert.match(out, /sess-source-1/);
+  assert.match(out, /Open in Controller: controller:\/\//);
+});
+
+test("runSessions branch surfaces a 404 server error as a clear exit (issue #364)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-1", name: "controller" }],
+      };
+    }
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-uuid-1", name: "controller" } }),
+      };
+    }
+    return {
+      status: 404,
+      json: async () => ({ error: "Source session not found" }),
+    };
+  };
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.runSessions(
+          ["branch", "sess-missing", "Review"],
+          "http://controller.test"
+        ),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Source session not found/);
+});
