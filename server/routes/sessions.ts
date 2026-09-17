@@ -80,6 +80,7 @@ import {
   dequeueFirst,
   resolveQueuedMessage,
   clearQueue,
+  withSessionQueueTransaction,
   type QueuedMessage,
   type QueuedMessageInput,
 } from "../lib/session-queue.js";
@@ -2628,11 +2629,9 @@ wakeBySessionIdRouter.post("/:sessionId/wake", async (req, res) => {
 //
 // `controller sessions send <target> <message> --from <parentId|self>`.
 // Enqueues a durable follow-up on the target session whose text is the
-// canonical `[/from: <parentTitle>] <message>` marker. The marker is
-// what makes the message distinguishable from a typed user message;
-// the markdown linkifier (in the client) turns the bracketed parent
-// title into a `controller://` deep link back into the parent's
-// focus queue.
+// canonical `[/from: <parentTitle>] <controller-uri> <message>` marker. The
+// marker distinguishes it from a typed user message, while the literal URI is
+// linkified by the client and navigates back to the parent conversation.
 //
 // The route is mounted under `/api/sessions/:sessionId/...` so the CLI
 // doesn't need to thread a project id — the same cross-worktree
@@ -2662,15 +2661,23 @@ async function enqueueExternalFollowUp(
   text: string
 ): Promise<QueuedMessage> {
   const { session, projectId, worktreeId } = target;
-  const message = await enqueueMessage(session.id, {
-    text,
-    visibleText: text,
-    provider: session.provider ?? "claude",
-    model: session.model,
-    reasoningEffort: session.reasoningEffort,
-    serviceTier: session.serviceTier === "fast" ? "fast" : undefined,
-    mode: session.mode === "plan" ? "plan" : "default",
-    attachmentIds: [],
+  const message = await withSessionQueueTransaction(session.id, async (queue) => {
+    // The target may have been archived since the caller located it. Re-read
+    // under the queue/lifecycle lock so archive and enqueue cannot cross.
+    const current = await locateSessionById(session.id);
+    if (!current || current.session.status === "archived") {
+      throw new Error(`Session ${session.id} is archived`);
+    }
+    return queue.enqueue({
+      text,
+      visibleText: text,
+      provider: current.session.provider ?? "claude",
+      model: current.session.model,
+      reasoningEffort: current.session.reasoningEffort,
+      serviceTier: current.session.serviceTier === "fast" ? "fast" : undefined,
+      mode: current.session.mode === "plan" ? "plan" : "default",
+      attachmentIds: [],
+    });
   });
   if (!getSessionRuntime(session.id).active) {
     void scheduleSessionQueueAdvance(projectId, worktreeId, session.id);
@@ -2717,8 +2724,18 @@ sendBySessionIdRouter.post(
       typeof parent.session.title === "string" && parent.session.title.trim()
         ? parent.session.title.trim()
         : "(untitled)";
-    const markerText = `[/from: ${parentTitle}] ${text}`;
-    const message = await enqueueExternalFollowUp(located, markerText);
+    const parentUrl = `controller://project/${parent.projectId}/worktree/${parent.worktreeId}/session/${parent.session.id}`;
+    const markerText = `[/from: ${parentTitle}] ${parentUrl} ${text}`;
+    let message: QueuedMessage;
+    try {
+      message = await enqueueExternalFollowUp(located, markerText);
+    } catch (error) {
+      if (error instanceof Error && error.message.endsWith(" is archived")) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
     res.status(201).json({
       // Preserve the original response field for CLI compatibility. The
       // identifier now belongs to the durable queued message rather than a
@@ -3474,13 +3491,26 @@ sessionsRouter.post(
     // the UI can render the specific reasons rather than a
     // generic "failed to archive" string.
     const { archiveBlockersFor } = await import("../lib/archive-blockers.js");
-    const blockers = await archiveBlockersFor(req.params.sessionId);
-    if (blockers.length > 0) {
+    const outcome = await withSessionQueueTransaction(
+      req.params.sessionId,
+      async (queue) => {
+        const blockers = await archiveBlockersFor(req.params.sessionId);
+        if (blockers.length > 0) return { kind: "blocked" as const, blockers };
+        const archived = await archiveSession(worktree.path, req.params.sessionId);
+        if (!archived) return { kind: "missing" as const };
+        await queue.clear();
+        return { kind: "archived" as const };
+      }
+    );
+    if (outcome.kind === "blocked") {
+      const blockers = outcome.blockers;
       const summary = blockers
         .map((b) => {
           switch (b.kind) {
             case "live-agent":
               return "live agent";
+            case "awaiting-input":
+              return "pending user input";
             case "queued-messages":
               return `${b.count} queued message${b.count === 1 ? "" : "s"}`;
             case "active-monitors":
@@ -3497,14 +3527,10 @@ sessionsRouter.post(
       });
       return;
     }
-    const archived = await archiveSession(worktree.path, req.params.sessionId);
-    if (!archived) {
+    if (outcome.kind === "missing") {
       res.status(404).json({ error: "Session not found" });
       return;
     }
-    // Drop any pending enqueued messages so an archived session leaves no
-    // orphaned queue file behind.
-    await clearQueue(req.params.sessionId);
     // Stop every monitor for the archived session (issue #339 review).
     // Persistent monitors otherwise keep executing their shell command
     // and appending events to the now-archived session's event log

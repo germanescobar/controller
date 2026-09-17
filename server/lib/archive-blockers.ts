@@ -27,10 +27,15 @@ import { getSessionRuntime } from "./session-runtime.js";
 import { listQueue } from "./session-queue.js";
 import { listMonitors } from "./monitors.js";
 import { listChildSessions } from "./sessions.js";
+import { listPersistedAttentionSessionIds } from "./session-attention.js";
 
 export type ArchiveBlocker =
   | {
       kind: "live-agent";
+      message: string;
+    }
+  | {
+      kind: "awaiting-input";
       message: string;
     }
   | {
@@ -90,6 +95,18 @@ async function collectArchiveBlockers(
       kind: "live-agent",
       message:
         "Session has a live agent run in progress. Stop the agent before archiving.",
+    });
+  }
+
+  const persistedAttention = await listPersistedAttentionSessionIds();
+  if (
+    runtime.awaitingUserInput === true ||
+    (runtime.pendingApprovals?.size ?? 0) > 0 ||
+    persistedAttention.has(sessionId)
+  ) {
+    blockers.push({
+      kind: "awaiting-input",
+      message: "Session is waiting for user input.",
     });
   }
 

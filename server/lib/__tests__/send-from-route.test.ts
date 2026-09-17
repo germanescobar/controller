@@ -191,7 +191,10 @@ test("POST /send-from enqueues a [/from: title] follow-up on the target", async 
       const queued = await queue.listQueue(childId);
       assert.equal(queued.length, 1);
       assert.equal(queued[0].id, body.eventId);
-      assert.equal(queued[0].text, "[/from: Coordinator] ping the child");
+      assert.equal(
+        queued[0].text,
+        `[/from: Coordinator] controller://project/proj-1/worktree/wt-main/session/${parentId} ping the child`
+      );
       assert.equal(queued[0].visibleText, queued[0].text);
       assert.equal(queued[0].provider, "claude");
       assert.deepEqual(queued[0].attachmentIds, []);
@@ -268,6 +271,28 @@ test("POST /send-from returns 404 when the target session is unknown (issue #351
       }
     );
     assert.equal(response.status, 404);
+  });
+});
+
+test("POST /send-from rejects an archived target session", async () => {
+  await withRoutes(async ({ baseUrl, parentId, childId }) => {
+    const located = await import("../session-locator.js");
+    const sessions = await import("../sessions.js");
+    const target = await located.locateSessionById(childId);
+    assert.ok(target);
+    assert.equal(await sessions.archiveSession(target.worktreePath, childId), true);
+
+    const response = await fetch(`${baseUrl}/api/sessions/${childId}/send-from`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fromSessionId: parentId, message: "too late" }),
+    });
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as { error?: string };
+    assert.match(body.error ?? "", /archived/);
+
+    const queue = await import("../session-queue.js");
+    assert.deepEqual(await queue.listQueue(childId), []);
   });
 });
 

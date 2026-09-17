@@ -432,6 +432,7 @@ export async function fetchActiveRuntimes(): Promise<SessionRuntimeEntry[]> {
 
 export type ArchiveBlocker =
   | { kind: "live-agent"; message: string }
+  | { kind: "awaiting-input"; message: string }
   | { kind: "queued-messages"; count: number }
   | {
       kind: "active-monitors";

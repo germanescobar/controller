@@ -449,6 +449,8 @@ export function Sidebar({
         switch (blocker.kind) {
           case "live-agent":
             return blocker.message || "agent is running";
+          case "awaiting-input":
+            return blocker.message || "session is waiting for input";
           case "queued-messages":
             return `${blocker.count} queued message${blocker.count === 1 ? "" : "s"}`;
           case "active-monitors":

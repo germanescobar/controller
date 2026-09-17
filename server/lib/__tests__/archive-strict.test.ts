@@ -168,6 +168,53 @@ test("archive returns 409 with a live-agent blocker (issue #351)", async () => {
   });
 });
 
+test("archive returns 409 while structured user input is pending", async () => {
+  await withStrictRoutes(async ({ baseUrl, projectId, sessionId }) => {
+    const runtime = await import("../../../server/lib/session-runtime.js");
+    runtime.markSessionActive(sessionId);
+    runtime.setSessionAwaitingUserInput(sessionId, true);
+    runtime.markSessionInactive(sessionId);
+
+    const response = await fetch(
+      `${baseUrl}/api/projects/${projectId}/sessions/${sessionId}/archive`,
+      { method: "POST" }
+    );
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as {
+      blockers: Array<{ kind: string }>;
+    };
+    assert.ok(body.blockers.some((blocker) => blocker.kind === "awaiting-input"));
+    runtime.setSessionAwaitingUserInput(sessionId, false);
+  });
+});
+
+test("archive restores pending input blockers from persisted events", async () => {
+  await withStrictRoutes(async ({ baseUrl, projectId, sessionId }) => {
+    const { projectStoreDir } = await import("../../../server/lib/paths.js");
+    const worktreePath = path.join(process.env.CONTROLLER_HOME!, "source", "main");
+    const eventsFile = path.join(
+      projectStoreDir(worktreePath),
+      "events",
+      `${sessionId}.jsonl`
+    );
+    await fs.mkdir(path.dirname(eventsFile), { recursive: true });
+    await fs.writeFile(
+      eventsFile,
+      `${JSON.stringify({ type: "user_input_requested", question: "Continue?" })}\n`
+    );
+
+    const response = await fetch(
+      `${baseUrl}/api/projects/${projectId}/sessions/${sessionId}/archive`,
+      { method: "POST" }
+    );
+    assert.equal(response.status, 409);
+    const body = (await response.json()) as {
+      blockers: Array<{ kind: string }>;
+    };
+    assert.ok(body.blockers.some((blocker) => blocker.kind === "awaiting-input"));
+  });
+});
+
 test("archive returns 409 with a queued-messages blocker (issue #351)", async () => {
   await withStrictRoutes(async ({ baseUrl, projectId, worktreeId, sessionId }) => {
     const queue = await import("../../../server/lib/session-queue.js");
