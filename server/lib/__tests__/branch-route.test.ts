@@ -171,7 +171,10 @@ async function seedSourceSessionWithProvider(
     projectId: string;
   },
   provider: string,
-  model: string
+  model: string,
+  options: {
+    mode?: "default" | "plan";
+  } = {}
 ): Promise<string> {
   const sourceId = "sess-source-364";
   const { projectStoreDir } = await import("../paths.js");
@@ -192,7 +195,7 @@ async function seedSourceSessionWithProvider(
         projectId: env.projectId,
         provider,
         model,
-        mode: "default",
+        mode: options.mode ?? "default",
         messages: [
           {
             type: "message",
@@ -592,6 +595,181 @@ test("POST /sessions/branch seeds an empty source (issue #364)", async () => {
       assert.equal(events.length, 1);
       assert.equal(events[0].type, "user_message");
       assert.match(events[0].data.text, /^\[\/branch: /);
+    }
+  );
+});
+
+test("POST /sessions/branch prepends the source transcript to the agent's prompt (issue #364 + #365)", async () => {
+  // The chat view shows the copied transcript once `seedBranchFromSource`
+  // runs, but the agent needs the transcript *in its first-turn prompt*
+  // — otherwise "review the proposal above" starts a context-free run.
+  // The route layer inlines the source transcript before the branch
+  // marker; the persisted user_message event keeps just the marker
+  // so the chat view stays audit-friendly.
+  const agentSessionId = "sess-branch-feed-prompt";
+  await withBranchEnv(
+    async ({ binDir, homeDir, projectPath, worktreeId, projectId }) => {
+      // Capture argv: the fake anita prints `$*` to a file the test
+      // reads back. The path is baked in via the script's expansion
+      // (the test passes `branchArgvPath` through the env when spawning
+      // — but the agent spawn doesn't inherit env, so we hard-code
+      // the path via `${CONTROLLER_BRANCH_ARGV}`).
+      const branchArgvPath = path.join(homeDir, "branch-argv.txt");
+      const sessionIdCaptured = agentSessionId;
+      const script = `#!/usr/bin/env bash
+set -e
+printf '%s\\n' "$*" > "${branchArgvPath}"
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionIdCaptured}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionIdCaptured}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+      // Seed a source with multiple turns so the inline transcript
+      // has recognizable content to match on.
+      const { projectStoreDir } = await import("../paths.js");
+      const sessionsDir = path.join(projectStoreDir(projectPath), "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      const now = new Date().toISOString();
+      await fs.writeFile(
+        path.join(sessionsDir, "sess-source-with-text.json"),
+        JSON.stringify(
+          {
+            id: "sess-source-with-text",
+            title: "Source with transcript",
+            workingDirectory: projectPath,
+            worktreeId,
+            projectId,
+            provider: "anita",
+            model: "anthropic/claude-opus-4",
+            mode: "default",
+            messages: [
+              { role: "user", content: "PROPOSAL_LINE_USER_MARKER" },
+              { role: "assistant", content: "PROPOSAL_LINE_ASSISTANT_MARKER" },
+            ],
+            createdAt: now,
+            lastActiveAt: now,
+            status: "active",
+          },
+          null,
+          2
+        )
+      );
+      void homeDir;
+      void worktreeId;
+      void projectId;
+    },
+    async ({ baseUrl, homeDir, projectPath }) => {
+      const response = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: "sess-source-with-text",
+          message: "Review the proposal above",
+          provider: "anita",
+        }),
+      });
+      assert.equal(response.status, 200);
+      // The agent's argv (the message passed as the prompt) should
+      // include both the transcript block and the branch marker.
+      const argv = (
+        await fs.readFile(path.join(homeDir, "branch-argv.txt"), "utf-8")
+      ).trim();
+      void baseUrl;
+      assert.match(
+        argv,
+        /PROPOSAL_LINE_USER_MARKER/,
+        `agent prompt should include the source transcript; got: ${argv}`
+      );
+      assert.match(
+        argv,
+        /PROPOSAL_LINE_ASSISTANT_MARKER/,
+        `agent prompt should include assistant turns too; got: ${argv}`
+      );
+      assert.match(
+        argv,
+        /Review the proposal above/,
+        `agent prompt should include the new user's message; got: ${argv}`
+      );
+      assert.match(
+        argv,
+        /\[\/branch:[^[\]]+->[^[\]]+\]/,
+        `agent prompt should include the branch marker; got: ${argv}`
+      );
+      // The persisted user_message event, on the other hand,
+      // should be just the marker + user text (no transcript
+      // bleed-through) so the chat view stays audit-friendly.
+      const { projectStoreDir } = await import("../paths.js");
+      const eventsDir = path.join(projectStoreDir(projectPath), "events");
+      const eventsFile = path.join(eventsDir, `${agentSessionId}.jsonl`);
+      const eventsContent = await fs.readFile(eventsFile, "utf-8");
+      const events = eventsContent
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      const userEvent = events.find((e) => e.type === "user_message");
+      assert.ok(userEvent, "expected a user_message event in the events file");
+      assert.doesNotMatch(
+        userEvent.data.text,
+        /PROPOSAL_LINE_USER_MARKER/,
+        `persisted user_message should be the pure marker; got: ${userEvent.data.text}`
+      );
+      assert.match(
+        userEvent.data.text,
+        /^\[\/branch:[^[\]]+->[^[\]]+\] Review the proposal above$/,
+        `persisted user_message should be the marker + user's text; got: ${userEvent.data.text}`
+      );
+    }
+  );
+});
+
+test("POST /sessions/branch inherits source mode when --mode is not supplied (issue #365 P2)", async () => {
+  // Plan-mode source + no override must keep the branch in plan mode
+  // (PR review P2). A plain `body.mode === "plan" ? "plan" : "default"`
+  // would silently downgrade — the documented default for the branch
+  // is the source's mode.
+  const agentSessionId = "sess-branch-inherit-mode";
+  await withBranchEnv(
+    async ({ binDir, homeDir, projectPath, worktreeId, projectId }) => {
+      await installFakeAgent(binDir, agentSessionId);
+      await seedSourceSessionWithProvider(
+        { homeDir, projectPath, worktreeId, projectId },
+        "anita",
+        "anthropic/claude-opus-4",
+        { mode: "plan" }
+      );
+    },
+    async ({ baseUrl, projectPath }) => {
+      const response = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: "sess-source-364",
+          message: "Continue",
+          provider: "anita",
+          // No `mode` on the wire — must inherit `plan` from the
+          // source. `seedBranchFromSource` then re-asserts `plan`
+          // when it patches the new session's metadata.
+          // (provider=anita is supplied to keep the agent path off
+          // the Codex plan-session branch — see other tests.)
+        }),
+      });
+      assert.equal(response.status, 200);
+      const { projectStoreDir } = await import("../paths.js");
+      const sessionFile = path.join(
+        projectStoreDir(projectPath),
+        "sessions",
+        `${agentSessionId}.json`
+      );
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      // The new session's metadata carries the source's defaults;
+      // `seedBranchFromSource` reads `sourceSession.mode` and writes
+      // it here once `run.started` lands.
+      assert.equal(
+        session.mode,
+        "plan",
+        `new session should inherit source mode "plan"; got: ${session.mode}`
+      );
     }
   );
 });

@@ -764,13 +764,23 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   // Default to the source's provider/model/mode. The CLI flags
   // (`--provider`, `--model`, `--mode`) override per the precedence
   // order documented in the issue (#364 design §2): explicit flag >
-  // mode flag > source defaults. The first turn's provider/model/mode
-  // are forwarded to `handleSessionStream` as standard query params;
-  // the session defaults (which the model picker falls back to after
-  // the first turn) come from the source via `seedFromSessionId`.
+  // source defaults. The first turn's provider/model/mode are
+  // forwarded to `handleSessionStream` as standard query params;
+  // the session defaults (which the model picker falls back to
+  // after the first turn) come from the source via
+  // `seedFromSessionId`.
+  //
+  // `mode` honors `body.mode ?? sourceSession.mode ?? "default"` —
+  // a plain `branch <src>` on a plan-mode source must continue in
+  // plan mode (PR review P2 from chatgpt-codex-connector on #365).
   const requestedProvider = body.provider || sourceSession.provider;
   const requestedModel = body.model || sourceSession.model;
-  const requestedMode = body.mode === "plan" ? "plan" : "default";
+  const requestedMode: "default" | "plan" =
+    body.mode === "plan"
+      ? "plan"
+      : body.mode === "default"
+        ? "default"
+        : (sourceSession.mode ?? "default");
   // Build the branch marker the agent sees as the first message.
   // Same shape as the `[/from: …]` / `[/skill: …]` markers the
   // linkifier already parses, so a future UI pass can render it as a
@@ -784,6 +794,20 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
       ? `${requestedProvider}/${requestedModel}`
       : (requestedProvider ?? requestedModel ?? sourceLabel);
   const branchMarkerText = `[/branch: ${sourceLabel}->${targetLabel}] ${message.trim()}`;
+  // Render the source's stored transcript into a plain-text block so
+  // the branched agent sees the prior conversation as part of its
+  // first-turn context. Without this, "review the proposal above"
+  // would start a context-free run; the chat view would show the
+  // copied transcript, but the agent itself would have no idea what
+  // it was reviewing (PR review P1 from chatgpt-codex-connector on
+  // #365). The chat view still reads from the events file
+  // independently — this block is purely for the agent's prompt.
+  const sourceTranscriptBlock = renderSourceTranscriptForAgent(
+    sourceSession.messages
+  );
+  const agentFirstTurnMessage = sourceTranscriptBlock
+    ? `${sourceTranscriptBlock}\n\n${branchMarkerText}`
+    : branchMarkerText;
   // Reuse the headless session-start shim (same `{ sessionId, url }`
   // contract as `POST /sessions`). The seed runs inside the SSE
   // handler via `seedFromSessionId`.
@@ -791,7 +815,17 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   try {
     await handleSessionStream(
       makeHeadlessSessionStartRequest(req, project.id, worktreeId, {
-        message: branchMarkerText,
+        // `message` is the agent's first-turn prompt — we pass the
+        // transcript + branch marker here so the branched agent
+        // sees the prior context as part of its prompt (issue #364
+        // + PR review P1 from chatgpt-codex-connector on #365).
+        // `historyText` (passed below) is what the persistence layer
+        // records as the user_message event — we keep that as the
+        // pure `branchMarkerText` so the chat transcript still
+        // shows the audit-friendly marker, not the inlined
+        // transcript.
+        message: agentFirstTurnMessage,
+        historyText: branchMarkerText,
         provider: requestedProvider,
         model: requestedModel,
         mode: requestedMode,
@@ -838,6 +872,18 @@ export function makeHeadlessSessionStartRequest(
   worktreeId: string,
   body: {
     message: string;
+    /**
+     * Override the text the persistence layer records as the
+     * user_message event. Defaults to `body.message` when omitted;
+     * the branch route sets this to the pure `[/branch: …] <text>`
+     * marker so the chat transcript stays audit-friendly even when
+     * the agent's prompt is augmented with the inlined source
+     * transcript (PR review P1 from chatgpt-codex-connector on
+     * #365). On the wire this is forwarded as the `historyText`
+     * query param; `handleSessionStream` reads it back via
+     * `req.query.historyText`.
+     */
+    historyText?: string;
     provider?: string;
     model?: string;
     mode: "default" | "plan";
@@ -871,6 +917,7 @@ export function makeHeadlessSessionStartRequest(
     provider: body.provider || "",
     mode: body.mode,
   };
+  if (body.historyText) query.historyText = body.historyText;
   if (body.model) query.model = body.model;
   if (body.skillName) query.skillName = body.skillName;
   if (body.attachmentIds.length) query.attachmentIds = body.attachmentIds.join(",");
@@ -1103,6 +1150,16 @@ export async function handleSessionStream(
   }
 
   const message = req.query.message as string;
+  // `historyText` overrides the text the persistence layer records
+  // as the user_message event. The branch route sets this to the
+  // pure `[/branch: …] <text>` marker so the chat transcript stays
+  // audit-friendly even when the agent's prompt is augmented with
+  // the inlined source transcript (PR review P1 from
+  // chatgpt-codex-connector on #365). When absent, the persistence
+  // layer records the same text the agent saw as its prompt — the
+  // default for `start` / `wake` / resume paths.
+  const historyTextOverride =
+    (req.query.historyText as string | undefined) || undefined;
   const resumeSessionId = req.query.resumeSessionId as string | undefined;
   const reasoningEffort = req.query.reasoningEffort as
     | "none"
@@ -1247,10 +1304,16 @@ export async function handleSessionStream(
   // inline preview) so reload is cheap and the transcript is
   // byte-identical across runs of the same prompt. The skill markers
   // already ride on the history text; the mention block is a separate
-  // prefix.
-  const historyText = mentionResolution.contextBlock
-    ? `${mentionResolution.contextBlock}\n\n${skillResolution.historyText}`
-    : skillResolution.historyText;
+  // prefix. The branch route overrides this with the pure
+  // `[/branch: …] <text>` marker so the chat transcript stays
+  // audit-friendly even when the agent's prompt is augmented with
+  // the inlined source transcript (PR review P1 from
+  // chatgpt-codex-connector on #365).
+  const historyText = historyTextOverride
+    ? historyTextOverride
+    : mentionResolution.contextBlock
+      ? `${mentionResolution.contextBlock}\n\n${skillResolution.historyText}`
+      : skillResolution.historyText;
 
   const runStartTree = await createWorktreeSnapshot(worktree.path);
 
@@ -1271,6 +1334,17 @@ export async function handleSessionStream(
       attachments,
       autoApprove,
       parentId,
+      // Branch-seeding knobs (issue #364). The Codex path doesn't
+      // go through the SSE handler's `persistSessionStart`, so the
+      // branch route threads `seedFromSessionId` + `seedTitle` in
+      // here explicitly. The Codex `persistSessionStart` honors
+      // them once the agent reports its session id (PR review P1
+      // from chatgpt-codex-connector on #365 — without these the
+      // Codex branch path silently drops the source transcript
+      // and falls back to the run's provider/model/mode for the
+      // session defaults).
+      seedFromSessionId,
+      seedTitle,
     });
     return;
   }
@@ -2059,6 +2133,17 @@ async function streamCodexPlanSession(
     // the same query → `persistSessionStart` path the SSE handler
     // uses; only honored on brand-new sessions.
     parentId?: string;
+    // Branch-seeding knobs (issue #364). The Codex path doesn't
+    // go through the SSE handler's `persistSessionStart`, so the
+    // branch route threads these in here explicitly. Honored by
+    // this function's `persistSessionStart` once the Codex agent
+    // reports its session id (PR review P1 from
+    // chatgpt-codex-connector on #365 — without these the Codex
+    // branch path silently drops the source transcript and falls
+    // back to the run's provider/model/mode for the session
+    // defaults).
+    seedFromSessionId?: string;
+    seedTitle?: string;
   }
 ) {
   const {
@@ -2077,6 +2162,8 @@ async function streamCodexPlanSession(
     attachments,
     autoApprove,
     parentId,
+    seedFromSessionId,
+    seedTitle,
   } = options;
 
   res.writeHead(200, {
@@ -2195,6 +2282,31 @@ async function streamCodexPlanSession(
     }
     if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
       sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
+    }
+    // Branch-seeding mirror of the SSE handler (issue #364): the
+    // Codex path doesn't go through the SSE `persistSessionStart`,
+    // so it has to honor `seedFromSessionId` here. The helper
+    // prepends source events to the new session's events file and
+    // patches provider/model/mode/parentId/messages so the chat
+    // view and the model picker both reflect the source. Non-fatal
+    // — failures here leave the new session in the state the rest
+    // of `persistSessionStart` left it in (PR review P1 from
+    // chatgpt-codex-connector on #365).
+    if (seedFromSessionId && seedFromSessionId !== sessionId) {
+      try {
+        await seedBranchFromSource(
+          worktreePath,
+          seedFromSessionId,
+          sessionId,
+          historyText,
+          { title: seedTitle }
+        );
+      } catch (error) {
+        console.error(
+          `[sessions] branch seed failed in codex path (source=${seedFromSessionId}, new=${sessionId}):`,
+          error instanceof Error ? error.message : error
+        );
+      }
     }
   }
 
@@ -4051,6 +4163,103 @@ export function parseSkillMarker(
 export function deriveAutoTitle(historyText: string): string {
   const source = parseSkillMarker(historyText)?.rest ?? historyText;
   return source.length > 60 ? `${source.slice(0, 60)}...` : source;
+}
+
+/**
+ * Render a source session's stored transcript into a plain-text
+ * block the branched agent sees as part of its first-turn prompt
+ * (issue #364 + PR review P1 from chatgpt-codex-connector on #365).
+ *
+ * Why this lives on the route side instead of inside
+ * `seedBranchFromSource`: the persistence layer copies events into
+ * the new session's events file *after* the agent has already
+ * started running (the seed happens inside `persistSessionStart`'s
+ * post-`run.started` hook). Without this block the branched agent
+ * gets only the `[/branch: …]` marker as its first message —
+ * "review the proposal above" would land in a context-free run
+ * even though the chat view would later render the copied
+ * transcript. We need the source history baked into the prompt
+ * the agent sees at spawn time.
+ *
+ * `session.messages` is a heterogeneous array (different agents
+ * persist slightly different shapes — see issue #139 for the
+ * rationale), so the helper tries the common shapes in order and
+ * falls back to a JSON dump for anything it doesn't recognize.
+ * The render is intentionally simple: a fenced transcript per
+ * turn, prefixed with the role. Long turns are truncated to a
+ * generous bound (8 KiB) so a 200-turn source doesn't blow past
+ * the agent's context window.
+ */
+export function renderSourceTranscriptForAgent(
+  messages: unknown,
+  options: {
+    /** Hard cap on the rendered block size in characters. */
+    maxChars?: number;
+  } = {}
+): string {
+  const maxChars = options.maxChars ?? 8 * 1024;
+  if (!Array.isArray(messages) || messages.length === 0) return "";
+  const lines: string[] = [];
+  lines.push(
+    "The following is a transcript of the source conversation you are continuing. Treat it as read-only context; respond to the user's NEW request below it."
+  );
+  for (const raw of messages) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const m = raw as Record<string, unknown>;
+    const role = readRole(m);
+    const text = readText(m);
+    if (!text) continue;
+    const safeText =
+      text.length > 1024 ? `${text.slice(0, 1024)}…(truncated)` : text;
+    lines.push("");
+    lines.push(`[${role}]`);
+    lines.push(safeText);
+  }
+  lines.push("");
+  lines.push("--- end of source transcript ---");
+  const block = lines.join("\n");
+  if (block.length <= maxChars) return block;
+  return `${block.slice(0, maxChars)}\n…(transcript truncated to ${maxChars} chars)`;
+}
+
+function readRole(m: Record<string, unknown>): string {
+  if (typeof m.role === "string" && m.role) return m.role;
+  const type = typeof m.type === "string" ? m.type : "";
+  if (type === "user_message" || type === "user") return "user";
+  if (type === "assistant_message" || type === "assistant") return "assistant";
+  if (type === "tool") return "tool";
+  if (type === "message") return "message";
+  return type || "message";
+}
+
+function readText(m: Record<string, unknown>): string {
+  // Prefer canonical fields first, then dig through legacy shapes.
+  if (typeof m.text === "string") return m.text;
+  if (typeof m.content === "string") return m.content;
+  if (Array.isArray(m.content)) {
+    const parts = m.content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object") {
+          const p = part as Record<string, unknown>;
+          if (typeof p.text === "string") return p.text;
+        }
+        return "";
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join("\n");
+  }
+  const data = m.data;
+  if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>;
+    if (typeof d.text === "string") return d.text;
+  }
+  // Last resort: JSON dump so the agent at least sees *something*.
+  try {
+    return JSON.stringify(m);
+  } catch {
+    return "";
+  }
 }
 
 /**
