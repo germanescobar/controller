@@ -472,8 +472,25 @@ exit 0
 
       const argv = (await fs.readFile(path.join(homeDir, "spawned-args.txt"), "utf-8")).trim();
       const tokens = argv.split(/\s+/);
+      // The orchestrator emits `--model <value>` only as a real
+      // flag pair, and only between the leading flags and the
+      // `--system-prompt` argument. The preamble legitimately
+      // mentions `--model` in worked examples (e.g. `branch
+      // self ... --agent claude --model opus-5`), so a plain
+      // `tokens.includes("--model")` would trip on those when the
+      // bash script joins `$*` with spaces. Restrict the check to
+      // the flag section before `--system-prompt`: if a real
+      // `--model` flag landed, it sits there.
+      const sysPromptIdx = tokens.indexOf("--system-prompt");
+      const flagSection =
+        sysPromptIdx >= 0 ? tokens.slice(0, sysPromptIdx) : tokens;
+      const modelIdx = flagSection.indexOf("--model");
+      const flagIsReal =
+        modelIdx >= 0 &&
+        modelIdx + 1 < flagSection.length &&
+        !flagSection[modelIdx + 1].startsWith("--");
       assert.ok(
-        !tokens.includes("--model"),
+        !flagIsReal,
         `resume must not apply Settings defaultModel, got argv: ${argv}`
       );
     }
