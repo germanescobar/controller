@@ -287,28 +287,28 @@ export async function startInteractiveOauth(
 
   const metadata = await discoverMetadata(resourceUrl, fetchImpl);
 
-  // Reuse a previously-registered client when one is still on file so the
-  // user isn't re-prompted for the same app on every reconnect.
   const priorSecret = await loadSecret(connection.id, scheme.id);
-  const client = priorSecret
-    ? { client_id: priorSecret.clientId, client_secret: priorSecret.clientSecret }
-    : await dynamicClientRegistration(metadata, fetchImpl, options.redirectUri);
-
   const scopes = options.scopes ?? scheme.config.scopes?.trim() ?? priorSecret?.scopes ?? "";
   const redirectUri = options.redirectUri ?? (await startLoopbackListener(callbackTimeoutMs));
-  const { code, verifier } = await runAuthorizationCodeFlow({
-    metadata,
-    client,
-    redirectUri,
-    resourceUrl,
-    scopes,
-    opener,
-    fetchImpl,
-  });
-
-  let tokenResult: OAuthDynamicSecret;
+  const ownsLoopbackListener = options.redirectUri === undefined;
   try {
-    tokenResult = await exchangeCodeForToken({
+    // Register only after the callback listener has bound its ephemeral port.
+    // Authorization servers commonly require the authorization request's
+    // redirect_uri to exactly match the value supplied during DCR. A client
+    // registered during an earlier acquisition cannot safely be reused here
+    // because every listener receives a new random port.
+    const client = await dynamicClientRegistration(metadata, fetchImpl, redirectUri);
+    const { code, verifier } = await runAuthorizationCodeFlow({
+      metadata,
+      client,
+      redirectUri,
+      resourceUrl,
+      scopes,
+      opener,
+      fetchImpl,
+    });
+
+    const tokenResult = await exchangeCodeForToken({
       metadata,
       client,
       code,
@@ -318,24 +318,24 @@ export async function startInteractiveOauth(
       scopes,
       fetchImpl,
     });
+
+    tokenResult.metadata = metadata;
+    tokenResult.scopes = scopes;
+    tokenResult.resource = resourceUrl;
+
+    await saveSecret(connection.id, scheme.id, tokenResult);
+    const key = `${connection.id}:${scheme.id}`;
+    cache.set(key, toCached(tokenResult));
+    await markAcquired(connection.id, scheme, {
+      status: "connected",
+      expiresAt: new Date(tokenResult.expiresAt).toISOString(),
+    });
+    return tokenResult;
   } finally {
-    // Stop the loopback listener — it's done its job whether the exchange
-    // succeeded or failed.
-    await stopLoopbackListener();
+    // Stop listeners created by this acquisition on registration,
+    // authorization, and token-exchange failures as well as success.
+    if (ownsLoopbackListener) await stopLoopbackListener();
   }
-
-  tokenResult.metadata = metadata;
-  tokenResult.scopes = scopes;
-  tokenResult.resource = resourceUrl;
-
-  await saveSecret(connection.id, scheme.id, tokenResult);
-  const key = `${connection.id}:${scheme.id}`;
-  cache.set(key, toCached(tokenResult));
-  await markAcquired(connection.id, scheme, {
-    status: "connected",
-    expiresAt: new Date(tokenResult.expiresAt).toISOString(),
-  });
-  return tokenResult;
 }
 
 /** Clear an `oauth_dynamic` scheme's stored token + state. */
