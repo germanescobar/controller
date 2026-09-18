@@ -425,6 +425,7 @@ test("startInteractiveOauth: PKCE happy path discovers, registers, opens browser
       const connection = await makeConnection(integrations, `${baseUrl}/mcp`);
       const scheme = schemeOf(connection);
       let observedAuthUrl: string | null = null;
+      let registeredRedirectUri: string | null = null;
       const result = await oauth.startInteractiveOauth(connection, scheme, {
         resourceUrl: `${baseUrl}/mcp`,
         callbackTimeoutMs: 5_000,
@@ -437,6 +438,8 @@ test("startInteractiveOauth: PKCE happy path discovers, registers, opens browser
             });
           }
           if (url === `${baseUrl}/register`) {
+            const body = JSON.parse(String(init?.body)) as { redirect_uris?: string[] };
+            registeredRedirectUri = body.redirect_uris?.[0] ?? null;
             return new Response(JSON.stringify({ client_id: "dyn-1" }), {
               status: 201,
               headers: { "Content-Type": "application/json" },
@@ -456,6 +459,8 @@ test("startInteractiveOauth: PKCE happy path discovers, registers, opens browser
           const parsed = new URL(url);
           const state = parsed.searchParams.get("state") ?? "";
           const redirectUri = parsed.searchParams.get("redirect_uri") ?? "";
+          assert.equal(redirectUri, registeredRedirectUri);
+          assert.match(redirectUri, /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
           const resp = await fetch(`${redirectUri}?code=AUTH-CODE-1&state=${state}`);
           void resp;
         },
@@ -463,6 +468,7 @@ test("startInteractiveOauth: PKCE happy path discovers, registers, opens browser
       assert.equal(result.accessToken, "AT-1");
       assert.equal(result.refreshToken, "RT-1");
       assert.equal(result.clientId, "dyn-1");
+      assert.notEqual(registeredRedirectUri, "http://127.0.0.1/callback");
       assert.equal(observedAuthUrl?.includes("response_type=code"), true);
       assert.equal(observedAuthUrl?.includes("code_challenge="), true);
       assert.equal(observedAuthUrl?.includes("code_challenge_method=S256"), true);
@@ -471,7 +477,7 @@ test("startInteractiveOauth: PKCE happy path discovers, registers, opens browser
   );
 });
 
-test("startInteractiveOauth: reuses a previously-registered client on re-acquire", async () => {
+test("startInteractiveOauth: re-registers the exact callback URI on re-acquire", async () => {
   await withMockAs(
     [{ method: "GET", url: "/.well-known/oauth-authorization-server", status: 200, body: {} }],
     async ({ integrations, oauth, baseUrl }) => {
@@ -484,6 +490,7 @@ test("startInteractiveOauth: reuses a previously-registered client on re-acquire
       const connection = await makeConnection(integrations, `${baseUrl}/mcp`);
       const scheme = schemeOf(connection);
       let registerCalls = 0;
+      const registeredRedirectUris: string[] = [];
       // First call: register a client.
       await oauth.startInteractiveOauth(connection, scheme, {
         resourceUrl: `${baseUrl}/mcp`,
@@ -498,6 +505,8 @@ test("startInteractiveOauth: reuses a previously-registered client on re-acquire
           }
           if (url === `${baseUrl}/register`) {
             registerCalls += 1;
+            const body = JSON.parse(String(init?.body)) as { redirect_uris?: string[] };
+            registeredRedirectUris.push(body.redirect_uris?.[0] ?? "");
             return new Response(JSON.stringify({ client_id: "dyn-reused" }), {
               status: 201,
               headers: { "Content-Type": "application/json" },
@@ -516,14 +525,14 @@ test("startInteractiveOauth: reuses a previously-registered client on re-acquire
           const parsed = new URL(url);
           const state = parsed.searchParams.get("state") ?? "";
           const redirectUri = parsed.searchParams.get("redirect_uri") ?? "";
+          assert.equal(redirectUri, registeredRedirectUris.at(-1));
           await fetch(`${redirectUri}?code=AUTH-CODE-2&state=${state}`);
         },
       });
       assert.equal(registerCalls, 1, "DCR runs the first time");
 
-      // Re-acquire with a fresh flow (simulate clicking "Reconnect").
-      // The persisted client_id is reused, so the registration endpoint
-      // must NOT be called again.
+      // Re-acquire with a fresh flow (simulate clicking "Reconnect"). A new
+      // ephemeral callback port requires a new matching client registration.
       const updated = await integrations.getConnection(connection.id);
       assert.ok(updated);
       const fresh = schemeOf(updated);
@@ -540,6 +549,8 @@ test("startInteractiveOauth: reuses a previously-registered client on re-acquire
           }
           if (url === `${baseUrl}/register`) {
             registerCalls += 1;
+            const body = JSON.parse(String(init?.body)) as { redirect_uris?: string[] };
+            registeredRedirectUris.push(body.redirect_uris?.[0] ?? "");
             return new Response(JSON.stringify({ client_id: "dyn-reused" }), {
               status: 201,
               headers: { "Content-Type": "application/json" },
@@ -558,11 +569,143 @@ test("startInteractiveOauth: reuses a previously-registered client on re-acquire
           const parsed = new URL(url);
           const state = parsed.searchParams.get("state") ?? "";
           const redirectUri = parsed.searchParams.get("redirect_uri") ?? "";
+          assert.equal(redirectUri, registeredRedirectUris.at(-1));
           await fetch(`${redirectUri}?code=AUTH-CODE-3&state=${state}`);
         },
       });
       assert.equal(second.accessToken, "AT-3");
-      assert.equal(registerCalls, 1, "DCR does NOT run again on re-acquire");
+      assert.equal(registerCalls, 2, "DCR runs for each ephemeral callback URI");
+      assert.equal(registeredRedirectUris.length, 2);
+      for (const redirectUri of registeredRedirectUris) {
+        assert.match(redirectUri, /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+      }
+    }
+  );
+});
+
+test("startInteractiveOauth: starts the callback timeout after slow registration", async () => {
+  await withMockAs(
+    [{ method: "GET", url: "/.well-known/oauth-authorization-server", status: 200, body: {} }],
+    async ({ integrations, oauth, baseUrl }) => {
+      const metadata = {
+        issuer: `${baseUrl}/`,
+        authorization_endpoint: `${baseUrl}/authorize`,
+        token_endpoint: `${baseUrl}/token`,
+        registration_endpoint: `${baseUrl}/register`,
+      };
+      const connection = await makeConnection(integrations, `${baseUrl}/mcp`);
+      const scheme = schemeOf(connection);
+      let registrationFinishedAt = 0;
+      const startedAt = Date.now();
+
+      const acquisition = oauth.startInteractiveOauth(connection, scheme, {
+        resourceUrl: `${baseUrl}/mcp`,
+        callbackTimeoutMs: 25,
+        fetchImpl: async (input) => {
+          const url = typeof input === "string" ? input : input.toString();
+          if (url === `${baseUrl}/.well-known/oauth-authorization-server`) {
+            return new Response(JSON.stringify(metadata), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (url === `${baseUrl}/register`) {
+            await delay(75);
+            registrationFinishedAt = Date.now();
+            return new Response(JSON.stringify({ client_id: "dyn-slow" }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+        openBrowser: async () => {},
+      });
+
+      await assert.rejects(
+        Promise.race([
+          acquisition,
+          delay(500).then(() => {
+            throw new Error("acquisition did not time out");
+          }),
+        ]),
+        (error: Error) =>
+          error instanceof oauth.OAuthDynamicError && error.code === "callback_timeout"
+      );
+      assert.ok(registrationFinishedAt - startedAt >= 70);
+      assert.ok(Date.now() - registrationFinishedAt >= 20);
+    }
+  );
+});
+
+test("startInteractiveOauth: overlapping acquisitions keep callback listeners isolated", async () => {
+  await withMockAs(
+    [{ method: "GET", url: "/.well-known/oauth-authorization-server", status: 200, body: {} }],
+    async ({ integrations, oauth, baseUrl }) => {
+      const metadata = {
+        issuer: `${baseUrl}/`,
+        authorization_endpoint: `${baseUrl}/authorize`,
+        token_endpoint: `${baseUrl}/token`,
+        registration_endpoint: `${baseUrl}/register`,
+      };
+      const firstConnection = await makeConnection(integrations, `${baseUrl}/mcp/first`);
+      const secondConnection = await makeConnection(integrations, `${baseUrl}/mcp/second`);
+      let registrationCount = 0;
+      const registeredRedirectUris = new Set<string>();
+      const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url === `${baseUrl}/.well-known/oauth-authorization-server`) {
+          return new Response(JSON.stringify(metadata), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url === `${baseUrl}/register`) {
+          registrationCount += 1;
+          const registrationNumber = registrationCount;
+          const body = JSON.parse(String(init?.body)) as { redirect_uris?: string[] };
+          registeredRedirectUris.add(body.redirect_uris?.[0] ?? "");
+          if (registrationNumber === 1) await delay(75);
+          return new Response(JSON.stringify({ client_id: `dyn-${registrationNumber}` }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url === `${baseUrl}/token`) {
+          const body = new URLSearchParams(String(init?.body));
+          return new Response(JSON.stringify({ access_token: `AT-${body.get("client_id")}` }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return fetch(url, init);
+      };
+      const openBrowser = async (url: string) => {
+        const parsed = new URL(url);
+        const redirectUri = parsed.searchParams.get("redirect_uri") ?? "";
+        const state = parsed.searchParams.get("state") ?? "";
+        assert.equal(registeredRedirectUris.has(redirectUri), true);
+        await fetch(`${redirectUri}?code=AUTH-CODE&state=${state}`);
+      };
+
+      const first = oauth.startInteractiveOauth(firstConnection, schemeOf(firstConnection), {
+        callbackTimeoutMs: 1_000,
+        fetchImpl: fetchImpl as typeof fetch,
+        openBrowser,
+      });
+      await delay(10);
+      const second = oauth.startInteractiveOauth(secondConnection, schemeOf(secondConnection), {
+        callbackTimeoutMs: 1_000,
+        fetchImpl: fetchImpl as typeof fetch,
+        openBrowser,
+      });
+
+      const results = await Promise.all([first, second]);
+      assert.deepEqual(
+        results.map((result) => result.accessToken).sort(),
+        ["AT-dyn-1", "AT-dyn-2"]
+      );
+      assert.equal(registeredRedirectUris.size, 2);
     }
   );
 });

@@ -17,9 +17,8 @@
  * (`acquireStatus`) are exposed over HTTP for the form.
  *
  * The loopback listener runs on `127.0.0.1` and is bound for the lifetime of
- * one acquisition only. The client registration's `redirect_uris` is
- * parameterized so the test suite can drive the flow without depending on
- * port allocation race conditions.
+ * one acquisition only. Each acquisition owns its listener and callback
+ * state so simultaneous connections cannot interfere with one another.
  */
 
 import http from "node:http";
@@ -209,11 +208,6 @@ export interface InteractiveOauthOptions {
   /** Override the scopes the user is asked to grant. */
   scopes?: string;
   /**
-   * Override the loopback URL the authorization code is delivered to. Mostly
-   * for tests; production should let the function pick an ephemeral port.
-   */
-  redirectUri?: string;
-  /**
    * Hook for the UI to open the authorization URL in the user's default
    * browser. Defaults to logging the URL — production injects an Electron
    * `shell.openExternal` call via `setBrowserOpener`.
@@ -287,28 +281,29 @@ export async function startInteractiveOauth(
 
   const metadata = await discoverMetadata(resourceUrl, fetchImpl);
 
-  // Reuse a previously-registered client when one is still on file so the
-  // user isn't re-prompted for the same app on every reconnect.
   const priorSecret = await loadSecret(connection.id, scheme.id);
-  const client = priorSecret
-    ? { client_id: priorSecret.clientId, client_secret: priorSecret.clientSecret }
-    : await dynamicClientRegistration(metadata, fetchImpl, options.redirectUri);
-
   const scopes = options.scopes ?? scheme.config.scopes?.trim() ?? priorSecret?.scopes ?? "";
-  const redirectUri = options.redirectUri ?? (await startLoopbackListener(callbackTimeoutMs));
-  const { code, verifier } = await runAuthorizationCodeFlow({
-    metadata,
-    client,
-    redirectUri,
-    resourceUrl,
-    scopes,
-    opener,
-    fetchImpl,
-  });
-
-  let tokenResult: OAuthDynamicSecret;
+  const listener = await startLoopbackListener();
+  const redirectUri = listener.redirectUri;
   try {
-    tokenResult = await exchangeCodeForToken({
+    // Register only after the callback listener has bound its ephemeral port.
+    // Authorization servers commonly require the authorization request's
+    // redirect_uri to exactly match the value supplied during DCR. A client
+    // registered during an earlier acquisition cannot safely be reused here
+    // because every listener receives a new random port.
+    const client = await dynamicClientRegistration(metadata, fetchImpl, redirectUri);
+    const { code, verifier } = await runAuthorizationCodeFlow({
+      metadata,
+      client,
+      redirectUri,
+      resourceUrl,
+      scopes,
+      opener,
+      fetchImpl,
+      waitForCallback: () => listener.waitForCallback(callbackTimeoutMs),
+    });
+
+    const tokenResult = await exchangeCodeForToken({
       metadata,
       client,
       code,
@@ -318,24 +313,24 @@ export async function startInteractiveOauth(
       scopes,
       fetchImpl,
     });
+
+    tokenResult.metadata = metadata;
+    tokenResult.scopes = scopes;
+    tokenResult.resource = resourceUrl;
+
+    await saveSecret(connection.id, scheme.id, tokenResult);
+    const key = `${connection.id}:${scheme.id}`;
+    cache.set(key, toCached(tokenResult));
+    await markAcquired(connection.id, scheme, {
+      status: "connected",
+      expiresAt: new Date(tokenResult.expiresAt).toISOString(),
+    });
+    return tokenResult;
   } finally {
-    // Stop the loopback listener — it's done its job whether the exchange
-    // succeeded or failed.
-    await stopLoopbackListener();
+    // Stop listeners created by this acquisition on registration,
+    // authorization, and token-exchange failures as well as success.
+    await listener.close();
   }
-
-  tokenResult.metadata = metadata;
-  tokenResult.scopes = scopes;
-  tokenResult.resource = resourceUrl;
-
-  await saveSecret(connection.id, scheme.id, tokenResult);
-  const key = `${connection.id}:${scheme.id}`;
-  cache.set(key, toCached(tokenResult));
-  await markAcquired(connection.id, scheme, {
-    status: "connected",
-    expiresAt: new Date(tokenResult.expiresAt).toISOString(),
-  });
-  return tokenResult;
 }
 
 /** Clear an `oauth_dynamic` scheme's stored token + state. */
@@ -647,11 +642,8 @@ export interface DCRClient {
  * The loopback listener: a tiny HTTP server that handles a single redirect
  * carrying the authorization code. It lives only for the duration of one
  * acquisition; the caller passes the listener's redirect_uri to the
- * authorization request and we tear it down in `stopLoopbackListener`.
+ * authorization request and closes that listener when the flow ends.
  */
-let loopbackServer: http.Server | null = null;
-let loopbackTimer: NodeJS.Timeout | null = null;
-
 interface CallbackPayload {
   code: string;
   state: string;
@@ -667,6 +659,7 @@ interface AuthorizationCodeFlowInput {
   scopes: string;
   opener: (url: string) => Promise<void> | void;
   fetchImpl: typeof fetch;
+  waitForCallback: () => Promise<CallbackPayload>;
 }
 
 async function runAuthorizationCodeFlow(input: AuthorizationCodeFlowInput): Promise<{
@@ -674,7 +667,7 @@ async function runAuthorizationCodeFlow(input: AuthorizationCodeFlowInput): Prom
   state: string;
   verifier: string;
 }> {
-  const { metadata, client, redirectUri, resourceUrl, scopes, opener } = input;
+  const { metadata, client, redirectUri, resourceUrl, scopes, opener, waitForCallback } = input;
   const state = randomBytes(16).toString("base64url");
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -692,13 +685,15 @@ async function runAuthorizationCodeFlow(input: AuthorizationCodeFlowInput): Prom
 
   // Set up the callback waiter *before* opening the browser, so we can't
   // miss the redirect when the AS bounces the user back quickly.
-  const payloadPromise = new Promise<CallbackPayload>((resolve, reject) => {
-    pendingCallback = { resolve, reject };
-  });
+  const payloadPromise = waitForCallback();
+  // The opener is normally immediate, but attach a rejection handler now so
+  // a very short callback timeout cannot become an unhandled rejection while
+  // the opener is still pending. Awaiting the original promise below still
+  // preserves the rejection for the caller.
+  void payloadPromise.catch(() => {});
 
   await opener(authorizeUrl.toString());
   const payload = await payloadPromise;
-  pendingCallback = null;
 
   if (payload.error) {
     throw new OAuthDynamicError(
@@ -715,13 +710,19 @@ async function runAuthorizationCodeFlow(input: AuthorizationCodeFlowInput): Prom
   return { code: payload.code, state: payload.state, verifier };
 }
 
-let pendingCallback: {
-  resolve: (v: CallbackPayload) => void;
-  reject: (e: Error) => void;
-} | null = null;
+interface LoopbackListener {
+  redirectUri: string;
+  waitForCallback: (timeoutMs: number) => Promise<CallbackPayload>;
+  close: () => Promise<void>;
+}
 
-async function startLoopbackListener(timeoutMs: number): Promise<string> {
-  if (loopbackServer) await stopLoopbackListener();
+async function startLoopbackListener(): Promise<LoopbackListener> {
+  let pendingCallback: {
+    resolve: (v: CallbackPayload) => void;
+    reject: (e: Error) => void;
+  } | null = null;
+  let timer: NodeJS.Timeout | null = null;
+  let closed = false;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://${LOOPBACK_HOST}`);
     if (url.pathname !== "/callback") {
@@ -735,6 +736,11 @@ async function startLoopbackListener(timeoutMs: number): Promise<string> {
     const errorDescription = url.searchParams.get("error_description") ?? undefined;
     if (pendingCallback) {
       const { resolve } = pendingCallback;
+      pendingCallback = null;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
       resolve({ code, state, error, errorDescription });
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -747,35 +753,45 @@ async function startLoopbackListener(timeoutMs: number): Promise<string> {
     server.once("error", reject);
     server.listen(0, LOOPBACK_HOST, () => resolve());
   });
-  loopbackServer = server;
   const port = (server.address() as AddressInfo).port;
-  if (loopbackTimer) clearTimeout(loopbackTimer);
-  loopbackTimer = setTimeout(() => {
-    if (pendingCallback) {
-      const { reject } = pendingCallback;
-      pendingCallback = null;
-      reject(new OAuthDynamicError("Authorization callback timed out.", "callback_timeout"));
-    }
-  }, timeoutMs);
-  return `http://${LOOPBACK_HOST}:${port}/callback`;
-}
-
-async function stopLoopbackListener(): Promise<void> {
-  if (loopbackTimer) {
-    clearTimeout(loopbackTimer);
-    loopbackTimer = null;
-  }
-  if (pendingCallback) {
-    // We tore down before the callback landed — surface a clear failure so
-    // the in-flight `runAuthorizationCodeFlow` doesn't hang.
-    const { reject } = pendingCallback;
-    pendingCallback = null;
-    reject(new OAuthDynamicError("Authorization listener stopped before callback.", "as_error"));
-  }
-  if (!loopbackServer) return;
-  const server = loopbackServer;
-  loopbackServer = null;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return {
+    redirectUri: `http://${LOOPBACK_HOST}:${port}/callback`,
+    waitForCallback: (timeoutMs) => {
+      if (closed) {
+        return Promise.reject(
+          new OAuthDynamicError("Authorization listener stopped before callback.", "as_error")
+        );
+      }
+      if (pendingCallback) {
+        return Promise.reject(
+          new OAuthDynamicError("Authorization callback is already pending.", "as_error")
+        );
+      }
+      return new Promise<CallbackPayload>((resolve, reject) => {
+        pendingCallback = { resolve, reject };
+        timer = setTimeout(() => {
+          if (!pendingCallback) return;
+          pendingCallback = null;
+          timer = null;
+          reject(new OAuthDynamicError("Authorization callback timed out.", "callback_timeout"));
+        }, timeoutMs);
+      });
+    },
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (pendingCallback) {
+        const { reject } = pendingCallback;
+        pendingCallback = null;
+        reject(new OAuthDynamicError("Authorization listener stopped before callback.", "as_error"));
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 interface ExchangeInput {
