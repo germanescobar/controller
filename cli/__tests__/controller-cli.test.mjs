@@ -4876,3 +4876,264 @@ test("runSessions branch surfaces a 404 server error as a clear exit (issue #364
   assert.equal(exitCode, 1);
   assert.match(stderrText, /Source session not found/);
 });
+
+// --- projects list (issue #370) ---
+
+/* Stub `GET /api/projects` with the given registry. `projects list` is the
+ * only caller, so any other URL is a bug in the code under test. */
+function stubProjectRegistry(projects) {
+  return async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => projects };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+}
+
+test("parseProjects list builds a list payload", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseProjects(["list"]), {
+    action: "list",
+    body: { json: false },
+  });
+  assert.deepEqual(cli.parseProjects(["list", "--json"]), {
+    action: "list",
+    body: { json: true },
+  });
+});
+
+test("parseProjects list rejects an unknown flag with a clear error (issue #306)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseProjects(["list", "--bogus"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Unknown flag for projects list/);
+  assert.match(stderrText, /--bogus/);
+  // The valid set is listed so the caller can fix the typo without
+  // reading the source.
+  assert.match(stderrText, /--json/);
+});
+
+test("parseProjects list rejects a stray positional (v1 has no filters)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let stderrText = "";
+  process.exit = () => {
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseProjects(["list", "controller"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.match(stderrText, /takes no positional arguments/);
+  assert.match(stderrText, /controller/);
+});
+
+test("parseProjects rejects an unknown subcommand", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let stderrText = "";
+  process.exit = () => {
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseProjects(["create"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.match(stderrText, /Unknown projects command: create/);
+});
+
+test("runProjects list prints one name-sorted row per project (issue #370)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  // Deliberately out of order (and mixed case) so the assertion below
+  // proves the CLI sorts rather than echoing the server's order.
+  globalThis.fetch = stubProjectRegistry([
+    {
+      id: "proj-uuid-2",
+      name: "Zephyr",
+      path: "/Users/dev/zephyr",
+      createdAt: "2026-02-01T00:00:00.000Z",
+    },
+    {
+      id: "proj-uuid-1",
+      name: "controller",
+      path: "/Users/dev/controller",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-09-18T10:00:00.000Z",
+    },
+  ]);
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runProjects(["list"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const lines = stdoutChunks.join("").trimEnd().split("\n");
+  assert.equal(lines.length, 2);
+  // Name-sorted, case-insensitively: `controller` before `Zephyr`.
+  assert.equal(
+    lines[0],
+    "proj-uuid-1  controller  /Users/dev/controller  lastActive=2026-09-18T10:00:00.000Z"
+  );
+  // `lastActive=` is omitted entirely when the server doesn't know one,
+  // rather than printed as an empty value.
+  assert.equal(lines[1], "proj-uuid-2  Zephyr  /Users/dev/zephyr");
+});
+
+test("runProjects list --json emits NDJSON of the registry record (issue #370)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = stubProjectRegistry([
+    {
+      id: "proj-uuid-2",
+      name: "zephyr",
+      path: "/Users/dev/zephyr",
+      createdAt: "2026-02-01T00:00:00.000Z",
+      // Hydrated by the server from the project's `*.sh` files on every
+      // read — script bodies, not registry fields, so they must not leak
+      // into the NDJSON an agent pipes to `jq`.
+      setupCommands: "npm install",
+      runCommands: "npm run dev",
+    },
+    {
+      id: "proj-uuid-1",
+      name: "controller",
+      path: "/Users/dev/controller",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-09-18T10:00:00.000Z",
+    },
+  ]);
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runProjects(["list", "--json"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const lines = stdoutChunks.join("").trimEnd().split("\n");
+  assert.equal(lines.length, 2);
+  // One JSON object per line, in the same name-sorted order as the
+  // human view, so `jq` and the terminal agree.
+  assert.deepEqual(JSON.parse(lines[0]), {
+    id: "proj-uuid-1",
+    name: "controller",
+    path: "/Users/dev/controller",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastActiveAt: "2026-09-18T10:00:00.000Z",
+  });
+  assert.deepEqual(JSON.parse(lines[1]), {
+    id: "proj-uuid-2",
+    name: "zephyr",
+    path: "/Users/dev/zephyr",
+    createdAt: "2026-02-01T00:00:00.000Z",
+  });
+});
+
+test("runProjects list prints 'No projects match.' for an empty registry (issue #370)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = stubProjectRegistry([]);
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runProjects(["list"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(stdoutChunks.join(""), "No projects match.\n");
+});
+
+test("runProjects list --json emits nothing for an empty registry (issue #370)", async () => {
+  // Mirrors the `sessions list` split from PR #354's review: the
+  // human-only empty-state copy would break a `jq` / `wc -l` pipeline
+  // on a legitimately empty registry.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = stubProjectRegistry([]);
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runProjects(["list", "--json"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(stdoutChunks.join(""), "");
+});
+
+test("controller --help lists the projects subcommand (issue #370)", async () => {
+  // Acceptance criterion 4: the USAGE block has to advertise the new
+  // subcommand in the same shape as its two siblings, otherwise an agent
+  // reading `--help` never learns it exists. `main()` isn't exported, so
+  // this one runs the CLI as a real child process — `--help` short-circuits
+  // before `getServerUrl()`, so no running server is needed.
+  const { execFileSync } = await import("node:child_process");
+  const out = execFileSync(
+    process.execPath,
+    [path.join(repoRoot, "cli", "controller"), "--help"],
+    { encoding: "utf-8" }
+  );
+  assert.match(out, /controller projects list \[--json\]/);
+  assert.match(out, /controller worktrees list \[<project>\]/);
+  assert.match(out, /controller sessions list \[<project>\]/);
+});

@@ -6,6 +6,7 @@
  *   controller browser <action> ...        Drive the in-app preview browser.
  *   controller integrations <action> ...   Use configured third-party services.
  *   controller skills <action> ...          Search and activate unified skills.
+ *   controller projects <action> ...        List the onboarded projects.
  *   controller worktrees <action> ...       Manage worktrees on a project.
  *   controller sessions <action> ...        Start a session pinned to a worktree.
  *   controller memory <action> ...          Read/write the app-owned memory layer.
@@ -96,6 +97,17 @@ const USAGE = `Usage:
   controller skills create --name <name> --description <description> [--body <body>] [--body-file <path>]
   controller skills import-discover
   controller skills import [--provider <id>] [--source <path>] [--scope <scope>] [--overwrite]... [--all]
+
+  controller projects list [--json]
+
+  \`projects list\` enumerates the onboarded projects (issue #370) — the first
+  step of the discovery chain \`projects list\` → \`worktrees list <project>\`
+  → \`sessions list <project> --worktree <id>\`. Rows are \`<id>  <name>
+  <path>\` in name-sorted order, plus \`lastActive=<iso>\` when the server
+  knows it. \`--json\` prints one JSON object per line (NDJSON), so
+  \`jq -r 'select(.name == "controller") | .id'\` replaces hand-rolling a
+  read of \`<controller-home>/projects.json\`. There are no filters in v1;
+  \`No projects match.\` is printed when the registry is empty.
 
   controller worktrees list [<project>]
   controller worktrees create [<project>] --name <name> [--branch <branch>] [--base <baseBranch>]
@@ -497,6 +509,132 @@ export async function resolveProjectByCwd(serverUrl, cwd) {
   }
   if (!body || typeof body !== "object") return null;
   return body.project ?? null;
+}
+
+// --- projects surface (issue #370) ---
+//
+// The third leg of the discovery tripod: `projects list` →
+// `worktrees list <project>` → `sessions list <project> --worktree <id>`.
+// Without it, an agent that knows a project by name had to shell out to
+// `jq` against `<controller-home>/projects.json` to get the UUID the
+// other two subcommands want.
+//
+// The source of truth here is `GET /api/projects` (via the existing
+// `fetchProjectList`), not the registry file on disk: it's the same route
+// `resolveProjectId` already uses to map a `<project>` name to an id, and
+// it keeps this subcommand consistent with `worktrees list` /
+// `sessions list`, which are both server-backed. No new server route is
+// needed either way.
+
+export function parseProjects(argv) {
+  const [command, ...args] = argv;
+  if (!command) fail(`Unknown projects command\n${USAGE}`);
+  switch (command) {
+    case "list": {
+      // No filters in v1 (issue #370): the registry is short enough that
+      // `--json` piped to `jq` covers every slice an agent needs. A stray
+      // positional is almost always someone reaching for a filter that
+      // doesn't exist yet, so reject it instead of silently ignoring it —
+      // `assertKnownFlags` only sees `--`-prefixed tokens.
+      const stray = args.find((arg) => !arg.startsWith("--"));
+      if (stray !== undefined) {
+        fail(
+          `projects list takes no positional arguments (got "${stray}"). ` +
+            `The list is unfiltered in v1 — pipe \`--json\` to \`jq\` to narrow it.`
+        );
+      }
+      assertKnownFlags(args, ["--json"], "projects list");
+      return { action: "list", body: { json: args.includes("--json") } };
+    }
+    default:
+      fail(`Unknown projects command: ${command}\n${USAGE}`);
+  }
+}
+
+// Project the server's payload down to the record persisted in
+// `projects.json` (`ProjectRecord` in `server/lib/projects.ts`).
+// `GET /api/projects` re-hydrates `setupCommands` / `runCommands` from
+// the project's `*.sh` files on every read; those are script bodies
+// rather than registry fields, so they stay out of the NDJSON — an agent
+// piping this to `jq` wants ids and names, not a shell script. A
+// `lastActiveAt` is passed through when the server knows one and omitted
+// otherwise.
+function toProjectRecord(project) {
+  const record = {
+    id: project.id,
+    name: project.name,
+    path: project.path,
+    createdAt: project.createdAt,
+  };
+  if (typeof project.lastActiveAt === "string" && project.lastActiveAt) {
+    record.lastActiveAt = project.lastActiveAt;
+  }
+  return record;
+}
+
+// One row per project, same single-line field shape as
+// `formatSessionRow`: the id first (it's the handle the agent pastes
+// into `worktrees list` / `sessions list`), then the human name, then
+// the path on disk.
+function formatProjectRow(project) {
+  const name =
+    typeof project.name === "string" && project.name.trim()
+      ? project.name
+      : "(unnamed)";
+  const projectPath =
+    typeof project.path === "string" && project.path ? project.path : "(no path)";
+  const lastActive =
+    typeof project.lastActiveAt === "string" && project.lastActiveAt
+      ? `  lastActive=${project.lastActiveAt}`
+      : "";
+  return `${project.id ?? "?"}  ${name}  ${projectPath}${lastActive}`;
+}
+
+// Name-sorted, always (issue #370). Deliberately not `localeCompare`:
+// its default collation varies with the host locale, and the order has
+// to be identical on every machine for a scripted diff of two installs
+// to be meaningful. Case-insensitive first (so `Zed` doesn't sort above
+// `acme`), with the id as a tiebreaker for two projects sharing a name.
+function compareProjects(a, b) {
+  const aName = String(a.name ?? "").toLowerCase();
+  const bName = String(b.name ?? "").toLowerCase();
+  if (aName !== bName) return aName < bName ? -1 : 1;
+  const aId = String(a.id ?? "");
+  const bId = String(b.id ?? "");
+  if (aId === bId) return 0;
+  return aId < bId ? -1 : 1;
+}
+
+export async function runProjects(argv, serverUrl) {
+  const parsed = parseProjects(argv);
+  if (parsed.action === "list") {
+    const projects = await fetchProjectList(serverUrl);
+    const rows = projects
+      .filter((project) => project && typeof project === "object")
+      .sort(compareProjects);
+    if (rows.length === 0) {
+      // Same split as `sessions list`: `--json` emits nothing so the
+      // output stays machine-readable (a literal `No projects match.`
+      // would break `jq` / `wc -l` on a legitimately empty registry),
+      // while the human view still gets the empty-state copy. Exit code
+      // is 0 either way — an empty registry isn't an error.
+      if (!parsed.body.json) {
+        process.stdout.write("No projects match.\n");
+      }
+      return;
+    }
+    if (parsed.body.json) {
+      for (const row of rows) {
+        process.stdout.write(`${JSON.stringify(toProjectRecord(row))}\n`);
+      }
+      return;
+    }
+    for (const row of rows) {
+      process.stdout.write(`${formatProjectRow(row)}\n`);
+    }
+    return;
+  }
+  fail(`Unknown projects action: ${parsed.action}`);
 }
 
 // --- worktrees surface (issue #190) ---
@@ -3503,6 +3641,7 @@ async function main() {
     surface !== "terminal" &&
     surface !== "integrations" &&
     surface !== "skills" &&
+    surface !== "projects" &&
     surface !== "worktrees" &&
     surface !== "sessions" &&
     surface !== "schedules" &&
@@ -3520,6 +3659,8 @@ async function main() {
     } else {
       await runSkills(rest, serverUrl);
     }
+  } else if (surface === "projects") {
+    await runProjects(rest, serverUrl);
   } else if (surface === "worktrees") {
     await runWorktrees(rest, serverUrl);
   } else if (surface === "sessions") {
