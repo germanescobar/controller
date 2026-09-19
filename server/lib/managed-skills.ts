@@ -43,6 +43,7 @@ export const MANAGED_SKILL_DIRS: readonly string[] = Object.freeze([
   "controller-search-skills",
   "controller-skill-creator",
   "controller-worktrees",
+  "controller-sessions",
   "controller-memory",
 ]);
 
@@ -558,7 +559,7 @@ conversation on it.
   the CLI itself and follows the install if it ever moves:
 
   \`\`\`sh
-  PROJECTS_JSON="\$(dirname "\$(dirname '${cliPath}')")/projects.json"
+  PROJECTS_JSON="\$(dirname "\$(dirname ${cliPath})")/projects.json"
   jq -r --arg pwd "\$(pwd)" '.[] | select(.path == \$pwd) | .name' "\$PROJECTS_JSON"
   \`\`\`
 
@@ -639,6 +640,187 @@ is provider-dependent and not a worktree problem. Recovery steps:
    authenticated (e.g. \`claude --version\`).
 3. The worktree itself is intact — you don't need to recreate it. Use the
    same \`<worktreeId>\` from the original \`worktrees create\` output.
+`;
+}
+
+function buildSessionsSkillBody(cliPath: string): string {
+  return `---
+name: controller-sessions
+description: Use when the agent needs to find an existing session, list sessions on another project, enumerate children of a coordinator session, send a follow-up, or inspect session state from disk.
+---
+
+${managedMarker("controller-sessions")}
+
+# Sessions
+
+Invoke the Controller CLI by its absolute path — it is not on your PATH.
+Every command below is run as \`${cliPath} sessions <command>\` (plus one
+\`${cliPath} worktrees list\` call used for discovery).
+
+This skill covers **finding and driving sessions that already exist**.
+Creating a worktree and kicking off the *first* session on it is the
+\`/controller-worktrees\` skill's job — come back here once the session
+exists and you need to locate it, message it, or watch it.
+
+## Commands
+
+- \`${cliPath} sessions list [<project>] [--worktree <worktreeId>] [--parent <sessionId|self>] [--provider <id>] [--json] [--limit <n>]\` — enumerate sessions in a project. Filters compose. \`--json\` emits NDJSON (one object per line); \`--limit\` defaults to 100. Prints \`No sessions match.\` when the filters exclude everything.
+- \`${cliPath} sessions children <parentId|self>\` — list the children of a session across every project × worktree.
+- \`${cliPath} sessions send <targetSessionId> <message> --from <parentId|self>\` — enqueue a durable user turn on an existing session without spawning a new one.
+- \`${cliPath} sessions wake <sessionId> <message> [--delay <duration>] [--run-at <iso>]\` — enqueue a follow-up on a session (often \`self\`), optionally held until a wall-clock deadline. Durations are \`30s\`, \`5m\`, \`1h\`, \`2d\`.
+- \`${cliPath} sessions goal set <sessionId> --condition <text> [--max-turns <n>] [--expires-at <iso>]\` — attach a completion condition the server re-evaluates after every turn.
+- \`${cliPath} sessions goal show <sessionId>\` — read the current goal and the evaluator's turn count.
+- \`${cliPath} sessions goal clear <sessionId>\` — drop the goal and stop the loop.
+- \`${cliPath} sessions monitor start <sessionId> --description <text> --command <shell> [--on-line <regex>] [--timeout-ms <ms>] [--persistent]\` — spawn a long-running child process whose stdout lands in the session event log.
+- \`${cliPath} sessions monitor list <sessionId>\` — the monitors currently attached to a session.
+- \`${cliPath} sessions monitor stop <monitorId>\` — stop one monitor.
+
+\`self\` is accepted anywhere a session id is (\`--parent self\`, \`--from
+self\`, \`children self\`, \`wake self\`). It resolves through the
+\`\$CONTROLLER_SESSION_ID\` env var the orchestrator injects at spawn time.
+On a brand-new session that variable isn't set yet — the id is assigned on
+the agent's first \`run.started\` event — and the CLI says so explicitly
+rather than guessing. When that happens, discover your own id with
+\`sessions list\` (see below).
+
+## Picking a project
+
+\`<project>\` accepts the project's UUID **or its human name**. It is
+optional: when omitted, the CLI resolves the project that owns \`pwd\`.
+
+**Bare \`${cliPath} sessions list\` is therefore scoped to the project that
+owns \`pwd\`.** To see sessions in a *different* project, pass \`<project>\`
+explicitly — omitting it will silently list the wrong project's sessions,
+not all of them.
+
+To find the human names of the onboarded projects, read the orchestrator's
+project list. It lives next to the CLI, so the path is derived from the CLI
+itself and follows the install if it ever moves:
+
+\`\`\`sh
+PROJECTS_JSON="\$(dirname "\$(dirname ${cliPath})")/projects.json"
+jq -r '.[] | "\\(.name)\\t\\(.id)\\t\\(.path)"' "\$PROJECTS_JSON"
+\`\`\`
+
+## "Find the session on this UUID"
+
+A bare UUID is ambiguous — it can be a project id, a worktree id, or a
+session id, and guessing burns turns. Resolve it by going through the
+worktree list rather than by trial and error:
+
+\`\`\`sh
+# 1. What worktrees does the project have? (<project> optional — cwd wins)
+${cliPath} worktrees list "Coding Orchestrator"
+# → issue-1503  id=9f0a1c2d-...  path=<home>/worktrees/<projectId>/issue-1503
+
+# 2. Now list the sessions on the worktree you matched.
+${cliPath} sessions list "Coding Orchestrator" --worktree 9f0a1c2d-...
+\`\`\`
+
+If the user hands you a UUID and says "find the session on this", run
+\`worktrees list <project>\` **first** to discover worktree ids, then
+\`sessions list <project> --worktree <worktreeId>\`. If the UUID matches no
+worktree, try it as a session id (\`sessions children <uuid>\` or
+\`sessions list --parent <uuid>\`) before asking the user.
+
+When the user names a worktree by its *directory* name (\`issue-1503\`)
+rather than its id, match that name in the \`worktrees list\` output — the
+directory name is not the id and cannot be passed to \`--worktree\`.
+
+## Discovering your own session id
+
+\`--parent self\` needs \`\$CONTROLLER_SESSION_ID\`. When it isn't set, pick
+your own row out of \`sessions list\`. Each line of \`--json\` output is a
+separate JSON object (NDJSON), so the per-line \`select\` runs first —
+\`.[]\` after \`select\` would iterate the object's scalar field values and
+jq would reject it with \`Cannot index string with string "provider"\`:
+
+\`\`\`sh
+SELF=\$(${cliPath} sessions list --json | jq -r 'select(.provider == "claude") | .id' | head -1)
+\`\`\`
+
+Filter by the provider that is actually running you, and prefer the
+most-recent row when several match.
+
+## Reading session state from disk
+
+Sometimes the fastest answer is the transcript itself — what a child
+session actually did, or whether a monitor line ever landed. Session
+storage lives under the Controller home, keyed **per worktree**:
+
+    \${CONTROLLER_HOME}/projects/<basename>-<sha16>/events/<sessionId>.jsonl
+    \${CONTROLLER_HOME}/projects/<basename>-<sha16>/sessions/<sessionId>.json
+
+- \`<basename>\` is the **on-disk directory name** of the worktree (e.g.
+  \`issue-1503\`), **not** the worktree id.
+- \`<sha16>\` is the first 16 hex characters of the SHA-256 of the
+  worktree's absolute path.
+- \`events/\` holds the append-only JSONL transcript; \`sessions/\` holds the
+  session metadata (title, provider, \`parentSessionId\`, status).
+
+Derive the directory rather than guessing it:
+
+\`\`\`sh
+HOME_DIR="\$(dirname "\$(dirname ${cliPath})")"
+WT=/absolute/path/to/the/worktree
+STORE="\$HOME_DIR/projects/\$(basename "\$WT")-\$(printf '%s' "\$WT" | shasum -a 256 | cut -c1-16)"
+tail -n 20 "\$STORE/events/<sessionId>.jsonl" | jq -r '.type'
+\`\`\`
+
+Because the key is the worktree path, a project's main checkout and each of
+its worktrees get **separate** store directories. A session you can't find
+in one is probably in another — that's also why \`--parent\` has to walk
+every worktree.
+
+## Workflow: coordinate a child session
+
+\`\`\`sh
+# 1. Learn your own id (or use \`self\` when the env var is set).
+SELF=\$(${cliPath} sessions list --json | jq -r 'select(.provider == "claude") | .id' | head -1)
+
+# 2. See what children you already have.
+${cliPath} sessions children "\$SELF"
+
+# 3. Give an existing child new work — it keeps its transcript.
+${cliPath} sessions send <childId> "Look at issue 190 first" --from "\$SELF"
+
+# 4. React to external state without polling: matched stdout lines are
+#    re-injected as a durable turn marked [/monitor: CI] <line>.
+${cliPath} sessions monitor start "\$SELF" \\
+  --description "CI" \\
+  --command "gh pr checks --watch" \\
+  --on-line '^\\[CI\\] (passed|failed)\$'
+
+# 5. Stay on the task until a condition holds, then let the goal clear.
+${cliPath} sessions goal set "\$SELF" \\
+  --condition "all required CI checks on PR #42 are SUCCESS" --max-turns 5
+\`\`\`
+
+## Notes
+
+- \`sessions send\` writes the canonical
+  \`[/from: <parentTitle>] <controller-uri> <message>\` marker as the target's
+  next user turn, so the child can link back to the parent conversation. It
+  runs after the child's current turn, or immediately when the child is idle.
+- \`sessions wake\` with no \`--delay\` replays as soon as the live turn
+  finishes. Don't poll with short delays for work Controller already
+  notifies you about — use a monitor or a goal instead.
+- A goal re-fires only while the queue is empty; \`--max-turns\` is the hard
+  ceiling and \`goal clear\` is the manual stop.
+- Monitors are capped at 8 per session and 1000 captured lines per monitor;
+  \`--timeout-ms\` defaults to 5 minutes and maxes out at 1 hour.
+- The \`--flag=value\` shorthand is rejected on the sessions surfaces — use a
+  space separator (\`--worktree wt-1\`). Messages are positional; if a message
+  starts with \`--\`, pass it after a bare \`--\`.
+
+## Related skills
+
+- \`/controller-worktrees\` — create a worktree and start the *first* session
+  on it (\`worktrees create\` then \`sessions start --parent self\`).
+- \`/controller-schedules\` — run a session later or on a cron schedule,
+  instead of holding one open with a delayed wake.
+- \`/controller-memory\` — persist what you learned across sessions; the
+  preamble's \`<memory_index>\` block lists every note by slug.
 `;
 }
 
@@ -893,7 +1075,7 @@ session. To find the project's UUID, read the orchestrator's project
 list (same as for worktrees):
 
 \`\`\`sh
-PROJECTS_JSON="\$(dirname "\$(dirname '${cliPath}')")/projects.json"
+PROJECTS_JSON="\$(dirname "\$(dirname ${cliPath})")/projects.json"
 jq -r '.[] | "\\(.id)  \\(.name)"' "\$PROJECTS_JSON"
 \`\`\`
 
@@ -1084,6 +1266,7 @@ export async function installManagedSkills(): Promise<void> {
     { name: "controller-search-skills", body: buildSearchSkillsBody(cli) },
     { name: "controller-skill-creator", body: buildSkillCreatorSkillBody(cli) },
     { name: "controller-worktrees", body: buildWorktreesSkillBody(cli) },
+    { name: "controller-sessions", body: buildSessionsSkillBody(cli) },
     { name: "controller-memory", body: buildControllerMemorySkillBody(cli) },
   ];
 
