@@ -667,42 +667,37 @@ exists and you need to locate it, message it, or watch it.
 - \`${cliPath} sessions list [<project>] [--worktree <worktreeId>] [--parent <sessionId|self>] [--provider <id>] [--json] [--limit <n>]\` — enumerate sessions in a project. Filters compose. \`--json\` emits NDJSON (one object per line); \`--limit\` defaults to 100. Prints \`No sessions match.\` when the filters exclude everything.
 - \`${cliPath} sessions children <parentId|self>\` — list the children of a session across every project × worktree.
 - \`${cliPath} sessions send <targetSessionId> <message> --from <parentId|self>\` — enqueue a durable user turn on an existing session without spawning a new one.
-- \`${cliPath} sessions wake <sessionId> <message> [--delay <duration>] [--run-at <iso>]\` — enqueue a follow-up on a session, optionally held until a wall-clock deadline. Takes a real session id; \`self\` is **not** resolved here (see below). Durations are \`30s\`, \`5m\`, \`1h\`, \`2d\`.
-- \`${cliPath} sessions goal set <sessionId> --condition <text> [--max-turns <n>] [--expires-at <iso>]\` — attach a completion condition the server re-evaluates after every turn.
-- \`${cliPath} sessions goal show <sessionId>\` — read the current goal and the evaluator's turn count.
-- \`${cliPath} sessions goal clear <sessionId>\` — drop the goal and stop the loop.
-- \`${cliPath} sessions monitor start <sessionId> --description <text> --command <shell> [--on-line <regex>] [--timeout-ms <ms>] [--persistent]\` — spawn a long-running child process whose stdout lands in the session event log.
-- \`${cliPath} sessions monitor list <sessionId>\` — the monitors currently attached to a session.
+- \`${cliPath} sessions wake <sessionId|self> <message> [--delay <duration>] [--run-at <iso>]\` — enqueue a follow-up on a session, optionally held until a wall-clock deadline. Durations are \`30s\`, \`5m\`, \`1h\`, \`2d\`.
+- \`${cliPath} sessions goal set <sessionId|self> --condition <text> [--max-turns <n>] [--expires-at <iso>]\` — attach a completion condition the server re-evaluates after every turn.
+- \`${cliPath} sessions goal show <sessionId|self>\` — read the current goal and the evaluator's turn count.
+- \`${cliPath} sessions goal clear <sessionId|self>\` — drop the goal and stop the loop.
+- \`${cliPath} sessions monitor start <sessionId|self> --description <text> --command <shell> [--on-line <regex>] [--timeout-ms <ms>] [--persistent]\` — spawn a long-running child process whose stdout lands in the session event log.
+- \`${cliPath} sessions monitor list <sessionId|self>\` — the monitors currently attached to a session.
 - \`${cliPath} sessions monitor stop <monitorId>\` — stop one monitor.
 
 ### Where \`self\` works
 
 \`self\` resolves to the calling session's id through the
-\`\$CONTROLLER_SESSION_ID\` env var the orchestrator injects at spawn time,
-but **only on the verbs that opt in**:
-
-| Accepts \`self\` | Needs an explicit session id |
-| --- | --- |
-| \`start --parent self\` | \`wake <sessionId>\` |
-| \`list --parent self\` | \`goal set\` / \`show\` / \`clear <sessionId>\` |
-| \`children self\` | \`monitor start <sessionId>\` |
-| \`send self\` / \`send … --from self\` | |
-| \`branch self\` | |
-
-On the right-hand column the token is passed through verbatim, so
-\`wake self\` asks the server for a session literally named \`self\` and
-comes back \`Session not found.\` Resolve your id first and pass it:
-
-\`\`\`sh
-SELF="\${CONTROLLER_SESSION_ID:?not set - use sessions list to find your id}"
-${cliPath} sessions wake "\$SELF" "Re-check the build" --delay 30s
-\`\`\`
+\`\$CONTROLLER_SESSION_ID\` env var the orchestrator injects at spawn time
+(issue #375). Every session-id-taking verb accepts it: \`wake <self>\`,
+\`goal set <self>\` / \`show <self>\` / \`clear <self>\`, \`monitor start <self>\` /
+\`list <self>\`, in addition to \`start --parent self\`, \`list --parent self\`,
+\`children self\`, \`send self\` / \`send … --from self\`, and \`branch self\`. The
+only verb that does **not** accept \`self\` is \`monitor stop <monitorId>\`,
+which takes a monitor UUID rather than a session id.
 
 On a brand-new session \`\$CONTROLLER_SESSION_ID\` isn't set yet — the id is
-assigned on the agent's first \`run.started\` event. On the left-hand
-column the CLI says so explicitly rather than guessing; on the right-hand
-column nothing warns you, so check the variable yourself. Either way,
-discover the id with \`sessions list\` (see below).
+assigned on the agent's first \`run.started\` event. When \`self\` is used
+before the env var is populated, the CLI fails with a clear error
+naming the verb and pointing at \`controller sessions list\` rather than
+passing the literal string \`self\` to the server.
+
+\`\`\`sh
+# Anywhere you would write a session id, you can write \`self\`:
+${cliPath} sessions wake self "Re-check the build" --delay 30s
+${cliPath} sessions goal set self --condition "all CI checks pass"
+${cliPath} sessions monitor start self --description "CI" --command "gh pr checks --watch"
+\`\`\`
 
 ## Picking a project
 

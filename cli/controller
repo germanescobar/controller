@@ -1004,10 +1004,16 @@ export function parseSessions(argv) {
       // has. We re-do the positional parsing here rather than reusing the
       // outer `<project>` strip above because the wake surface has a
       // different positional shape.
-      const sessionId = rest[0];
-      if (!sessionId || sessionId.startsWith("--")) {
+      //
+      // Issue #375: route the session id through `resolveParentFlag` so
+      // `wake <self>` resolves via `$CONTROLLER_SESSION_ID` (the same
+      // contract `start --parent self` / `children self` / `branch self`
+      // already implement). Agents see a clear client-side error when
+      // the env var is unset, not the server's "Session not found.".
+      if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions wake requires a sessionId");
       }
+      const sessionId = resolveParentFlag(rest[0], "sessions wake");
       // Issue #355: the message is a positional argument (the second
       // positional, after the session id), not a `--message` flag. It
       // can come before or after the wake-specific flags (`--delay`,
@@ -1321,10 +1327,14 @@ export function parseGoal(argv) {
   }
   switch (command) {
     case "set": {
-      const sessionId = rest[0];
-      if (!sessionId || sessionId.startsWith("--")) {
+      // Issue #375: route the session id through `resolveParentFlag` so
+      // `goal set <self>` resolves via `$CONTROLLER_SESSION_ID` instead
+      // of being forwarded verbatim as the literal string "self" (which
+      // surfaces server-side as `Session not found.`).
+      if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions goal set requires a sessionId");
       }
+      const sessionId = resolveParentFlag(rest[0], "sessions goal set");
       const goalArgs = rest.slice(1);
       assertKnownFlags(
         goalArgs,
@@ -1358,10 +1368,11 @@ export function parseGoal(argv) {
       };
     }
     case "clear": {
-      const sessionId = rest[0];
-      if (!sessionId || sessionId.startsWith("--")) {
+      // Issue #375: same `self` resolution as `set`.
+      if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions goal clear requires a sessionId");
       }
+      const sessionId = resolveParentFlag(rest[0], "sessions goal clear");
       return {
         project,
         action: "clear",
@@ -1370,10 +1381,11 @@ export function parseGoal(argv) {
       };
     }
     case "show": {
-      const sessionId = rest[0];
-      if (!sessionId || sessionId.startsWith("--")) {
+      // Issue #375: same `self` resolution as `set`.
+      if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions goal show requires a sessionId");
       }
+      const sessionId = resolveParentFlag(rest[0], "sessions goal show");
       return { project, action: "show", sessionId };
     }
     default:
@@ -1739,10 +1751,14 @@ export function parseMonitor(argv) {
   }
   switch (command) {
     case "start": {
-      const sessionId = rest[0];
-      if (!sessionId || sessionId.startsWith("--")) {
+      // Issue #375: route the session id through `resolveParentFlag` so
+      // `monitor start <self> ...` resolves via `$CONTROLLER_SESSION_ID`
+      // instead of forwarding the literal string "self" to the server
+      // (which returns `Session not found.`).
+      if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions monitor start requires a sessionId");
       }
+      const sessionId = resolveParentFlag(rest[0], "sessions monitor start");
       const monitorArgs = rest.slice(1);
       assertKnownFlags(
         monitorArgs,
@@ -1799,13 +1815,18 @@ export function parseMonitor(argv) {
       };
     }
     case "list": {
-      const sessionId = rest[0];
-      if (!sessionId || sessionId.startsWith("--")) {
+      // Issue #375: same `self` resolution as `start`. Monitor UUIDs
+      // are listed per session, so listing by `self` is a natural
+      // operation for the agent ("which monitors do I have running?").
+      if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions monitor list requires a sessionId");
       }
+      const sessionId = resolveParentFlag(rest[0], "sessions monitor list");
       return { action: "list", sessionId };
     }
     case "stop": {
+      // `stop` takes a monitor UUID, not a session id, so `self` does
+      // not apply here. Keep the verbatim forward (issue #375).
       const monitorId = rest[0];
       if (!monitorId || monitorId.startsWith("--")) {
         fail("sessions monitor stop requires a monitorId");
@@ -2895,27 +2916,37 @@ function extractMessageAndFlagArgs(args, knownFlags, commandLabel) {
   return { message: args[messageIdx], flagArgs };
 }
 
-// Resolve the `--parent <value>` flag (issue #353). `value` is either
+// Resolve the `self` shortcut for any verb that takes a session id or
+// `--parent <value>` flag (issues #339, #353, #375). `value` is either
 // `undefined` (no flag), a literal session id, or the special token
 // `self`. `self` resolves to the calling session's id via the
 // `$CONTROLLER_SESSION_ID` env var the orchestrator injects at agent
 // spawn time. When `self` is used and the env var is not set, the CLI
 // surfaces a clear error pointing at the env var — the natural
 // fallback is to use `controller sessions list` to find the calling
-// session's id. The function returns `undefined` when the flag is
+// session's id. The function returns `undefined` when the value is
 // absent so callers can simply spread the result into an object.
-function resolveParentFlag(value) {
+//
+// After issue #375 this is shared by every session-id-taking verb
+// (`wake`, `goal set|clear|show`, `monitor start|list`, `children`,
+// `send`, `branch`) in addition to the original `--parent` flag on
+// `start` / `list`. Pass `verbLabel` (e.g. `"sessions wake"`,
+// `"sessions goal set"`, `"sessions monitor start"`) so the failure
+// message names the verb the agent invoked. When omitted, the generic
+// `sessions:` prefix is used (matches the original `--parent self`
+// error wording on `start` / `list`).
+function resolveParentFlag(value, verbLabel = "sessions") {
   if (value == null) return undefined;
   if (value === "self") {
     const selfId = process.env.CONTROLLER_SESSION_ID;
     if (!selfId) {
       fail(
-        "sessions: --parent self requires the CONTROLLER_SESSION_ID env var. " +
+        `${verbLabel}: 'self' requires the CONTROLLER_SESSION_ID env var. ` +
           "The orchestrator injects it when spawning an agent, so the env var " +
           "is missing here because this command is running outside the orchestrator's " +
           "agent process, or because the calling session hasn't been assigned an id yet. " +
           "Use `controller sessions list` to discover the calling session's id, then " +
-          "pass it explicitly to --parent."
+          "pass it explicitly to the verb that needs it."
       );
     }
     return selfId;

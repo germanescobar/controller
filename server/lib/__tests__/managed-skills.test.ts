@@ -303,21 +303,26 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       sessions,
       cliCommandRegex(cliPath, "sessions send <targetSessionId> <message> --from <parentId|self>")
     );
+    // Issue #375: every session-id-taking verb now advertises
+    // `<sessionId|self>`, since `wake` / `goal set|show|clear` /
+    // `monitor start|list` all route through `resolveParentFlag`.
+    // The lone verb that does *not* accept `self` is `monitor stop`,
+    // because it takes a monitor UUID rather than a session id.
     assert.match(
       sessions,
-      cliCommandRegex(cliPath, "sessions wake <sessionId> <message>")
+      cliCommandRegex(cliPath, "sessions wake <sessionId|self> <message>")
     );
     assert.match(
       sessions,
-      cliCommandRegex(cliPath, "sessions goal set <sessionId> --condition <text>")
+      cliCommandRegex(cliPath, "sessions goal set <sessionId|self> --condition <text>")
     );
-    assert.match(sessions, cliCommandRegex(cliPath, "sessions goal clear <sessionId>"));
-    assert.match(sessions, cliCommandRegex(cliPath, "sessions goal show <sessionId>"));
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions goal clear <sessionId|self>"));
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions goal show <sessionId|self>"));
     assert.match(
       sessions,
-      cliCommandRegex(cliPath, "sessions monitor start <sessionId> --description <text>")
+      cliCommandRegex(cliPath, "sessions monitor start <sessionId|self> --description <text>")
     );
-    assert.match(sessions, cliCommandRegex(cliPath, "sessions monitor list <sessionId>"));
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions monitor list <sessionId|self>"));
     assert.match(sessions, cliCommandRegex(cliPath, "sessions monitor stop <monitorId>"));
     // The `--on-line` re-injection filter is the reason a monitor is
     // preferable to polling, so it must be named.
@@ -343,26 +348,34 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
     );
     assert.match(sessions, /on-disk directory name[\s\S]*?\*\*not\*\* the worktree id/);
 
-    // Codex review on PR #373, P2: `wake` / `goal` / `monitor` take
-    // `rest[0]` verbatim — only `start`, `list`, `send`, `children`, and
-    // `branch` route the value through `resolveParentFlag`. Advertising
-    // `wake self` sends the literal string "self" to the server, which
-    // answers "Session not found.". The body must not promise it.
+    // Issue #375: `self` now resolves on every session-id-taking verb
+    // (`wake`, `goal set|show|clear`, `monitor start|list` route the
+    // positional through `resolveParentFlag`, matching what `start
+    // --parent` / `list --parent` / `children` / `send` / `branch` did
+    // before). The skill body must reflect that — no more
+    // `Needs an explicit session id` column, no more "`wake self`
+    // asks the server for a session literally named `self`" warning.
+    // The single carve-out (`monitor stop <monitorId>`, a monitor UUID)
+    // is still called out.
     assert.match(sessions, /Where `self` works/);
-    assert.match(sessions, /Needs an explicit session id/);
-    // `wake self` may appear only as the worked counter-example that
-    // explains why it fails — never as a form the agent should copy.
     assert.match(
       sessions,
-      /`wake self` asks the server for a session literally named `self`/
+      /`monitor stop <monitorId>`[\s\S]*?monitor UUID rather than a session id/
+    );
+    // The old failure-mode phrasing must be gone.
+    assert.doesNotMatch(
+      sessions,
+      /Needs an explicit session id/,
+      "the 'needs an explicit session id' column was collapsed in issue #375"
     );
     assert.doesNotMatch(
       sessions,
-      /often `self`/,
-      "the wake bullet must not imply `self` is the usual argument"
+      /`wake self` asks the server for a session literally named `self`/,
+      "after #375 `wake self` resolves; the warning is stale"
     );
-    // The `--delay` worked example must pass a resolved id, not `self`.
-    assert.match(sessions, /sessions wake "\$SELF"/);
+    // Worked example: the agent should now write `wake self "..."`,
+    // not `wake "$SELF" "..."`.
+    assert.match(sessions, /sessions wake self "Re-check the build"/);
 
     // Codex review on PR #373, P2: the persisted field is `parentId`
     // (`SessionState.parentId`), which is also what `list --parent`
