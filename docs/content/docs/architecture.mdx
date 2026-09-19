@@ -82,7 +82,7 @@ disk so the on-disk shape stays consistent with the in-memory view.
 under the Controller home — never inside the project working tree:
 
 ```
-${CONTROLLER_HOME}/projects/<basename>-<hash16>/{sessions,events,attachments,schedules}/
+${CONTROLLER_HOME}/projects/<basename>-<hash16>/{sessions,events,attachments}/
 ```
 
 `<basename>` is the name of the checkout's own directory and `<hash16>` the
@@ -91,8 +91,16 @@ checkout and every feature worktree each get an isolated store. A session's
 transcript in a worktree named `issue-369` lands at, for example,
 `${CONTROLLER_HOME}/projects/issue-369-5cb2af9d83d3f77f/events/<sessionId>.jsonl`
 — the hash is derived from the full absolute path, so the same branch name
-checked out elsewhere hashes differently. `attachments/` and `schedules/` are
-created lazily, so a store may hold only `sessions/` and `events/`.
+checked out elsewhere hashes differently. `attachments/` is created lazily, so
+a store may hold only `sessions/` and `events/`.
+
+Schedules are the exception: they are project-scoped, not per-checkout. Every
+schedule API is called with the project's own path
+(`server/routes/schedules.ts`), so schedule files live in a `schedules/`
+directory inside the *project root's* store and a worktree's store never holds
+any. A schedule that targets a worktree records it in a `worktreeId` field;
+only the session it materializes lands in that worktree's store.
+
 `projectStoreDir` in `server/lib/paths.ts` is the source of truth for this
 layout — it also records why the old project-local `.coding-agent/` directory
 was abandoned (it collided with the `anita` CLI's own session storage and
