@@ -342,6 +342,37 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       /\$\{CONTROLLER_HOME\}\/projects\/<basename>-<sha16>\/sessions\/<sessionId>\.json/
     );
     assert.match(sessions, /on-disk directory name[\s\S]*?\*\*not\*\* the worktree id/);
+
+    // Codex review on PR #373, P2: `wake` / `goal` / `monitor` take
+    // `rest[0]` verbatim — only `start`, `list`, `send`, `children`, and
+    // `branch` route the value through `resolveParentFlag`. Advertising
+    // `wake self` sends the literal string "self" to the server, which
+    // answers "Session not found.". The body must not promise it.
+    assert.match(sessions, /Where `self` works/);
+    assert.match(sessions, /Needs an explicit session id/);
+    // `wake self` may appear only as the worked counter-example that
+    // explains why it fails — never as a form the agent should copy.
+    assert.match(
+      sessions,
+      /`wake self` asks the server for a session literally named `self`/
+    );
+    assert.doesNotMatch(
+      sessions,
+      /often `self`/,
+      "the wake bullet must not imply `self` is the usual argument"
+    );
+    // The `--delay` worked example must pass a resolved id, not `self`.
+    assert.match(sessions, /sessions wake "\$SELF"/);
+
+    // Codex review on PR #373, P2: the persisted field is `parentId`
+    // (`SessionState.parentId`), which is also what `list --parent`
+    // filters on. `parentSessionId` does not exist on disk.
+    assert.match(sessions, /`parentId`/);
+    assert.doesNotMatch(
+      sessions,
+      /parentSessionId/,
+      "the persisted field is `parentId`, not `parentSessionId`"
+    );
   });
 });
 

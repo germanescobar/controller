@@ -667,7 +667,7 @@ exists and you need to locate it, message it, or watch it.
 - \`${cliPath} sessions list [<project>] [--worktree <worktreeId>] [--parent <sessionId|self>] [--provider <id>] [--json] [--limit <n>]\` — enumerate sessions in a project. Filters compose. \`--json\` emits NDJSON (one object per line); \`--limit\` defaults to 100. Prints \`No sessions match.\` when the filters exclude everything.
 - \`${cliPath} sessions children <parentId|self>\` — list the children of a session across every project × worktree.
 - \`${cliPath} sessions send <targetSessionId> <message> --from <parentId|self>\` — enqueue a durable user turn on an existing session without spawning a new one.
-- \`${cliPath} sessions wake <sessionId> <message> [--delay <duration>] [--run-at <iso>]\` — enqueue a follow-up on a session (often \`self\`), optionally held until a wall-clock deadline. Durations are \`30s\`, \`5m\`, \`1h\`, \`2d\`.
+- \`${cliPath} sessions wake <sessionId> <message> [--delay <duration>] [--run-at <iso>]\` — enqueue a follow-up on a session, optionally held until a wall-clock deadline. Takes a real session id; \`self\` is **not** resolved here (see below). Durations are \`30s\`, \`5m\`, \`1h\`, \`2d\`.
 - \`${cliPath} sessions goal set <sessionId> --condition <text> [--max-turns <n>] [--expires-at <iso>]\` — attach a completion condition the server re-evaluates after every turn.
 - \`${cliPath} sessions goal show <sessionId>\` — read the current goal and the evaluator's turn count.
 - \`${cliPath} sessions goal clear <sessionId>\` — drop the goal and stop the loop.
@@ -675,13 +675,34 @@ exists and you need to locate it, message it, or watch it.
 - \`${cliPath} sessions monitor list <sessionId>\` — the monitors currently attached to a session.
 - \`${cliPath} sessions monitor stop <monitorId>\` — stop one monitor.
 
-\`self\` is accepted anywhere a session id is (\`--parent self\`, \`--from
-self\`, \`children self\`, \`wake self\`). It resolves through the
-\`\$CONTROLLER_SESSION_ID\` env var the orchestrator injects at spawn time.
-On a brand-new session that variable isn't set yet — the id is assigned on
-the agent's first \`run.started\` event — and the CLI says so explicitly
-rather than guessing. When that happens, discover your own id with
-\`sessions list\` (see below).
+### Where \`self\` works
+
+\`self\` resolves to the calling session's id through the
+\`\$CONTROLLER_SESSION_ID\` env var the orchestrator injects at spawn time,
+but **only on the verbs that opt in**:
+
+| Accepts \`self\` | Needs an explicit session id |
+| --- | --- |
+| \`start --parent self\` | \`wake <sessionId>\` |
+| \`list --parent self\` | \`goal set\` / \`show\` / \`clear <sessionId>\` |
+| \`children self\` | \`monitor start <sessionId>\` |
+| \`send self\` / \`send … --from self\` | |
+| \`branch self\` | |
+
+On the right-hand column the token is passed through verbatim, so
+\`wake self\` asks the server for a session literally named \`self\` and
+comes back \`Session not found.\` Resolve your id first and pass it:
+
+\`\`\`sh
+SELF="\${CONTROLLER_SESSION_ID:?not set - use sessions list to find your id}"
+${cliPath} sessions wake "\$SELF" "Re-check the build" --delay 30s
+\`\`\`
+
+On a brand-new session \`\$CONTROLLER_SESSION_ID\` isn't set yet — the id is
+assigned on the agent's first \`run.started\` event. On the left-hand
+column the CLI says so explicitly rather than guessing; on the right-hand
+column nothing warns you, so check the variable yourself. Either way,
+discover the id with \`sessions list\` (see below).
 
 ## Picking a project
 
@@ -756,7 +777,9 @@ storage lives under the Controller home, keyed **per worktree**:
 - \`<sha16>\` is the first 16 hex characters of the SHA-256 of the
   worktree's absolute path.
 - \`events/\` holds the append-only JSONL transcript; \`sessions/\` holds the
-  session metadata (title, provider, \`parentSessionId\`, status).
+  session metadata (title, provider, status, and \`parentId\` — the same
+  field \`sessions list --parent\` filters on; it is absent on root
+  sessions rather than empty).
 
 Derive the directory rather than guessing it:
 
