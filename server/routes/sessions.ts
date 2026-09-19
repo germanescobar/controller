@@ -704,18 +704,34 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  * Wire shape (JSON body):
  *   {
  *     "sourceSessionId": "<sid>",
- *     "message":         "<first message text>",
+ *     "message":         "<first message text — optional; see below>",
  *     "provider":        "<optional, defaults to source.provider>",
  *     "model":           "<optional, defaults to source.model>",
  *     "mode":            "<optional, defaults to source.mode>",
  *     "title":           "<optional, defaults to 'Branch of <sourceTitle>'>"
  *   }
  *
+ * `message` is optional when the caller wants a no-prompt branch — the
+ * route pre-creates the session file / events with the source transcript
+ * seeded plus a `[/branch: <source>-><target>]` marker, and returns
+ * `{ sessionId, url }` synchronously without spawning an agent. The
+ * user types the first real turn on the new session via the composer,
+ * which goes through the regular `POST /sessions` flow with
+ * `resumeSessionId` set to the new session's id. This is the UI's
+ * "click the branch icon, land on an empty composer" path; the CLI
+ * still requires a non-empty `message` (the CLI hands the message via
+ * a separate `printStartResult` error path the route enforces before
+ * the empty-message shortcut kicks in).
+ *
  * Returns `{ sessionId, url }` once the agent's first `run.started` event
  * lands — same shape as the headless `POST /sessions` endpoint so the
- * CLI's `printStartResult` helper works unchanged. The new session id is
- * the agent's own id (the agents pick their session ids; we cannot
- * pre-create a session file keyed by a Controller-chosen UUID).
+ * CLI's `printStartResult` helper works unchanged. For the empty-
+ * message path the response is synchronous (no SSE; no agent spawn).
+ * The new session id is the agent's own id (the agents pick their
+ * session ids; we cannot pre-create a session file keyed by a
+ * Controller-chosen UUID) — *except* in the empty-message shortcut,
+ * where we pre-pick a UUID ourselves because there's no agent to
+ * report one.
  *
  * Implementation notes:
  *   - We resolve the source via `locateSessionById` (issue #339 review's
@@ -760,8 +776,14 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     res.status(400).json({ error: "sourceSessionId is required" });
     return;
   }
-  if (typeof message !== "string" || !message.trim()) {
-    res.status(400).json({ error: "message is required" });
+  // `message` is optional in the empty-prompt shortcut (see the route
+  // doc above) — when absent the route seeds the new session and
+  // returns synchronously without spawning an agent. The CLI verb
+  // still requires a non-empty `message` because the CLI is the
+  // caller that's expected to *start* the first turn, not just
+  // fork the transcript.
+  if (message !== undefined && typeof message !== "string") {
+    res.status(400).json({ error: "message must be a string" });
     return;
   }
   // Cross-project branches aren't supported — the source must live in
@@ -812,7 +834,42 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     requestedProvider && requestedModel
       ? `${requestedProvider}/${requestedModel}`
       : (requestedProvider ?? requestedModel ?? sourceLabel);
-  const branchMarkerText = `[/branch: ${sourceLabel}->${targetLabel}] ${message.trim()}`;
+  const branchMarkerText = message && message.trim()
+    ? `[/branch: ${sourceLabel}->${targetLabel}] ${message.trim()}`
+    : `[/branch: ${sourceLabel}->${targetLabel}]`;
+  // Empty-message branch: pre-create the session file + events file,
+  // return synchronously without spawning an agent. The UI uses this
+  // for "click the branch icon, land on an empty composer"; the CLI
+  // never hits it because the CLI requires a non-empty positional
+  // `message`. The new session id is Controller-chosen (the agents
+  // don't pick ids themselves in this path) and is returned to the
+  // caller immediately so the composer can route its first real turn
+  // through `resumeSessionId`.
+  const emptyMessageBranch = !message || !message.trim();
+  if (emptyMessageBranch) {
+    const newSessionId = randomUUID();
+    try {
+      await persistEmptyBranchStart({
+        worktreePath: located.worktreePath,
+        sourceSession,
+        newSessionId,
+        branchMarkerText,
+        titleOverride: body.title && body.title.trim() ? body.title.trim() : undefined,
+      });
+      res.status(200).json({
+        sessionId: newSessionId,
+        url: `controller://project/${project.id}/worktree/${worktreeId}/session/${newSessionId}`,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to create empty branch",
+      });
+    }
+    return;
+  }
   // Render the source's stored transcript into a plain-text block so
   // the branched agent sees the prior conversation as part of its
   // first-turn context. Without this, "review the proposal above"
@@ -4420,6 +4477,100 @@ function readText(m: Record<string, unknown>): string {
  * provider/model/mode). The agent runs unaffected — only the chat
  * view loses continuity.
  */
+
+/**
+ * Pre-create a branch session **without spawning an agent** (the
+ * empty-message shortcut of `POST /sessions/branch`, see the route
+ * doc above). Writes the session file with the source-derived
+ * defaults (provider / model / mode / `parentId` / title), appends
+ * the branch-marker `user_message` event, then delegates to
+ * `seedBranchFromSource` to prepend the source's events to the new
+ * events file (same shape as the agent-spawned branch).
+ *
+ * Returns once the new session's files are durable on disk. The
+ * user types the first real turn in the composer, which routes
+ * through the regular `POST /sessions` flow with `resumeSessionId`
+ * set to the returned `newSessionId`; that turn picks up the
+ * already-seeded transcript and starts a normal run.
+ */
+export async function persistEmptyBranchStart(params: {
+  worktreePath: string;
+  sourceSession: NonNullable<
+    Awaited<ReturnType<typeof getSession>>
+  >;
+  newSessionId: string;
+  branchMarkerText: string;
+  titleOverride?: string;
+}): Promise<void> {
+  const {
+    worktreePath,
+    sourceSession,
+    newSessionId,
+    branchMarkerText,
+    titleOverride,
+  } = params;
+  // 1. Compute the title. The CLI verb's `seedTitle` knob follows
+  // the same precedence: explicit override > existing source title
+  // (`Branch of <source>`) > whatever the persistence layer would
+  // derive from the marker text. For the empty-message shortcut
+  // the marker is just `[/branch: a->b]` — a poor auto-title, so
+  // we skip `deriveAutoTitle` and default to `Branch of <source>`
+  // when no override is supplied.
+  const seededTitle = titleOverride
+    ? titleOverride
+    : sourceSession.title
+      ? `Branch of ${sourceSession.title}`
+      : `Branch of ${sourceSession.id.slice(0, 8)}`;
+  const now = new Date().toISOString();
+  // 2. Write the session file with the source's defaults so the
+  // composer's provider/model/mode pickers pre-fill correctly on
+  // the new session's first turn (issue #364 design §2).
+  await saveSession(worktreePath, {
+    id: newSessionId,
+    title: seededTitle,
+    workingDirectory: worktreePath,
+    worktreeId: sourceSession.worktreeId,
+    model: sourceSession.model ?? "",
+    reasoningEffort: sourceSession.reasoningEffort,
+    serviceTier: sourceSession.serviceTier,
+    provider: sourceSession.provider ?? "anita",
+    mode: sourceSession.mode ?? "default",
+    messages: [],
+    parentId: sourceSession.id,
+    createdAt: now,
+    lastActiveAt: now,
+    status: "active",
+  });
+  // 3. Append the branch-marker user_message event so the chat view
+  // shows the source transcript + branch marker (the source events
+  // are prepended in step 4). The marker text is the audit-friendly
+  // form (no inline transcript) so the chat transcript stays
+  // legible (PR review P1 from chatgpt-codex-connector on #365).
+  await appendEvent(worktreePath, newSessionId, {
+    id: randomUUID(),
+    sessionId: newSessionId,
+    timestamp: now,
+    type: "user_message",
+    data: {
+      text: branchMarkerText,
+      attachments: [],
+    },
+  });
+  // 4. Prepend the source's events + patch the session file's
+  // messages array so `GET /sessions/:id` echoes the seeded
+  // transcript. This is the same `seedBranchFromSource` the
+  // agent-spawned branch route uses — we call it directly here so
+  // the empty-message shortcut produces the same on-disk shape as
+  // a regular branch.
+  await seedBranchFromSource(
+    worktreePath,
+    sourceSession.id,
+    newSessionId,
+    branchMarkerText,
+    { title: titleOverride }
+  );
+}
+
 export async function seedBranchFromSource(
   worktreePath: string,
   sourceSessionId: string,

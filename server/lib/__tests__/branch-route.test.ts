@@ -464,22 +464,30 @@ test("POST /sessions/branch returns 404 for an unknown source session (issue #36
   );
 });
 
-test("POST /sessions/branch returns 400 for a missing message (issue #364)", async () => {
+test("POST /sessions/branch returns 400 for a non-string message (issue #364)", async () => {
   await withBranchEnv(
     async ({ binDir }) => {
       await installFakeAgent(binDir, "sess-never-issued-400");
     },
     async ({ baseUrl }) => {
+      // The CLI-side validation lives upstream of the route (the
+      // CLI prints "message is required" and exits non-zero when
+      // the positional argument is missing). The HTTP layer
+      // accepts a missing/empty `message` because the UI's
+      // empty-prompt shortcut needs that to land on an empty
+      // composer; a non-string value is still a server-side
+      // contract violation and gets a 400.
       const response = await fetch(`${baseUrl}/sessions/branch`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           sourceSessionId: "sess-source-364",
+          message: 42,
         }),
       });
       const body = (await response.json()) as { error?: string };
       assert.equal(response.status, 400);
-      assert.match(body.error ?? "", /message is required/);
+      assert.match(body.error ?? "", /message must be a string/);
     }
   );
 });
@@ -595,6 +603,104 @@ test("POST /sessions/branch seeds an empty source (issue #364)", async () => {
       assert.equal(events.length, 1);
       assert.equal(events[0].type, "user_message");
       assert.match(events[0].data.text, /^\[\/branch: /);
+    }
+  );
+});
+
+test("POST /sessions/branch empty-message shortcut seeds the session without spawning an agent (issue #364 + UI)", async () => {
+  // The UI's "click the branch icon, land on an empty composer"
+  // path takes the empty-message shortcut: pre-create the session
+  // file + events file, return synchronously without an SSE
+  // round-trip. The CLI never hits this path (it requires a
+  // non-empty positional `message`). Verify:
+  //   - response is a synchronous 200 with `{ sessionId, url }`
+  //   - the new session file has source-derived defaults + parentId
+  //   - the events file has source events + branch marker (no
+  //     transcript bleed-through — audit-friendly marker only)
+  //   - NO agent process was spawned (no fake agent installed)
+  await withBranchEnv(
+    async ({ homeDir, projectPath, worktreeId, projectId }) => {
+      // Note: no `installFakeAgent` call. If the route spawns an
+      // agent despite the empty message, the test hangs (no
+      // `run.started` to unblock the SSE handler). The fast
+      // timeout below is the safety net.
+      await seedSourceSession({ homeDir, projectPath, worktreeId, projectId });
+    },
+    async ({ baseUrl, projectPath }) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      let response: Response;
+      try {
+        response = await fetch(`${baseUrl}/sessions/branch`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sourceSessionId: "sess-source-364",
+            // `message` intentionally omitted — empty-prompt shortcut.
+            title: "Empty-prompt branch",
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+      const body = (await response!.json()) as {
+        sessionId?: string;
+        url?: string;
+        error?: string;
+      };
+      assert.equal(
+        response!.status,
+        200,
+        `expected 200, got ${response!.status}: ${JSON.stringify(body)}`
+      );
+      assert.ok(
+        typeof body.sessionId === "string" && body.sessionId.length > 0,
+        `expected a Controller-chosen sessionId; got: ${body.sessionId}`
+      );
+      assert.match(
+        body.url ?? "",
+        new RegExp(`session/${body.sessionId}`)
+      );
+      // The new session file: source defaults + parentId + title override.
+      const { projectStoreDir } = await import("../paths.js");
+      const sessionsDir = path.join(projectStoreDir(projectPath), "sessions");
+      const eventsDir = path.join(projectStoreDir(projectPath), "events");
+      const sessionFile = path.join(sessionsDir, `${body.sessionId}.json`);
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      assert.equal(session.id, body.sessionId);
+      assert.equal(session.parentId, "sess-source-364");
+      assert.equal(session.provider, "codex");
+      assert.equal(session.model, "codex/gpt-5");
+      assert.equal(session.mode, "default");
+      assert.equal(session.title, "Empty-prompt branch");
+      // The events file: 3 source events + 1 branch marker = 4 events.
+      const eventsFile = path.join(eventsDir, `${body.sessionId}.jsonl`);
+      const eventsContent = await fs.readFile(eventsFile, "utf-8");
+      const events = eventsContent
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(
+        events.length,
+        4,
+        `expected 3 source events + 1 branch marker; got ${events.length}`
+      );
+      const lastEvent = events[events.length - 1];
+      assert.equal(lastEvent.type, "user_message");
+      // Empty-message marker has no trailing message text — just
+      // `[/branch: a->b]` — so the chat view shows a clean audit
+      // entry without a phantom first-user-message.
+      assert.match(
+        lastEvent.data.text,
+        /^\[\/branch: codex\/codex\/gpt-5->codex\/codex\/gpt-5\]$/
+      );
+      // The session file's `messages` array is also seeded (chat
+      // view's GET /sessions/:id echoes the transcript).
+      assert.ok(Array.isArray(session.messages));
+      assert.equal(session.messages.length, 4);
+      const seededMarker = session.messages[session.messages.length - 1];
+      assert.equal(seededMarker.text, lastEvent.data.text);
     }
   );
 });

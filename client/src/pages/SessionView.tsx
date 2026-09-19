@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -76,6 +76,7 @@ import {
   runProjectScript,
   startSession,
   stopSession,
+  branchSession,
   steerSession,
   submitSessionUserInput,
   pinSessionFocus,
@@ -1409,11 +1410,20 @@ const EventBlock = memo(function EventBlock({
   event,
   copiedId,
   onCopy,
+  onBranch,
+  branching,
   hiddenPendingUserInputEventId,
 }: {
   event: AgentEvent;
   copiedId: string | null;
   onCopy: (e: AgentEvent) => void;
+  /** Branch-this-conversation callback (issue #364, UI). Wired
+   *  through from SessionView so every assistant turn gets the
+   *  same fork affordance. */
+  onBranch?: () => void;
+  /** True while a branch request is in flight — disables the
+   *  branch icon to prevent double-clicks. */
+  branching?: boolean;
   hiddenPendingUserInputEventId?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -1503,18 +1513,13 @@ const EventBlock = memo(function EventBlock({
       <div className="space-y-3">
         {reasoningText ? <ReasoningBlock text={reasoningText} /> : null}
         {text ? (
-          <AssistantBlock text={text}>
-            <button
-              onClick={() => onCopy(event)}
-              className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              {copiedId === event.id ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-            </button>
-          </AssistantBlock>
+          <AssistantBlock
+            text={text}
+            copiedId={copiedId === event.id ? event.id : null}
+            onCopy={() => onCopy(event)}
+            onBranch={onBranch}
+            branching={branching}
+          />
         ) : null}
       </div>
     );
@@ -1767,12 +1772,34 @@ const PreviewUrlActions = memo(function PreviewUrlActions({ content }: { content
 
 const AssistantBlock = memo(function AssistantBlock({
   text,
-  children,
+  copiedId,
+  onCopy,
+  onBranch,
+  branching,
 }: {
   text: unknown;
+  /** id of the AgentEvent this assistant turn corresponds to.
+   *  When it matches, the copy button swaps its icon from Copy to
+   *  Check for visual feedback. */
+  copiedId?: string | null;
+  /** Click handler for the copy button. Parent wires it to copy
+   *  the assistant message's text (or JSON). */
+  onCopy?: () => void;
+  /** Click handler for the branch button. Parent wires it to
+   *  `handleBranchCurrent` so every assistant turn in either the
+   *  persisted timeline or the live stream gets the same fork
+   *  affordance (issue #364, UI). */
+  onBranch?: () => void;
+  /** True while a branch request is in flight — disables the branch
+   *  icon to prevent double-clicks. */
+  branching?: boolean;
+  /** Optional children kept for backwards-compat with the older
+   *  children prop shape; new callers should prefer the named props
+   *  so the action row stays consistent across persist + stream paths. */
   children?: React.ReactNode;
 }) {
   const normalizedText = normalizeMarkdownText(text);
+  const showActionRow = Boolean(onCopy || onBranch);
   return (
     <div className="space-y-2">
       <div className="prose prose-invert prose-sm min-w-0 max-w-none overflow-x-auto break-words">
@@ -1780,6 +1807,43 @@ const AssistantBlock = memo(function AssistantBlock({
           {normalizedText}
         </ReactMarkdown>
       </div>
+      {showActionRow ? (
+        <div className="flex items-center gap-1 text-muted-foreground">
+          {onCopy ? (
+            <button
+              type="button"
+              onClick={onCopy}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors hover:bg-muted/60 hover:text-foreground"
+              title="Copy message"
+            >
+              {copiedId ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </button>
+          ) : null}
+          {onBranch ? (
+            <button
+              type="button"
+              onClick={onBranch}
+              disabled={branching}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors hover:bg-muted/60 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                branching
+                  ? "Branching conversation…"
+                  : "Branch this conversation into a new session"
+              }
+            >
+              {branching ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <GitFork className="h-3.5 w-3.5" />
+              )}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {children}
     </div>
   );
@@ -5329,6 +5393,59 @@ export function SessionView({
     }
   };
 
+  // Branch this conversation into a brand-new session whose transcript
+  // is seeded from the source (issue #364, UI). The empty-message
+  // shortcut seeds the transcript synchronously without spawning an
+  // agent — the user lands on the new session's empty composer and
+  // picks the agent / model / mode there (the composer pickers are
+  // unlocked because the new session has no turns yet). We navigate
+  // via `onSessionCreated` so App.tsx's existing session-switch path
+  // (worktree-aware, sidebar-refreshing) handles the rest. A
+  // per-session busy flag prevents double-clicks during the network
+  // round-trip.
+  const [branchingSessionId, setBranchingSessionId] = useState<
+    string | null
+  >(null);
+  const handleBranchCurrent = useCallback(async () => {
+    const targetSessionId = activeStreamSessionId ?? sessionId;
+    if (!targetSessionId) return;
+    if (branchingSessionId === targetSessionId) return;
+    setBranchingSessionId(targetSessionId);
+    try {
+      const { sessionId: newSessionId } = await branchSession(
+        projectId,
+        targetSessionId,
+        // No `message` — the server takes the empty-prompt shortcut
+        // (pre-creates the session file + events, returns
+        // synchronously). The user types the first real turn on the
+        // new session via the composer.
+        { worktreeId }
+      );
+      onSessionCreated(newSessionId);
+    } catch (err) {
+      setStreamItems((prev) => [
+        ...prev,
+        {
+          type: "error",
+          text:
+            err instanceof Error
+              ? `Failed to branch session: ${err.message}`
+              : "Failed to branch session",
+          at: Date.now(),
+        },
+      ]);
+    } finally {
+      setBranchingSessionId(null);
+    }
+  }, [
+    activeStreamSessionId,
+    sessionId,
+    projectId,
+    worktreeId,
+    onSessionCreated,
+    branchingSessionId,
+  ]);
+
   // Steer the running turn (Shift+Enter while streaming). Uses the composer
   // text, or the first enqueued message when the composer is empty
   // ("promote queued to steer"). Codex steers natively; Claude/Anita stop the
@@ -5990,6 +6107,21 @@ export function SessionView({
     sessionId,
   );
 
+  // Branch-this-conversation affordance (issue #364, UI). We pass the
+  // callback down through both the persisted timeline (EventBlock)
+  // and the live stream (streamRenderItems) so every assistant turn
+  // gets the same fork icon. `branching` is true while a branch
+  // request for the current source session is in flight — keeps the
+  // icon in its loading state and disables the button so a second
+  // click can't double-fire. The current source is whichever
+  // session owns the live stream, falling back to the route session
+  // id when the stream is dormant (scrolled-back timeline).
+  const onBranch = handleBranchCurrent;
+  const branching =
+    (branchingSessionId !== null &&
+      branchingSessionId === (activeStreamSessionId ?? sessionId)) ||
+    false;
+
   return (
     <>
       {sessionId && onFocusSkip && onFocusDone && onToggleAutoAdvance ? (
@@ -6308,6 +6440,8 @@ export function SessionView({
                       event={renderItem.event}
                       copiedId={copiedId}
                       onCopy={copyEventData}
+                      onBranch={onBranch}
+                      branching={branching}
                       hiddenPendingUserInputEventId={
                         visibleStreamItems.length === 0 ? latestStructuredInputRequest?.id : null
                       }
@@ -6439,7 +6573,14 @@ export function SessionView({
                     }
 
                     if (item.type === "assistant") {
-                      return <AssistantBlock key={render.key} text={item.text} />;
+                      return (
+                        <AssistantBlock
+                          key={render.key}
+                          text={item.text}
+                          onBranch={onBranch}
+                          branching={branching}
+                        />
+                      );
                     }
 
                     if (item.type === "user_input_requested") {
