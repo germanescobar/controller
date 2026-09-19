@@ -363,3 +363,116 @@ test("codex spawn uses workspace-write by default and a restricted sandbox when 
     `off must set an approval policy, got: ${offArgs.join(" ")}`
   );
 });
+
+test("codex spawn places --image flags AFTER the positional prompt (issue #376)", async () => {
+  // Codex's clap parser marks `-i/--image` as `Occurrence::ZeroOrMore`, so
+  // every token after the first `--image` is consumed as another image
+  // path. If `--image` is placed *before* the positional `[PROMPT]`, the
+  // prompt is silently absorbed as a second image path, no positional
+  // remains, and the CLI falls back to "read prompt from stdin" and exits
+  // 1. The orchestrator previously emitted this argv shape and every
+  // Codex turn with at least one image attachment crashed within ~500ms.
+  //
+  // We also must NOT insert a `--` option-terminator between the flags
+  // and the positional: `... -- PROMPT --image PATH` puts `--image` past
+  // the terminator, which clap rejects outright with exit 2 ("unexpected
+  // argument '--image' found"). The correct shape is the plain
+  // `... PROMPT --image PATH` ordering used by the anita and claude
+  // providers (Codex PR #379 review).
+  const args = await captureCodexArgs({
+    attachments: [
+      {
+        id: "att-1",
+        name: "image.png",
+        mimeType: "image/png",
+        size: 1234,
+        path: "/tmp/image.png",
+        isImage: true,
+      },
+    ],
+  });
+
+  // No `--` option-terminator anywhere — putting it in front of the
+  // image flags makes clap treat them as positionals.
+  assert.equal(
+    args.includes("--"),
+    false,
+    `argv must not contain an option-terminator (got: ${args.join(" ")})`
+  );
+
+  // The prompt is the first positional argument. It's decorated by
+  // `withAttachmentContext` to include a short file listing — match it
+  // by prefix so this test isn't brittle to formatting tweaks.
+  const promptIndex = args.findIndex(
+    (arg) => typeof arg === "string" && arg.startsWith("Hello")
+  );
+  assert.ok(
+    promptIndex >= 0,
+    `expected positional prompt (starting with "Hello") somewhere in argv, got: ${args.join(" ")}`
+  );
+
+  const firstImageIndex = args.indexOf("--image");
+  assert.ok(
+    firstImageIndex > promptIndex,
+    `--image must appear AFTER the positional prompt so clap doesn't consume the prompt as a second image path (got argv: ${args.join(" ")})`
+  );
+  assert.equal(
+    args[firstImageIndex + 1],
+    "/tmp/image.png",
+    `expected /tmp/image.png as the image path, got: ${args.join(" ")}`
+  );
+});
+
+test("codex spawn places --image flags AFTER the resume sessionId and prompt", async () => {
+  // Same regression check for the resume path. The subcommand shape is
+  // `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]`, so argv becomes
+  // `exec ... resume <SESSION_ID> <PROMPT> --image <PATH>` — no `--`
+  // terminator, prompt before the repeatable flag.
+  const args = await captureCodexArgs({
+    resumeSessionId: "session-abc-123",
+    attachments: [
+      {
+        id: "att-1",
+        name: "image.png",
+        mimeType: "image/png",
+        size: 1234,
+        path: "/tmp/image.png",
+        isImage: true,
+      },
+    ],
+  });
+
+  const resumeIndex = args.indexOf("resume");
+  assert.ok(resumeIndex >= 0, `expected "resume" in argv: ${args.join(" ")}`);
+
+  // No `--` option-terminator — same reason as the new-turn path above.
+  assert.equal(
+    args.includes("--"),
+    false,
+    `argv must not contain an option-terminator (got: ${args.join(" ")})`
+  );
+
+  // sessionId and prompt are the two consecutive positional args
+  // immediately after `resume`.
+  assert.equal(
+    args[resumeIndex + 1],
+    "session-abc-123",
+    `expected sessionId right after "resume", got: ${args.join(" ")}`
+  );
+  const prompt = args[resumeIndex + 2];
+  assert.ok(
+    typeof prompt === "string" && prompt.startsWith("Hello"),
+    `expected positional prompt right after sessionId to start with "Hello", got: ${JSON.stringify(prompt)}`
+  );
+
+  const firstImageIndex = args.indexOf("--image");
+  assert.ok(
+    firstImageIndex > resumeIndex + 2,
+    `--image must appear AFTER the prompt on the resume path (got argv: ${args.join(" ")})`
+  );
+  assert.equal(
+    args[firstImageIndex + 1],
+    "/tmp/image.png",
+    `expected /tmp/image.png as the image path, got: ${args.join(" ")}`
+  );
+});
