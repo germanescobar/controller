@@ -1729,6 +1729,82 @@ test("runSessions wake POSTs to the per-session wake endpoint", async () => {
   assert.match(out, /runs at 2026-06-26T08:00:30.000Z/);
 });
 
+test("parseSessions wake resolves 'self' via $CONTROLLER_SESSION_ID (issue #339, #375)", async () => {
+  // The agent preamble teaches `wake <self> "..." --delay 30s` (issue
+  // #339); before the fix in #375 the parser forwarded the literal
+  // string "self" to the server, which answered `Session not found.`.
+  // After the fix the value routes through `resolveParentFlag` like
+  // `start --parent self` / `children self` / `branch self` already
+  // do.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-wake";
+  try {
+    const parsed = cli.parseSessions([
+      "wake",
+      "self",
+      "--delay",
+      "30s",
+      "check CI",
+    ]);
+    assert.equal(parsed.action, "wake");
+    assert.equal(parsed.sessionId, "sess-self-wake");
+    assert.equal(parsed.body.message, "check CI");
+    assert.equal(parsed.body.delay, "30s");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseSessions wake surfaces a clear error when 'self' has no env var (issue #375)", async () => {
+  // Without $CONTROLLER_SESSION_ID the agent should see a clear
+  // client-side error pointing at `controller sessions list`, not the
+  // server-side `Session not found.` that the previous behavior
+  // produced.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["wake", "self", "check CI"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (savedEnv !== undefined) process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /sessions wake/);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+  assert.match(stderrText, /controller sessions list/);
+});
+
+test("parseSessions wake passes an explicit session id through unchanged (issue #375)", async () => {
+  // `self` is the only string substitution; any other value must be
+  // forwarded verbatim so the server can use it directly.
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "wake",
+    "sess-explicit",
+    "hi",
+  ]);
+  assert.equal(parsed.sessionId, "sess-explicit");
+});
+
 // --- sessions goal (issue #339) ---
 
 test("parseGoal set builds a goal payload with --condition and --max-turns", async () => {
@@ -1934,6 +2010,95 @@ test("runGoal show GETs the goal endpoint and prints the fields", async () => {
   assert.match(out, /lastReason="still going"/);
 });
 
+test("parseGoal set resolves 'self' via $CONTROLLER_SESSION_ID (issue #339, #375)", async () => {
+  // The agent preamble teaches `goal set <self> --condition "..."`
+  // (issue #339); the parser used to forward the literal "self" to
+  // the server (issue #375). After the fix the value flows through
+  // `resolveParentFlag`.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-goal";
+  try {
+    const parsed = cli.parseGoal([
+      "set",
+      "self",
+      "--condition",
+      "all checks pass",
+      "--max-turns",
+      "5",
+    ]);
+    assert.equal(parsed.action, "set");
+    assert.equal(parsed.sessionId, "sess-self-goal");
+    assert.equal(parsed.body.condition, "all checks pass");
+    assert.equal(parsed.body.maxTurns, 5);
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseGoal set surfaces a clear error when 'self' has no env var (issue #375)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseGoal(["set", "self", "--condition", "x"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (savedEnv !== undefined) process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /sessions goal set/);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+  assert.match(stderrText, /controller sessions list/);
+});
+
+test("parseGoal clear resolves 'self' via $CONTROLLER_SESSION_ID (issue #375)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-clear";
+  try {
+    const parsed = cli.parseGoal(["clear", "self"]);
+    assert.equal(parsed.action, "clear");
+    assert.equal(parsed.sessionId, "sess-self-clear");
+    assert.equal(parsed.body.action, "clear");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseGoal show resolves 'self' via $CONTROLLER_SESSION_ID (issue #375)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-show";
+  try {
+    const parsed = cli.parseGoal(["show", "self"]);
+    assert.equal(parsed.action, "show");
+    assert.equal(parsed.sessionId, "sess-self-show");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
 // --- sessions monitor (issue #339) ---
 
 test("parseMonitor start builds a monitor payload", async () => {
@@ -2129,6 +2294,100 @@ test("runMonitor stop DELETEs the monitor endpoint", async () => {
   assert.equal(call.init.method, "DELETE");
   const out = stdoutChunks.join("");
   assert.match(out, /Monitor stopped/);
+});
+
+test("parseMonitor start resolves 'self' via $CONTROLLER_SESSION_ID (issue #339, #375)", async () => {
+  // The agent preamble teaches `monitor start <self> --description ...
+  // --command ...` (issue #339); before #375 the parser forwarded the
+  // literal "self" to the server. After the fix the value flows
+  // through `resolveParentFlag`.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-monitor";
+  try {
+    const parsed = cli.parseMonitor([
+      "start",
+      "self",
+      "--description",
+      "watch CI",
+      "--command",
+      "gh pr checks 42 --watch",
+    ]);
+    assert.equal(parsed.action, "start");
+    assert.equal(parsed.sessionId, "sess-self-monitor");
+    assert.equal(parsed.body.description, "watch CI");
+    assert.equal(parsed.body.command, "gh pr checks 42 --watch");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseMonitor start surfaces a clear error when 'self' has no env var (issue #375)", async () => {
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  delete process.env.CONTROLLER_SESSION_ID;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.parseMonitor([
+          "start",
+          "self",
+          "--description",
+          "watch CI",
+          "--command",
+          "gh pr checks 42 --watch",
+        ]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+    if (savedEnv !== undefined) process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /sessions monitor start/);
+  assert.match(stderrText, /CONTROLLER_SESSION_ID/);
+  assert.match(stderrText, /controller sessions list/);
+});
+
+test("parseMonitor list resolves 'self' via $CONTROLLER_SESSION_ID (issue #375)", async () => {
+  // `monitor list <self>` is a natural operation for the agent ("which
+  // monitors do I have running?"). Before #375 this forwarded the
+  // literal "self" to the server.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-mon-list";
+  try {
+    const parsed = cli.parseMonitor(["list", "self"]);
+    assert.equal(parsed.action, "list");
+    assert.equal(parsed.sessionId, "sess-self-mon-list");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
+test("parseMonitor stop does NOT resolve 'self' (issue #375)", async () => {
+  // `stop` takes a monitor UUID, not a session id. The literal "self"
+  // is forwarded verbatim — applying `resolveParentFlag` here would
+  // turn a UUID-looking typo into a confusing env-var error.
+  const cli = await loadCli();
+  const parsed = cli.parseMonitor(["stop", "mon-self-uuid"]);
+  assert.equal(parsed.action, "stop");
+  assert.equal(parsed.monitorId, "mon-self-uuid");
 });
 
 // --- schedules surface (issue #243) ---
@@ -4343,6 +4602,66 @@ test("parseSessions monitor delegates to parseMonitor (issue #351 + #339 wiring)
   assert.equal(inner.body.onLine, "^\\[CI\\]");
 });
 
+test("parseSessions goal delegates to parseGoal (issue #339 + #377 wiring)", async () => {
+  // Codex review of PR #377 (P1): before this wiring,
+  // `controller sessions goal <subcommand>` fell through
+  // `parseSessions`' `default:` case and exited with
+  // `Unknown sessions command: goal`, so every goal form the agent
+  // preamble and the unified `controller-sessions` skill teach
+  // (including `goal set <self>`, `goal show <self>`) was
+  // unreachable from the executable. This test pins the delegation:
+  // the outer parser produces `action: "goal"` with `goalArgv` that
+  // `parseGoal` then re-parses into the same shape the dedicated
+  // `runGoal` dispatcher expects.
+  const cli = await loadCli();
+  const outer = cli.parseSessions([
+    "goal",
+    "set",
+    "sess-abc",
+    "--condition",
+    "all CI checks pass",
+    "--max-turns",
+    "5",
+  ]);
+  assert.equal(outer.action, "goal");
+  assert.deepEqual(outer.goalArgv, [
+    "set",
+    "sess-abc",
+    "--condition",
+    "all CI checks pass",
+    "--max-turns",
+    "5",
+  ]);
+  const inner = cli.parseGoal(outer.goalArgv);
+  assert.equal(inner.action, "set");
+  assert.equal(inner.sessionId, "sess-abc");
+  assert.equal(inner.body.condition, "all CI checks pass");
+  assert.equal(inner.body.maxTurns, 5);
+});
+
+test("parseSessions goal forwards 'self' through the delegation (issue #377)", async () => {
+  // The two parsers compose: the outer `parseSessions` only knows
+  // the surface exists; `parseGoal` resolves `self` via
+  // `$CONTROLLER_SESSION_ID`. Verify the chain works end-to-end so
+  // `controller sessions goal show self` (the natural usage the
+  // preamble teaches) does not need a real session id at the call
+  // site — the env var does the lookup, and the delegation does
+  // not strip it.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-goal-delegated";
+  try {
+    const outer = cli.parseSessions(["goal", "show", "self"]);
+    assert.equal(outer.action, "goal");
+    const inner = cli.parseGoal(outer.goalArgv);
+    assert.equal(inner.action, "show");
+    assert.equal(inner.sessionId, "sess-self-goal-delegated");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
 test("runMonitor start echoes the onLine pattern when the server returns it (issue #351)", async () => {
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
@@ -4409,6 +4728,62 @@ test("runMonitor start echoes the onLine pattern when the server returns it (iss
   // substrings that survive double-escaping.
   assert.match(stdoutText, /\(passed\|failed\)/);
   assert.match(stdoutText, /\\\\\[CI\\\\\]/);
+});
+
+test("runSessions goal dispatches to the per-session goal route (issue #339 + #377 wiring)", async () => {
+  // Codex review of PR #377 (P1): before this wiring,
+  // `controller sessions goal show self` (and every other goal form)
+  // exited at the `default:` branch in `runSessions` with
+  // `Unknown sessions action: goal`. This test pins the end-to-end
+  // dispatch: `runSessions(["goal", "show", "sess-abc"], ...)` must
+  // reach the goal endpoint, not the wake / monitor / branch ones.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    calls.push({ url: String(url) });
+    // `runSessions goal show` resolves the project from cwd (the
+    // other `runSessions` actions all do), then GETs the per-session
+    // goal route. Stub both shapes.
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        goal: {
+          sessionId: "sess-abc",
+          condition: "all checks pass",
+          maxTurns: 5,
+          turnsEvaluated: 2,
+          lastReason: "still going",
+          setAt: "2026-06-26T08:00:00.000Z",
+        },
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["goal", "show", "sess-abc"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const goalCall = calls.find((c) =>
+    c.url.endsWith("/api/sessions/sess-abc/goal")
+  );
+  assert.ok(goalCall, "expected a GET to the per-session goal endpoint");
+  const out = stdoutChunks.join("");
+  assert.match(out, /condition="all checks pass"/);
+  assert.match(out, /maxTurns=5/);
 });
 
 test("runMonitor start surfaces a 400 for an invalid --on-line pattern (issue #351)", async () => {
