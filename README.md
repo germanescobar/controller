@@ -37,7 +37,7 @@ server/          Express API backend
     api-keys.ts  API key CRUD
 ```
 
-The server spawns agent CLIs as child processes, parses their JSON output streams, normalizes events into a common format (`AgentStreamEvent`), and forwards them to the client over SSE. Session state and events are stored as JSON/JSONL files inside each project's `.coding-agent/` directory.
+The server spawns agent CLIs as child processes, parses their JSON output streams, normalizes events into a common format (`AgentStreamEvent`), and forwards them to the client over SSE. Session state and events are stored as JSON/JSONL files under the Controller home, in a per-checkout directory keyed by the absolute path — `${CONTROLLER_HOME}/projects/<basename>-<hash16>/{sessions,events,attachments,schedules}/` (see `projectStoreDir` in `server/lib/paths.ts`) — never inside the project working tree.
 
 Embedded terminal tabs are backed by deterministic `tmux` sessions. The Express server attaches browser WebSocket connections to those sessions, so commands started in a terminal can survive browser refreshes and backend hot reloads. Closing a terminal tab intentionally kills its associated `tmux` session.
 
