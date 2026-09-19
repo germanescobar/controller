@@ -137,6 +137,10 @@ test("managed skills use a single `<cliPath> <surface> <command>` convention", a
       { name: "controller-search-skills", surfaces: ["skills"] },
       { name: "controller-skill-creator", surfaces: ["skills"] },
       { name: "controller-worktrees", surfaces: ["worktrees", "sessions"] },
+      // `controller-sessions` documents the session-discovery surface
+      // and reaches for `worktrees list` in the "resolve a bare UUID"
+      // recipe, so both surfaces are legal in its body.
+      { name: "controller-sessions", surfaces: ["sessions", "worktrees"] },
     ] as const;
 
     for (const { name, surfaces } of cases) {
@@ -281,6 +285,118 @@ test("browser, integrations, and skills bodies advertise concrete commands", asy
       worktrees,
       /positional[\s\S]*?flag-like tokens/
     );
+
+    // Issue #368: `controller-sessions` is the discovery counterpart to
+    // `controller-worktrees`. The worktrees skill covers create-then-start;
+    // this one must carry every verb an agent needs to *find* and drive a
+    // session that already exists.
+    const sessions = readFileSync(
+      unifiedSkillFile(orchestrator, "controller-sessions"),
+      "utf-8"
+    );
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions list [<project>]"));
+    assert.match(
+      sessions,
+      cliCommandRegex(cliPath, "sessions children <parentId|self>")
+    );
+    assert.match(
+      sessions,
+      cliCommandRegex(cliPath, "sessions send <targetSessionId> <message> --from <parentId|self>")
+    );
+    assert.match(
+      sessions,
+      cliCommandRegex(cliPath, "sessions wake <sessionId> <message>")
+    );
+    assert.match(
+      sessions,
+      cliCommandRegex(cliPath, "sessions goal set <sessionId> --condition <text>")
+    );
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions goal clear <sessionId>"));
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions goal show <sessionId>"));
+    assert.match(
+      sessions,
+      cliCommandRegex(cliPath, "sessions monitor start <sessionId> --description <text>")
+    );
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions monitor list <sessionId>"));
+    assert.match(sessions, cliCommandRegex(cliPath, "sessions monitor stop <monitorId>"));
+    // The `--on-line` re-injection filter is the reason a monitor is
+    // preferable to polling, so it must be named.
+    assert.match(sessions, /--on-line/);
+
+    // The four failure modes from the 2026-09-18 investigation. Each one
+    // cost an agent turns, so each gets an explicit assertion.
+    // 1. A bare UUID is resolved worktrees-list-first, not by guessing.
+    assert.match(sessions, cliCommandRegex(cliPath, "worktrees list"));
+    assert.match(sessions, /find the session on this[\s\S]*?worktrees list <project>/);
+    // 2. `<project>` takes a human name, not only a UUID.
+    assert.match(sessions, /accepts the project's UUID \*\*or its human name\*\*/);
+    // 3. A bare `sessions list` is cwd-scoped, not global.
+    assert.match(sessions, /scoped to the project that\nowns `pwd`/);
+    // 4. The on-disk transcript path, including the basename-vs-worktree-id trap.
+    assert.match(
+      sessions,
+      /\$\{CONTROLLER_HOME\}\/projects\/<basename>-<sha16>\/events\/<sessionId>\.jsonl/
+    );
+    assert.match(
+      sessions,
+      /\$\{CONTROLLER_HOME\}\/projects\/<basename>-<sha16>\/sessions\/<sessionId>\.json/
+    );
+    assert.match(sessions, /on-disk directory name[\s\S]*?\*\*not\*\* the worktree id/);
+
+    // Codex review on PR #373, P2: `wake` / `goal` / `monitor` take
+    // `rest[0]` verbatim — only `start`, `list`, `send`, `children`, and
+    // `branch` route the value through `resolveParentFlag`. Advertising
+    // `wake self` sends the literal string "self" to the server, which
+    // answers "Session not found.". The body must not promise it.
+    assert.match(sessions, /Where `self` works/);
+    assert.match(sessions, /Needs an explicit session id/);
+    // `wake self` may appear only as the worked counter-example that
+    // explains why it fails — never as a form the agent should copy.
+    assert.match(
+      sessions,
+      /`wake self` asks the server for a session literally named `self`/
+    );
+    assert.doesNotMatch(
+      sessions,
+      /often `self`/,
+      "the wake bullet must not imply `self` is the usual argument"
+    );
+    // The `--delay` worked example must pass a resolved id, not `self`.
+    assert.match(sessions, /sessions wake "\$SELF"/);
+
+    // Codex review on PR #373, P2: the persisted field is `parentId`
+    // (`SessionState.parentId`), which is also what `list --parent`
+    // filters on. `parentSessionId` does not exist on disk.
+    assert.match(sessions, /`parentId`/);
+    assert.doesNotMatch(
+      sessions,
+      /parentSessionId/,
+      "the persisted field is `parentId`, not `parentSessionId`"
+    );
+  });
+});
+
+test("managed skill shell snippets do not re-quote the already-quoted CLI path", async () => {
+  // `controllerCliShellPath()` returns the install path *already* wrapped
+  // in single quotes so the macOS default home (`Application Support`)
+  // survives word splitting. A body that writes `'${cliPath}'` produces
+  // `''/Users/…/Application Support/…''`, which the shell collapses to an
+  // unquoted path and then splits at the space. Snippets must interpolate
+  // the bare `cliPath`.
+  await withIsolatedHomes(async ({ orchestrator }) => {
+    await installManagedSkills();
+
+    const cliPath = shellQuote(path.join(orchestrator, "bin", "controller"));
+    const doubled = new RegExp("'" + escapeRegex(cliPath) + "'");
+
+    for (const name of MANAGED_SKILL_DIRS) {
+      const body = readFileSync(unifiedSkillFile(orchestrator, name), "utf-8");
+      assert.doesNotMatch(
+        body,
+        doubled,
+        `${name} double-quotes the CLI path; interpolate the bare cliPath instead`
+      );
+    }
   });
 });
 
