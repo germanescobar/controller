@@ -126,6 +126,63 @@ function runGit(cwd: string, args: string[]): Promise<void> {
 }
 
 /**
+ * Read SSE events from a streaming response until the server closes the
+ * connection. Each event is the JSON payload of a `data: …` line; ignored
+ * lines (heartbeats, comments) are dropped. The reader tolerates premature
+ * closes (the server may end the stream mid-read during shutdown) and
+ * surfaces whatever events it had accumulated.
+ *
+ * Mirrors the helper in `events.test.ts` so this test file stays
+ * self-contained — sharing helpers across `__tests__/` files would require
+ * a new test-utility module and the duplication is small.
+ */
+async function readSse(res: Response): Promise<unknown[]> {
+  if (!res.body) return [];
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const out: unknown[] = [];
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf("\n\n");
+      while (idx !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const dataLine = block
+          .split("\n")
+          .find((line) => line.startsWith("data: "));
+        if (dataLine) {
+          try {
+            out.push(JSON.parse(dataLine.slice(6)));
+          } catch {
+            // ignore parse errors
+          }
+        }
+        idx = buffer.indexOf("\n\n");
+      }
+    }
+  } catch (err) {
+    // Connection aborted (test teardown) or closed by the server — the
+    // events we accumulated so far are still useful for assertions.
+    if (
+      err &&
+      typeof err === "object" &&
+      "name" in err &&
+      ((err as { name?: string }).name === "AbortError" ||
+        (err as { name?: string }).name === "ERR_STREAM_PREMATURE_CLOSE")
+    ) {
+      // fall through and return what we have
+    } else {
+      throw err;
+    }
+  }
+  return out;
+}
+
+/**
  * Stand up a fake agent binary on PATH. The script emits one
  * `run.started` line (with a deterministic sessionId) and a
  * `run.completed` line, then exits 0. The real provider parser only
@@ -413,6 +470,103 @@ exit 1
         body.error ?? "",
         /Invalid model format/,
         `expected stderr text in preflight error, got: ${JSON.stringify(body)}`
+      );
+    }
+  );
+});
+
+test("GET /api/projects/:projectId/sessions/stream appends captured stderr to the synthetic run.failed event (issue #376)", async () => {
+  // Issue #376: when an agent child crashes mid-run (e.g. Codex rejecting
+  // the argv and printing "Reading prompt from stdin... No prompt provided
+  // via stdin." to stderr before exiting 1), the SSE handler must surface
+  // that stderr in the synthetic `run.failed` event — not just the generic
+  // `${providerName} process exited with code ${code}.` banner. Without
+  // the captured stderr the user (and on-call engineer) has no clue what
+  // actually broke and has to repro by hand. This test pins the behavior
+  // by exercising the full SSE stream end-to-end with a shim that emits
+  // run.started, prints a distinctive stderr line, and exits 1.
+  const sessionId = "sess-issue-376-synthetic-run-failed";
+  const stderrMarker =
+    "ISSUE_376_STDERR_MARKER: agent crashed mid-run before producing output";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      // The shim emits a real run.started (so the SSE handshake completes
+      // and we get a connected stream), then writes a recognizable stderr
+      // line, and exits 1 — without ever emitting run.completed or
+      // run.failed on stdout. This drives the synthetic run.failed branch
+      // in the SSE handler's child.on("close") path with `lastStderrText`
+      // populated from the stderr data handler.
+      const script = `#!/usr/bin/env bash
+set -e
+printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '${stderrMarker}' >&2
+cat >/dev/null || true
+exit 1
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+    },
+    async ({ baseUrl, worktreeId }) => {
+      // Open the SSE stream directly. We can't use POST here because the
+      // synthetic run.failed event fires AFTER the preflight resolves —
+      // the POST response just hands back { sessionId, url } and closes,
+      // and the synthetic run.failed event then flows to a connected SSE
+      // client (the one that owns this turn's stream).
+      const res = await fetch(
+        `${baseUrl}/sessions/stream?` +
+          new URLSearchParams({
+            worktreeId,
+            message: "Trigger the synthetic-run-failed-with-stderr path.",
+            provider: "anita",
+          }).toString(),
+        {
+          headers: { accept: "text/event-stream" },
+        }
+      );
+      assert.equal(
+        res.status,
+        200,
+        `expected 200 from SSE endpoint, got ${res.status}`
+      );
+      assert.match(
+        res.headers.get("content-type") ?? "",
+        /text\/event-stream/,
+        `expected text/event-stream content-type, got ${res.headers.get("content-type")}`
+      );
+
+      const events = await readSse(res);
+
+      // Locate the synthetic run.failed event. The shim does not emit
+      // run.completed or run.failed on stdout, so any run.failed that
+      // appears in the stream was synthesized by the SSE handler's close
+      // path — the exact code path the issue is about.
+      const failedEvents = events.filter(
+        (event): event is { type: string; event?: { type?: string; error?: string } } =>
+          typeof event === "object" &&
+          event !== null &&
+          (event as { type?: unknown }).type === "anita_event" &&
+          (event as { event?: { type?: unknown } }).event?.type === "run.failed"
+      );
+      assert.ok(
+        failedEvents.length >= 1,
+        `expected at least one run.failed event in SSE stream, got: ${JSON.stringify(events)}`
+      );
+
+      // Concatenate the error fields from every synthetic run.failed in
+      // case the orchestrator emits more than one (e.g. an inactivity
+      // timeout firing after the exit). The captured stderr should appear
+      // in at least one of them.
+      const errors = failedEvents
+        .map((event) => event.event?.error ?? "")
+        .join("\n");
+      assert.match(
+        errors,
+        /process exited with code 1/,
+        `synthetic run.failed must include the generic exit-code banner, got: ${JSON.stringify(errors)}`
+      );
+      assert.match(
+        errors,
+        /ISSUE_376_STDERR_MARKER/,
+        `synthetic run.failed must include the captured stderr marker, got: ${JSON.stringify(errors)}`
       );
     }
   );

@@ -719,11 +719,19 @@ const codexProvider: AgentProvider = {
       .flatMap((attachment) => ["--image", attachment.path]);
     const prompt = withAttachmentContext(message, attachments, "codex");
 
+    // Codex's clap parser marks `-i/--image` as `Occurrence::ZeroOrMore`, so
+    // every token after the first `--image` is consumed as another image
+    // path until the parser hits a value-less flag. If `--image` appears
+    // *before* the positional `[PROMPT]`, the prompt is silently absorbed as
+    // a second image path, no positional remains, and the CLI falls back to
+    // "read prompt from stdin", exits 1, and the orchestrator sees
+    // `Codex process exited with code 1` with no stderr (issue #376).
+    // Always place repeatable flags after the positional arguments.
     let args: string[];
     if (resumeSessionId) {
-      args = ["exec", ...flags, "resume", ...imageArgs, "--", resumeSessionId, prompt];
+      args = ["exec", ...flags, "resume", "--", resumeSessionId, prompt, ...imageArgs];
     } else {
-      args = ["exec", ...flags, ...imageArgs, "--", prompt];
+      args = ["exec", ...flags, "--", prompt, ...imageArgs];
     }
 
     const fullCmd = `codex ${args.join(" ")}`;

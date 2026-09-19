@@ -363,3 +363,94 @@ test("codex spawn uses workspace-write by default and a restricted sandbox when 
     `off must set an approval policy, got: ${offArgs.join(" ")}`
   );
 });
+
+test("codex spawn places --image flags AFTER the positional prompt (issue #376)", async () => {
+  // Codex's clap parser marks `-i/--image` as `Occurrence::ZeroOrMore`, so
+  // every token after the first `--image` is consumed as another image
+  // path. If `--image` is placed *before* the positional `[PROMPT]`, the
+  // prompt is silently absorbed as a second image path, no positional
+  // remains, and the CLI falls back to "read prompt from stdin" and exits
+  // 1. The orchestrator previously emitted this argv shape and every
+  // Codex turn with at least one image attachment crashed within ~500ms.
+  const args = await captureCodexArgs({
+    attachments: [
+      {
+        id: "att-1",
+        name: "image.png",
+        mimeType: "image/png",
+        size: 1234,
+        path: "/tmp/image.png",
+        isImage: true,
+      },
+    ],
+  });
+
+  // The positional prompt is the first non-flag argument after the `--`
+  // separator. With the fix it appears before any `--image` flag. The
+  // prompt itself is decorated by `withAttachmentContext` to include a
+  // short file listing — match it by prefix so this test isn't brittle
+  // to formatting tweaks.
+  const separatorIndex = args.indexOf("--");
+  assert.ok(separatorIndex >= 0, `expected -- separator in argv: ${args.join(" ")}`);
+  const prompt = args[separatorIndex + 1];
+  assert.ok(
+    typeof prompt === "string" && prompt.startsWith("Hello"),
+    `expected positional prompt right after -- to start with "Hello", got: ${JSON.stringify(prompt)}`
+  );
+
+  const firstImageIndex = args.indexOf("--image");
+  assert.ok(
+    firstImageIndex > separatorIndex + 1,
+    `--image must appear AFTER the positional prompt so clap doesn't consume the prompt as a second image path (got argv: ${args.join(" ")})`
+  );
+  assert.equal(
+    args[firstImageIndex + 1],
+    "/tmp/image.png",
+    `expected /tmp/image.png as the image path, got: ${args.join(" ")}`
+  );
+});
+
+test("codex spawn places --image flags AFTER the resume sessionId and prompt", async () => {
+  // Same regression check for the resume path. `resume <SESSION_ID>` is
+  // a flag-like positional that comes before `--`, so the ordering
+  // becomes: `exec ... resume -- <SESSION_ID> <PROMPT> --image <PATH>`.
+  const args = await captureCodexArgs({
+    resumeSessionId: "session-abc-123",
+    attachments: [
+      {
+        id: "att-1",
+        name: "image.png",
+        mimeType: "image/png",
+        size: 1234,
+        path: "/tmp/image.png",
+        isImage: true,
+      },
+    ],
+  });
+
+  const resumeIndex = args.indexOf("resume");
+  assert.ok(resumeIndex >= 0, `expected "resume" in argv: ${args.join(" ")}`);
+  const separatorIndex = args.indexOf("--");
+  assert.ok(separatorIndex > resumeIndex, `expected -- after resume: ${args.join(" ")}`);
+  assert.equal(
+    args[separatorIndex + 1],
+    "session-abc-123",
+    `expected sessionId right after --, got: ${args.join(" ")}`
+  );
+  const prompt = args[separatorIndex + 2];
+  assert.ok(
+    typeof prompt === "string" && prompt.startsWith("Hello"),
+    `expected positional prompt right after sessionId to start with "Hello", got: ${JSON.stringify(prompt)}`
+  );
+
+  const firstImageIndex = args.indexOf("--image");
+  assert.ok(
+    firstImageIndex > separatorIndex + 2,
+    `--image must appear AFTER the prompt on the resume path (got argv: ${args.join(" ")})`
+  );
+  assert.equal(
+    args[firstImageIndex + 1],
+    "/tmp/image.png",
+    `expected /tmp/image.png as the image path, got: ${args.join(" ")}`
+  );
+});

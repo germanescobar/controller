@@ -1704,6 +1704,13 @@ export async function handleSessionStream(
   }
 
   // Forward stderr text and keep fallback approval handling for older prompts.
+  // We also keep the most recent stderr line in `lastStderrText` so the
+  // synthetic `run.failed` event emitted below for an abnormal exit
+  // without a terminal stdout event can include the actual cause —
+  // without this the event would just say "Anita process exited with code
+  // 1" and the user (and on-call engineer) would have to repro by hand to
+  // discover the real error (issue #376).
+  let lastStderrText = "";
   child.stderr?.on("data", (data: Buffer) => {
     resetWatchdog();
     const raw = data.toString();
@@ -1716,6 +1723,7 @@ export async function handleSessionStream(
       .trim();
     if (!filtered) return;
 
+    lastStderrText = filtered;
     sseSend({ type: "stderr", text: filtered });
 
     if (raw.includes("[y/n]")) {
@@ -1873,10 +1881,20 @@ export async function handleSessionStream(
                 ? `${providerName} process exited with code ${effectiveExitCode}.`
                 : null;
           if (errorText) {
+            // Include the most recent stderr line(s) captured during the
+            // run so the user doesn't have to dig through the terminal
+            // log to discover *why* the process crashed. Without this,
+            // a Codex startup failure (e.g. malformed argv) just shows
+            // "Codex process exited with code 1" and the actual root
+            // cause ("Reading prompt from stdin... No prompt provided
+            // via stdin.") is silently dropped (issue #376).
+            const failureError = lastStderrText
+              ? `${errorText} ${lastStderrText}`
+              : errorText;
             const failureEvent: AgentStreamEvent = {
               type: "run.failed",
               sessionId: streamSessionId,
-              error: errorText,
+              error: failureError,
               timestamp: new Date().toISOString(),
             };
             sseSend({ type: "anita_event", event: failureEvent });
