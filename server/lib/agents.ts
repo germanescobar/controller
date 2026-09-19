@@ -721,17 +721,32 @@ const codexProvider: AgentProvider = {
 
     // Codex's clap parser marks `-i/--image` as `Occurrence::ZeroOrMore`, so
     // every token after the first `--image` is consumed as another image
-    // path until the parser hits a value-less flag. If `--image` appears
-    // *before* the positional `[PROMPT]`, the prompt is silently absorbed as
-    // a second image path, no positional remains, and the CLI falls back to
-    // "read prompt from stdin", exits 1, and the orchestrator sees
-    // `Codex process exited with code 1` with no stderr (issue #376).
-    // Always place repeatable flags after the positional arguments.
+    // path. The argv shape must keep the positional `[PROMPT]` (and
+    // `[SESSION_ID]` on the resume path) BEFORE any `--image` flag, and we
+    // intentionally do NOT insert a `--` option-terminator between the
+    // flags and the positional:
+    //
+    //   - `... --image PATH -- PROMPT` (the original buggy shape) makes
+    //     clap consume the prompt as a second image path → exit 1, "No
+    //     prompt provided via stdin." (issue #376).
+    //   - `... -- PROMPT --image PATH` puts `--image` *after* the option
+    //     terminator, which clap refuses outright ("unexpected argument
+    //     '--image' found", exit 2 — Codex PR #379 review). Same for the
+    //     resume shape with `--` between flags and positional.
+    //   - `... PROMPT --image PATH` parses correctly: the prompt is the
+    //     positional `[PROMPT]`, then `--image` is consumed as the
+    //     repeatable option. Verified against the installed codex-cli
+    //     0.154.0 by hand-spawning both argv shapes. Matches how the
+    //     anita and claude providers push their prompts at the end of
+    //     argv without `--`. The `--`-defense-against-prompts-starting-
+    //     with-`-` is not a real concern here: `withAttachmentContext`
+    //     decorates the message with a multi-line `Attached files:` block,
+    //     and user chat input doesn't start with `-`.
     let args: string[];
     if (resumeSessionId) {
-      args = ["exec", ...flags, "resume", "--", resumeSessionId, prompt, ...imageArgs];
+      args = ["exec", ...flags, "resume", resumeSessionId, prompt, ...imageArgs];
     } else {
-      args = ["exec", ...flags, "--", prompt, ...imageArgs];
+      args = ["exec", ...flags, prompt, ...imageArgs];
     }
 
     const fullCmd = `codex ${args.join(" ")}`;
