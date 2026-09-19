@@ -26,7 +26,11 @@ import {
 } from "./lib/process-shutdown.js";
 import { listPersistedAttentionSessionIds } from "./lib/session-attention.js";
 import { getProject } from "./lib/projects.js";
-import { resolveWorktree } from "./lib/worktrees.js";
+import {
+  resolveWorktree,
+  worktreeNotFoundMessage,
+  worktreeNotFoundPayload,
+} from "./lib/worktrees.js";
 import { ptyManager } from "./lib/pty-manager.js";
 import { buildScriptEnv } from "./lib/project-scripts.js";
 import { restoreLoginShellPath } from "./lib/shell-env.js";
@@ -199,7 +203,20 @@ terminalWss.on("connection", (ws: WebSocket) => {
 
       const worktree = await resolveWorktree(projectId, worktreeIdParam);
       if (!worktree) {
-        ws.send(JSON.stringify({ type: "error", message: "Worktree not found" }));
+        // Issue #367: the terminal-attach handler is reachable with a
+        // project id in `worktreeId` too, so flatten the same enriched
+        // 404 body the HTTP routes return into this transport's
+        // single-string error field.
+        const payload = await worktreeNotFoundPayload(
+          projectId,
+          worktreeIdParam
+        );
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            message: worktreeNotFoundMessage(payload),
+          })
+        );
         return;
       }
 
