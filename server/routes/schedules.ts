@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { getProject } from "../lib/projects.js";
-import { resolveWorktree } from "../lib/worktrees.js";
+import {
+  resolveWorktree,
+  worktreeNotFoundPayload,
+} from "../lib/worktrees.js";
 import {
   createSchedule,
   getSchedule,
@@ -57,7 +60,9 @@ schedulesRouter.post("/:projectId/schedules", async (req, res) => {
 
     const worktree = await resolveWorktree(project.id, body.worktreeId);
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(project.id, body.worktreeId)
+      );
       return;
     }
 

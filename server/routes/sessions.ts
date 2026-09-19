@@ -6,7 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { getProject, getProjects } from "../lib/projects.js";
-import { getProjectWorktrees, resolveWorktree } from "../lib/worktrees.js";
+import {
+  getProjectWorktrees,
+  resolveWorktree,
+  worktreeNotFoundPayload,
+} from "../lib/worktrees.js";
 
 const execAsync = promisify(exec);
 import {
@@ -350,7 +354,12 @@ sessionsRouter.post("/:projectId/attachments", async (req, res) => {
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
 
@@ -472,7 +481,12 @@ sessionsRouter.get("/:projectId/git/diff", async (req, res) => {
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
 
@@ -540,7 +554,12 @@ sessionsRouter.get("/:projectId/git/branch-diff", async (req, res) => {
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
 
@@ -1145,7 +1164,12 @@ export async function handleSessionStream(
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
 
@@ -2492,7 +2516,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -2530,7 +2559,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -2620,7 +2654,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -2662,7 +2701,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -2822,7 +2866,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const session = await getSession(worktree.path, req.params.sessionId);
@@ -3116,7 +3165,12 @@ sessionsRouter.get(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const session = await getSession(worktree.path, req.params.sessionId);
@@ -3143,7 +3197,12 @@ sessionsRouter.put(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const session = await getSession(worktree.path, req.params.sessionId);
@@ -3283,7 +3342,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const session = await getSession(worktree.path, req.params.sessionId);
@@ -3562,7 +3626,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -3734,7 +3803,12 @@ function registerFocusActionRoute(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -3770,7 +3844,12 @@ sessionsRouter.get(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const session = await getSession(worktree.path, req.params.sessionId);
@@ -3797,7 +3876,12 @@ sessionsRouter.post(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     // Issue #351: strict-archive rule. A session cannot be
@@ -3887,7 +3971,12 @@ sessionsRouter.get("/:projectId/sessions", async (req, res) => {
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
   // The sidebar only needs session metadata to render its tree and focus
@@ -3917,7 +4006,12 @@ sessionsRouter.get("/:projectId/sessions/:sessionId", async (req, res) => {
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
   const session = await getSession(worktree.path, req.params.sessionId);
@@ -3947,7 +4041,12 @@ sessionsRouter.get(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const session = await getSession(worktree.path, req.params.sessionId);
@@ -3971,7 +4070,12 @@ sessionsRouter.patch("/:projectId/sessions/:sessionId", async (req, res) => {
     req.query.worktreeId as string | undefined
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
     return;
   }
   const { title } = req.body as { title?: unknown };
@@ -4004,7 +4108,12 @@ sessionsRouter.get(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
 
@@ -4032,7 +4141,12 @@ sessionsRouter.get(
       req.query.worktreeId as string | undefined
     );
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(
+          req.params.projectId,
+          req.query.worktreeId as string | undefined
+        )
+      );
       return;
     }
     const events = await getEvents(worktree.path, req.params.sessionId);

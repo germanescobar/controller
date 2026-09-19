@@ -283,6 +283,25 @@ function fail(message) {
   process.exit(1);
 }
 
+// Compose the single line `fail()` prints from a server JSON error body.
+//
+// Every server error body carries `error` (the historical one-line text).
+// Since issue #367 a body may also carry `hint` with the actionable next
+// step — e.g. a 404 from a `worktreeId` route that recognized the value
+// as a *project* id says so and points at `worktrees list`. Call sites
+// used to spell this as `fail(result?.error ?? fallback)`, which threw
+// the hint away; they go through here instead so the hint is appended to
+// the same line rather than lost.
+export function serverError(result, fallback) {
+  const base =
+    typeof result?.error === "string" && result.error.trim()
+      ? result.error.trim()
+      : fallback;
+  const hint = typeof result?.hint === "string" ? result.hint.trim() : "";
+  if (!hint) return base;
+  return /[.!?]$/.test(base) ? `${base} ${hint}` : `${base}. ${hint}`;
+}
+
 async function getServerUrl() {
   if (process.env.CONTROLLER_SERVER_URL) return process.env.CONTROLLER_SERVER_URL;
   const os = await import("node:os");
@@ -699,7 +718,7 @@ export async function runWorktrees(argv, serverUrl) {
       `/api/projects/${projectId}/worktrees`
     );
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to list worktrees (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to list worktrees (HTTP ${response.status})`));
     }
     const worktrees = Array.isArray(result) ? result : [];
     if (worktrees.length === 0) {
@@ -778,7 +797,7 @@ export async function runWorktrees(argv, serverUrl) {
       `/api/projects/${projectId}/worktrees/${parsed.worktreeId}`
     );
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to delete worktree (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to delete worktree (HTTP ${response.status})`));
     }
     process.stdout.write("Deleted worktree.\n");
     return;
@@ -1372,7 +1391,7 @@ export async function runSessions(argv, serverUrl) {
       parsed.body
     );
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to start session (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to start session (HTTP ${response.status})`));
     }
     const sessionId = result?.sessionId;
     const url = result?.url;
@@ -1392,7 +1411,7 @@ export async function runSessions(argv, serverUrl) {
     const route = `/api/sessions/${parsed.sessionId}/wake`;
     const { response, result } = await postJson(serverUrl, route, parsed.body);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to wake session (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to wake session (HTTP ${response.status})`));
     }
     const message = result?.message;
     const queuedId = message?.id;
@@ -1421,7 +1440,7 @@ export async function runSessions(argv, serverUrl) {
     const body = { ...parsed.body, fromSessionId: parsed.fromSessionId };
     const { response, result } = await postJson(serverUrl, route, body);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to send (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to send (HTTP ${response.status})`));
     }
     const queuedId = result?.eventId;
     if (typeof queuedId !== "string" || !queuedId) {
@@ -1437,7 +1456,7 @@ export async function runSessions(argv, serverUrl) {
     const route = `/api/sessions/${parsed.parentId}/children`;
     const { response, result } = await getJson(serverUrl, route);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to list children (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to list children (HTTP ${response.status})`));
     }
     const children = Array.isArray(result?.children) ? result.children : [];
     if (children.length === 0) {
@@ -1466,7 +1485,7 @@ export async function runSessions(argv, serverUrl) {
     const route = `/api/projects/${projectId}/sessions/branch`;
     const { response, result } = await postJson(serverUrl, route, parsed.body);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to branch session (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to branch session (HTTP ${response.status})`));
     }
     const sessionId = result?.sessionId;
     const url = result?.url;
@@ -1582,7 +1601,7 @@ async function fetchSessionSummaries(serverUrl, projectId, worktreeId) {
     );
     if (response.status >= 400) {
       fail(
-        result?.error ?? `Failed to list sessions (HTTP ${response.status})`
+        serverError(result, `Failed to list sessions (HTTP ${response.status})`)
       );
     }
     return Array.isArray(result) ? result : [];
@@ -1598,7 +1617,7 @@ async function fetchSessionSummaries(serverUrl, projectId, worktreeId) {
   );
   if (response.status >= 400) {
     fail(
-      result?.error ?? `Failed to list worktrees (HTTP ${response.status})`
+      serverError(result, `Failed to list worktrees (HTTP ${response.status})`)
     );
   }
   const worktrees = Array.isArray(result) ? result : [];
@@ -1663,7 +1682,7 @@ export async function runGoal(argv, serverUrl) {
     const route = `/api/sessions/${parsed.sessionId}/goal`;
     const { response, result } = await getJson(serverUrl, route);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to load goal (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to load goal (HTTP ${response.status})`));
     }
     const goal = result?.goal;
     if (!goal) {
@@ -1690,7 +1709,7 @@ export async function runGoal(argv, serverUrl) {
   const { response, result } = await putJson(serverUrl, route, parsed.body);
   if (response.status >= 400) {
     fail(
-      result?.error ?? `Failed to ${parsed.action} goal (HTTP ${response.status})`
+      serverError(result, `Failed to ${parsed.action} goal (HTTP ${response.status})`)
     );
   }
   if (parsed.action === "clear") {
@@ -1805,7 +1824,7 @@ export async function runMonitor(argv, serverUrl) {
     const { response, result } = await postJson(serverUrl, route, parsed.body);
     if (response.status >= 400) {
       fail(
-        result?.error ?? `Failed to start monitor (HTTP ${response.status})`
+        serverError(result, `Failed to start monitor (HTTP ${response.status})`)
       );
     }
     const monitor = result?.monitor;
@@ -1828,7 +1847,7 @@ export async function runMonitor(argv, serverUrl) {
     const route = `/api/sessions/${parsed.sessionId}/monitors`;
     const { response, result } = await getJson(serverUrl, route);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to list monitors (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to list monitors (HTTP ${response.status})`));
     }
     const monitors = Array.isArray(result?.monitors) ? result.monitors : [];
     if (monitors.length === 0) {
@@ -1845,7 +1864,7 @@ export async function runMonitor(argv, serverUrl) {
   const route = `/api/sessions/monitors/${parsed.monitorId}`;
   const { response, result } = await deleteJson(serverUrl, route);
   if (response.status >= 400) {
-    fail(result?.error ?? `Failed to stop monitor (HTTP ${response.status})`);
+    fail(serverError(result, `Failed to stop monitor (HTTP ${response.status})`));
   }
   process.stdout.write("Monitor stopped.\n");
 }
@@ -2040,7 +2059,7 @@ export async function runSchedules(argv, serverUrl) {
       `${base}?includeDisabled=${parsed.includeDisabled ? "true" : "false"}`
     );
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to list schedules (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to list schedules (HTTP ${response.status})`));
     }
     const schedules = Array.isArray(result) ? result : [];
     if (schedules.length === 0) {
@@ -2056,7 +2075,7 @@ export async function runSchedules(argv, serverUrl) {
   if (parsed.action === "show") {
     const { response, result } = await getJson(serverUrl, `${base}/${parsed.scheduleId}`);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to load schedule (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to load schedule (HTTP ${response.status})`));
     }
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
@@ -2065,7 +2084,7 @@ export async function runSchedules(argv, serverUrl) {
   if (parsed.action === "runs") {
     const { response, result } = await getJson(serverUrl, `${base}/${parsed.scheduleId}/runs`);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to load runs (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to load runs (HTTP ${response.status})`));
     }
     const runs = Array.isArray(result) ? result : [];
     if (runs.length === 0) {
@@ -2082,7 +2101,7 @@ export async function runSchedules(argv, serverUrl) {
   if (parsed.action === "add") {
     const { response, result } = await postJson(serverUrl, base, parsed.body);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to add schedule (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to add schedule (HTTP ${response.status})`));
     }
     process.stdout.write(`Created schedule ${result.id}\n  next run: ${result.nextRunAt}\n`);
     return;
@@ -2095,7 +2114,7 @@ export async function runSchedules(argv, serverUrl) {
       {}
     );
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to ${parsed.action} schedule (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to ${parsed.action} schedule (HTTP ${response.status})`));
     }
     process.stdout.write(`Schedule ${parsed.action}d.\n`);
     return;
@@ -2104,7 +2123,7 @@ export async function runSchedules(argv, serverUrl) {
   if (parsed.action === "remove") {
     const { response, result } = await deleteJson(serverUrl, `${base}/${parsed.scheduleId}`);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to remove schedule (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to remove schedule (HTTP ${response.status})`));
     }
     process.stdout.write("Removed schedule.\n");
     return;
@@ -2348,7 +2367,7 @@ export async function runMemory(argv, serverUrl) {
     const path = `/api/memory?${query}${parsed.includePinned ? `${query ? "&" : ""}includePinned=1` : ""}`;
     const { response, result } = await getJson(serverUrl, path);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to list memory (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to list memory (HTTP ${response.status})`));
     }
     const entries = Array.isArray(result?.entries) ? result.entries : [];
     if (parsed.includePinned && typeof result?.pinned === "string") {
@@ -2372,7 +2391,7 @@ export async function runMemory(argv, serverUrl) {
     const path = `/api/memory/${parsed.scope}/${encodeURIComponent(parsed.slug)}?${query}`;
     const { response, result } = await getJson(serverUrl, path);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to read memory (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to read memory (HTTP ${response.status})`));
     }
     process.stdout.write(result?.content ?? "");
     return;
@@ -2388,7 +2407,7 @@ export async function runMemory(argv, serverUrl) {
     const path = `/api/memory/${parsed.scope}/search?${query}`;
     const { response, result } = await getJson(serverUrl, path);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to search memory (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to search memory (HTTP ${response.status})`));
     }
     const hits = Array.isArray(result?.results) ? result.results : [];
     if (hits.length === 0) {
@@ -2409,7 +2428,7 @@ export async function runMemory(argv, serverUrl) {
       ...(projectId ? { projectId } : {}),
     });
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to write memory (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to write memory (HTTP ${response.status})`));
     }
     process.stdout.write(`Wrote memory note "${parsed.slug}".\n`);
     return;
@@ -2423,7 +2442,7 @@ export async function runMemory(argv, serverUrl) {
     const path = `/api/memory/${parsed.scope}/pinned?${query}`;
     const { response, result } = await getJson(serverUrl, path);
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to read pinned memory (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to read pinned memory (HTTP ${response.status})`));
     }
     process.stdout.write(result?.content ?? "");
     return;
@@ -2437,7 +2456,7 @@ export async function runMemory(argv, serverUrl) {
       ...(projectId ? { projectId } : {}),
     });
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to write pinned memory (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to write pinned memory (HTTP ${response.status})`));
     }
     process.stdout.write(`Updated pinned memory for ${parsed.scope}.\n`);
     return;
@@ -2567,7 +2586,7 @@ async function runBrowser(argv, serverUrl) {
   const { action, params } = parseBrowser(argv);
   const { response, result } = await postJson(serverUrl, "/api/browser/command", { action, params });
   if (!result || result.ok === false) {
-    fail((result && result.error) || `Browser command failed (HTTP ${response.status})`);
+    fail(serverError(result, `Browser command failed (HTTP ${response.status})`));
   }
   if (action === "snapshot") {
     const header = [result.title, result.url].filter(Boolean).join(" — ");
@@ -2683,7 +2702,7 @@ export async function runTerminal(argv, serverUrl) {
   }
   const { response, result } = await postJson(serverUrl, "/api/terminal/command", { action, params });
   if (!result || result.ok === false) {
-    fail((result && result.error) || `Terminal command failed (HTTP ${response.status})`);
+    fail(serverError(result, `Terminal command failed (HTTP ${response.status})`));
   }
   printTerminal(action, result);
 }
@@ -3476,7 +3495,7 @@ async function runSkills(argv, serverUrl) {
   if (body && body.__all) {
     const discover = await postJson(serverUrl, "/api/skills/import-discover", {});
     if (discover.response.status >= 400) {
-      fail(discover.result?.error ?? `Import discovery failed (HTTP ${discover.response.status})`);
+      fail(serverError(discover.result, `Import discovery failed (HTTP ${discover.response.status})`));
     }
     const selections = (discover.result?.skills ?? []).map((s) => ({
       providerId: s.providerId,
@@ -3517,7 +3536,7 @@ export async function runIntegrations(argv, serverUrl) {
   if (parsed.action === "registry-list") {
     const { response, result } = await getJson(serverUrl, "/api/integrations/");
     if (response.status >= 400) {
-      fail(result?.error ?? `Failed to list integrations (HTTP ${response.status})`);
+      fail(serverError(result, `Failed to list integrations (HTTP ${response.status})`));
     }
     // The registry endpoint returns the connection array directly (not
     // wrapped in `{ connections: [...] }` like the gateway does). Wrap it
@@ -3572,7 +3591,7 @@ async function runIntegrationsCreate(serverUrl, body) {
   }
   const { response, result } = await postJson(serverUrl, "/api/integrations/", body);
   if (response.status >= 400) {
-    fail(result?.error ?? `Failed to create integration (HTTP ${response.status})`);
+    fail(serverError(result, `Failed to create integration (HTTP ${response.status})`));
   }
   const name = result?.name ?? body?.name ?? "(unnamed)";
   const id = result?.id ?? "(no id)";
@@ -3624,7 +3643,7 @@ async function runSkillsCreate(rest, serverUrl) {
     body,
   });
   if (!result || result.ok === false) {
-    fail((result && result.error) || `Skill create failed (HTTP ${response.status})`);
+    fail(serverError(result, `Skill create failed (HTTP ${response.status})`));
   }
   const skill = result.skill ?? {};
   process.stdout.write(`Created skill "${skill.name}" at ${skill.path}\n`);

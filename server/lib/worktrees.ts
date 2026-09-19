@@ -172,6 +172,83 @@ export async function resolveWorktree(
   return getWorktree(projectId, id);
 }
 
+/**
+ * Maximum number of known worktree ids echoed back in a 404 body. A
+ * project with dozens of worktrees would otherwise turn a one-line CLI
+ * error into a wall of UUIDs; the `worktrees list` pointer in the hint
+ * covers the overflow.
+ */
+export const WORKTREE_NOT_FOUND_ID_LIMIT = 10;
+
+/**
+ * Body of a `404 Worktree not found` response (issue #367).
+ *
+ * The bare `{ error: "Worktree not found" }` shape gave a caller no way
+ * to tell "I passed a project id by mistake" apart from "that worktree
+ * was deleted". Every field beyond `error` is diagnostic: `error` keeps
+ * its historical text so existing clients keep matching on it, and the
+ * actionable one-liner rides along in `hint`.
+ */
+export interface WorktreeNotFoundPayload {
+  error: string;
+  /** The project the lookup was scoped to. Always present. */
+  projectId: string;
+  /** The worktree id the caller supplied, when it supplied one. */
+  suppliedId?: string;
+  /** True when `suppliedId` is a known *project* id — the "did you mean" case. */
+  suppliedIdIsProjectId?: boolean;
+  /** Worktree ids that do exist for `projectId`, capped at {@link WORKTREE_NOT_FOUND_ID_LIMIT}. */
+  knownWorktreeIds?: string[];
+  /** One-line, actionable next step. Absent when the caller passed no worktree id. */
+  hint?: string;
+}
+
+/**
+ * Build the enriched 404 body for a failed worktree lookup.
+ *
+ * When no worktree id was supplied the lookup failed for some other
+ * reason (an unknown project, a corrupt registry), so the payload stays
+ * at the historical single-key shape rather than inventing a hint the
+ * caller can't act on.
+ */
+export async function worktreeNotFoundPayload(
+  projectId: string,
+  worktreeIdParam?: string | string[]
+): Promise<WorktreeNotFoundPayload> {
+  const payload: WorktreeNotFoundPayload = {
+    error: "Worktree not found",
+    projectId,
+  };
+  const suppliedId = Array.isArray(worktreeIdParam)
+    ? worktreeIdParam[0]
+    : worktreeIdParam;
+  if (!suppliedId) return payload;
+  payload.suppliedId = suppliedId;
+
+  const worktrees = await getProjectWorktrees(projectId);
+  payload.knownWorktreeIds = worktrees
+    .slice(0, WORKTREE_NOT_FOUND_ID_LIMIT)
+    .map((worktree) => worktree.id);
+
+  const projects = await getProjects();
+  payload.suppliedIdIsProjectId = projects.some((p) => p.id === suppliedId);
+  payload.hint = payload.suppliedIdIsProjectId
+    ? `${suppliedId} is a project id, not a worktree id. Use 'controller worktrees list ${suppliedId}' to discover worktree ids.`
+    : `No worktree ${suppliedId} in project ${projectId}. Use 'controller worktrees list ${projectId}' to discover worktree ids.`;
+  return payload;
+}
+
+/**
+ * Flatten a {@link WorktreeNotFoundPayload} into the single line that
+ * non-JSON transports (the terminal WebSocket) and the CLI's `fail()`
+ * both print. Kept here so the two never drift.
+ */
+export function worktreeNotFoundMessage(
+  payload: WorktreeNotFoundPayload
+): string {
+  return payload.hint ? `${payload.error}. ${payload.hint}` : payload.error;
+}
+
 export async function addWorktree(
   worktree: Omit<Worktree, "id" | "createdAt"> & { id?: string }
 ): Promise<Worktree> {

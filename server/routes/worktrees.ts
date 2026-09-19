@@ -16,6 +16,7 @@ import {
   removeWorktree,
   resolveWorktree,
   updateWorktree,
+  worktreeNotFoundPayload,
 } from "../lib/worktrees.js";
 import { projectWorktreesDir, worktreePath } from "../lib/paths.js";
 import { getSessions } from "../lib/sessions.js";
@@ -258,7 +259,12 @@ worktreesRouter.get("/:projectId/terminal-tabs", async (req, res) => {
 
   const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
     return;
   }
 
@@ -275,7 +281,12 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
 
   const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
     return;
   }
 
@@ -355,7 +366,12 @@ worktreesRouter.get("/:projectId/files", async (req, res) => {
 
   const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
     return;
   }
 
@@ -439,7 +455,12 @@ worktreesRouter.get("/:projectId/file-index", async (req, res) => {
     getQueryString(req.query.worktreeId),
   );
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
     return;
   }
   const depth = clampInt(
@@ -475,7 +496,12 @@ worktreesRouter.put("/:projectId/terminal-tabs", async (req, res) => {
 
   const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
     return;
   }
 
@@ -506,7 +532,12 @@ worktreesRouter.post("/:projectId/run-script", async (req, res) => {
 
   const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
   if (!worktree) {
-    res.status(404).json({ error: "Worktree not found" });
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
     return;
   }
 
@@ -552,7 +583,9 @@ worktreesRouter.get(
     }
     const worktree = await getWorktree(project.id, req.params.worktreeId);
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(project.id, req.params.worktreeId)
+      );
       return;
     }
     if (!worktree.setupLogPath) {
@@ -582,7 +615,9 @@ worktreesRouter.post(
     }
     const worktree = await getWorktree(project.id, req.params.worktreeId);
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(project.id, req.params.worktreeId)
+      );
       return;
     }
 
@@ -890,7 +925,9 @@ worktreesRouter.delete(
     }
     const worktree = await getWorktree(project.id, req.params.worktreeId);
     if (!worktree) {
-      res.status(404).json({ error: "Worktree not found" });
+      res.status(404).json(
+        await worktreeNotFoundPayload(project.id, req.params.worktreeId)
+      );
       return;
     }
     if (worktree.isMain) {
