@@ -1290,6 +1290,28 @@ export function parseSessions(argv) {
         monitorArgv: rest,
       };
     }
+    case "goal": {
+      // `sessions goal <set|clear|show> <sessionId> ...` (issue #339).
+      // Delegated to `runGoal` for the same reason `monitor` is —
+      // the goal sub-shape (`set | clear | show`) takes its own
+      // positional args, and `parseSessions` only needs to know the
+      // surface exists. The route is mounted under
+      // `/api/sessions/:sessionId/goal` so the agent doesn't need a
+      // project id — the same per-session walker the wake + monitor
+      // surfaces use.
+      //
+      // Codex review of PR #377 (P1): without this delegation the
+      // executable exits with `Unknown sessions command: goal` for
+      // every form (including `sessions goal show self`) that the
+      // agent preamble and the unified `controller-sessions` skill
+      // teach agents to use. The delegation is the mirror image of
+      // the `monitor` case above.
+      return {
+        project: "",
+        action: "goal",
+        goalArgv: rest,
+      };
+    }
     default:
       fail(`Unknown sessions command: ${command}\n${USAGE}`);
   }
@@ -1518,6 +1540,23 @@ export async function runSessions(argv, serverUrl) {
     // exists. The `projectId` is unused — the per-session monitor
     // route resolves its own session.
     await runMonitor(parsed.monitorArgv, serverUrl);
+    return;
+  }
+  if (parsed.action === "goal") {
+    // Delegate to the dedicated `runGoal` dispatcher (issue #339).
+    // Same shape as the `monitor` delegation above: the goal
+    // sub-shape (`set | clear | show`) takes its own positional
+    // args, and `parseSessions` only knows the surface exists. The
+    // per-session goal route resolves its own session, so the
+    // `projectId` is unused.
+    //
+    // Codex review of PR #377 (P1): without this delegation the
+    // executable exits with `Unknown sessions action: goal` for
+    // every goal form — including `sessions goal show self`, which
+    // the agent preamble and the unified skill both teach agents
+    // to invoke as the natural usage. This is the run-path mirror
+    // of the `case "goal":` added to `parseSessions` above.
+    await runGoal(parsed.goalArgv, serverUrl);
     return;
   }
   fail(`Unknown sessions action: ${parsed.action}`);

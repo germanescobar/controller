@@ -4602,6 +4602,66 @@ test("parseSessions monitor delegates to parseMonitor (issue #351 + #339 wiring)
   assert.equal(inner.body.onLine, "^\\[CI\\]");
 });
 
+test("parseSessions goal delegates to parseGoal (issue #339 + #377 wiring)", async () => {
+  // Codex review of PR #377 (P1): before this wiring,
+  // `controller sessions goal <subcommand>` fell through
+  // `parseSessions`' `default:` case and exited with
+  // `Unknown sessions command: goal`, so every goal form the agent
+  // preamble and the unified `controller-sessions` skill teach
+  // (including `goal set <self>`, `goal show <self>`) was
+  // unreachable from the executable. This test pins the delegation:
+  // the outer parser produces `action: "goal"` with `goalArgv` that
+  // `parseGoal` then re-parses into the same shape the dedicated
+  // `runGoal` dispatcher expects.
+  const cli = await loadCli();
+  const outer = cli.parseSessions([
+    "goal",
+    "set",
+    "sess-abc",
+    "--condition",
+    "all CI checks pass",
+    "--max-turns",
+    "5",
+  ]);
+  assert.equal(outer.action, "goal");
+  assert.deepEqual(outer.goalArgv, [
+    "set",
+    "sess-abc",
+    "--condition",
+    "all CI checks pass",
+    "--max-turns",
+    "5",
+  ]);
+  const inner = cli.parseGoal(outer.goalArgv);
+  assert.equal(inner.action, "set");
+  assert.equal(inner.sessionId, "sess-abc");
+  assert.equal(inner.body.condition, "all CI checks pass");
+  assert.equal(inner.body.maxTurns, 5);
+});
+
+test("parseSessions goal forwards 'self' through the delegation (issue #377)", async () => {
+  // The two parsers compose: the outer `parseSessions` only knows
+  // the surface exists; `parseGoal` resolves `self` via
+  // `$CONTROLLER_SESSION_ID`. Verify the chain works end-to-end so
+  // `controller sessions goal show self` (the natural usage the
+  // preamble teaches) does not need a real session id at the call
+  // site — the env var does the lookup, and the delegation does
+  // not strip it.
+  const cli = await loadCli();
+  const savedEnv = process.env.CONTROLLER_SESSION_ID;
+  process.env.CONTROLLER_SESSION_ID = "sess-self-goal-delegated";
+  try {
+    const outer = cli.parseSessions(["goal", "show", "self"]);
+    assert.equal(outer.action, "goal");
+    const inner = cli.parseGoal(outer.goalArgv);
+    assert.equal(inner.action, "show");
+    assert.equal(inner.sessionId, "sess-self-goal-delegated");
+  } finally {
+    if (savedEnv === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = savedEnv;
+  }
+});
+
 test("runMonitor start echoes the onLine pattern when the server returns it (issue #351)", async () => {
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
@@ -4668,6 +4728,62 @@ test("runMonitor start echoes the onLine pattern when the server returns it (iss
   // substrings that survive double-escaping.
   assert.match(stdoutText, /\(passed\|failed\)/);
   assert.match(stdoutText, /\\\\\[CI\\\\\]/);
+});
+
+test("runSessions goal dispatches to the per-session goal route (issue #339 + #377 wiring)", async () => {
+  // Codex review of PR #377 (P1): before this wiring,
+  // `controller sessions goal show self` (and every other goal form)
+  // exited at the `default:` branch in `runSessions` with
+  // `Unknown sessions action: goal`. This test pins the end-to-end
+  // dispatch: `runSessions(["goal", "show", "sess-abc"], ...)` must
+  // reach the goal endpoint, not the wake / monitor / branch ones.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    calls.push({ url: String(url) });
+    // `runSessions goal show` resolves the project from cwd (the
+    // other `runSessions` actions all do), then GETs the per-session
+    // goal route. Stub both shapes.
+    if (String(url).includes("/api/projects?cwd=")) {
+      return {
+        status: 200,
+        json: async () => ({ project: { id: "proj-from-cwd", name: "FromCwd" } }),
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        goal: {
+          sessionId: "sess-abc",
+          condition: "all checks pass",
+          maxTurns: 5,
+          turnsEvaluated: 2,
+          lastReason: "still going",
+          setAt: "2026-06-26T08:00:00.000Z",
+        },
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["goal", "show", "sess-abc"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const goalCall = calls.find((c) =>
+    c.url.endsWith("/api/sessions/sess-abc/goal")
+  );
+  assert.ok(goalCall, "expected a GET to the per-session goal endpoint");
+  const out = stdoutChunks.join("");
+  assert.match(out, /condition="all checks pass"/);
+  assert.match(out, /maxTurns=5/);
 });
 
 test("runMonitor start surfaces a 400 for an invalid --on-line pattern (issue #351)", async () => {
