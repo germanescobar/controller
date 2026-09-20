@@ -711,27 +711,25 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  *     "title":           "<optional, defaults to 'Branch of <sourceTitle>'>"
  *   }
  *
- * `message` is optional when the caller wants a no-prompt branch — the
- * route pre-creates the session file / events with the source transcript
- * seeded plus a `[/branch: <source>-><target>]` marker, and returns
- * `{ sessionId, url }` synchronously without spawning an agent. The
- * user types the first real turn on the new session via the composer,
- * which goes through the regular `POST /sessions` flow with
- * `resumeSessionId` set to the new session's id. This is the UI's
- * "click the branch icon, land on an empty composer" path; the CLI
- * still requires a non-empty `message` (the CLI hands the message via
- * a separate `printStartResult` error path the route enforces before
- * the empty-message shortcut kicks in).
+ * `message` is optional for the UI's empty-prompt branch ("click the
+ * branch icon, land on an empty composer"). The route still spawns an
+ * agent in that case — the agent runs an empty/branch-marker-only turn
+ * to establish a real provider thread, and the agent's reported
+ * `sessionId` becomes the new session's id. This is critical: the
+ * session file's id is what the provider's `--resume` (or Codex's
+ * `thread/resume`) reads on subsequent turns, so a Controller-chosen
+ * UUID with no provider backing would cause the user's first real turn
+ * on the branched session to fail (PR review P1 from chatgpt-codex-
+ * connector on #381). The CLI verb still requires a non-empty
+ * `message` upstream (the CLI is the caller that's expected to start
+ * the first turn).
  *
  * Returns `{ sessionId, url }` once the agent's first `run.started` event
  * lands — same shape as the headless `POST /sessions` endpoint so the
- * CLI's `printStartResult` helper works unchanged. For the empty-
- * message path the response is synchronous (no SSE; no agent spawn).
- * The new session id is the agent's own id (the agents pick their
- * session ids; we cannot pre-create a session file keyed by a
- * Controller-chosen UUID) — *except* in the empty-message shortcut,
- * where we pre-pick a UUID ourselves because there's no agent to
- * report one.
+ * CLI's `printStartResult` helper works unchanged. The new session id
+ * is always the agent's own id (the agents pick their session ids; we
+ * cannot pre-create a session file keyed by a Controller-chosen UUID
+ * because resume would then target a nonexistent provider thread).
  *
  * Implementation notes:
  *   - We resolve the source via `locateSessionById` (issue #339 review's
@@ -837,39 +835,19 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   const branchMarkerText = message && message.trim()
     ? `[/branch: ${sourceLabel}->${targetLabel}] ${message.trim()}`
     : `[/branch: ${sourceLabel}->${targetLabel}]`;
-  // Empty-message branch: pre-create the session file + events file,
-  // return synchronously without spawning an agent. The UI uses this
-  // for "click the branch icon, land on an empty composer"; the CLI
-  // never hits it because the CLI requires a non-empty positional
-  // `message`. The new session id is Controller-chosen (the agents
-  // don't pick ids themselves in this path) and is returned to the
-  // caller immediately so the composer can route its first real turn
-  // through `resumeSessionId`.
-  const emptyMessageBranch = !message || !message.trim();
-  if (emptyMessageBranch) {
-    const newSessionId = randomUUID();
-    try {
-      await persistEmptyBranchStart({
-        worktreePath: located.worktreePath,
-        sourceSession,
-        newSessionId,
-        branchMarkerText,
-        titleOverride: body.title && body.title.trim() ? body.title.trim() : undefined,
-      });
-      res.status(200).json({
-        sessionId: newSessionId,
-        url: `controller://project/${project.id}/worktree/${worktreeId}/session/${newSessionId}`,
-      });
-    } catch (error) {
-      res.status(500).json({
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to create empty branch",
-      });
-    }
-    return;
-  }
+  // The empty-message UI branch (no `message` on the wire) still goes
+  // through the agent-spawned SSE path below. We could pre-seed the
+  // session file and skip the agent entirely, but that would give the
+  // branched session a Controller-chosen id with no provider backing —
+  // subsequent `POST /sessions` calls would then send that id as
+  // `resumeSessionId` and the provider would try to `--resume` (or
+  // `thread/resume`) against a nonexistent thread. The first real
+  // turn the user types on the branched session would fail (PR
+  // review P1 from chatgpt-codex-connector on #381). Spawning an
+  // agent at branch time costs ~1s of startup and produces a brief
+  // "ready" turn the chat view shows above the empty composer, but
+  // it leaves the user on a real provider thread — the first real
+  // turn resumes cleanly.
   // Render the source's stored transcript into a plain-text block so
   // the branched agent sees the prior conversation as part of its
   // first-turn context. Without this, "review the proposal above"
@@ -926,6 +904,15 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
         // `controller sessions list --parent <sourceId>` (issue #353)
         // groups every branch under the source automatically.
         parentId: sourceSessionId,
+        // Mark the branched session as `unstarted` so the
+        // composer's provider/model/mode pickers stay unlocked
+        // until the user types their first real turn (PR review
+        // P2 from chatgpt-codex-connector on #381). Without this,
+        // the existing `disabled={!!sessionId}` on the provider
+        // picker would lock the user into the source's provider
+        // on their first turn, contradicting the spec's "Agent
+        // selector is enabled on that first turn" affordance.
+        unstarted: true,
       }),
       shim.res
     );
@@ -985,6 +972,12 @@ export function makeHeadlessSessionStartRequest(
     // `--title`). Forwarded as `seedTitle` so `seedBranchFromSource`
     // uses it instead of the auto-derived "Branch of <sourceTitle>".
     seedTitle?: string;
+    // Optional flag for the branch route (issue #364 + #381 P2).
+    // When true, `seedBranchFromSource` writes the new session file
+    // with `unstarted: true` so the client's composer pickers stay
+    // unlocked until the user types their first turn. Cleared on
+    // the subsequent `persistSessionStart` resume.
+    unstarted?: boolean;
   }
 ): Request<{ projectId: string }> {
   const query: Record<string, string> = {
@@ -1015,6 +1008,7 @@ export function makeHeadlessSessionStartRequest(
   if (body.parentId) query.parentId = body.parentId;
   if (body.seedFromSessionId) query.seedFromSessionId = body.seedFromSessionId;
   if (body.seedTitle) query.seedTitle = body.seedTitle;
+  if (body.unstarted) query.unstarted = "1";
   return {
     params: { projectId },
     query,
@@ -1316,6 +1310,12 @@ export async function handleSessionStream(
   // new session's title instead of the auto-derived
   // "Branch of <sourceTitle>".
   const seedTitle = (req.query.seedTitle as string | undefined)?.trim() || undefined;
+  // Optional flag for the branch route (issue #364 + #381 P2).
+  // When set, `seedBranchFromSource` marks the new session file
+  // `unstarted: true` so the composer's provider/model/mode
+  // pickers stay unlocked until the user types the first real
+  // turn. Cleared on the subsequent `persistSessionStart` resume.
+  const unstarted = req.query.unstarted === "1";
 
   const provider = getAgentProvider(providerId);
   if (!provider) {
@@ -1426,6 +1426,13 @@ export async function handleSessionStream(
       // session defaults).
       seedFromSessionId,
       seedTitle,
+      // Branch-route unstarted flag (issue #364 + #381 P2).
+      // Mirrors the SSE path's `unstarted` query parameter — the
+      // Codex `persistSessionStart` forwards it to
+      // `seedBranchFromSource` so the composer's provider/model/
+      // mode pickers stay unlocked on the new session's first
+      // turn.
+      unstarted,
     });
     return;
   }
@@ -1628,7 +1635,7 @@ export async function handleSessionStream(
           seedFromSessionId,
           sessionId,
           historyText,
-          { title: seedTitle }
+          { title: seedTitle, unstarted }
         );
       } catch (error) {
         // Seed failures are non-fatal: the new session still has the
@@ -2243,6 +2250,12 @@ async function streamCodexPlanSession(
     // defaults).
     seedFromSessionId?: string;
     seedTitle?: string;
+    // Branch-route unstarted flag (issue #364 + #381 P2). When
+    // true, the Codex `persistSessionStart` writes the new
+    // session file with `unstarted: true` so the composer's
+    // provider/model/mode pickers stay unlocked until the user
+    // types their first turn.
+    unstarted?: boolean;
   }
 ) {
   const {
@@ -4492,84 +4505,14 @@ function readText(m: Record<string, unknown>): string {
  * through the regular `POST /sessions` flow with `resumeSessionId`
  * set to the returned `newSessionId`; that turn picks up the
  * already-seeded transcript and starts a normal run.
+ *
+ * (Removed in #381 review: the empty-message shortcut was
+ *  superseded by spawning an agent at branch time so the new
+ *  session's id has real provider backing. Without a provider
+ *  thread, the user's first real turn would `--resume` a
+ *  nonexistent thread and fail — PR review P1 from
+ *  chatgpt-codex-connector on #381.)
  */
-export async function persistEmptyBranchStart(params: {
-  worktreePath: string;
-  sourceSession: NonNullable<
-    Awaited<ReturnType<typeof getSession>>
-  >;
-  newSessionId: string;
-  branchMarkerText: string;
-  titleOverride?: string;
-}): Promise<void> {
-  const {
-    worktreePath,
-    sourceSession,
-    newSessionId,
-    branchMarkerText,
-    titleOverride,
-  } = params;
-  // 1. Compute the title. The CLI verb's `seedTitle` knob follows
-  // the same precedence: explicit override > existing source title
-  // (`Branch of <source>`) > whatever the persistence layer would
-  // derive from the marker text. For the empty-message shortcut
-  // the marker is just `[/branch: a->b]` — a poor auto-title, so
-  // we skip `deriveAutoTitle` and default to `Branch of <source>`
-  // when no override is supplied.
-  const seededTitle = titleOverride
-    ? titleOverride
-    : sourceSession.title
-      ? `Branch of ${sourceSession.title}`
-      : `Branch of ${sourceSession.id.slice(0, 8)}`;
-  const now = new Date().toISOString();
-  // 2. Write the session file with the source's defaults so the
-  // composer's provider/model/mode pickers pre-fill correctly on
-  // the new session's first turn (issue #364 design §2).
-  await saveSession(worktreePath, {
-    id: newSessionId,
-    title: seededTitle,
-    workingDirectory: worktreePath,
-    worktreeId: sourceSession.worktreeId,
-    model: sourceSession.model ?? "",
-    reasoningEffort: sourceSession.reasoningEffort,
-    serviceTier: sourceSession.serviceTier,
-    provider: sourceSession.provider ?? "anita",
-    mode: sourceSession.mode ?? "default",
-    messages: [],
-    parentId: sourceSession.id,
-    createdAt: now,
-    lastActiveAt: now,
-    status: "active",
-  });
-  // 3. Append the branch-marker user_message event so the chat view
-  // shows the source transcript + branch marker (the source events
-  // are prepended in step 4). The marker text is the audit-friendly
-  // form (no inline transcript) so the chat transcript stays
-  // legible (PR review P1 from chatgpt-codex-connector on #365).
-  await appendEvent(worktreePath, newSessionId, {
-    id: randomUUID(),
-    sessionId: newSessionId,
-    timestamp: now,
-    type: "user_message",
-    data: {
-      text: branchMarkerText,
-      attachments: [],
-    },
-  });
-  // 4. Prepend the source's events + patch the session file's
-  // messages array so `GET /sessions/:id` echoes the seeded
-  // transcript. This is the same `seedBranchFromSource` the
-  // agent-spawned branch route uses — we call it directly here so
-  // the empty-message shortcut produces the same on-disk shape as
-  // a regular branch.
-  await seedBranchFromSource(
-    worktreePath,
-    sourceSession.id,
-    newSessionId,
-    branchMarkerText,
-    { title: titleOverride }
-  );
-}
 
 export async function seedBranchFromSource(
   worktreePath: string,
@@ -4579,6 +4522,12 @@ export async function seedBranchFromSource(
   options: {
     /** Caller-supplied title override (the branch route's `--title`). */
     title?: string;
+    /** When true, mark the new session as `unstarted: true` so the
+     *  composer's provider/model/mode pickers stay unlocked on the
+     *  branched session's first turn. The flag is cleared by
+     *  `persistSessionStart` once the user types their first turn
+     *  and the session is resumed (issue #364 + #381 P2). */
+    unstarted?: boolean;
   } = {}
 ): Promise<void> {
   const { getSession, saveSession, getEvents } = await import(
@@ -4652,5 +4601,11 @@ export async function seedBranchFromSource(
     parentId: source.id,
     title: seededTitle,
     messages: seededMessages,
+    // Mark the new session as unstarted so the composer's
+    // provider/model/mode pickers stay unlocked until the user
+    // types their first real turn. `persistSessionStart` clears
+    // this on the subsequent resume (see its `existing?.unstarted`
+    // handling).
+    unstarted: options.unstarted ?? newSession.unstarted,
   });
 }

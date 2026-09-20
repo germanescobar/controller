@@ -3157,6 +3157,14 @@ export function SessionView({
   );
   const [isFocusPinned, setIsFocusPinned] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string | undefined>();
+  // True while this session has no user turn yet (the UI's
+  // empty-message branch shortcut creates it that way — issue #364
+  // + #381 P2). Drives the composer pickers' lock: while unstarted,
+  // the provider/model/mode pickers stay unlocked so the user can
+  // swap the agent on the first turn; the moment the user types a
+  // turn and the server resumes the session, the flag is cleared
+  // and the pickers lock back to the session's chosen provider.
+  const [unstarted, setUnstarted] = useState(false);
   const [titleDialogOpen, setTitleDialogOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
@@ -3961,6 +3969,13 @@ export function SessionView({
             setIsFocusPinned(Boolean(session.focusPinnedAt));
             setSessionTitle(session.title);
             setTitleDialogOpen(false);
+            // Branch-route unstarted flag (issue #364 + #381 P2).
+            // Drives the composer pickers' lock — see the state
+            // declaration above. Cleared by the server on the
+            // user's first follow-up resume, so a future
+            // `fetchSession` (after the resume) will set it back
+            // to false on the next route / SessionView key change.
+            setUnstarted(Boolean(session.unstarted));
           }
 
           if (eventsResult.status === "fulfilled") {
@@ -5308,6 +5323,14 @@ export function SessionView({
         )
       ) {
         clearComposer();
+        // The user's first turn just left the composer (issue
+        // #364 + #381 P2). The server clears `unstarted` on the
+        // session file at `run.started`; mirror that locally so
+        // the provider/model/mode pickers lock immediately
+        // instead of waiting for a refetch or navigation. New
+        // branches created later will set this back to `true`
+        // when their session loads.
+        setUnstarted(false);
       }
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : "Failed to upload attachments");
@@ -7178,16 +7201,35 @@ export function SessionView({
                       <div className="relative" ref={providerPickerRef}>
                         <button
                           type="button"
-                          onClick={() => !sessionId && setShowProviderPicker(!showProviderPicker)}
-                          disabled={!!sessionId}
+                          // Provider picker is locked once a session
+                          // exists and has been started. The empty-
+                          // message branch shortcut (issue #364 +
+                          // #381 P2) creates a session with real
+                          // provider backing but flags it
+                          // `unstarted: true` so the picker stays
+                          // unlocked for the user's first turn — the
+                          // spec calls for "the Agent selector is
+                          // enabled on that first turn". After the
+                          // first turn (unstarted=false), the picker
+                          // locks back to the session's chosen
+                          // provider.
+                          onClick={() =>
+                            (!sessionId || unstarted) &&
+                            setShowProviderPicker(!showProviderPicker)
+                          }
+                          disabled={!!sessionId && !unstarted}
                           className={`flex min-w-0 max-w-full items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors ${
-                            sessionId ? "opacity-50 cursor-not-allowed" : "hover:bg-accent hover:text-foreground"
+                            sessionId && !unstarted
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-accent hover:text-foreground"
                           }`}
                         >
                           <span className="truncate">
                             {agentProviders.find((p) => p.id === selectedProvider)?.name ?? selectedProvider}
                           </span>
-                          {!sessionId && <ChevronDown className="h-3 w-3" />}
+                          {(!sessionId || unstarted) && (
+                            <ChevronDown className="h-3 w-3" />
+                          )}
                         </button>
                         {showProviderPicker && (
                           <div className="absolute bottom-full left-0 z-20 mb-1 w-40 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-popover p-1 shadow-lg">

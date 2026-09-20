@@ -33,6 +33,14 @@ export interface Session {
   // re-pinning a session the user removed.
   userUnpinned?: boolean;
   parentId?: string;
+  // True when this session was created by the UI's empty-message
+  // branch shortcut (issue #364 + #381 P2). The session is
+  // keyed by a real provider thread id but the user hasn't typed
+  // the first real turn yet — the composer pickers stay unlocked
+  // while this is true so the user can swap the agent on the
+  // first turn. Cleared by the server on the user's first
+  // follow-up resume.
+  unstarted?: boolean;
 }
 
 /**

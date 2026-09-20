@@ -58,6 +58,17 @@ export interface SessionState {
   // session the user has deliberately removed from their focus queue.
   // Cleared on archive.
   userUnpinned?: boolean;
+  // True when this session was created by the UI's empty-message
+  // branch shortcut (issue #364 + #381 P2). The session is keyed by
+  // a real provider thread id (the agent spawned at branch time
+  // reports it via `run.started`) but the user hasn't typed the
+  // first real turn yet. While unstarted, the composer pickers
+  // (provider / model / mode) stay unlocked so the user can swap
+  // the agent on their first turn — the same affordance a fresh
+  // `POST /sessions` provides. Cleared by `persistSessionStart` on
+  // the user's first follow-up resume, after which the session
+  // behaves like any other and the pickers lock.
+  unstarted?: boolean;
 }
 
 /**
