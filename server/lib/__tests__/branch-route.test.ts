@@ -464,22 +464,30 @@ test("POST /sessions/branch returns 404 for an unknown source session (issue #36
   );
 });
 
-test("POST /sessions/branch returns 400 for a missing message (issue #364)", async () => {
+test("POST /sessions/branch returns 400 for a non-string message (issue #364)", async () => {
   await withBranchEnv(
     async ({ binDir }) => {
       await installFakeAgent(binDir, "sess-never-issued-400");
     },
     async ({ baseUrl }) => {
+      // The CLI-side validation lives upstream of the route (the
+      // CLI prints "message is required" and exits non-zero when
+      // the positional argument is missing). The HTTP layer
+      // accepts a missing/empty `message` because the UI's
+      // empty-prompt shortcut needs that to land on an empty
+      // composer; a non-string value is still a server-side
+      // contract violation and gets a 400.
       const response = await fetch(`${baseUrl}/sessions/branch`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           sourceSessionId: "sess-source-364",
+          message: 42,
         }),
       });
       const body = (await response.json()) as { error?: string };
       assert.equal(response.status, 400);
-      assert.match(body.error ?? "", /message is required/);
+      assert.match(body.error ?? "", /message must be a string/);
     }
   );
 });
@@ -595,6 +603,279 @@ test("POST /sessions/branch seeds an empty source (issue #364)", async () => {
       assert.equal(events.length, 1);
       assert.equal(events[0].type, "user_message");
       assert.match(events[0].data.text, /^\[\/branch: /);
+    }
+  );
+});
+
+test("POST /sessions/branch empty-message UI branch spawns an agent and returns the agent's sessionId (issue #364 + #381)", async () => {
+  // The UI's "click the branch icon, land on an empty composer"
+  // path sends no `message`. The route still spawns an agent so the
+  // new session id has real provider backing — otherwise subsequent
+  // `POST /sessions` calls would send a Controller-chosen UUID as
+  // `resumeSessionId` and the provider would try to `--resume`
+  // (or `thread/resume`) against a nonexistent thread, failing the
+  // user's first real turn (PR review P1 from chatgpt-codex-connector
+  // on #381). The response carries the agent's reported sessionId,
+  // not a Controller-chosen UUID; the UI navigates to that.
+  //
+  // Verify:
+  //   - response is 200 with the agent's sessionId
+  //   - the new session file has source-derived defaults + parentId
+  //   - the events file has source events + branch marker (no
+  //     transcript bleed-through — audit-friendly marker only)
+  //   - the new session file's id matches the agent's sessionId
+  //     (i.e. the resume target the user will hit on their first
+  //     turn is a real provider thread)
+  const agentSessionId = "sess-branch-empty-message";
+  await withBranchEnv(
+    async ({ binDir, homeDir, projectPath, worktreeId, projectId }) => {
+      await installFakeAgent(binDir, agentSessionId);
+      await seedSourceSession({ homeDir, projectPath, worktreeId, projectId });
+    },
+    async ({ baseUrl, projectPath }) => {
+      const response = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: "sess-source-364",
+          // `message` intentionally omitted — empty-prompt UI branch.
+          // Explicit `provider: "anita"` so the first turn routes to
+          // the fake agent under binDir (the source's `codex`
+          // provider has no fake in this test harness).
+          provider: "anita",
+          title: "Empty-prompt branch",
+        }),
+      });
+      const body = (await response.json()) as {
+        sessionId?: string;
+        url?: string;
+        error?: string;
+      };
+      assert.equal(
+        response.status,
+        200,
+        `expected 200, got ${response.status}: ${JSON.stringify(body)}`
+      );
+      // The returned id is the *agent's* sessionId, not a
+      // Controller-chosen UUID — this is the regression assertion
+      // for #381 P1. Without real provider backing, the user's
+      // first real turn on the branched session would fail to
+      // resume.
+      assert.equal(
+        body.sessionId,
+        agentSessionId,
+        `expected the agent's sessionId; got ${body.sessionId} (Controller-chosen UUIDs would 404 on provider --resume)`
+      );
+      assert.match(
+        body.url ?? "",
+        new RegExp(`session/${agentSessionId}`)
+      );
+      // The new session file: source defaults + parentId + title override.
+      const { projectStoreDir } = await import("../paths.js");
+      const sessionsDir = path.join(projectStoreDir(projectPath), "sessions");
+      const eventsDir = path.join(projectStoreDir(projectPath), "events");
+      const sessionFile = path.join(sessionsDir, `${agentSessionId}.json`);
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      assert.equal(session.id, agentSessionId);
+      assert.equal(session.parentId, "sess-source-364");
+      assert.equal(session.provider, "codex");
+      assert.equal(session.model, "codex/gpt-5");
+      assert.equal(session.mode, "default");
+      assert.equal(session.title, "Empty-prompt branch");
+      // PR review P2 (chatgpt-codex-connector on #381): the
+      // branched session must be flagged `unstarted` so the
+      // composer's provider/model/mode pickers stay unlocked on
+      // the user's first turn. Without this flag the picker is
+      // gated on `!!sessionId`, which would lock the user into
+      // the source's provider.
+      assert.equal(
+        session.unstarted,
+        true,
+        `expected branched session to be flagged unstarted; got: ${session.unstarted}`,
+      );
+      // The events file: 3 source events + 1 branch marker = 4
+      // events (the empty-message branch's agent run does not
+      // produce any user-facing text events — the agent just
+      // emits `run.started` + `run.completed` for its first turn
+      // on the branch-marker prompt, neither of which the
+      // persistence layer writes to the events JSONL).
+      const eventsFile = path.join(eventsDir, `${agentSessionId}.jsonl`);
+      const eventsContent = await fs.readFile(eventsFile, "utf-8");
+      const events = eventsContent
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      assert.equal(
+        events.length,
+        4,
+        `expected 3 source events + 1 branch marker; got ${events.length}`
+      );
+      const lastEvent = events[events.length - 1];
+      assert.equal(lastEvent.type, "user_message");
+      // Empty-message marker has no trailing message text — just
+      // `[/branch: a->b]` — so the chat view shows a clean audit
+      // entry without a phantom first-user-message. The source
+      // label is `codex/codex/gpt-5` (provider + model) and the
+      // target label is `anita/codex/gpt-5` (override provider
+      // only; model falls through to source's).
+      assert.match(
+        lastEvent.data.text,
+        /^\[\/branch: codex\/codex\/gpt-5->anita\/codex\/gpt-5\]$/
+      );
+      // The session file's `messages` array is also seeded (chat
+      // view's GET /sessions/:id echoes the transcript).
+      assert.ok(Array.isArray(session.messages));
+      assert.equal(session.messages.length, 4);
+      const seededMarker = session.messages[session.messages.length - 1];
+      assert.equal(seededMarker.text, lastEvent.data.text);
+    }
+  );
+});
+
+test("user first turn on empty-message branch resumes the branched session (issue #364 + #381 P1 regression)", async () => {
+  // The full UI flow: branch with empty message, navigate to the
+  // new session, type the first real turn, hit send. The composer's
+  // `startSession` call sends `resumeSessionId` set to the branched
+  // session id. For that resume to actually work, the branched
+  // session id MUST equal a real provider thread id — otherwise the
+  // provider's `--resume` (or Codex's `thread/resume`) fails on an
+  // unknown target (PR review P1 from chatgpt-codex-connector on
+  // #381). We assert:
+  //   - `POST /sessions` with `resumeSessionId=<branched id>`
+  //     succeeds and returns the SAME session id
+  //   - the resume spawns the agent with `--resume <branched id>`
+  //     (captured via the fake agent's argv dump)
+  //   - the events file gains the follow-up user_message event
+  const agentSessionId = "sess-branch-empty-then-resume";
+  await withBranchEnv(
+    async ({ binDir, homeDir, projectPath, worktreeId, projectId }) => {
+      // Capture argv on every invocation so we can read back what
+      // `--resume` value the orchestrator passed on the user's
+      // follow-up turn.
+      const resumeArgvPath = path.join(homeDir, "resume-argv.txt");
+      const script = `#!/usr/bin/env bash
+set -e
+printf '%s\\n' "$*" >> "${resumeArgvPath}"
+printf '%s\\n' '{"type":"run.started","sessionId":"${agentSessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+printf '%s\\n' '{"type":"run.completed","sessionId":"${agentSessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+cat >/dev/null || true
+exit 0
+`;
+      await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+      await seedSourceSession({ homeDir, projectPath, worktreeId, projectId });
+    },
+    async ({ baseUrl, projectPath, homeDir }) => {
+      // Step 1: branch with empty message (UI click).
+      const branchRes = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: "sess-source-364",
+          provider: "anita",
+          title: "Resumable branch",
+        }),
+      });
+      const branchBody = (await branchRes.json()) as {
+        sessionId?: string;
+        error?: string;
+      };
+      assert.equal(branchRes.status, 200);
+      assert.equal(branchBody.sessionId, agentSessionId);
+
+      // Read the worktreeId off the session file we just wrote —
+      // `POST /sessions` requires it for worktree resolution.
+      const { projectStoreDir } = await import("../paths.js");
+      const sessionFile = path.join(
+        projectStoreDir(projectPath),
+        "sessions",
+        `${agentSessionId}.json`,
+      );
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+
+      // Step 2: the user types the first real turn and hits send.
+      // The composer wires `resumeSessionId` to the active session
+      // id (= `agentSessionId`). Without real provider backing, the
+      // orchestrator would pass `--resume ${agentSessionId}` to a
+      // provider that has no thread with that id → 4xx/5xx. With
+      // backing, the resume path re-enters the same thread and
+      // reuses the existing session file.
+      const resumeRes = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId: session.worktreeId,
+          message: "Follow-up turn",
+          provider: "anita",
+          resumeSessionId: agentSessionId,
+        }),
+      });
+      assert.equal(
+        resumeRes.status,
+        200,
+        `expected the resume to succeed; got ${resumeRes.status}`
+      );
+      const resumeBody = (await resumeRes.json()) as {
+        sessionId?: string;
+        error?: string;
+      };
+      assert.equal(
+        resumeBody.sessionId,
+        agentSessionId,
+        "resume should keep the existing session id, not create a new one"
+      );
+
+      // Step 3: the agent was invoked with `--resume <branched id>`
+      // (the actual provider-side resume — PR review P1 from
+      // chatgpt-codex-connector on #381). The fake appends every
+      // argv line to `resume-argv.txt`; the resume call's argv
+      // contains `--resume ${agentSessionId}`.
+      const argvLines = (
+        await fs.readFile(path.join(homeDir, "resume-argv.txt"), "utf-8")
+      )
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+      const resumeArgv = argvLines[argvLines.length - 1];
+      assert.match(
+        resumeArgv,
+        new RegExp(`--resume ${agentSessionId}`),
+        `agent should have been invoked with --resume ${agentSessionId}; got: ${resumeArgv}`
+      );
+
+      // Step 4: the events file gained the follow-up user_message.
+      const eventsFile = path.join(
+        projectStoreDir(projectPath),
+        "events",
+        `${agentSessionId}.jsonl`,
+      );
+      const eventsContent = await fs.readFile(eventsFile, "utf-8");
+      const events = eventsContent
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      const followUp = events.find(
+        (e) =>
+          e.type === "user_message" && e.data.text === "Follow-up turn",
+      );
+      assert.ok(
+        followUp,
+        `expected a user_message event with text "Follow-up turn"; got events: ${eventsContent}`,
+      );
+
+      // Step 5: the `unstarted` flag was cleared by the resume.
+      // PR review P2 from chatgpt-codex-connector on #381. After
+      // the user types their first turn, the session behaves like
+      // any other and the composer's provider/model/mode pickers
+      // lock. `persistSessionStart` clears the flag by writing a
+      // fresh session object on resume (no `unstarted` key).
+      const sessionAfterResume = JSON.parse(
+        await fs.readFile(sessionFile, "utf-8"),
+      );
+      assert.notEqual(
+        sessionAfterResume.unstarted,
+        true,
+        `unstarted flag must be cleared after the user's first turn; got: ${sessionAfterResume.unstarted}`,
+      );
     }
   );
 });
