@@ -1417,9 +1417,11 @@ const EventBlock = memo(function EventBlock({
   event: AgentEvent;
   copiedId: string | null;
   onCopy: (e: AgentEvent) => void;
-  /** Branch-this-conversation callback (issue #364, UI). Wired
-   *  through from SessionView so every assistant turn gets the
-   *  same fork affordance. */
+  /** Branch-this-conversation callback (issue #364, UI). Only the
+   *  last assistant block in the whole view receives this — see
+   *  `lastBranchableKey` in SessionView. Branching always forks the
+   *  entire conversation, so one icon per paragraph was both noisy
+   *  and misleading (every copy of it did the same thing). */
   onBranch?: () => void;
   /** True while a branch request is in flight — disables the
    *  branch icon to prevent double-clicks. */
@@ -1785,10 +1787,11 @@ const AssistantBlock = memo(function AssistantBlock({
   /** Click handler for the copy button. Parent wires it to copy
    *  the assistant message's text (or JSON). */
   onCopy?: () => void;
-  /** Click handler for the branch button. Parent wires it to
-   *  `handleBranchCurrent` so every assistant turn in either the
-   *  persisted timeline or the live stream gets the same fork
-   *  affordance (issue #364, UI). */
+  /** Click handler for the branch button. Only supplied for the
+   *  last assistant block in the view — branching forks the whole
+   *  conversation, so it reads as a single end-of-conversation
+   *  action rather than a per-paragraph one. Copy, by contrast, is
+   *  per-paragraph and is wired on every block. */
   onBranch?: () => void;
   /** True while a branch request is in flight — disables the branch
    *  icon to prevent double-clicks. */
@@ -5697,6 +5700,16 @@ export function SessionView({
     setTimeout(() => setCopiedId(null), 2000);
   }, []);
 
+  /** Copy a live-stream assistant paragraph. Stream items have no
+   *  AgentEvent behind them yet, so the render key doubles as the
+   *  copied-state id and the raw markdown is what lands on the
+   *  clipboard (the persisted path copies the event JSON instead). */
+  const copyStreamText = useCallback((key: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(key);
+    setTimeout(() => setCopiedId(null), 2000);
+  }, []);
+
   const openSourcePath = useCallback((path: string, line?: number, errorLabel = path) => {
     fetchSourceFile(projectId, path, worktreeId)
       .then((file) => {
@@ -6138,6 +6151,34 @@ export function SessionView({
     (branchingSessionId !== null &&
       branchingSessionId === (activeStreamSessionId ?? sessionId)) ||
     false;
+  // The branch icon belongs on exactly one block: the last assistant
+  // message in the view. `handleBranchCurrent` forks the whole
+  // conversation regardless of which icon is clicked, so rendering one
+  // per paragraph was noise that also implied a per-paragraph fork
+  // point that doesn't exist. Copy stays on every block — that one IS
+  // per-paragraph.
+  //
+  // The live stream renders below the persisted timeline, so a
+  // streaming assistant block wins; we only fall back to the timeline
+  // when the stream has no assistant text of its own.
+  const lastBranchableKey = useMemo(() => {
+    for (let i = streamRenderItems.length - 1; i >= 0; i -= 1) {
+      const render = streamRenderItems[i];
+      if (render.kind === "item" && render.item.type === "assistant") {
+        return render.key;
+      }
+    }
+    for (let i = eventRenderItems.length - 1; i >= 0; i -= 1) {
+      const render = eventRenderItems[i];
+      if (
+        render.kind !== "working_group" &&
+        render.event.type === "assistant_response"
+      ) {
+        return render.key;
+      }
+    }
+    return null;
+  }, [streamRenderItems, eventRenderItems]);
 
   return (
     <>
@@ -6457,7 +6498,11 @@ export function SessionView({
                       event={renderItem.event}
                       copiedId={copiedId}
                       onCopy={copyEventData}
-                      onBranch={onBranch}
+                      onBranch={
+                        renderItem.key === lastBranchableKey
+                          ? onBranch
+                          : undefined
+                      }
                       branching={branching}
                       hiddenPendingUserInputEventId={
                         visibleStreamItems.length === 0 ? latestStructuredInputRequest?.id : null
@@ -6594,7 +6639,13 @@ export function SessionView({
                         <AssistantBlock
                           key={render.key}
                           text={item.text}
-                          onBranch={onBranch}
+                          copiedId={copiedId === render.key ? render.key : null}
+                          onCopy={() => copyStreamText(render.key, item.text)}
+                          onBranch={
+                            render.key === lastBranchableKey
+                              ? onBranch
+                              : undefined
+                          }
                           branching={branching}
                         />
                       );
