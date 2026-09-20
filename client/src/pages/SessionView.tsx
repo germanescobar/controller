@@ -1793,10 +1793,6 @@ const AssistantBlock = memo(function AssistantBlock({
   /** True while a branch request is in flight — disables the branch
    *  icon to prevent double-clicks. */
   branching?: boolean;
-  /** Optional children kept for backwards-compat with the older
-   *  children prop shape; new callers should prefer the named props
-   *  so the action row stays consistent across persist + stream paths. */
-  children?: React.ReactNode;
 }) {
   const normalizedText = normalizeMarkdownText(text);
   const showActionRow = Boolean(onCopy || onBranch);
@@ -1844,7 +1840,6 @@ const AssistantBlock = memo(function AssistantBlock({
           ) : null}
         </div>
       ) : null}
-      {children}
     </div>
   );
 });
@@ -5417,11 +5412,11 @@ export function SessionView({
   };
 
   // Branch this conversation into a brand-new session whose transcript
-  // is seeded from the source (issue #364, UI). The empty-message
-  // shortcut seeds the transcript synchronously without spawning an
-  // agent — the user lands on the new session's empty composer and
-  // picks the agent / model / mode there (the composer pickers are
-  // unlocked because the new session has no turns yet). We navigate
+  // is seeded from the source (issue #382). The server responds
+  // synchronously without spawning an agent — the user lands on the
+  // new session's empty composer and picks the agent / model / mode
+  // there (the composer pickers are unlocked because the new session
+  // has no turns yet). We navigate
   // via `onSessionCreated` so App.tsx's existing session-switch path
   // (worktree-aware, sidebar-refreshing) handles the rest. A
   // per-session busy flag prevents double-clicks during the network
@@ -5438,10 +5433,9 @@ export function SessionView({
       const { sessionId: newSessionId } = await branchSession(
         projectId,
         targetSessionId,
-        // No `message` — the server takes the empty-prompt shortcut
-        // (pre-creates the session file + events, returns
-        // synchronously). The user types the first real turn on the
-        // new session via the composer.
+        // The route pre-creates the session file + events and
+        // returns synchronously. The user types the first real turn
+        // on the new session via the composer.
         { worktreeId }
       );
       onSessionCreated(newSessionId);

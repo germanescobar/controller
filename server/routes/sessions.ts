@@ -11,6 +11,7 @@ import {
   resolveWorktree,
   worktreeNotFoundPayload,
 } from "../lib/worktrees.js";
+import { projectStoreDir } from "../lib/paths.js";
 
 const execAsync = promisify(exec);
 import {
@@ -693,66 +694,51 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
 });
 
 /*
- * `POST /api/projects/:projectId/sessions/branch` (issue #364).
+ * `POST /api/projects/:projectId/sessions/branch` (issue #382).
  *
- * Forks an existing session into a brand-new session whose transcript is
- * a copy of the source session's transcript up to (and including) the
- * user's first new message. The first turn of the new branch can run on
- * a different provider / model / mode than the source; later turns use
- * whatever the user picks in the composer (the source's defaults).
+ * Branches an existing session into a brand-new empty-composer session
+ * **without spawning an agent**. The new session:
+ *
+ *   - lives on the same project + worktree as the source (cross-worktree
+ *     branches are intentionally out of scope — the user can always pick
+ *     a different worktree when they start the first real turn);
+ *   - has its events file prepended with the source's transcript so the
+ *     chat view shows the prior conversation immediately;
+ *   - carries `parentId: sourceId` so `controller sessions list --parent`
+ *     (issue #353) groups every branch under its source;
+ *   - is marked `unstarted: true` so the composer's provider / model /
+ *     mode pickers stay unlocked — the whole point of a branch is "I
+ *     want to try this with a different agent or model", so we do not
+ *     copy the source's defaults into the new session's file;
+ *   - uses a Controller-chosen UUID for the session id, **not** a
+ *     provider-thread id. The first real turn the user types goes
+ *     through the regular `POST /sessions` flow; `handleSessionStream`
+ *     sees `unstarted: true`, drops `resumeSessionId` so the provider
+ *     starts a fresh thread, and prepends the branched session's
+ *     `messages` (the source transcript) to the first-turn prompt so
+ *     the agent still has the prior conversation in context. The
+ *     provider's own thread id is captured on the session file as
+ *     `providerThreadId` at `run.started`, and every *subsequent* turn
+ *     resumes that id while the events file, URL and sidebar keep
+ *     keying off the Controller UUID.
+ *
+ * This replaces the previous agent-spawning branch route (#364 / #380 /
+ * #381), which started a real provider turn at branch time purely so the
+ * new session id had provider backing. The visible side effect was an
+ * empty agent reply the moment you clicked the icon — "it sent a
+ * message". The `providerThreadId` indirection removes the need for that
+ * trade-off entirely. The route is web-only by design; there is no CLI
+ * verb (the `controller sessions branch` subcommand was removed along
+ * with the old route).
  *
  * Wire shape (JSON body):
  *   {
- *     "sourceSessionId": "<sid>",
- *     "message":         "<first message text — optional; see below>",
- *     "provider":        "<optional, defaults to source.provider>",
- *     "model":           "<optional, defaults to source.model>",
- *     "mode":            "<optional, defaults to source.mode>",
- *     "title":           "<optional, defaults to 'Branch of <sourceTitle>'>"
+ *     "sourceSessionId": "<sid>",   // required
+ *     "worktreeId":      "<wtid>",  // optional; defaults to source's worktree
+ *     "title":           "<text>"   // optional; defaults to "Branch of <sourceTitle>"
  *   }
  *
- * `message` is optional for the UI's empty-prompt branch ("click the
- * branch icon, land on an empty composer"). The route still spawns an
- * agent in that case — the agent runs an empty/branch-marker-only turn
- * to establish a real provider thread, and the agent's reported
- * `sessionId` becomes the new session's id. This is critical: the
- * session file's id is what the provider's `--resume` (or Codex's
- * `thread/resume`) reads on subsequent turns, so a Controller-chosen
- * UUID with no provider backing would cause the user's first real turn
- * on the branched session to fail (PR review P1 from chatgpt-codex-
- * connector on #381). The CLI verb still requires a non-empty
- * `message` upstream (the CLI is the caller that's expected to start
- * the first turn).
- *
- * Returns `{ sessionId, url }` once the agent's first `run.started` event
- * lands — same shape as the headless `POST /sessions` endpoint so the
- * CLI's `printStartResult` helper works unchanged. The new session id
- * is always the agent's own id (the agents pick their session ids; we
- * cannot pre-create a session file keyed by a Controller-chosen UUID
- * because resume would then target a nonexistent provider thread).
- *
- * Implementation notes:
- *   - We resolve the source via `locateSessionById` (issue #339 review's
- *     cross-worktree walk) so a branch request from any project reaches
- *     the source no matter which worktree it lives on.
- *   - The new session inherits the source's worktree — a branch
- *     continues on the same checkout, not a fresh clone. Cross-worktree
- *     branches are out of scope (the issue calls this out explicitly).
- *   - The branch marker is the `[/branch: <sourceProvider>-><targetProvider>/<targetModel>] <text>`
- *     prefix on the user's first message. The same prefix is what the
- *     agent sees as the prompt; the linkifier would render it as a
- *     clickable badge in a future UI pass.
- *   - We use the same `handleSessionStream` pipeline as `start` and
- *     pass `seedFromSessionId` so the persistence layer can prepend
- *     the source's events to the new session's events file once the
- *     agent has reported its sessionId. The seed runs *after*
- *     `persistSessionStart` writes the first user_message event so the
- *     chat-view order is `[...sourceEvents, branchMarker]`.
- *   - The first turn's provider / model / mode (passed via the standard
- *     query params) affect only the agent spawn. The session defaults
- *     (which the model picker falls back to after the first turn) come
- *     from the source — that's the `[/branch: …]` "one-time marker"
- *     semantic the issue describes.
+ * Returns `{ sessionId, url }` synchronously.
  */
 sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   const project = await getProject(req.params.projectId);
@@ -762,32 +748,17 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   }
   const body = (req.body ?? {}) as {
     sourceSessionId?: string;
-    message?: string;
-    provider?: string;
-    model?: string;
-    mode?: "default" | "plan";
+    worktreeId?: string;
     title?: string;
   };
   const sourceSessionId = body.sourceSessionId;
-  const message = body.message;
   if (typeof sourceSessionId !== "string" || !sourceSessionId) {
     res.status(400).json({ error: "sourceSessionId is required" });
     return;
   }
-  // `message` is optional in the empty-prompt shortcut (see the route
-  // doc above) — when absent the route seeds the new session and
-  // returns synchronously without spawning an agent. The CLI verb
-  // still requires a non-empty `message` because the CLI is the
-  // caller that's expected to *start* the first turn, not just
-  // fork the transcript.
-  if (message !== undefined && typeof message !== "string") {
-    res.status(400).json({ error: "message must be a string" });
-    return;
-  }
-  // Cross-project branches aren't supported — the source must live in
-  // the same project the route is mounted on. `getProjectWorktrees`
-  // returns every worktree of the project, so we just need the source
-  // to be discoverable through the registry.
+  // `worktreeId` is optional — when absent, the branch inherits the
+  // source's worktree. Cross-project branches aren't supported; the
+  // source must live in the same project the route is mounted on.
   const located = await locateSessionById(sourceSessionId);
   if (!located) {
     res.status(404).json({ error: "Source session not found" });
@@ -799,126 +770,130 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     });
     return;
   }
-  const { session: sourceSession, worktreeId } = located;
-  // Default to the source's provider/model/mode. The CLI flags
-  // (`--provider`, `--model`, `--mode`) override per the precedence
-  // order documented in the issue (#364 design §2): explicit flag >
-  // source defaults. The first turn's provider/model/mode are
-  // forwarded to `handleSessionStream` as standard query params;
-  // the session defaults (which the model picker falls back to
-  // after the first turn) come from the source via
-  // `seedFromSessionId`.
-  //
-  // `mode` honors `body.mode ?? sourceSession.mode ?? "default"` —
-  // a plain `branch <src>` on a plan-mode source must continue in
-  // plan mode (PR review P2 from chatgpt-codex-connector on #365).
-  const requestedProvider = body.provider || sourceSession.provider;
-  const requestedModel = body.model || sourceSession.model;
-  const requestedMode: "default" | "plan" =
-    body.mode === "plan"
-      ? "plan"
-      : body.mode === "default"
-        ? "default"
-        : (sourceSession.mode ?? "default");
-  // Build the branch marker the agent sees as the first message.
-  // Same shape as the `[/from: …]` / `[/skill: …]` markers the
-  // linkifier already parses, so a future UI pass can render it as a
-  // clickable badge without a new link format.
-  const sourceLabel =
-    sourceSession.provider && sourceSession.model
-      ? `${sourceSession.provider}/${sourceSession.model}`
-      : (sourceSession.provider ?? sourceSession.model ?? "source");
-  const targetLabel =
-    requestedProvider && requestedModel
-      ? `${requestedProvider}/${requestedModel}`
-      : (requestedProvider ?? requestedModel ?? sourceLabel);
-  const branchMarkerText = message && message.trim()
-    ? `[/branch: ${sourceLabel}->${targetLabel}] ${message.trim()}`
-    : `[/branch: ${sourceLabel}->${targetLabel}]`;
-  // The empty-message UI branch (no `message` on the wire) still goes
-  // through the agent-spawned SSE path below. We could pre-seed the
-  // session file and skip the agent entirely, but that would give the
-  // branched session a Controller-chosen id with no provider backing —
-  // subsequent `POST /sessions` calls would then send that id as
-  // `resumeSessionId` and the provider would try to `--resume` (or
-  // `thread/resume`) against a nonexistent thread. The first real
-  // turn the user types on the branched session would fail (PR
-  // review P1 from chatgpt-codex-connector on #381). Spawning an
-  // agent at branch time costs ~1s of startup and produces a brief
-  // "ready" turn the chat view shows above the empty composer, but
-  // it leaves the user on a real provider thread — the first real
-  // turn resumes cleanly.
-  // Render the source's stored transcript into a plain-text block so
-  // the branched agent sees the prior conversation as part of its
-  // first-turn context. Without this, "review the proposal above"
-  // would start a context-free run; the chat view would show the
-  // copied transcript, but the agent itself would have no idea what
-  // it was reviewing (PR review P1 from chatgpt-codex-connector on
-  // #365). The chat view still reads from the events file
-  // independently — this block is purely for the agent's prompt.
-  const sourceTranscriptBlock = renderSourceTranscriptForAgent(
-    sourceSession.messages
-  );
-  const agentFirstTurnMessage = sourceTranscriptBlock
-    ? `${sourceTranscriptBlock}\n\n${branchMarkerText}`
-    : branchMarkerText;
-  // Reuse the headless session-start shim (same `{ sessionId, url }`
-  // contract as `POST /sessions`). The seed runs inside the SSE
-  // handler via `seedFromSessionId`.
-  const shim = makeSessionStartShim(project.id, worktreeId, res);
-  try {
-    await handleSessionStream(
-      makeHeadlessSessionStartRequest(req, project.id, worktreeId, {
-        // `message` is the agent's first-turn prompt — we pass the
-        // transcript + branch marker here so the branched agent
-        // sees the prior context as part of its prompt (issue #364
-        // + PR review P1 from chatgpt-codex-connector on #365).
-        // `historyText` (passed below) is what the persistence layer
-        // records as the user_message event — we keep that as the
-        // pure `branchMarkerText` so the chat transcript still
-        // shows the audit-friendly marker, not the inlined
-        // transcript.
-        message: agentFirstTurnMessage,
-        historyText: branchMarkerText,
-        provider: requestedProvider,
-        model: requestedModel,
-        mode: requestedMode,
-        attachmentIds: [],
-        // `seedFromSessionId` is the only branch-specific knob — the
-        // SSE handler honors it once `run.started` lands.
-        seedFromSessionId: sourceSessionId,
-        // `seedTitle` plumbs the caller's `--title` flag (or the
-        // omitted-default `Branch of <sourceTitle>`) into
-        // `seedBranchFromSource`. We don't pre-derive the title
-        // here because the persistence layer already ran
-        // `deriveAutoTitle` from the branch-marker text — passing an
-        // explicit `seedTitle` lets the seed step either honor the
-        // caller's override or fall back to a saner auto-name.
-        seedTitle:
-          body.title && body.title.trim()
-            ? body.title.trim()
-            : sourceSession.title
-              ? `Branch of ${sourceSession.title}`
-              : undefined,
-        // `parentId` ties the new session to its source so
-        // `controller sessions list --parent <sourceId>` (issue #353)
-        // groups every branch under the source automatically.
-        parentId: sourceSessionId,
-        // Mark the branched session as `unstarted` so the
-        // composer's provider/model/mode pickers stay unlocked
-        // until the user types their first real turn (PR review
-        // P2 from chatgpt-codex-connector on #381). Without this,
-        // the existing `disabled={!!sessionId}` on the provider
-        // picker would lock the user into the source's provider
-        // on their first turn, contradicting the spec's "Agent
-        // selector is enabled on that first turn" affordance.
-        unstarted: true,
-      }),
-      shim.res
-    );
-  } catch (error) {
-    shim.fail(error instanceof Error ? error.message : String(error));
+  const { session: sourceSession, worktreePath } = located;
+  // Resolve the worktree the branch should live on. Reject an explicit
+  // override that doesn't resolve to a known worktree on this project
+  // so we don't silently branch onto the main worktree and surprise
+  // the user.
+  // `located.worktreeId` reads the field off the source's session
+  // file and falls back to `""` when it's absent (legacy sessions
+  // written before worktrees existed). Resolve those to the project's
+  // main worktree rather than persisting an empty id the sidebar
+  // can't place.
+  let targetWorktreeId = located.worktreeId;
+  if (!targetWorktreeId) {
+    const worktrees = await getProjectWorktrees(req.params.projectId);
+    targetWorktreeId = (worktrees.find((w) => w.isMain) ?? worktrees[0])?.id ?? "";
   }
+  if (typeof body.worktreeId === "string" && body.worktreeId.trim()) {
+    const worktrees = await getProjectWorktrees(req.params.projectId);
+    const match = worktrees.find((w) => w.id === body.worktreeId);
+    if (!match) {
+      res
+        .status(404)
+        .json(
+          await worktreeNotFoundPayload(req.params.projectId, body.worktreeId)
+        );
+      return;
+    }
+    targetWorktreeId = match.id;
+  }
+  // Read the source's events + messages. The events go into the new
+  // session's events file (that's what the chat view reads on load);
+  // the messages go onto the new session file, which is what
+  // `handleSessionStream` renders into the first-turn prompt so the
+  // agent sees the prior conversation.
+  const sourceEvents = await getEvents(worktreePath, sourceSessionId);
+  const sourceMessages = Array.isArray(sourceSession.messages)
+    ? sourceSession.messages
+    : [];
+  const newSessionId = randomUUID();
+  const now = new Date().toISOString();
+  // The branch marker is the chat-view breadcrumb: one `user_message`
+  // line saying where this conversation came from, carrying a
+  // `controller://` URI so the linkifier renders it as a click-through
+  // back to the source (same shape as the `[/from: …]` marker
+  // `sessions send` writes). It is *not* the old
+  // `[/branch: src->tgt] <text>` agent prompt prefix — this route
+  // never spawns an agent, so there is no prompt to prefix.
+  const sourceUri = `controller://project/${project.id}/worktree/${located.worktreeId}/session/${sourceSessionId}`;
+  const branchMarkerText = `[/branch: ${sourceSession.title?.trim() || sourceSessionId}] ${sourceUri}`;
+  const branchMarkerEvent = {
+    id: randomUUID(),
+    sessionId: newSessionId,
+    timestamp: now,
+    type: "user_message" as const,
+    data: {
+      text: branchMarkerText,
+      attachments: [],
+    },
+  };
+  const branchMarkerMessage = {
+    type: "user_message",
+    role: "user",
+    text: branchMarkerText,
+    timestamp: now,
+  };
+  // 1. Write the new session's events file: the source's events
+  // verbatim, then the branch marker as the last line. The copied
+  // events keep their original `sessionId` field — the chat view
+  // renders from the file it was asked for, so the inner id is inert
+  // (this matches what the old `seedBranchFromSource` did).
+  const eventsDir = path.join(projectStoreDir(worktreePath), "events");
+  await fs.mkdir(eventsDir, { recursive: true });
+  const newEventsPath = path.join(eventsDir, `${newSessionId}.jsonl`);
+  const sourceLines = sourceEvents
+    .map((event) => JSON.stringify(event))
+    .join("\n");
+  const markerLine = JSON.stringify(branchMarkerEvent);
+  await fs.writeFile(
+    newEventsPath,
+    sourceLines ? `${sourceLines}\n${markerLine}\n` : `${markerLine}\n`
+  );
+  // 2. Write the new session file. Provider / model / mode /
+  // reasoningEffort / serviceTier are deliberately left unset so the
+  // composer's picker gate keeps them unlocked — picking a different
+  // agent is the entire point of branching. `parentId` links the
+  // branch back to its source for `sessions list --parent`;
+  // `unstarted` keeps the picker gate open and is what
+  // `handleSessionStream` keys off to run the first turn on a fresh
+  // provider thread. `persistSessionStart` clears it on that turn
+  // (its `saveSession` rewrites the whole file without the flag).
+  const derivedTitle =
+    body.title && body.title.trim()
+      ? body.title.trim()
+      : sourceSession.title && sourceSession.title.trim()
+        ? `Branch of ${sourceSession.title.trim()}`
+        : "Branched session";
+  await saveSession(worktreePath, {
+    id: newSessionId,
+    title: derivedTitle,
+    workingDirectory: worktreePath,
+    worktreeId: targetWorktreeId,
+    model: "",
+    messages: [...sourceMessages, branchMarkerMessage],
+    createdAt: now,
+    lastActiveAt: now,
+    status: "active",
+    parentId: sourceSessionId,
+    unstarted: true,
+  });
+  // 3. Pre-warm the focus sidecar so the branch shows up pinned in the
+  // sidebar like every other brand-new session. Without this the
+  // sidecar stays absent until the first user turn triggers
+  // `persistSessionStart`'s focus write.
+  const existingFocus = await readSessionFocus(newSessionId);
+  if (!existingFocus) {
+    const focus = resolveSessionFocusState(null);
+    await writeSessionFocus(buildSessionFocus(newSessionId, focus));
+  }
+  // Tell other windows' sidebars about the new session so they can
+  // insert it into the tree without polling.
+  emitSessionAdded(req.params.projectId, targetWorktreeId, newSessionId);
+  res.status(200).json({
+    sessionId: newSessionId,
+    url: `controller://project/${project.id}/worktree/${targetWorktreeId}/session/${newSessionId}`,
+  });
 });
 
 /*
@@ -962,22 +937,6 @@ export function makeHeadlessSessionStartRequest(
     // create-new-session path; queue-replay passes `resumeSessionId`
     // and never sets `parentId`.
     parentId?: string;
-    // Optional source session id (issue #364). When set, the SSE
-    // handler seeds the new session's transcript + metadata from
-    // the source once the agent reports its sessionId. Ignored on
-    // resume / queue-replay paths (a resumed session already has
-    // its own transcript).
-    seedFromSessionId?: string;
-    // Optional caller-supplied title override (the branch route's
-    // `--title`). Forwarded as `seedTitle` so `seedBranchFromSource`
-    // uses it instead of the auto-derived "Branch of <sourceTitle>".
-    seedTitle?: string;
-    // Optional flag for the branch route (issue #364 + #381 P2).
-    // When true, `seedBranchFromSource` writes the new session file
-    // with `unstarted: true` so the client's composer pickers stay
-    // unlocked until the user types their first turn. Cleared on
-    // the subsequent `persistSessionStart` resume.
-    unstarted?: boolean;
   }
 ): Request<{ projectId: string }> {
   const query: Record<string, string> = {
@@ -1006,9 +965,6 @@ export function makeHeadlessSessionStartRequest(
   // a new-session-only API.
   if (body.resumeSessionId) query.resumeSessionId = body.resumeSessionId;
   if (body.parentId) query.parentId = body.parentId;
-  if (body.seedFromSessionId) query.seedFromSessionId = body.seedFromSessionId;
-  if (body.seedTitle) query.seedTitle = body.seedTitle;
-  if (body.unstarted) query.unstarted = "1";
   return {
     params: { projectId },
     query,
@@ -1235,7 +1191,41 @@ export async function handleSessionStream(
   // default for `start` / `wake` / resume paths.
   const historyTextOverride =
     (req.query.historyText as string | undefined) || undefined;
-  const resumeSessionId = req.query.resumeSessionId as string | undefined;
+  // `resumeSessionId` arrives from the client as the **Controller**
+  // session id (what the URL and the events file are keyed by). For
+  // every session that was started by an agent these are the same
+  // string, because the provider's thread id *is* the session id. For
+  // a branched session (issue #382) they differ, so we keep the two
+  // apart from here on:
+  //
+  //   - `controllerSessionId` — the events-file key / URL id. Never
+  //     changes for the life of the session.
+  //   - `resumeSessionId`     — what we hand the provider as
+  //     `--resume`. `undefined` means "start a fresh thread".
+  const controllerSessionId = req.query.resumeSessionId as string | undefined;
+  let resumeSessionId = controllerSessionId;
+  // Branched-session first turn. The session file carries
+  // `unstarted: true` and its id is a Controller-chosen UUID with no
+  // provider thread behind it. Drop the resume so the provider starts
+  // fresh, and render the branched transcript (already on the session
+  // file's `messages`, seeded by the branch route) into the first-turn
+  // prompt so the agent has the prior conversation in context.
+  let branchedTranscript = "";
+  let branchedFirstTurn = false;
+  if (controllerSessionId) {
+    const existingSession = await getSession(worktree.path, controllerSessionId);
+    if (existingSession?.unstarted) {
+      branchedFirstTurn = true;
+      branchedTranscript = renderSourceTranscriptForAgent(
+        existingSession.messages
+      );
+      resumeSessionId = undefined;
+    } else if (existingSession?.providerThreadId) {
+      // Second and later turns on a branched session: resume the
+      // provider's own thread, not the Controller UUID.
+      resumeSessionId = existingSession.providerThreadId;
+    }
+  }
   const reasoningEffort = req.query.reasoningEffort as
     | "none"
     | "minimal"
@@ -1295,27 +1285,6 @@ export async function handleSessionStream(
   // writing a brand-new session, and ignores it on resumed sessions
   // (the existing session's `parentId` is the source of truth there).
   const parentId = (req.query.parentId as string | undefined)?.trim() || undefined;
-  // Optional source session id (issue #364). When set, the new
-  // session's events file is prepended with the source's transcript
-  // and the session file is patched to carry the source's
-  // provider/model/mode + parentId once `run.started` lands. The
-  // first turn still runs with the requested provider/model/mode
-  // (passed in the query string above); only the session defaults
-  // and the chat-view transcript are seeded from the source. Honors
-  // the resolved-locator pattern (no per-session walk on this path;
-  // the route layer resolves the source via `locateSessionById`).
-  const seedFromSessionId = (req.query.seedFromSessionId as string | undefined)?.trim() || undefined;
-  // Optional caller-supplied title override (the branch route's
-  // `--title`). When set, `seedBranchFromSource` uses it as the
-  // new session's title instead of the auto-derived
-  // "Branch of <sourceTitle>".
-  const seedTitle = (req.query.seedTitle as string | undefined)?.trim() || undefined;
-  // Optional flag for the branch route (issue #364 + #381 P2).
-  // When set, `seedBranchFromSource` marks the new session file
-  // `unstarted: true` so the composer's provider/model/mode
-  // pickers stay unlocked until the user types the first real
-  // turn. Cleared on the subsequent `persistSessionStart` resume.
-  const unstarted = req.query.unstarted === "1";
 
   const provider = getAgentProvider(providerId);
   if (!provider) {
@@ -1378,9 +1347,17 @@ export async function handleSessionStream(
   const baseAgentMessage = mentionResolution.prefix
     ? `${mentionResolution.prefix}${skillResolution.agentMessage}`
     : skillResolution.agentMessage;
+  // On a branched session's first turn (issue #382) the provider
+  // starts a fresh thread, so there is no `--resume` to carry the
+  // prior conversation. Prepend the branched transcript so the agent
+  // has it in context. The chat-view transcript is independent — it
+  // lives in the events file the branch route already seeded.
+  const agentMessageWithBranch = branchedTranscript
+    ? `${branchedTranscript}\n\n${baseAgentMessage}`
+    : baseAgentMessage;
   const agentMessage = usesSystemPrompt
-    ? baseAgentMessage
-    : framePreambleForPrompt(controllerPreamble) + baseAgentMessage;
+    ? agentMessageWithBranch
+    : framePreambleForPrompt(controllerPreamble) + agentMessageWithBranch;
   // The persisted history carries the deterministic mention block (no
   // inline preview) so reload is cheap and the transcript is
   // byte-identical across runs of the same prompt. The skill markers
@@ -1415,24 +1392,13 @@ export async function handleSessionStream(
       attachments,
       autoApprove,
       parentId,
-      // Branch-seeding knobs (issue #364). The Codex path doesn't
-      // go through the SSE handler's `persistSessionStart`, so the
-      // branch route threads `seedFromSessionId` + `seedTitle` in
-      // here explicitly. The Codex `persistSessionStart` honors
-      // them once the agent reports its session id (PR review P1
-      // from chatgpt-codex-connector on #365 — without these the
-      // Codex branch path silently drops the source transcript
-      // and falls back to the run's provider/model/mode for the
-      // session defaults).
-      seedFromSessionId,
-      seedTitle,
-      // Branch-route unstarted flag (issue #364 + #381 P2).
-      // Mirrors the SSE path's `unstarted` query parameter — the
-      // Codex `persistSessionStart` forwards it to
-      // `seedBranchFromSource` so the composer's provider/model/
-      // mode pickers stay unlocked on the new session's first
-      // turn.
-      unstarted,
+      // Branched-session plumbing (issue #382). The Codex path has
+      // its own `persistSessionStart`, so it needs the same two
+      // facts the SSE path derives above: which Controller id the
+      // events file is keyed by, and whether this is the branched
+      // session's first turn (so it captures `providerThreadId`).
+      controllerSessionId,
+      branchedFirstTurn,
     });
     return;
   }
@@ -1468,8 +1434,11 @@ export async function handleSessionStream(
     // its own id.
     env: {
       ...apiKeyEnv,
+      // `CONTROLLER_SESSION_ID` is the *Controller* id — that's what
+      // `--parent self` / `wake self` resolve against, not the
+      // provider's thread id (they diverge on branched sessions).
       ...controllerAgentEnv(
-        resumeSessionId ? { sessionId: resumeSessionId } : undefined
+        controllerSessionId ? { sessionId: controllerSessionId } : undefined
       ),
     },
     command: resolvedCommand,
@@ -1487,7 +1456,12 @@ export async function handleSessionStream(
 
   let stdoutBuffer = "";
   let eventProcessing = Promise.resolve();
-  let streamSessionId = resumeSessionId ?? "";
+  // Events are always keyed by the Controller session id, never the
+  // provider's thread id — for a branched session (issue #382) those
+  // differ, and the chat view reads the file the URL names. Empty for
+  // a brand-new session, where the id only exists once the provider
+  // reports it at `run.started`.
+  let streamSessionId = controllerSessionId ?? "";
   let userMessageWritten = false;
   let pausedForClaudeUserInput = false;
   let runTerminated = false;
@@ -1531,8 +1505,32 @@ export async function handleSessionStream(
   const worktreePath = worktree.path;
   const worktreeId = worktree.id;
 
+  /**
+   * Forward an agent event to the client, stamped with the **Controller**
+   * session id (issue #382). On a branched session the provider picks its
+   * own thread id and reports it on `run.started`; the web client calls
+   * `attachToSession(event.sessionId)` off that event, so forwarding the
+   * raw provider id would silently swap the user onto a session id that
+   * has no events file and no URL. The provider's id is captured
+   * separately as `providerThreadId` before this rewrite happens.
+   */
+  function sendAgentEvent(event: AgentStreamEvent) {
+    sseSend({
+      type: "anita_event",
+      event:
+        streamSessionId &&
+        "sessionId" in event &&
+        event.sessionId !== streamSessionId
+          ? { ...event, sessionId: streamSessionId }
+          : event,
+    });
+  }
+
   /** Write the user message + create/update session file once we know the sessionId. */
-  async function persistSessionStart(sessionId: string) {
+  async function persistSessionStart(
+    sessionId: string,
+    options: { providerThreadId?: string } = {}
+  ) {
     streamSessionId = sessionId;
     markSessionActive(sessionId, {
       provider: providerId,
@@ -1603,6 +1601,20 @@ export async function handleSessionStream(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
+      // Branched-session provider-thread-id (issue #382). On a
+      // branched session's first turn `sessionId` is the Controller
+      // UUID and the provider picked its own thread id at
+      // `run.started` — capture it so later turns `--resume` the
+      // right thread. The `existing?.providerThreadId` fallback is
+      // what stops `saveSession`'s full-file overwrite from dropping
+      // the field on every subsequent turn. Absent for sessions that
+      // were never branched, where the session id IS the thread id.
+      ...(options.providerThreadId ?? existing?.providerThreadId
+        ? {
+            providerThreadId:
+              options.providerThreadId ?? existing?.providerThreadId,
+          }
+        : {}),
     });
     // Notify other clients (sidebar in another window) about the new
     // session so they can add it to the tree without polling. Only
@@ -1615,38 +1627,6 @@ export async function handleSessionStream(
     // the focus-queue indicator without a full page reload.
     if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
       sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
-    }
-    // Issue #364: seed the new session's transcript + metadata from
-    // the source session once the agent has reported its sessionId.
-    // The seeding runs *after* the user_message append + saveSession
-    // above so we don't race the chat transcript: the source events
-    // land at the start of the events file (with the user_message as
-    // the last entry), and the session file's `messages` array is
-    // patched to `[...source.messages, branchMarker]`. The new
-    // session's provider/model/mode come from the source so the model
-    // picker in the composer falls back to source's defaults after
-    // the first turn — the requested provider/model/mode only
-    // affected the first turn's agent spawn (above), not the
-    // session defaults that subsequent turns read.
-    if (seedFromSessionId && seedFromSessionId !== sessionId) {
-      try {
-        await seedBranchFromSource(
-          worktreePath,
-          seedFromSessionId,
-          sessionId,
-          historyText,
-          { title: seedTitle, unstarted }
-        );
-      } catch (error) {
-        // Seed failures are non-fatal: the new session still has the
-        // first-turn user_message event and the agent's response
-        // continues normally. The user just won't see the source
-        // transcript in the chat view; the agent runs unaffected.
-        console.error(
-          `[sessions] branch seed failed (source=${seedFromSessionId}, new=${sessionId}):`,
-          error instanceof Error ? error.message : error
-        );
-      }
     }
   }
 
@@ -1758,12 +1738,16 @@ export async function handleSessionStream(
   }, SSE_HEARTBEAT_INTERVAL_MS);
   resetWatchdog();
 
-  if (resumeSessionId) {
+  if (controllerSessionId && !branchedFirstTurn) {
     // Serialize the resumed session-start (which appends the controller's
     // user_message) onto the same chain the stream events use, so the user
     // turn is written before any assistant/tool event that follows it.
+    // Skipped on a branched session's first turn: there is no provider
+    // thread yet, so we wait for `run.started` to learn the provider's
+    // id before writing the session file (that's where
+    // `providerThreadId` gets captured).
     eventProcessing = eventProcessing
-      .then(() => persistSessionStart(resumeSessionId))
+      .then(() => persistSessionStart(controllerSessionId))
       .catch(() => {});
   }
 
@@ -1821,7 +1805,18 @@ export async function handleSessionStream(
                 // then persist each transcript event to
                 // .coding-agent/events/ so it can be read back on reload.
                 if (event.type === "run.started") {
-                  await persistSessionStart(event.sessionId);
+                  // Persist under the Controller id when we have one
+                  // (resume + branched first turn); fall back to the
+                  // provider's id for a brand-new session, where the
+                  // two are the same by definition. On a branched
+                  // first turn we also stash the provider's own
+                  // thread id so later turns can `--resume` it
+                  // (issue #382).
+                  await persistSessionStart(streamSessionId || event.sessionId, {
+                    providerThreadId: branchedFirstTurn
+                      ? event.sessionId
+                      : undefined,
+                  });
                 } else if (
                   event.type !== "run.completed" &&
                   event.type !== "run.failed" &&
@@ -1840,7 +1835,7 @@ export async function handleSessionStream(
                 if (streamSessionId) {
                   recordSessionAttentionEvent(streamSessionId, event);
                 }
-                sseSend({ type: "anita_event", event });
+                sendAgentEvent(event);
               })
               .catch(() => {});
             if (providerId === "claude" && event.type === "user.input_requested") {
@@ -1905,7 +1900,7 @@ export async function handleSessionStream(
               if (streamSessionId) {
                 recordSessionAttentionEvent(streamSessionId, event);
               }
-              sseSend({ type: "anita_event", event });
+              sendAgentEvent(event);
               if (providerId === "claude" && event.type === "user.input_requested") {
                 pausedForClaudeUserInput = true;
               }
@@ -2239,23 +2234,15 @@ async function streamCodexPlanSession(
     // the same query → `persistSessionStart` path the SSE handler
     // uses; only honored on brand-new sessions.
     parentId?: string;
-    // Branch-seeding knobs (issue #364). The Codex path doesn't
-    // go through the SSE handler's `persistSessionStart`, so the
-    // branch route threads these in here explicitly. Honored by
-    // this function's `persistSessionStart` once the Codex agent
-    // reports its session id (PR review P1 from
-    // chatgpt-codex-connector on #365 — without these the Codex
-    // branch path silently drops the source transcript and falls
-    // back to the run's provider/model/mode for the session
-    // defaults).
-    seedFromSessionId?: string;
-    seedTitle?: string;
-    // Branch-route unstarted flag (issue #364 + #381 P2). When
-    // true, the Codex `persistSessionStart` writes the new
-    // session file with `unstarted: true` so the composer's
-    // provider/model/mode pickers stay unlocked until the user
-    // types their first turn.
-    unstarted?: boolean;
+    // Branched-session plumbing (issue #382). `controllerSessionId`
+    // is the events-file key / URL id — it equals `resumeSessionId`
+    // for every ordinary session and diverges from it on a branched
+    // one, where `resumeSessionId` carries the provider's own thread
+    // id (or is undefined on the first turn).
+    // `branchedFirstTurn` marks that first turn, where there is no
+    // provider thread yet and we must capture the one Codex picks.
+    controllerSessionId?: string;
+    branchedFirstTurn?: boolean;
   }
 ) {
   const {
@@ -2274,8 +2261,8 @@ async function streamCodexPlanSession(
     attachments,
     autoApprove,
     parentId,
-    seedFromSessionId,
-    seedTitle,
+    controllerSessionId,
+    branchedFirstTurn,
   } = options;
 
   res.writeHead(200, {
@@ -2285,7 +2272,9 @@ async function streamCodexPlanSession(
   });
 
   let clientConnected = true;
-  let streamSessionId = resumeSessionId ?? "";
+  // Keyed by the Controller id, not the provider thread id — they
+  // differ on a branched session (issue #382).
+  let streamSessionId = controllerSessionId ?? "";
   let userMessageWritten = false;
   let finished = false;
   let eventProcessing = Promise.resolve();
@@ -2330,7 +2319,25 @@ async function streamCodexPlanSession(
     }
   }
 
-  async function persistSessionStart(sessionId: string) {
+  /** Controller-id-stamped event forward; see the SSE-stream twin
+   *  for why the provider's own thread id must not reach the client
+   *  on a branched session (issue #382). */
+  function sendAgentEvent(event: AgentStreamEvent) {
+    sseSend({
+      type: "anita_event",
+      event:
+        streamSessionId &&
+        "sessionId" in event &&
+        event.sessionId !== streamSessionId
+          ? { ...event, sessionId: streamSessionId }
+          : event,
+    });
+  }
+
+  async function persistSessionStart(
+    sessionId: string,
+    startOptions: { providerThreadId?: string } = {}
+  ) {
     streamSessionId = sessionId;
     markSessionActive(sessionId, {
       provider: providerId,
@@ -2388,37 +2395,22 @@ async function streamCodexPlanSession(
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
       status: "active",
+      // Branched-session provider-thread-id (issue #382); see the
+      // SSE-stream variant for the full rationale. The
+      // `existing?.providerThreadId` fallback is what keeps the
+      // field alive across `saveSession`'s full-file overwrite.
+      ...(startOptions.providerThreadId ?? existing?.providerThreadId
+        ? {
+            providerThreadId:
+              startOptions.providerThreadId ?? existing?.providerThreadId,
+          }
+        : {}),
     });
     if (!existing) {
       emitSessionAdded(projectId, worktreeId, sessionId);
     }
     if (focus.focusPinnedAt && !existingFocus?.focusPinnedAt) {
       sseSend({ type: "session_focus", focusPinnedAt: focus.focusPinnedAt });
-    }
-    // Branch-seeding mirror of the SSE handler (issue #364): the
-    // Codex path doesn't go through the SSE `persistSessionStart`,
-    // so it has to honor `seedFromSessionId` here. The helper
-    // prepends source events to the new session's events file and
-    // patches provider/model/mode/parentId/messages so the chat
-    // view and the model picker both reflect the source. Non-fatal
-    // — failures here leave the new session in the state the rest
-    // of `persistSessionStart` left it in (PR review P1 from
-    // chatgpt-codex-connector on #365).
-    if (seedFromSessionId && seedFromSessionId !== sessionId) {
-      try {
-        await seedBranchFromSource(
-          worktreePath,
-          seedFromSessionId,
-          sessionId,
-          historyText,
-          { title: seedTitle }
-        );
-      } catch (error) {
-        console.error(
-          `[sessions] branch seed failed in codex path (source=${seedFromSessionId}, new=${sessionId}):`,
-          error instanceof Error ? error.message : error
-        );
-      }
     }
   }
 
@@ -2447,7 +2439,13 @@ async function streamCodexPlanSession(
     eventProcessing = eventProcessing
       .then(async () => {
         if (event.type === "run.started") {
-          await persistSessionStart(event.sessionId);
+          // Same Controller-id-first rule as the SSE path (issue
+          // #382): persist under the Controller id when we have one,
+          // fall back to Codex's own id for a brand-new session, and
+          // capture Codex's thread id on a branched first turn.
+          await persistSessionStart(streamSessionId || event.sessionId, {
+            providerThreadId: branchedFirstTurn ? event.sessionId : undefined,
+          });
         } else if (
           event.type !== "run.completed" &&
           event.type !== "run.failed" &&
@@ -2461,7 +2459,7 @@ async function streamCodexPlanSession(
           recordSessionAttentionEvent(streamSessionId, event);
         }
 
-        sseSend({ type: "anita_event", event });
+        sendAgentEvent(event);
 
         if (event.type === "run.completed" || event.type === "run.failed") {
           if (!streamSessionId) {
@@ -2488,8 +2486,10 @@ async function streamCodexPlanSession(
         // brand-new ones (issue #353).
         env: {
           ...(await getApiKeyEnvVars()),
+          // The *Controller* id, not the provider thread id — those
+          // diverge on a branched session (issue #382).
           ...controllerAgentEnv(
-            resumeSessionId ? { sessionId: resumeSessionId } : undefined
+            controllerSessionId ? { sessionId: controllerSessionId } : undefined
           ),
         },
         resumeSessionId,
@@ -4462,150 +4462,4 @@ function readText(m: Record<string, unknown>): string {
   } catch {
     return "";
   }
-}
-
-/**
- * Seed a brand-new session's transcript + metadata from a source
- * session (issue #364). Called from `persistSessionStart` after the
- * new session's first user_message event has been written.
- *
- * Side effects:
- *   1. Reads `<projectStoreDir>/events/<sourceSid>.jsonl` and writes
- *      `<projectStoreDir>/events/<newSid>.jsonl` with the source
- *      events followed by the user_message line the persistence
- *      layer already appended (so the chat view reads source events
- *      + branch marker as the conversation history).
- *   2. Reads the source session's `SessionState` and patches the new
- *      session file to carry the source's `provider` / `model` /
- *      `mode` (so the model picker in the composer falls back to
- *      the source's defaults for subsequent turns — the requested
- *      provider/model/mode only affected the first turn's agent
- *      spawn) and the source's `messages` array appended with the
- *      branch-marker user message (so `GET /sessions/:id` echoes
- *      the full transcript).
- *
- * Failures are non-fatal: a missing source, an unreadable events
- * file, or a write failure leaves the new session in the state the
- * rest of `persistSessionStart` left it in (empty transcript, run's
- * provider/model/mode). The agent runs unaffected — only the chat
- * view loses continuity.
- */
-
-/**
- * Pre-create a branch session **without spawning an agent** (the
- * empty-message shortcut of `POST /sessions/branch`, see the route
- * doc above). Writes the session file with the source-derived
- * defaults (provider / model / mode / `parentId` / title), appends
- * the branch-marker `user_message` event, then delegates to
- * `seedBranchFromSource` to prepend the source's events to the new
- * events file (same shape as the agent-spawned branch).
- *
- * Returns once the new session's files are durable on disk. The
- * user types the first real turn in the composer, which routes
- * through the regular `POST /sessions` flow with `resumeSessionId`
- * set to the returned `newSessionId`; that turn picks up the
- * already-seeded transcript and starts a normal run.
- *
- * (Removed in #381 review: the empty-message shortcut was
- *  superseded by spawning an agent at branch time so the new
- *  session's id has real provider backing. Without a provider
- *  thread, the user's first real turn would `--resume` a
- *  nonexistent thread and fail — PR review P1 from
- *  chatgpt-codex-connector on #381.)
- */
-
-export async function seedBranchFromSource(
-  worktreePath: string,
-  sourceSessionId: string,
-  newSessionId: string,
-  historyText: string,
-  options: {
-    /** Caller-supplied title override (the branch route's `--title`). */
-    title?: string;
-    /** When true, mark the new session as `unstarted: true` so the
-     *  composer's provider/model/mode pickers stay unlocked on the
-     *  branched session's first turn. The flag is cleared by
-     *  `persistSessionStart` once the user types their first turn
-     *  and the session is resumed (issue #364 + #381 P2). */
-    unstarted?: boolean;
-  } = {}
-): Promise<void> {
-  const { getSession, saveSession, getEvents } = await import(
-    "../lib/sessions.js"
-  );
-  const { projectStoreDir } = await import("../lib/paths.js");
-  const fs = await import("node:fs/promises");
-  const path = await import("node:path");
-  const source = await getSession(worktreePath, sourceSessionId);
-  // No source: nothing to seed. The new session keeps its empty
-  // transcript (the `persistSessionStart` user_message event is the
-  // only entry in the events file).
-  if (!source) return;
-  // 1. Prepend source events to the new session's events file.
-  const sourceEvents = await getEvents(worktreePath, sourceSessionId);
-  if (sourceEvents.length > 0) {
-    const eventsDir = path.join(projectStoreDir(worktreePath), "events");
-    await fs.mkdir(eventsDir, { recursive: true });
-    const newEventsPath = path.join(eventsDir, `${newSessionId}.jsonl`);
-    // `persistSessionStart` already appended the branch-marker
-    // user_message event to this file via `appendEvent`. Read the
-    // existing contents (just the one line) and prepend the source
-    // events.
-    let trailing = "";
-    try {
-      trailing = await fs.readFile(newEventsPath, "utf-8");
-    } catch {
-      // No file yet — extremely unlikely (persistSessionStart
-      // should have just created it), but be defensive.
-    }
-    const sourceLines = sourceEvents
-      .map((event) => JSON.stringify(event))
-      .join("\n");
-    const next = sourceLines + (trailing ? `\n${trailing.replace(/\n+$/, "")}\n` : "");
-    await fs.writeFile(newEventsPath, next);
-  }
-  // 2. Patch the new session's file: provider/model/mode from
-  // source, messages seeded, parentId set to source. We read the
-  // session file the persistence layer just wrote and rewrite it
-  // with the source-derived defaults. We do NOT change the agent's
-  // spawn-time provider/model/mode (those already ran the first
-  // turn) — only the *defaults* the model picker falls back to.
-  const newSession = await getSession(worktreePath, newSessionId);
-  if (!newSession) return;
-  // Build the branch-marker user message for the in-file messages
-  // array. Match the same prefix the route layer prepends to the
-  // user-visible text so the two stay in lock-step.
-  const branchMarker: Record<string, unknown> = {
-    type: "user_message",
-    role: "user",
-    text: historyText,
-    timestamp: new Date().toISOString(),
-  };
-  const seededMessages: unknown[] = [
-    ...((Array.isArray(source.messages) ? source.messages : []) as unknown[]),
-    branchMarker,
-  ];
-  const seededTitle =
-    options.title && options.title.trim()
-      ? options.title.trim()
-      : newSession.title && newSession.title.length > 0
-        ? newSession.title
-        : source.title
-          ? `Branch of ${source.title}`
-          : newSession.title;
-  await saveSession(worktreePath, {
-    ...newSession,
-    provider: source.provider ?? newSession.provider,
-    model: source.model ?? newSession.model,
-    mode: source.mode ?? newSession.mode,
-    parentId: source.id,
-    title: seededTitle,
-    messages: seededMessages,
-    // Mark the new session as unstarted so the composer's
-    // provider/model/mode pickers stay unlocked until the user
-    // types their first real turn. `persistSessionStart` clears
-    // this on the subsequent resume (see its `existing?.unstarted`
-    // handling).
-    unstarted: options.unstarted ?? newSession.unstarted,
-  });
 }

@@ -179,31 +179,6 @@ const USAGE = `Usage:
   server resolves the owning project from the session file, so the agent's
   natural usage is just \`wake <self>\`.
 
-  controller sessions branch <sourceSessionId|self> <message> \\
-      [--provider|--agent codex|claude|anita] [--model <model>] \\
-      [--mode default|plan] [--title <title>] [--from <sourceSessionId|self>]
-
-  Same positional-message + \`--\` end-of-flags shape as \`sessions start\` /
-  \`sessions wake\` (issue #355). The first positional is the *source* session
-  id (or \`self\` for the calling session via \`$CONTROLLER_SESSION_ID\`);
-  the second positional is the message that kicks off the new branch.
-  \`--from <id|self>\` is an alias for the positional source.
-
-  \`sessions branch\` forks an existing conversation into a brand-new session
-  whose transcript is a copy of the source's transcript up to (and including)
-  the user's first new message (issue #364). The first turn of the new branch
-  can run on a different \`--provider\` / \`--model\` / \`--mode\` than the
-  source; later turns use whatever the user picks in the composer (the
-  source's defaults). With no override flags the first turn runs on the same
-  agent/model/mode as the source — useful for "continue this conversation in
-  a sibling session". The branch marker (\`[/branch: codex->claude/opus-5] …\`)
-  is recorded as the first message so the chat view audits which agent/model
-  ran the first turn. \`--title\` overrides the auto-generated
-  \`Branch of <sourceTitle>\`. The new session is recorded as a child of the
-  source (\`controller sessions list --parent <sourceId>\` and
-  \`controller sessions children <sourceId>\` both surface it) so the sidebar
-  subtree groups every branch under its source.
-
   controller sessions goal set <sessionId> --condition <text> [--max-turns <n>] [--expires-at <iso>]
   controller sessions goal clear <sessionId>
   controller sessions goal show <sessionId>
@@ -1007,8 +982,8 @@ export function parseSessions(argv) {
       //
       // Issue #375: route the session id through `resolveParentFlag` so
       // `wake <self>` resolves via `$CONTROLLER_SESSION_ID` (the same
-      // contract `start --parent self` / `children self` / `branch self`
-      // already implement). Agents see a clear client-side error when
+      // contract `start --parent self` / `children self` already
+      // implement). Agents see a clear client-side error when
       // the env var is unset, not the server's "Session not found.".
       if (!rest[0] || rest[0].startsWith("--")) {
         fail("sessions wake requires a sessionId");
@@ -1154,126 +1129,6 @@ export function parseSessions(argv) {
         project: "",
         action: "children",
         parentId,
-      };
-    }
-    case "branch": {
-      // `sessions branch <sourceSessionId|self> <message> [flags]`
-      // (issue #364).
-      //
-      // The verb forks an existing session into a brand-new one whose
-      // transcript is a copy of the source's transcript up to (and
-      // including) the user's first new message. The first turn of
-      // the new branch can run on a different `--provider` /
-      // `--model` / `--mode` than the source; later turns use the
-      // source's defaults (the model picker in the composer falls
-      // back to whatever the source had).
-      //
-      // Wire shape mirrors `sessions start` (issue #355 positional
-      // message + `--` end-of-flags), but the first positional is the
-      // *source session id* — the worktree id is implied (the source
-      // lives on a specific worktree, and the branch inherits that
-      // worktree; cross-worktree branches are out of scope per the
-      // issue). `--from <id|self>` is an alias for the positional
-      // source so the call shape reads naturally in scripts; the
-      // positional wins when both are present.
-      //
-      // We strip the source + any `--from` pair before handing the
-      // remaining args to `extractMessageAndFlagArgs`, which gives
-      // us the same positional-message + flag-pair walker as
-      // `start` / `wake` / `send`.
-      const positionalSource = rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined;
-      const fromIdx = rest.indexOf("--from");
-      const aliasSource = fromIdx >= 0 ? rest[fromIdx + 1] : undefined;
-      // Positional wins when both are present (the issue's
-      // recommendation). Error if neither is set.
-      const sourceRaw = positionalSource ?? aliasSource;
-      if (!sourceRaw || sourceRaw.startsWith("--")) {
-        fail("sessions branch requires a <sourceSessionId|self> (or --from <id|self>)");
-      }
-      if (positionalSource && aliasSource && positionalSource !== aliasSource) {
-        fail(
-          `sessions branch: positional source (${positionalSource}) and --from (${aliasSource}) disagree. ` +
-            `Pass only one of them.`
-        );
-      }
-      const sourceSessionId = resolveParentFlag(sourceRaw);
-      if (!sourceSessionId) {
-        fail(
-          `sessions branch: source 'self' requires $CONTROLLER_SESSION_ID; ` +
-            `the agent that ran this command was not spawned by the orchestrator. ` +
-            `Run \`controller sessions list\` to discover your id and pass it explicitly.`
-        );
-      }
-      // Build the args slice the positional parser sees. We strip
-      // the positional source id and any `--from <value>` pair so
-      // the message positional + the flag pairs are the only things
-      // left. The filter walks `rest` once and drops:
-      //   - rest[0] if it's the positional source
-      //   - the `--from` flag and its value (when `--from <value>`
-      //     is the alias form — `--from` always takes a value, so
-      //     we can increment i past it safely)
-      const branchArgs = [];
-      for (let i = 0; i < rest.length; i += 1) {
-        const arg = rest[i];
-        if (i === 0 && arg === positionalSource) continue;
-        if (arg === "--from") {
-          // Skip the flag and its value.
-          i += 1;
-          continue;
-        }
-        branchArgs.push(arg);
-      }
-      const { message, flagArgs } = extractMessageAndFlagArgs(
-        branchArgs,
-        [
-          "--provider",
-          "--agent",
-          "--model",
-          "--mode",
-          "--title",
-        ],
-        "sessions branch"
-      );
-      const providerFromFlag = flagValue(flagArgs, "--provider");
-      const providerFromAlias = flagValue(flagArgs, "--agent");
-      let provider = undefined;
-      if (providerFromFlag != null && providerFromAlias != null) {
-        if (providerFromFlag !== providerFromAlias) {
-          fail(
-            `sessions branch: --provider (${providerFromFlag}) and --agent (${providerFromAlias}) disagree. ` +
-              `Pass only one of them.`
-          );
-        }
-        provider = providerFromFlag;
-      } else {
-        provider = providerFromFlag ?? providerFromAlias;
-      }
-      const model = flagValue(flagArgs, "--model");
-      const mode = flagValue(flagArgs, "--mode");
-      const title = flagValue(flagArgs, "--title");
-      return {
-        project: "",
-        action: "branch",
-        sourceSessionId,
-        body: {
-          // `sourceSessionId` lives in `body` for symmetry with the
-          // wire format the server expects (`POST /sessions/branch`
-          // reads `sourceSessionId` from the JSON body). The CLI
-          // dispatcher reads it from `parsed.sourceSessionId`
-          // directly so the call stays typed; carrying it in
-          // `body` too keeps the parser output aligned with the
-          // server wire shape, which is what the issue's test
-          // cases assert.
-          sourceSessionId,
-          message,
-          // Empty strings are dropped server-side; the server falls
-          // back to the source's provider/model/mode when these are
-          // absent (issue #364 design §2).
-          ...(provider ? { provider } : {}),
-          ...(model ? { model } : {}),
-          ...(mode ? { mode } : {}),
-          ...(title ? { title } : {}),
-        },
       };
     }
     case "monitor": {
@@ -1504,32 +1359,6 @@ export async function runSessions(argv, serverUrl) {
   }
   if (parsed.action === "list") {
     await runSessionsList(parsed.body, serverUrl, projectId);
-    return;
-  }
-  if (parsed.action === "branch") {
-    // Fork an existing session into a brand-new one (issue #364).
-    // The route is mounted under `/api/projects/:projectId/sessions/branch`
-    // and the server resolves the source via the cross-worktree
-    // `locateSessionById` walk. The CLI parser already threads
-    // `sourceSessionId` through `parsed.body` (matching the server
-    // wire shape) and resolves `--from` / `self` aliases; we just
-    // forward the body. The response shape matches the headless
-    // `start` endpoint (`{ sessionId, url }`), so the CLI prints
-    // the same "Started session … / Open in Controller: …" lines.
-    const route = `/api/projects/${projectId}/sessions/branch`;
-    const { response, result } = await postJson(serverUrl, route, parsed.body);
-    if (response.status >= 400) {
-      fail(serverError(result, `Failed to branch session (HTTP ${response.status})`));
-    }
-    const sessionId = result?.sessionId;
-    const url = result?.url;
-    if (typeof sessionId !== "string" || !sessionId) {
-      fail("Server did not return a sessionId");
-    }
-    process.stdout.write(`Branched session ${sessionId} from ${parsed.sourceSessionId}\n`);
-    if (typeof url === "string" && url) {
-      process.stdout.write(`Open in Controller: ${url}\n`);
-    }
     return;
   }
   if (parsed.action === "monitor") {
@@ -2968,7 +2797,7 @@ function extractMessageAndFlagArgs(args, knownFlags, commandLabel) {
 //
 // After issue #375 this is shared by every session-id-taking verb
 // (`wake`, `goal set|clear|show`, `monitor start|list`, `children`,
-// `send`, `branch`) in addition to the original `--parent` flag on
+// `send`) in addition to the original `--parent` flag on
 // `start` / `list`. Pass `verbLabel` (e.g. `"sessions wake"`,
 // `"sessions goal set"`, `"sessions monitor start"`) so the failure
 // message names the verb the agent invoked. When omitted, the generic

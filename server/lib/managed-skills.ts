@@ -682,7 +682,7 @@ exists and you need to locate it, message it, or watch it.
 (issue #375). Every session-id-taking verb accepts it: \`wake <self>\`,
 \`goal set <self>\` / \`show <self>\` / \`clear <self>\`, \`monitor start <self>\` /
 \`list <self>\`, in addition to \`start --parent self\`, \`list --parent self\`,
-\`children self\`, \`send self\` / \`send … --from self\`, and \`branch self\`. The
+\`children self\`, and \`send self\` / \`send … --from self\`. The
 only verb that does **not** accept \`self\` is \`monitor stop <monitorId>\`,
 which takes a monitor UUID rather than a session id.
 
