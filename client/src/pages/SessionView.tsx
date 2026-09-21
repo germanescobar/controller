@@ -1259,6 +1259,21 @@ function isWorkingStreamItem(item: StreamItem): boolean {
   return WORKING_STREAM_TYPES.has(item.type);
 }
 
+/**
+ * True when an `assistant_response` event will actually render an
+ * `AssistantBlock` — i.e. it carries at least one non-empty `text`
+ * content block. Reasoning-only responses render a `ReasoningBlock`
+ * and no action row, so they can't host the branch icon. Mirrors the
+ * text extraction in `EventBlock`; keep the two in step.
+ */
+function assistantResponseHasText(event: AgentEvent): boolean {
+  const content = event.data?.content;
+  if (!Array.isArray(content)) return false;
+  return (content as Array<{ type?: unknown; text?: unknown; content?: unknown }>)
+    .filter((block) => block.type === "text")
+    .some((block) => normalizeMarkdownText(block.text ?? block.content).length > 0);
+}
+
 function groupEventsForRender(events: AgentEvent[]): EventRenderItem[] {
   const result: EventRenderItem[] = [];
   let group: AgentEvent[] = [];
@@ -1417,10 +1432,11 @@ const EventBlock = memo(function EventBlock({
   event: AgentEvent;
   copiedId: string | null;
   onCopy: (e: AgentEvent) => void;
-  /** Branch-this-conversation callback (issue #364, UI). Wired
-   *  through from SessionView so every assistant turn gets the
-   *  same fork affordance. */
-  onBranch?: () => void;
+  /** Branch-from-here callback. Only the last assistant block of
+   *  each turn receives this — see `branchableEventKeys` in
+   *  SessionView. Called with this event's id so the branch ends at
+   *  this response rather than at the end of the conversation. */
+  onBranch?: (upToEventId?: string) => void;
   /** True while a branch request is in flight — disables the
    *  branch icon to prevent double-clicks. */
   branching?: boolean;
@@ -1517,7 +1533,7 @@ const EventBlock = memo(function EventBlock({
             text={text}
             copiedId={copiedId === event.id ? event.id : null}
             onCopy={() => onCopy(event)}
-            onBranch={onBranch}
+            onBranch={onBranch ? () => onBranch(event.id) : undefined}
             branching={branching}
           />
         ) : null}
@@ -1565,6 +1581,36 @@ const EventBlock = memo(function EventBlock({
       <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
         <div className="h-px flex-1 bg-border" />
         <span>{label}</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    );
+  }
+
+  // branch_marker: the "this conversation was branched from X"
+  // breadcrumb the branch route writes (issue #382). Rendered as a
+  // divider rather than a chat bubble — the user never sent it, and
+  // showing it as their message is what made branched sessions look
+  // like they opened with a message nobody typed. The link resolves
+  // the source's current title and navigates in-app.
+  if (event.type === "branch_marker") {
+    const sourceUri =
+      typeof data.sourceUri === "string" ? data.sourceUri : "";
+    const linkTarget = parseControllerUri(sourceUri);
+    return (
+      <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
+        <div className="h-px flex-1 bg-border" />
+        <span className="flex items-center gap-1">
+          Branched from
+          {linkTarget ? (
+            <ControllerConversationLink
+              href={sourceUri}
+              linkTarget={linkTarget}
+              className="underline underline-offset-2 hover:text-foreground"
+            />
+          ) : (
+            <span>a deleted conversation</span>
+          )}
+        </span>
         <div className="h-px flex-1 bg-border" />
       </div>
     );
@@ -1785,18 +1831,14 @@ const AssistantBlock = memo(function AssistantBlock({
   /** Click handler for the copy button. Parent wires it to copy
    *  the assistant message's text (or JSON). */
   onCopy?: () => void;
-  /** Click handler for the branch button. Parent wires it to
-   *  `handleBranchCurrent` so every assistant turn in either the
-   *  persisted timeline or the live stream gets the same fork
-   *  affordance (issue #364, UI). */
+  /** Click handler for the branch button. Only supplied for the
+   *  last assistant block of a turn, so the icon reads as an
+   *  end-of-response action rather than a per-paragraph one. Copy,
+   *  by contrast, is per-paragraph and is wired on every block. */
   onBranch?: () => void;
   /** True while a branch request is in flight — disables the branch
    *  icon to prevent double-clicks. */
   branching?: boolean;
-  /** Optional children kept for backwards-compat with the older
-   *  children prop shape; new callers should prefer the named props
-   *  so the action row stays consistent across persist + stream paths. */
-  children?: React.ReactNode;
 }) {
   const normalizedText = normalizeMarkdownText(text);
   const showActionRow = Boolean(onCopy || onBranch);
@@ -1832,7 +1874,7 @@ const AssistantBlock = memo(function AssistantBlock({
               title={
                 branching
                   ? "Branching conversation…"
-                  : "Branch this conversation into a new session"
+                  : "Branch from here into a new session"
               }
             >
               {branching ? (
@@ -1844,7 +1886,6 @@ const AssistantBlock = memo(function AssistantBlock({
           ) : null}
         </div>
       ) : null}
-      {children}
     </div>
   );
 });
@@ -5417,11 +5458,11 @@ export function SessionView({
   };
 
   // Branch this conversation into a brand-new session whose transcript
-  // is seeded from the source (issue #364, UI). The empty-message
-  // shortcut seeds the transcript synchronously without spawning an
-  // agent — the user lands on the new session's empty composer and
-  // picks the agent / model / mode there (the composer pickers are
-  // unlocked because the new session has no turns yet). We navigate
+  // is seeded from the source (issue #382). The server responds
+  // synchronously without spawning an agent — the user lands on the
+  // new session's empty composer and picks the agent / model / mode
+  // there (the composer pickers are unlocked because the new session
+  // has no turns yet). We navigate
   // via `onSessionCreated` so App.tsx's existing session-switch path
   // (worktree-aware, sidebar-refreshing) handles the rest. A
   // per-session busy flag prevents double-clicks during the network
@@ -5429,7 +5470,13 @@ export function SessionView({
   const [branchingSessionId, setBranchingSessionId] = useState<
     string | null
   >(null);
-  const handleBranchCurrent = useCallback(async () => {
+  // `upToEventId` is the id of the assistant event whose icon was
+  // clicked: the branch then ends at that response instead of running
+  // to the end of the conversation. The live stream has no persisted
+  // event ids yet, so branching from it passes nothing and copies the
+  // whole transcript — which is the same thing, since the stream *is*
+  // the end of the conversation.
+  const handleBranchCurrent = useCallback(async (upToEventId?: string) => {
     const targetSessionId = activeStreamSessionId ?? sessionId;
     if (!targetSessionId) return;
     if (branchingSessionId === targetSessionId) return;
@@ -5438,11 +5485,10 @@ export function SessionView({
       const { sessionId: newSessionId } = await branchSession(
         projectId,
         targetSessionId,
-        // No `message` — the server takes the empty-prompt shortcut
-        // (pre-creates the session file + events, returns
-        // synchronously). The user types the first real turn on the
-        // new session via the composer.
-        { worktreeId }
+        // The route pre-creates the session file + events and
+        // returns synchronously. The user types the first real turn
+        // on the new session via the composer.
+        { worktreeId, ...(upToEventId ? { upToEventId } : {}) }
       );
       onSessionCreated(newSessionId);
     } catch (err) {
@@ -5700,6 +5746,16 @@ export function SessionView({
   const copyEventData = useCallback((event: AgentEvent) => {
     navigator.clipboard.writeText(JSON.stringify(event.data, null, 2));
     setCopiedId(event.id);
+    setTimeout(() => setCopiedId(null), 2000);
+  }, []);
+
+  /** Copy a live-stream assistant paragraph. Stream items have no
+   *  AgentEvent behind them yet, so the render key doubles as the
+   *  copied-state id and the raw markdown is what lands on the
+   *  clipboard (the persisted path copies the event JSON instead). */
+  const copyStreamText = useCallback((key: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(key);
     setTimeout(() => setCopiedId(null), 2000);
   }, []);
 
@@ -6144,6 +6200,48 @@ export function SessionView({
     (branchingSessionId !== null &&
       branchingSessionId === (activeStreamSessionId ?? sessionId)) ||
     false;
+  // The branch icon goes at the end of every *response*, not on every
+  // paragraph and not only on the last response. One agent turn emits
+  // many `assistant_response` events (roughly one per paragraph), so
+  // the icon lands on the last one of each turn — a turn being the run
+  // of events between two user messages. Copy stays on every block;
+  // that one genuinely is per-paragraph.
+  const branchableEventKeys = useMemo(() => {
+    const keys = new Set<string>();
+    // The last assistant block seen since the current turn began. A
+    // user message closes the turn and promotes it; anything else
+    // (tool calls, reasoning, diffs) leaves it alone, so trailing
+    // tool work after the prose doesn't steal the icon.
+    let pendingKey: string | null = null;
+    for (const render of eventRenderItems) {
+      if (render.kind === "working_group") continue;
+      if (render.event.type === "user_message") {
+        if (pendingKey) {
+          keys.add(pendingKey);
+          pendingKey = null;
+        }
+      } else if (
+        render.event.type === "assistant_response" &&
+        assistantResponseHasText(render.event)
+      ) {
+        pendingKey = render.key;
+      }
+    }
+    // The final turn has no user message after it to close it.
+    if (pendingKey) keys.add(pendingKey);
+    return keys;
+  }, [eventRenderItems]);
+  // The live stream is the in-flight response; its last assistant block
+  // is that response's current end, so it carries the icon too.
+  const lastStreamBranchableKey = useMemo(() => {
+    for (let i = streamRenderItems.length - 1; i >= 0; i -= 1) {
+      const render = streamRenderItems[i];
+      if (render.kind === "item" && render.item.type === "assistant") {
+        return render.key;
+      }
+    }
+    return null;
+  }, [streamRenderItems]);
 
   return (
     <>
@@ -6463,7 +6561,11 @@ export function SessionView({
                       event={renderItem.event}
                       copiedId={copiedId}
                       onCopy={copyEventData}
-                      onBranch={onBranch}
+                      onBranch={
+                        branchableEventKeys.has(renderItem.key)
+                          ? onBranch
+                          : undefined
+                      }
                       branching={branching}
                       hiddenPendingUserInputEventId={
                         visibleStreamItems.length === 0 ? latestStructuredInputRequest?.id : null
@@ -6600,7 +6702,13 @@ export function SessionView({
                         <AssistantBlock
                           key={render.key}
                           text={item.text}
-                          onBranch={onBranch}
+                          copiedId={copiedId === render.key ? render.key : null}
+                          onCopy={() => copyStreamText(render.key, item.text)}
+                          onBranch={
+                            render.key === lastStreamBranchableKey
+                              ? () => onBranch()
+                              : undefined
+                          }
                           branching={branching}
                         />
                       );

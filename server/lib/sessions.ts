@@ -69,6 +69,18 @@ export interface SessionState {
   // the user's first follow-up resume, after which the session
   // behaves like any other and the pickers lock.
   unstarted?: boolean;
+  // Provider-thread id (issue #382). Set on the first turn after a
+  // branch — the branched session's `id` is a Controller-chosen UUID
+  // (so the URL is stable before any agent runs), and the provider
+  // picks its own thread id when the first turn starts. We capture
+  // the provider's id here so subsequent turns can pass
+  // `--resume <providerThreadId>` to the provider while the rest
+  // of the Controller machinery (events file, URL, sidebar tree)
+  // continues to key off the Controller UUID. Read by
+  // `handleSessionStream`'s resume branch; absent for sessions that
+  // were never branched (where `id` IS the provider thread id, as it
+  // always was pre-#382).
+  providerThreadId?: string;
 }
 
 /**

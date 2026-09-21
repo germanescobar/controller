@@ -1451,54 +1451,44 @@ export function subscribeProjectEvents(
 }
 
 /**
- * Fork an existing session into a brand-new one whose transcript is
- * seeded from the source (issue #364, UI). The empty-message
- * shortcut (no `message` option) lands the caller on the new
- * session's empty composer — the source transcript is seeded into
- * the new session's events file, but no agent runs until the user
- * types and sends the first real turn through the regular
- * `startSession` flow. With a non-empty `message`, the server
- * runs the first turn on the requested provider/model/mode
- * (matching the CLI verb's contract).
+ * Branch an existing session into a brand-new one (issue #382).
  *
- * Returns `{ sessionId, url }` synchronously for the empty-message
- * shortcut; for the agent-spawned path the SSE handler resolves
- * the same shape once `run.started` lands. The caller can navigate
- * to the new session immediately in both cases.
+ * Pass `upToEventId` to branch from a specific response rather than
+ * from the end of the conversation — the copied transcript stops
+ * there.
+ *
+ * The server responds synchronously: no agent is spawned, no turn
+ * runs. The new session's events file is seeded with the source's
+ * transcript plus a `[/branch: …]` breadcrumb, and its composer
+ * pickers are unlocked so the caller can pick a different agent or
+ * model for the first turn. That first turn goes through the regular
+ * `startSession` flow; the server starts a fresh provider thread and
+ * feeds it the seeded transcript.
  */
 export async function branchSession(
   projectId: string,
   sourceSessionId: string,
   options?: {
-    message?: string;
-    provider?: string;
-    model?: string;
-    mode?: "default" | "plan";
-    title?: string;
+    /** Cut the copied transcript after this event (inclusive), so
+     *  branching from an earlier response yields a session that ends
+     *  there. Omit to copy the whole conversation. */
+    upToEventId?: string;
+    /** Defaults to the source's worktree. */
     worktreeId?: string;
+    /** Defaults to "Branch of <sourceTitle>". */
+    title?: string;
   }
 ): Promise<{ sessionId: string; url: string }> {
-  const res = await fetch(
-    `${BASE}/projects/${projectId}/sessions/branch`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        sourceSessionId,
-        // `message` is omitted on the wire when not supplied so the
-        // server takes the empty-prompt shortcut. Passing an empty
-        // string is the same outcome — the route treats `""` and
-        // `undefined` identically.
-        ...(options?.message && options.message.trim()
-          ? { message: options.message }
-          : {}),
-        ...(options?.provider ? { provider: options.provider } : {}),
-        ...(options?.model ? { model: options.model } : {}),
-        ...(options?.mode ? { mode: options.mode } : {}),
-        ...(options?.title ? { title: options.title } : {}),
-      }),
-    }
-  );
+  const res = await fetch(`${BASE}/projects/${projectId}/sessions/branch`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      sourceSessionId,
+      ...(options?.upToEventId ? { upToEventId: options.upToEventId } : {}),
+      ...(options?.worktreeId ? { worktreeId: options.worktreeId } : {}),
+      ...(options?.title ? { title: options.title } : {}),
+    }),
+  });
   await throwIfNotOk(res, "Failed to branch session");
   return (await res.json()) as { sessionId: string; url: string };
 }
