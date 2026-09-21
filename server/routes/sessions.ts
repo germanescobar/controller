@@ -706,8 +706,10 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  *     chat view shows the prior conversation immediately, followed by a
  *     `branch_marker` event the chat view renders as a "Branched from
  *     <source>" divider;
- *   - carries `parentId: sourceId` so `controller sessions list --parent`
- *     (issue #353) groups every branch under its source;
+ *   - stands on its own in the sidebar: no `parentId`, because that
+ *     field marks a coordinator-spawned child (issues #351 / #353) and
+ *     a fork of a conversation is not work delegated by it. Lineage is
+ *     recorded by the `branch_marker` event instead;
  *   - is marked `unstarted: true` so the composer's provider / model /
  *     mode pickers stay unlocked — the whole point of a branch is "I
  *     want to try this with a different agent or model", so we do not
@@ -872,12 +874,18 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   // 2. Write the new session file. Provider / model / mode /
   // reasoningEffort / serviceTier are deliberately left unset so the
   // composer's picker gate keeps them unlocked — picking a different
-  // agent is the entire point of branching. `parentId` links the
-  // branch back to its source for `sessions list --parent`;
-  // `unstarted` keeps the picker gate open and is what
-  // `handleSessionStream` keys off to run the first turn on a fresh
-  // provider thread. `persistSessionStart` clears it on that turn
-  // (its `saveSession` rewrites the whole file without the flag).
+  // agent is the entire point of branching. `unstarted` keeps that
+  // gate open and is what `handleSessionStream` keys off to run the
+  // first turn on a fresh provider thread; `persistSessionStart`
+  // clears it on that turn (its `saveSession` rewrites the whole file
+  // without the flag).
+  //
+  // No `parentId`. That field means "a coordinator spawned this child"
+  // (issues #351 / #353) — it is what `sessions children <id>` and the
+  // sidebar subtree read, and it implies a supervision relationship
+  // the branch doesn't have. A branch is a fork of a conversation, not
+  // work delegated by it, so it stands on its own and the
+  // `branch_marker` event is where its lineage is recorded.
   const derivedTitle =
     body.title && body.title.trim()
       ? body.title.trim()
@@ -896,7 +904,6 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     createdAt: now,
     lastActiveAt: now,
     status: "active",
-    parentId: sourceSessionId,
     unstarted: true,
   });
   // 3. Pre-warm the focus sidecar so the branch shows up pinned in the

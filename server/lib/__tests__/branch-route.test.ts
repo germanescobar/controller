@@ -22,7 +22,7 @@ import path from "node:path";
  *
  * Covered here:
  *   1. Happy path — synchronous 200, Controller UUID, `unstarted: true`,
- *      unlocked pickers (no provider/model copied), `parentId` linkage,
+ *      unlocked pickers (no provider/model copied), no `parentId`,
  *      events file = source events + branch marker.
  *   2. `--title` override / auto-derived "Branch of <sourceTitle>".
  *   3. Unknown source -> 404; missing `sourceSessionId` -> 400.
@@ -334,7 +334,11 @@ test("POST /sessions/branch returns synchronously without spawning an agent (iss
       const session = await readSessionFile(projectPath, body.sessionId!);
       assert.equal(session.id, body.sessionId);
       assert.equal(session.worktreeId, worktreeId);
-      assert.equal(session.parentId, SOURCE_ID);
+      // No `parentId`: that field marks a coordinator-spawned child
+      // and drives `sessions children` + the sidebar subtree. A branch
+      // is a fork, not delegated work, so it must not nest under its
+      // source — its lineage is the `branch_marker` event below.
+      assert.equal(session.parentId, undefined);
       assert.equal(session.title, "Branch of Source session");
       // `unstarted` keeps the composer's pickers unlocked, and the
       // source's provider/model/mode are deliberately NOT copied —
@@ -535,6 +539,9 @@ test("first turn on a branched session starts a fresh provider thread and captur
       // events file — `messages` is still empty, so nothing mirrored
       // it onto the session file.
       assert.deepEqual(session.messages, []);
+      // `persistSessionStart` has a `parentId` branch; the first turn
+      // must not use it to quietly adopt the branch into a subtree.
+      assert.equal(session.parentId, undefined);
       // The branch breadcrumb is chat-view furniture; it must not
       // reach the agent as a conversation turn.
       assert.ok(
