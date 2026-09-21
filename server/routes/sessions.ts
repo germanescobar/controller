@@ -703,7 +703,9 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  *     branches are intentionally out of scope — the user can always pick
  *     a different worktree when they start the first real turn);
  *   - has its events file prepended with the source's transcript so the
- *     chat view shows the prior conversation immediately;
+ *     chat view shows the prior conversation immediately, followed by a
+ *     `branch_marker` event the chat view renders as a "Branched from
+ *     <source>" divider;
  *   - carries `parentId: sourceId` so `controller sessions list --parent`
  *     (issue #353) groups every branch under its source;
  *   - is marked `unstarted: true` so the composer's provider / model /
@@ -832,23 +834,23 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   }
   const newSessionId = randomUUID();
   const now = new Date().toISOString();
-  // The branch marker is the chat-view breadcrumb: one `user_message`
-  // line saying where this conversation came from, carrying a
-  // `controller://` URI so the linkifier renders it as a click-through
-  // back to the source (same shape as the `[/from: …]` marker
-  // `sessions send` writes). It is *not* the old
-  // `[/branch: src->tgt] <text>` agent prompt prefix — this route
-  // never spawns an agent, so there is no prompt to prefix.
-  const sourceUri = `controller://project/${project.id}/worktree/${located.worktreeId}/session/${sourceSessionId}`;
-  const branchMarkerText = `[/branch: ${sourceSession.title?.trim() || sourceSessionId}] ${sourceUri}`;
+  // The branch marker is a chat-view breadcrumb saying where this
+  // conversation came from. It gets its own event type rather than
+  // riding on a `user_message`: the user never typed it, so rendering
+  // it as a chat bubble from them is a lie, and `messagesFromEvents`
+  // would then feed it to the agent as a turn it has to interpret.
+  // `branch_marker` renders as a divider with a link and is invisible
+  // to the prompt builder. The client resolves the source's *current*
+  // title from `sourceSessionId`, so none is baked in here — a later
+  // rename of the source is reflected automatically.
   const branchMarkerEvent = {
     id: randomUUID(),
     sessionId: newSessionId,
     timestamp: now,
-    type: "user_message" as const,
+    type: "branch_marker" as const,
     data: {
-      text: branchMarkerText,
-      attachments: [],
+      sourceSessionId,
+      sourceUri: `controller://project/${project.id}/worktree/${located.worktreeId}/session/${sourceSessionId}`,
     },
   };
   // 1. Write the new session's events file: the source's events

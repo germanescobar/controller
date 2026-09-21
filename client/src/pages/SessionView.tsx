@@ -1586,6 +1586,36 @@ const EventBlock = memo(function EventBlock({
     );
   }
 
+  // branch_marker: the "this conversation was branched from X"
+  // breadcrumb the branch route writes (issue #382). Rendered as a
+  // divider rather than a chat bubble — the user never sent it, and
+  // showing it as their message is what made branched sessions look
+  // like they opened with a message nobody typed. The link resolves
+  // the source's current title and navigates in-app.
+  if (event.type === "branch_marker") {
+    const sourceUri =
+      typeof data.sourceUri === "string" ? data.sourceUri : "";
+    const linkTarget = parseControllerUri(sourceUri);
+    return (
+      <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
+        <div className="h-px flex-1 bg-border" />
+        <span className="flex items-center gap-1">
+          Branched from
+          {linkTarget ? (
+            <ControllerConversationLink
+              href={sourceUri}
+              linkTarget={linkTarget}
+              className="underline underline-offset-2 hover:text-foreground"
+            />
+          ) : (
+            <span>a deleted conversation</span>
+          )}
+        </span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    );
+  }
+
   // session_start / session_end: compact
   if (event.type === "session_start" || event.type === "session_end") {
     return (

@@ -361,10 +361,15 @@ test("POST /sessions/branch returns synchronously without spawning an agent (iss
         `expected 3 source events + 1 branch marker; got ${events.length}`
       );
       assert.equal(events[0].data.text, "First user turn");
-      assert.equal(events[3].type, "user_message");
+      // The breadcrumb is its own event type, not a `user_message` —
+      // the user never typed it, so the chat view must not render it
+      // as a bubble from them and the prompt builder must not see it
+      // as a turn.
+      assert.equal(events[3].type, "branch_marker");
+      assert.equal(events[3].data.sourceSessionId, SOURCE_ID);
       assert.match(
-        events[3].data.text,
-        new RegExp(`^\\[/branch: Source session\\] controller://.*${SOURCE_ID}$`)
+        events[3].data.sourceUri,
+        new RegExp(`^controller://project/.*/session/${SOURCE_ID}$`)
       );
     }
   );
@@ -448,8 +453,8 @@ test("POST /sessions/branch seeds an empty source with just the marker (issue #3
         )
       );
       assert.equal(events.length, 1);
-      assert.equal(events[0].type, "user_message");
-      assert.match(events[0].data.text, /^\[\/branch: /);
+      assert.equal(events[0].type, "branch_marker");
+      assert.equal(events[0].data.sourceSessionId, SOURCE_ID);
     }
   );
 });
@@ -530,6 +535,12 @@ test("first turn on a branched session starts a fresh provider thread and captur
       // events file — `messages` is still empty, so nothing mirrored
       // it onto the session file.
       assert.deepEqual(session.messages, []);
+      // The branch breadcrumb is chat-view furniture; it must not
+      // reach the agent as a conversation turn.
+      assert.ok(
+        !invocations[0].includes(`session/${SOURCE_ID}`),
+        "the branch marker's source URI must not appear in the prompt"
+      );
 
       // Events still land under the Controller id — never the provider's.
       const { projectStoreDir } = await import("../paths.js");
@@ -663,8 +674,7 @@ test("POST /sessions/branch cuts the transcript at upToEventId (issue #382)", as
       );
       assert.equal(events[0].id, "evt-source-1");
       assert.equal(events[1].id, "evt-source-2");
-      assert.equal(events[2].type, "user_message");
-      assert.match(events[2].data.text, /^\[\/branch: /);
+      assert.equal(events[2].type, "branch_marker");
       assert.ok(
         !events.some((e) => e.data?.text === "Second user turn"),
         "the turn after the cut point must not be copied"
