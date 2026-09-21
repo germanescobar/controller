@@ -390,6 +390,49 @@ export async function fetchSessionTitle(
   }
 }
 
+/*
+ * Parent/children relationships for the floating focus panel (issue #384).
+ *
+ * The endpoint sits at `/api/sessions/:sessionId/children` (issue #353) so a
+ * coordinator on one worktree and its child on another resolve without the
+ * caller threading project ids. The route returns:
+ *
+ *   {
+ *     parent: string | null,           // backwards-compat: the parent id
+ *     parentSession: SessionSummary | null,        // for the panel's title link
+ *     parentProjectId: string | null,             // for the controller:// URI
+ *     children: Array<SessionSummary & { projectId: string }>,
+ *   }
+ *
+ * Children carry `projectId` so the panel can build a clickable
+ * `controller://project/<pid>/worktree/<wid>/session/<sid>` URI without a
+ * second lookup. Empty `projectId` on a child means the session was archived
+ * between the two server-side walks (see `server/routes/sessions.ts`); the
+ * panel renders the title but skips the click handler in that case.
+ */
+export interface SessionChildSummary extends SessionSummary {
+  projectId: string;
+}
+
+export interface SessionRelationships {
+  parent: string | null;
+  parentSession: SessionSummary | null;
+  parentProjectId: string | null;
+  children: SessionChildSummary[];
+}
+
+export async function fetchSessionRelationships(
+  sessionId: string
+): Promise<SessionRelationships | null> {
+  try {
+    const res = await fetch(`${BASE}/sessions/${sessionId}/children`);
+    if (!res.ok) return null;
+    return (await res.json()) as SessionRelationships;
+  } catch {
+    return null;
+  }
+}
+
 export async function updateSessionTitle(
   projectId: string,
   sessionId: string,

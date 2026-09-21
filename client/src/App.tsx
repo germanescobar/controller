@@ -35,6 +35,7 @@ import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useFocusShortcuts } from "./lib/useFocusShortcuts.ts";
+import { bumpRelationshipsRefresh } from "./lib/session-relationships.ts";
 import {
   ShortcutBindingsProvider,
   useShortcutBindingsContext,
@@ -382,6 +383,14 @@ function AppBody() {
         loadProjects();
       }
       setEventsRefreshKey((key) => key + 1);
+      // Issue #384: refresh the cached session-relationships
+      // (parent + children) so a child session that just spawned
+      // or finished in another tab is reflected in the floating
+      // focus panel on the next render. The events stream is the
+      // single source of truth for session lifecycle changes
+      // (issue #210), so this is the canonical place to bump the
+      // store from.
+      bumpRelationshipsRefresh();
     }, 50);
   }, [loadProjects]);
   useEffect(() => {

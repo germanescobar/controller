@@ -29,6 +29,7 @@ import {
   getAttachments,
   type AgentEvent,
   type AttachmentMetadata,
+  type SessionSummary,
 } from "../lib/sessions.js";
 import {
   buildSessionFocus,
@@ -3261,8 +3262,88 @@ childrenBySessionIdRouter.get(
       return;
     }
     const { listChildSessions } = await import("../lib/sessions.js");
-    const children = await listChildSessions(parentId);
-    res.json({ parent: parentId, children });
+    const { getProjectWorktrees } = await import("../lib/worktrees.js");
+    // Issue #384: the floating focus panel renders parent/children
+    // titles as `controller://project/<pid>/worktree/<wid>/session/<sid>`
+    // anchors, so we need project+worktree ids for every entry. The
+    // parent comes from `locateSessionById`; the children's ids
+    // require walking projects × worktrees again. We do this
+    // here rather than in `listChildSessions` so the cheaper
+    // existing helper (used by `collectArchiveBlockers`) keeps its
+    // current shape. The walk mirrors the strict-archive rule's
+    // child recursion, so the cost is the same.
+    const projects = await getProjects();
+    const childrenSummaries = await listChildSessions(parentId);
+    const childrenWithProjects: Array<
+      SessionSummary & { projectId: string }
+    > = [];
+    for (const child of childrenSummaries) {
+      // Re-locate the child so a session moved across worktrees
+      // since the parent walk still resolves correctly. `located`
+      // already returns the worktreeId on the session itself, but
+      // a child may live in a different project (a coordinator
+      // on one project can spawn a child on another via the
+      // `sessions start --project` route), so we cannot assume
+      // project id equality.
+      let resolved: { projectId: string; session: SessionSummary } | null =
+        null;
+      for (const project of projects) {
+        const worktrees = await getProjectWorktrees(project.id).catch(
+          () => [],
+        );
+        for (const worktree of worktrees) {
+          const candidate = await getSession(worktree.path, child.id).catch(
+            () => null,
+          );
+          if (candidate) {
+            resolved = { projectId: project.id, session: candidate };
+            break;
+          }
+        }
+        if (resolved) break;
+      }
+      if (!resolved) {
+        // The child was archived between the two walks. Fall back
+        // to the bare summary so the row still renders the title
+        // — better than silently dropping it — but mark the
+        // projectId as empty so the panel-side click handler can
+        // skip navigation for that entry.
+        childrenWithProjects.push({ ...child, projectId: "" });
+        continue;
+      }
+      childrenWithProjects.push({
+        ...resolved.session,
+        projectId: resolved.projectId,
+      });
+    }
+    // Parent summary is the session the caller already located;
+    // include it so the floating panel can render a single
+    // clickable title without a second round-trip. `parentProjectId`
+    // is split out for the controller:// anchor builder.
+    const parentSummary: SessionSummary = {
+      id: located.session.id,
+      title: located.session.title,
+      workingDirectory: located.session.workingDirectory,
+      worktreeId: located.session.worktreeId,
+      model: located.session.model,
+      reasoningEffort: located.session.reasoningEffort,
+      serviceTier: located.session.serviceTier,
+      provider: located.session.provider,
+      mode: located.session.mode,
+      createdAt: located.session.createdAt,
+      lastActiveAt: located.session.lastActiveAt,
+      status: located.session.status,
+      focusPinnedAt: located.session.focusPinnedAt,
+      focusDoneAt: located.session.focusDoneAt,
+      userUnpinned: located.session.userUnpinned,
+      parentId: located.session.parentId,
+    };
+    res.json({
+      parent: parentId,
+      parentSession: parentSummary,
+      parentProjectId: located.projectId,
+      children: childrenWithProjects,
+    });
   }
 );
 

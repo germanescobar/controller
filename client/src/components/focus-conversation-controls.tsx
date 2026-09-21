@@ -5,6 +5,10 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { formatChord, isMacPlatform } from "@/lib/shortcut-match";
 import type { ShortcutBindings } from "../../../shared/shortcuts.ts";
+import type {
+  SessionChildSummary,
+  SessionSummary,
+} from "../api.ts";
 
 interface FocusConversationControlsProps {
   variant: "mobile" | "desktop";
@@ -20,6 +24,59 @@ interface FocusConversationControlsProps {
     durationMs: number;
     onStay: () => void;
   } | null;
+  /**
+   * The current session's parent, or `null`/undefined when this
+   * session has no parent (issue #384). When set, the panel
+   * renders a single `Parent` row with the parent's clickable
+   * truncated title.
+   */
+  parent?: SessionSummary | null;
+  /**
+   * The current session's children. When non-empty, the panel
+   * renders a `Children` row with one clickable truncated title
+   * per child.
+   */
+  children?: SessionChildSummary[];
+  /**
+   * Project id of the current session. Required to build the
+   * `controller://` anchor for the parent; children summaries
+   * already carry their own projectId so the child's anchor is
+   * always self-sufficient.
+   */
+  currentProjectId?: string;
+  /**
+   * Navigates to another conversation referenced by a
+   * `controller://` link. Wires the parent/children clicks to
+   * the existing session-switch plumbing (no extra IPC).
+   */
+  onOpenConversation?: (target: {
+    projectId: string;
+    worktreeId: string;
+    sessionId: string;
+  }) => void;
+}
+
+const MAX_RELATIONSHIP_TITLE_LENGTH = 40;
+
+/**
+ * Truncate a session title for the panel rows. Long titles would
+ * otherwise wrap inside the narrow floating panel and steal space
+ * from the Next/Done buttons. The "Untitled conversation" fallback
+ * mirrors the rest of the client when a session has no `title`.
+ */
+function truncateTitle(value: string | null | undefined): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return "Untitled conversation";
+  if (text.length <= MAX_RELATIONSHIP_TITLE_LENGTH) return text;
+  return `${text.slice(0, MAX_RELATIONSHIP_TITLE_LENGTH)}…`;
+}
+
+function buildControllerUri(
+  projectId: string,
+  worktreeId: string,
+  sessionId: string
+): string {
+  return `controller://project/${projectId}/worktree/${worktreeId}/session/${sessionId}`;
 }
 
 export function FocusConversationControls({
@@ -32,6 +89,10 @@ export function FocusConversationControls({
   onAddToRadar,
   onToggleAutoAdvance,
   countdown = null,
+  parent = null,
+  children = [],
+  currentProjectId,
+  onOpenConversation,
 }: FocusConversationControlsProps) {
   const nextChord = formatChord(
     bindings?.focusAdvanceNext ?? "ctrl-n",
@@ -67,6 +128,43 @@ export function FocusConversationControls({
   const secondsRemaining = countdown
     ? Math.max(0, Math.ceil((countdown.durationMs - elapsedMs) / 1000))
     : 0;
+
+  // The parent row needs the current session's project id; the
+  // children summaries already carry projectId so they're
+  // self-sufficient. The parent row is hidden if the project id
+  // isn't known yet (e.g. the very first render before
+  // SessionView has hydrated) — the URI would be malformed
+  // otherwise.
+  //
+  // Issue #384 explicit out-of-scope: the mobile header carries
+  // this component in a tight horizontal strip, so the multi-line
+  // rows stay desktop-only. The mobile variant still receives
+  // the props (the same component is mounted twice), but the
+  // rows are not rendered there. A future "expandable drawer"
+  // refactor will own the mobile surface.
+  const isDesktop = variant === "desktop";
+  const parentTargetProjectId =
+    currentProjectId && parent?.id ? currentProjectId : null;
+  const parentWorktreeId = parent?.worktreeId ?? "";
+  const showParentRow =
+    isDesktop &&
+    Boolean(parent && parent.id) &&
+    Boolean(parentTargetProjectId);
+  const showChildrenRow =
+    isDesktop && Array.isArray(children) && children.length > 0;
+  const showRelationships = showParentRow || showChildrenRow;
+
+  const handleOpenTarget = (
+    event: React.MouseEvent<HTMLAnchorElement>,
+    target: {
+      projectId: string;
+      worktreeId: string;
+      sessionId: string;
+    }
+  ) => {
+    event.preventDefault();
+    onOpenConversation?.(target);
+  };
 
   return (
     <div
@@ -158,6 +256,92 @@ export function FocusConversationControls({
           </button>
         ) : null}
       </div>
+      {showRelationships ? (
+        <div
+          data-testid={`focus-conversation-relationships-${variant}`}
+          className="flex min-w-0 flex-col gap-1 border-t border-blue-500/20 pt-1.5 text-xs text-muted-foreground"
+        >
+          {showParentRow ? (
+            <div
+              data-testid="focus-conversation-relationship-parent"
+              className="flex min-w-0 flex-col"
+            >
+              <span className="font-medium uppercase tracking-wide text-[10px] text-muted-foreground/80">
+                Parent
+              </span>
+              <a
+                href={buildControllerUri(
+                  parentTargetProjectId!,
+                  parentWorktreeId,
+                  parent!.id
+                )}
+                onClick={(event) =>
+                  handleOpenTarget(event, {
+                    projectId: parentTargetProjectId!,
+                    worktreeId: parentWorktreeId,
+                    sessionId: parent!.id,
+                  })
+                }
+                title={parent?.title ?? "Parent conversation"}
+                className="min-w-0 truncate text-xs font-medium text-blue-700 hover:underline dark:text-blue-300"
+              >
+                {truncateTitle(parent?.title)}
+              </a>
+            </div>
+          ) : null}
+          {showChildrenRow ? (
+            <div
+              data-testid="focus-conversation-relationship-children"
+              className="flex min-w-0 flex-col gap-0.5"
+            >
+              <span className="font-medium uppercase tracking-wide text-[10px] text-muted-foreground/80">
+                Children
+              </span>
+              {children!.map((child) => {
+                const childProjectId = child.projectId;
+                // Empty projectId on a child means the server's
+                // two walks found no project for it (archived
+                // between walks — see `server/routes/sessions.ts`).
+                // Render the title as plain text so the panel is
+                // not missing a row, but don't wire it up as a link.
+                if (!childProjectId) {
+                  return (
+                    <span
+                      key={child.id}
+                      title={child.title ?? "Child conversation"}
+                      className="min-w-0 truncate text-xs text-muted-foreground"
+                    >
+                      {truncateTitle(child.title)}
+                    </span>
+                  );
+                }
+                const childWorktreeId = child.worktreeId ?? "";
+                return (
+                  <a
+                    key={child.id}
+                    href={buildControllerUri(
+                      childProjectId,
+                      childWorktreeId,
+                      child.id
+                    )}
+                    onClick={(event) =>
+                      handleOpenTarget(event, {
+                        projectId: childProjectId,
+                        worktreeId: childWorktreeId,
+                        sessionId: child.id,
+                      })
+                    }
+                    title={child.title ?? "Child conversation"}
+                    className="min-w-0 truncate text-xs font-medium text-blue-700 hover:underline dark:text-blue-300"
+                  >
+                    {truncateTitle(child.title)}
+                  </a>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {countdown ? (
         <div className="absolute inset-x-0 bottom-0 h-0.5 bg-muted">
           <div
