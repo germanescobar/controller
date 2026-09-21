@@ -714,9 +714,9 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  *     provider-thread id. The first real turn the user types goes
  *     through the regular `POST /sessions` flow; `handleSessionStream`
  *     sees `unstarted: true`, drops `resumeSessionId` so the provider
- *     starts a fresh thread, and prepends the branched session's
- *     `messages` (the source transcript) to the first-turn prompt so
- *     the agent still has the prior conversation in context. The
+ *     starts a fresh thread, and reads the branched session's own
+ *     events file to prepend the copied transcript to the first-turn
+ *     prompt so the agent still has the prior conversation in context. The
  *     provider's own thread id is captured on the session file as
  *     `providerThreadId` at `run.started`, and every *subsequent* turn
  *     resumes that id while the events file, URL and sidebar keep
@@ -804,12 +804,14 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     }
     targetWorktreeId = match.id;
   }
-  // Read the source's events. They go into the new session's events
-  // file (that's what the chat view reads on load) and, after the
-  // optional cut, are also what the new session's `messages` array is
-  // derived from — `handleSessionStream` renders that array into the
-  // first-turn prompt, so deriving both from one list is what keeps
-  // the agent's context and the visible transcript in agreement.
+  // Read the source's events. The events file is the session's
+  // transcript, full stop: the chat view renders from it, and
+  // `handleSessionStream` reads the branched session's own copy to
+  // build the first-turn prompt. Nothing is mirrored onto the session
+  // file's `messages` — that field is provider-owned (Anita writes the
+  // session file itself on some paths) and Controller only ever passes
+  // it through, so duplicating the transcript there would create a
+  // second copy to keep in sync for no reader's benefit.
   const allSourceEvents = await getEvents(worktreePath, sourceSessionId);
   // `upToEventId` cuts the transcript after the named event
   // (inclusive), so branching from the third of ten responses yields a
@@ -828,7 +830,6 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     }
     sourceEvents = allSourceEvents.slice(0, cutIndex + 1);
   }
-  const sourceMessages = messagesFromEvents(sourceEvents);
   const newSessionId = randomUUID();
   const now = new Date().toISOString();
   // The branch marker is the chat-view breadcrumb: one `user_message`
@@ -849,12 +850,6 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
       text: branchMarkerText,
       attachments: [],
     },
-  };
-  const branchMarkerMessage = {
-    type: "user_message",
-    role: "user",
-    text: branchMarkerText,
-    timestamp: now,
   };
   // 1. Write the new session's events file: the source's events
   // verbatim, then the branch marker as the last line. The copied
@@ -893,7 +888,9 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     workingDirectory: worktreePath,
     worktreeId: targetWorktreeId,
     model: "",
-    messages: [...sourceMessages, branchMarkerMessage],
+    // Empty, like every other Controller-started session. The
+    // transcript lives in the events file alone.
+    messages: [],
     createdAt: now,
     lastActiveAt: now,
     status: "active",
@@ -1229,9 +1226,12 @@ export async function handleSessionStream(
   // Branched-session first turn. The session file carries
   // `unstarted: true` and its id is a Controller-chosen UUID with no
   // provider thread behind it. Drop the resume so the provider starts
-  // fresh, and render the branched transcript (already on the session
-  // file's `messages`, seeded by the branch route) into the first-turn
-  // prompt so the agent has the prior conversation in context.
+  // fresh, and read the session's own events file — the transcript the
+  // branch route copied into it — to build the first-turn prompt so
+  // the agent has the prior conversation in context. Reading the
+  // events rather than a mirrored `messages` array means there is
+  // exactly one transcript, so a cut branch (`upToEventId`) can't hand
+  // the agent turns the user cut off.
   let branchedTranscript = "";
   let branchedFirstTurn = false;
   if (controllerSessionId) {
@@ -1239,7 +1239,7 @@ export async function handleSessionStream(
     if (existingSession?.unstarted) {
       branchedFirstTurn = true;
       branchedTranscript = renderSourceTranscriptForAgent(
-        existingSession.messages
+        messagesFromEvents(await getEvents(worktree.path, controllerSessionId))
       );
       resumeSessionId = undefined;
     } else if (existingSession?.providerThreadId) {
@@ -4393,12 +4393,13 @@ export function deriveAutoTitle(historyText: string): string {
  * Project a session's event log into the `{ role, text }` message
  * shape `renderSourceTranscriptForAgent` reads.
  *
- * The branch route derives the new session's `messages` from the same
- * (possibly truncated) event list it copies into the events file, so
- * the transcript the agent is given and the transcript the user sees
- * can't drift apart — which matters most with `upToEventId`, where
- * copying `source.messages` wholesale would hand the agent the very
- * turns the user cut off.
+ * This is a read-time projection, not a stored copy. The events file
+ * is a session's only transcript — the session file's `messages` is
+ * provider-owned (Anita writes the session file itself on some paths)
+ * and Controller never populates it. A branched session's first turn
+ * therefore renders its prompt straight from the events the branch
+ * route copied in, so the agent's context and the visible transcript
+ * are the same bytes by construction, cut point included.
  *
  * Only user and assistant prose is carried; tool calls, diffs and
  * reasoning are omitted because the prompt block is read-only context,

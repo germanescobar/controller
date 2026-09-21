@@ -36,8 +36,15 @@ import path from "node:path";
  *      not on the Controller UUID — while events keep landing under the
  *      Controller UUID.
  *   7. `upToEventId` cuts the copied transcript after the named event,
- *      in both the events file and the derived `messages` array, and
- *      404s on an id the source doesn't have.
+ *      and 404s on an id the source doesn't have.
+ *
+ * A branched session has exactly one transcript: its events file. The
+ * session file's `messages` stays `[]` like every other
+ * Controller-started session — it is a provider-owned field Controller
+ * only passes through — and the first-turn prompt is projected from
+ * the events at read time. Several tests below assert that, since a
+ * mirrored copy is what would let a cut branch leak dropped turns into
+ * the agent's context.
  */
 
 async function withBranchEnv<T>(
@@ -199,7 +206,7 @@ const SOURCE_ID = "sess-source-382";
 
 /**
  * Seed a source session with three turns. The branch route copies the
- * events file verbatim and the `messages` array onto the new session.
+ * events file verbatim onto the new session.
  */
 async function seedSourceSession(
   env: {
@@ -336,13 +343,9 @@ test("POST /sessions/branch returns synchronously without spawning an agent (iss
       assert.equal(session.model, "");
       assert.equal(session.provider, undefined);
       assert.equal(session.mode, undefined);
-      // `messages` = source transcript + branch marker; this array is
-      // what `handleSessionStream` renders into the first-turn prompt.
-      assert.equal(session.messages.length, 4);
-      assert.match(
-        session.messages[3].text,
-        new RegExp(`^\\[/branch: Source session\\] controller://.*${SOURCE_ID}$`)
-      );
+      // The transcript lives in the events file alone — `messages` is
+      // provider-owned and Controller never populates it.
+      assert.deepEqual(session.messages, []);
 
       const { projectStoreDir } = await import("../paths.js");
       const events = await readJsonl(
@@ -359,7 +362,10 @@ test("POST /sessions/branch returns synchronously without spawning an agent (iss
       );
       assert.equal(events[0].data.text, "First user turn");
       assert.equal(events[3].type, "user_message");
-      assert.equal(events[3].data.text, session.messages[3].text);
+      assert.match(
+        events[3].data.text,
+        new RegExp(`^\\[/branch: Source session\\] controller://.*${SOURCE_ID}$`)
+      );
     }
   );
 });
@@ -520,6 +526,10 @@ test("first turn on a branched session starts a fresh provider thread and captur
         true,
         "unstarted must be cleared once the user has typed a turn"
       );
+      // The prompt above carried the transcript, and it came from the
+      // events file — `messages` is still empty, so nothing mirrored
+      // it onto the session file.
+      assert.deepEqual(session.messages, []);
 
       // Events still land under the Controller id — never the provider's.
       const { projectStoreDir } = await import("../paths.js");
@@ -613,9 +623,10 @@ test("POST /sessions/branch cuts the transcript at upToEventId (issue #382)", as
   // Branching from an earlier response must yield a session that ends
   // at that response — otherwise every icon in the timeline produces
   // the same full-conversation copy and the per-response affordance is
-  // a lie. Both representations have to be cut: the events file (what
-  // the chat view renders) and the `messages` array (what
-  // `handleSessionStream` feeds the agent as first-turn context).
+  // a lie. There is one transcript to cut: the events file. The
+  // first-turn prompt is projected from it at read time, so the
+  // agent's context follows the cut for free (asserted end-to-end
+  // below).
   await withBranchEnv(
     async ({ projectPath, worktreeId }) => {
       await seedSourceSession({ projectPath, worktreeId, projectId: "proj-1" });
@@ -659,18 +670,10 @@ test("POST /sessions/branch cuts the transcript at upToEventId (issue #382)", as
         "the turn after the cut point must not be copied"
       );
 
-      // `messages` is derived from the same cut list, so the agent
-      // can't be handed the turns the user cut off.
+      // No mirrored copy of the transcript on the session file, so
+      // there is nothing that could still hold the dropped turns.
       const session = await readSessionFile(projectPath, body.sessionId!);
-      assert.equal(session.messages.length, 3);
-      assert.deepEqual(
-        session.messages.slice(0, 2).map((m: any) => [m.role, m.text]),
-        [
-          ["user", "First user turn"],
-          ["assistant", "First assistant reply"],
-        ]
-      );
-      assert.equal(session.messages[2].text, events[2].data.text);
+      assert.deepEqual(session.messages, []);
     }
   );
 });
