@@ -734,9 +734,14 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
  * Wire shape (JSON body):
  *   {
  *     "sourceSessionId": "<sid>",   // required
+ *     "upToEventId":     "<evid>",  // optional; cut point, inclusive
  *     "worktreeId":      "<wtid>",  // optional; defaults to source's worktree
  *     "title":           "<text>"   // optional; defaults to "Branch of <sourceTitle>"
  *   }
+ *
+ * `upToEventId` is what makes "branch from *this* response" work: the
+ * copied transcript stops after that event instead of running to the
+ * end of the source. Omit it to branch the whole conversation.
  *
  * Returns `{ sessionId, url }` synchronously.
  */
@@ -748,6 +753,7 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   }
   const body = (req.body ?? {}) as {
     sourceSessionId?: string;
+    upToEventId?: string;
     worktreeId?: string;
     title?: string;
   };
@@ -798,15 +804,31 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     }
     targetWorktreeId = match.id;
   }
-  // Read the source's events + messages. The events go into the new
-  // session's events file (that's what the chat view reads on load);
-  // the messages go onto the new session file, which is what
-  // `handleSessionStream` renders into the first-turn prompt so the
-  // agent sees the prior conversation.
-  const sourceEvents = await getEvents(worktreePath, sourceSessionId);
-  const sourceMessages = Array.isArray(sourceSession.messages)
-    ? sourceSession.messages
-    : [];
+  // Read the source's events. They go into the new session's events
+  // file (that's what the chat view reads on load) and, after the
+  // optional cut, are also what the new session's `messages` array is
+  // derived from — `handleSessionStream` renders that array into the
+  // first-turn prompt, so deriving both from one list is what keeps
+  // the agent's context and the visible transcript in agreement.
+  const allSourceEvents = await getEvents(worktreePath, sourceSessionId);
+  // `upToEventId` cuts the transcript after the named event
+  // (inclusive), so branching from the third of ten responses yields a
+  // session containing three. An id we can't find is a client bug
+  // worth surfacing rather than silently branching the whole thing.
+  let sourceEvents = allSourceEvents;
+  if (typeof body.upToEventId === "string" && body.upToEventId.trim()) {
+    const cutIndex = allSourceEvents.findIndex(
+      (event) => event.id === body.upToEventId
+    );
+    if (cutIndex === -1) {
+      res.status(404).json({
+        error: `Event ${body.upToEventId} not found in session ${sourceSessionId}`,
+      });
+      return;
+    }
+    sourceEvents = allSourceEvents.slice(0, cutIndex + 1);
+  }
+  const sourceMessages = messagesFromEvents(sourceEvents);
   const newSessionId = randomUUID();
   const now = new Date().toISOString();
   // The branch marker is the chat-view breadcrumb: one `user_message`
@@ -4365,6 +4387,56 @@ export function parseSkillMarker(
 export function deriveAutoTitle(historyText: string): string {
   const source = parseSkillMarker(historyText)?.rest ?? historyText;
   return source.length > 60 ? `${source.slice(0, 60)}...` : source;
+}
+
+/**
+ * Project a session's event log into the `{ role, text }` message
+ * shape `renderSourceTranscriptForAgent` reads.
+ *
+ * The branch route derives the new session's `messages` from the same
+ * (possibly truncated) event list it copies into the events file, so
+ * the transcript the agent is given and the transcript the user sees
+ * can't drift apart — which matters most with `upToEventId`, where
+ * copying `source.messages` wholesale would hand the agent the very
+ * turns the user cut off.
+ *
+ * Only user and assistant prose is carried; tool calls, diffs and
+ * reasoning are omitted because the prompt block is read-only context,
+ * not a replayable log.
+ */
+export function messagesFromEvents(
+  events: AgentEvent[]
+): Array<{ role: string; text: string; timestamp: string }> {
+  const messages: Array<{ role: string; text: string; timestamp: string }> = [];
+  for (const event of events) {
+    const data = (event.data ?? {}) as Record<string, unknown>;
+    if (event.type === "user_message") {
+      const text = typeof data.text === "string" ? data.text : "";
+      if (text) messages.push({ role: "user", text, timestamp: event.timestamp });
+      continue;
+    }
+    if (event.type !== "assistant_response") continue;
+    // Assistant events carry either a flat `data.text` or an array of
+    // typed content blocks; take whichever is present.
+    let text = typeof data.text === "string" ? data.text : "";
+    if (!text && Array.isArray(data.content)) {
+      text = (data.content as Array<Record<string, unknown>>)
+        .filter((block) => block.type === "text")
+        .map((block) =>
+          typeof block.text === "string"
+            ? block.text
+            : typeof block.content === "string"
+              ? block.content
+              : ""
+        )
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (text) {
+      messages.push({ role: "assistant", text, timestamp: event.timestamp });
+    }
+  }
+  return messages;
 }
 
 /**

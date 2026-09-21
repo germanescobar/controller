@@ -1432,12 +1432,11 @@ const EventBlock = memo(function EventBlock({
   event: AgentEvent;
   copiedId: string | null;
   onCopy: (e: AgentEvent) => void;
-  /** Branch-this-conversation callback (issue #364, UI). Only the
-   *  last assistant block in the whole view receives this — see
-   *  `lastBranchableKey` in SessionView. Branching always forks the
-   *  entire conversation, so one icon per paragraph was both noisy
-   *  and misleading (every copy of it did the same thing). */
-  onBranch?: () => void;
+  /** Branch-from-here callback. Only the last assistant block of
+   *  each turn receives this — see `branchableEventKeys` in
+   *  SessionView. Called with this event's id so the branch ends at
+   *  this response rather than at the end of the conversation. */
+  onBranch?: (upToEventId?: string) => void;
   /** True while a branch request is in flight — disables the
    *  branch icon to prevent double-clicks. */
   branching?: boolean;
@@ -1534,7 +1533,7 @@ const EventBlock = memo(function EventBlock({
             text={text}
             copiedId={copiedId === event.id ? event.id : null}
             onCopy={() => onCopy(event)}
-            onBranch={onBranch}
+            onBranch={onBranch ? () => onBranch(event.id) : undefined}
             branching={branching}
           />
         ) : null}
@@ -1803,10 +1802,9 @@ const AssistantBlock = memo(function AssistantBlock({
    *  the assistant message's text (or JSON). */
   onCopy?: () => void;
   /** Click handler for the branch button. Only supplied for the
-   *  last assistant block in the view — branching forks the whole
-   *  conversation, so it reads as a single end-of-conversation
-   *  action rather than a per-paragraph one. Copy, by contrast, is
-   *  per-paragraph and is wired on every block. */
+   *  last assistant block of a turn, so the icon reads as an
+   *  end-of-response action rather than a per-paragraph one. Copy,
+   *  by contrast, is per-paragraph and is wired on every block. */
   onBranch?: () => void;
   /** True while a branch request is in flight — disables the branch
    *  icon to prevent double-clicks. */
@@ -1846,7 +1844,7 @@ const AssistantBlock = memo(function AssistantBlock({
               title={
                 branching
                   ? "Branching conversation…"
-                  : "Branch this conversation into a new session"
+                  : "Branch from here into a new session"
               }
             >
               {branching ? (
@@ -5442,7 +5440,13 @@ export function SessionView({
   const [branchingSessionId, setBranchingSessionId] = useState<
     string | null
   >(null);
-  const handleBranchCurrent = useCallback(async () => {
+  // `upToEventId` is the id of the assistant event whose icon was
+  // clicked: the branch then ends at that response instead of running
+  // to the end of the conversation. The live stream has no persisted
+  // event ids yet, so branching from it passes nothing and copies the
+  // whole transcript — which is the same thing, since the stream *is*
+  // the end of the conversation.
+  const handleBranchCurrent = useCallback(async (upToEventId?: string) => {
     const targetSessionId = activeStreamSessionId ?? sessionId;
     if (!targetSessionId) return;
     if (branchingSessionId === targetSessionId) return;
@@ -5454,7 +5458,7 @@ export function SessionView({
         // The route pre-creates the session file + events and
         // returns synchronously. The user types the first real turn
         // on the new session via the composer.
-        { worktreeId }
+        { worktreeId, ...(upToEventId ? { upToEventId } : {}) }
       );
       onSessionCreated(newSessionId);
     } catch (err) {
@@ -6672,7 +6676,7 @@ export function SessionView({
                           onCopy={() => copyStreamText(render.key, item.text)}
                           onBranch={
                             render.key === lastStreamBranchableKey
-                              ? onBranch
+                              ? () => onBranch()
                               : undefined
                           }
                           branching={branching}

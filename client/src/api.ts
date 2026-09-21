@@ -1453,6 +1453,10 @@ export function subscribeProjectEvents(
 /**
  * Branch an existing session into a brand-new one (issue #382).
  *
+ * Pass `upToEventId` to branch from a specific response rather than
+ * from the end of the conversation — the copied transcript stops
+ * there.
+ *
  * The server responds synchronously: no agent is spawned, no turn
  * runs. The new session's events file is seeded with the source's
  * transcript plus a `[/branch: …]` breadcrumb, and its composer
@@ -1465,6 +1469,10 @@ export async function branchSession(
   projectId: string,
   sourceSessionId: string,
   options?: {
+    /** Cut the copied transcript after this event (inclusive), so
+     *  branching from an earlier response yields a session that ends
+     *  there. Omit to copy the whole conversation. */
+    upToEventId?: string;
     /** Defaults to the source's worktree. */
     worktreeId?: string;
     /** Defaults to "Branch of <sourceTitle>". */
@@ -1476,6 +1484,7 @@ export async function branchSession(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       sourceSessionId,
+      ...(options?.upToEventId ? { upToEventId: options.upToEventId } : {}),
       ...(options?.worktreeId ? { worktreeId: options.worktreeId } : {}),
       ...(options?.title ? { title: options.title } : {}),
     }),

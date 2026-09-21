@@ -35,6 +35,9 @@ import path from "node:path";
  *   6. Second turn: the provider IS resumed, on `providerThreadId` —
  *      not on the Controller UUID — while events keep landing under the
  *      Controller UUID.
+ *   7. `upToEventId` cuts the copied transcript after the named event,
+ *      in both the events file and the derived `messages` array, and
+ *      404s on an id the source doesn't have.
  */
 
 async function withBranchEnv<T>(
@@ -602,6 +605,140 @@ test("second turn on a branched session resumes providerThreadId, not the Contro
           `expected a user_message event for "${text}"`
         );
       }
+    }
+  );
+});
+
+test("POST /sessions/branch cuts the transcript at upToEventId (issue #382)", async () => {
+  // Branching from an earlier response must yield a session that ends
+  // at that response — otherwise every icon in the timeline produces
+  // the same full-conversation copy and the per-response affordance is
+  // a lie. Both representations have to be cut: the events file (what
+  // the chat view renders) and the `messages` array (what
+  // `handleSessionStream` feeds the agent as first-turn context).
+  await withBranchEnv(
+    async ({ projectPath, worktreeId }) => {
+      await seedSourceSession({ projectPath, worktreeId, projectId: "proj-1" });
+    },
+    async ({ baseUrl, projectPath }) => {
+      const response = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: SOURCE_ID,
+          // The assistant reply — event 2 of 3. Everything after it
+          // ("Second user turn") must be dropped.
+          upToEventId: "evt-source-2",
+        }),
+      });
+      const body = (await response.json()) as { sessionId?: string };
+      assert.equal(response.status, 200);
+
+      const { projectStoreDir } = await import("../paths.js");
+      const events = await readJsonl(
+        path.join(
+          projectStoreDir(projectPath),
+          "events",
+          `${body.sessionId}.jsonl`
+        )
+      );
+      // 2 source events (cut inclusive) + the branch marker.
+      assert.equal(
+        events.length,
+        3,
+        `expected the copy to stop after evt-source-2; got ${JSON.stringify(
+          events.map((e) => e.id)
+        )}`
+      );
+      assert.equal(events[0].id, "evt-source-1");
+      assert.equal(events[1].id, "evt-source-2");
+      assert.equal(events[2].type, "user_message");
+      assert.match(events[2].data.text, /^\[\/branch: /);
+      assert.ok(
+        !events.some((e) => e.data?.text === "Second user turn"),
+        "the turn after the cut point must not be copied"
+      );
+
+      // `messages` is derived from the same cut list, so the agent
+      // can't be handed the turns the user cut off.
+      const session = await readSessionFile(projectPath, body.sessionId!);
+      assert.equal(session.messages.length, 3);
+      assert.deepEqual(
+        session.messages.slice(0, 2).map((m: any) => [m.role, m.text]),
+        [
+          ["user", "First user turn"],
+          ["assistant", "First assistant reply"],
+        ]
+      );
+      assert.equal(session.messages[2].text, events[2].data.text);
+    }
+  );
+});
+
+test("POST /sessions/branch 404s on an upToEventId the source doesn't have (issue #382)", async () => {
+  await withBranchEnv(
+    async ({ projectPath, worktreeId }) => {
+      await seedSourceSession({ projectPath, worktreeId, projectId: "proj-1" });
+    },
+    async ({ baseUrl }) => {
+      const response = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: SOURCE_ID,
+          upToEventId: "evt-does-not-exist",
+        }),
+      });
+      assert.equal(response.status, 404);
+      assert.match(
+        ((await response.json()) as { error?: string }).error ?? "",
+        /evt-does-not-exist not found/
+      );
+    }
+  );
+});
+
+test("first turn on a cut branch only sees the transcript up to the cut (issue #382)", async () => {
+  // End-to-end version of the cut: the agent's prompt must contain the
+  // kept turns and none of the dropped ones.
+  const providerThreadId = "provider-thread-cut";
+  await withBranchEnv(
+    async ({ projectPath, worktreeId, binDir, homeDir }) => {
+      await installFakeAgent(binDir, homeDir, providerThreadId);
+      await seedSourceSession({ projectPath, worktreeId, projectId: "proj-1" });
+    },
+    async ({ baseUrl, homeDir, worktreeId }) => {
+      const branched = (await (
+        await fetch(`${baseUrl}/sessions/branch`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sourceSessionId: SOURCE_ID,
+            upToEventId: "evt-source-2",
+          }),
+        })
+      ).json()) as { sessionId?: string };
+
+      const turn = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Take it from here",
+          provider: "anita",
+          resumeSessionId: branched.sessionId,
+        }),
+      });
+      assert.equal(turn.status, 200);
+      await turn.json();
+
+      const [argv] = await readArgvInvocations(path.join(homeDir, "argv.txt"));
+      assert.match(argv, /First user turn/);
+      assert.match(argv, /First assistant reply/);
+      assert.ok(
+        !argv.includes("Second user turn"),
+        `the agent must not see turns past the cut point; argv was: ${argv}`
+      );
     }
   );
 });
