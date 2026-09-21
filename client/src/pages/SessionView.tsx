@@ -1259,6 +1259,21 @@ function isWorkingStreamItem(item: StreamItem): boolean {
   return WORKING_STREAM_TYPES.has(item.type);
 }
 
+/**
+ * True when an `assistant_response` event will actually render an
+ * `AssistantBlock` — i.e. it carries at least one non-empty `text`
+ * content block. Reasoning-only responses render a `ReasoningBlock`
+ * and no action row, so they can't host the branch icon. Mirrors the
+ * text extraction in `EventBlock`; keep the two in step.
+ */
+function assistantResponseHasText(event: AgentEvent): boolean {
+  const content = event.data?.content;
+  if (!Array.isArray(content)) return false;
+  return (content as Array<{ type?: unknown; text?: unknown; content?: unknown }>)
+    .filter((block) => block.type === "text")
+    .some((block) => normalizeMarkdownText(block.text ?? block.content).length > 0);
+}
+
 function groupEventsForRender(events: AgentEvent[]): EventRenderItem[] {
   const result: EventRenderItem[] = [];
   let group: AgentEvent[] = [];
@@ -6151,34 +6166,48 @@ export function SessionView({
     (branchingSessionId !== null &&
       branchingSessionId === (activeStreamSessionId ?? sessionId)) ||
     false;
-  // The branch icon belongs on exactly one block: the last assistant
-  // message in the view. `handleBranchCurrent` forks the whole
-  // conversation regardless of which icon is clicked, so rendering one
-  // per paragraph was noise that also implied a per-paragraph fork
-  // point that doesn't exist. Copy stays on every block — that one IS
-  // per-paragraph.
-  //
-  // The live stream renders below the persisted timeline, so a
-  // streaming assistant block wins; we only fall back to the timeline
-  // when the stream has no assistant text of its own.
-  const lastBranchableKey = useMemo(() => {
+  // The branch icon goes at the end of every *response*, not on every
+  // paragraph and not only on the last response. One agent turn emits
+  // many `assistant_response` events (roughly one per paragraph), so
+  // the icon lands on the last one of each turn — a turn being the run
+  // of events between two user messages. Copy stays on every block;
+  // that one genuinely is per-paragraph.
+  const branchableEventKeys = useMemo(() => {
+    const keys = new Set<string>();
+    // The last assistant block seen since the current turn began. A
+    // user message closes the turn and promotes it; anything else
+    // (tool calls, reasoning, diffs) leaves it alone, so trailing
+    // tool work after the prose doesn't steal the icon.
+    let pendingKey: string | null = null;
+    for (const render of eventRenderItems) {
+      if (render.kind === "working_group") continue;
+      if (render.event.type === "user_message") {
+        if (pendingKey) {
+          keys.add(pendingKey);
+          pendingKey = null;
+        }
+      } else if (
+        render.event.type === "assistant_response" &&
+        assistantResponseHasText(render.event)
+      ) {
+        pendingKey = render.key;
+      }
+    }
+    // The final turn has no user message after it to close it.
+    if (pendingKey) keys.add(pendingKey);
+    return keys;
+  }, [eventRenderItems]);
+  // The live stream is the in-flight response; its last assistant block
+  // is that response's current end, so it carries the icon too.
+  const lastStreamBranchableKey = useMemo(() => {
     for (let i = streamRenderItems.length - 1; i >= 0; i -= 1) {
       const render = streamRenderItems[i];
       if (render.kind === "item" && render.item.type === "assistant") {
         return render.key;
       }
     }
-    for (let i = eventRenderItems.length - 1; i >= 0; i -= 1) {
-      const render = eventRenderItems[i];
-      if (
-        render.kind !== "working_group" &&
-        render.event.type === "assistant_response"
-      ) {
-        return render.key;
-      }
-    }
     return null;
-  }, [streamRenderItems, eventRenderItems]);
+  }, [streamRenderItems]);
 
   return (
     <>
@@ -6499,7 +6528,7 @@ export function SessionView({
                       copiedId={copiedId}
                       onCopy={copyEventData}
                       onBranch={
-                        renderItem.key === lastBranchableKey
+                        branchableEventKeys.has(renderItem.key)
                           ? onBranch
                           : undefined
                       }
@@ -6642,7 +6671,7 @@ export function SessionView({
                           copiedId={copiedId === render.key ? render.key : null}
                           onCopy={() => copyStreamText(render.key, item.text)}
                           onBranch={
-                            render.key === lastBranchableKey
+                            render.key === lastStreamBranchableKey
                               ? onBranch
                               : undefined
                           }
