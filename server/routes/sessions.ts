@@ -122,13 +122,62 @@ function isBenignProviderStderrLine(line: string): boolean {
 // Kill a spawned agent that produces no stdout for this long — catches hangs
 // where the process is alive but stalled (e.g. an upstream request that never
 // streams). Long-running tool calls (builds, tests) still emit start/finish
-// events, so a multi-minute window avoids false positives. Override per-deploy.
-const AGENT_INACTIVITY_TIMEOUT_MS = (() => {
+// events, so a multi-minute window avoids false positives. Override per-deploy
+// (this constant) or per-session via the `agentInactivityTimeoutMs` query/body
+// field on `POST /sessions` (issue #386). The per-session override is
+// persisted on the session file and re-applied on resume so the user does not
+// have to re-pass it on follow-up turns.
+const DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS = (() => {
   const parsed = Number(process.env.AGENT_INACTIVITY_TIMEOUT_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
 })();
 // Comment-line ping so idle proxies don't drop a quiet SSE connection.
 const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
+// How often the SSE handler emits an in-memory `run.idle` event while the
+// child is alive and no terminal event has fired (issue #386). Drives the
+// UI's "still running" indicator so users see progress during long
+// synchronous tool calls instead of a frozen transcript. Not persisted;
+// purely a liveness signal. Cadence is shorter than the default inactivity
+// window (5 min) but long enough that the SSE stays quiet under normal
+// traffic. Read from the `RUN_IDLE_PING_INTERVAL_MS` env var on each call
+// so test suites can shrink the cadence without restarting the process;
+// production deployments leave the var unset (defaults to 30s).
+const DEFAULT_RUN_IDLE_PING_INTERVAL_MS = 30 * 1000;
+
+function resolveRunIdlePingIntervalMs(): number {
+  const parsed = Number(process.env.RUN_IDLE_PING_INTERVAL_MS);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_RUN_IDLE_PING_INTERVAL_MS;
+}
+
+/**
+ * Resolve the per-session inactivity timeout (issue #386). The query-param
+ * value (when a positive integer) wins; otherwise we honor an override
+ * previously persisted on the session file; otherwise we fall back to the
+ * global `AGENT_INACTIVITY_TIMEOUT_MS` env var, then the 5-minute default.
+ */
+function resolveAgentInactivityTimeoutMs(args: {
+  queryValue: string | string[] | undefined;
+  persistedValue: number | undefined;
+}): number {
+  const fromQuery = parsePositiveInt(args.queryValue);
+  if (fromQuery !== undefined) return fromQuery;
+  if (typeof args.persistedValue === "number" && args.persistedValue > 0) {
+    return args.persistedValue;
+  }
+  return DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS;
+}
+
+function parsePositiveInt(
+  raw: string | string[] | undefined
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const text = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof text !== "string") return undefined;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_SIZE = 15 * 1024 * 1024;
@@ -637,6 +686,15 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     // the coordinator pattern from #351 reads it. Set once; never
     // mutated afterwards.
     parentId?: string;
+    // Optional per-session agent-inactivity timeout in ms (issue
+    // #386). When the session is expected to run a long synchronous
+    // tool call (e.g. `gh pr checks --watch` waiting on CI), the
+    // client can extend the watchdog window above the 5-minute
+    // default here. Persisted on the session file and re-applied on
+    // resume so the user does not need to re-pass it on follow-up
+    // turns. Negative or zero values are rejected by the SSE
+    // handler; non-integers are ignored and the default applies.
+    agentInactivityTimeoutMs?: number;
   };
   const worktreeId = body.worktreeId;
   const message = body.message;
@@ -685,6 +743,11 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
         serviceTier: body.serviceTier,
         resumeSessionId: body.resumeSessionId,
         parentId: body.parentId,
+        // Forward the per-session inactivity timeout (issue #386);
+        // `makeHeadlessSessionStartRequest` validates positive
+        // numbers and drops anything else before forwarding to the
+        // SSE handler.
+        agentInactivityTimeoutMs: body.agentInactivityTimeoutMs,
       }),
       shim.res
     );
@@ -965,6 +1028,11 @@ export function makeHeadlessSessionStartRequest(
     // create-new-session path; queue-replay passes `resumeSessionId`
     // and never sets `parentId`.
     parentId?: string;
+    // Per-session agent-inactivity timeout in ms (issue #386).
+    // Forwarded as a query string so the SSE handler can resolve it
+    // before arming the watchdog. Persisted on the session file
+    // thereafter.
+    agentInactivityTimeoutMs?: number;
   }
 ): Request<{ projectId: string }> {
   const query: Record<string, string> = {
@@ -993,6 +1061,18 @@ export function makeHeadlessSessionStartRequest(
   // a new-session-only API.
   if (body.resumeSessionId) query.resumeSessionId = body.resumeSessionId;
   if (body.parentId) query.parentId = body.parentId;
+  // Per-session inactivity timeout (issue #386). Always forward when
+  // the caller supplied a positive number — even when it matches the
+  // default — so the SSE handler sees the user's intent explicitly
+  // and the resolved-value vs. fallback distinction is unmistakable
+  // in logs.
+  if (
+    typeof body.agentInactivityTimeoutMs === "number" &&
+    Number.isFinite(body.agentInactivityTimeoutMs) &&
+    body.agentInactivityTimeoutMs > 0
+  ) {
+    query.agentInactivityTimeoutMs = String(body.agentInactivityTimeoutMs);
+  }
   return {
     params: { projectId },
     query,
@@ -1430,6 +1510,28 @@ export async function handleSessionStream(
       // session's first turn (so it captures `providerThreadId`).
       controllerSessionId,
       branchedFirstTurn,
+      // Per-session agent-inactivity timeout (issue #386). Resolved
+      // by the caller so the Codex path reuses the same logic — the
+      // persisted field is the only thing that survives across
+      // resumes, so we forward the resolved value here and the
+      // Codex `persistSessionStart` writes it through. Uses
+      // `worktree.path` rather than the locally-shadowed
+      // `worktreePath` constant because the Codex branch fires
+      // before the SSE-handler-internal `const worktreePath` is
+      // declared further down.
+      agentInactivityTimeoutMs:
+        resolveAgentInactivityTimeoutMs({
+          queryValue: req.query.agentInactivityTimeoutMs as
+            | string
+            | string[]
+            | undefined,
+          persistedValue:
+            controllerSessionId && !branchedFirstTurn
+              ? (
+                  await getSession(worktree.path, controllerSessionId)
+                )?.agentInactivityTimeoutMs
+              : undefined,
+        }),
     });
     return;
   }
@@ -1646,6 +1748,22 @@ export async function handleSessionStream(
               options.providerThreadId ?? existing?.providerThreadId,
           }
         : {}),
+      // Per-session inactivity-timeout override (issue #386). Persisted
+      // here so a follow-up turn on the same session does not require the
+      // client to re-supply it. On a brand-new session we honor the value
+      // computed for this stream (`inactivityTimeoutMs` falls back to the
+      // default when no override is supplied, which is what `undefined`
+      // correctly encodes). On resume we preserve the existing override
+      // because changing the inactivity window mid-session from a different
+      // turn would be surprising — the same logic that protects
+      // `parentId` and `providerThreadId` above.
+      ...(existing
+        ? existing.agentInactivityTimeoutMs
+          ? { agentInactivityTimeoutMs: existing.agentInactivityTimeoutMs }
+          : {}
+        : inactivityTimeoutMs !== DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS
+        ? { agentInactivityTimeoutMs: inactivityTimeoutMs }
+        : {}),
     });
     // Notify other clients (sidebar in another window) about the new
     // session so they can add it to the tree without polling. Only
@@ -1671,7 +1789,11 @@ export async function handleSessionStream(
    */
   async function persistAgentEvent(event: AgentStreamEvent): Promise<void> {
     if (!streamSessionId) return;
-    if (event.type === "thread.status" || event.type === "plan.delta") return;
+    if (
+      event.type === "thread.status" ||
+      event.type === "plan.delta" ||
+      event.type === "run.idle"
+    ) return;
     const agentEvent: AgentEvent = {
       id: randomUUID(),
       sessionId: streamSessionId,
@@ -1696,11 +1818,31 @@ export async function handleSessionStream(
 
   // Heartbeat keeps the SSE connection alive through idle proxies; the watchdog
   // reaps a child that has gone silent (alive but stalled) so the run fails
-  // visibly instead of hanging forever.
+  // visibly instead of hanging forever. Issue #386: the inactivity window is
+  // resolved per-stream so a client can extend it on sessions expected to run
+  // long synchronous tool calls (e.g. `gh pr checks --watch` waiting on CI).
   const providerName = provider.name;
+  const inactivityTimeoutMs = resolveAgentInactivityTimeoutMs({
+    queryValue: req.query.agentInactivityTimeoutMs as
+      | string
+      | string[]
+      | undefined,
+    persistedValue:
+      controllerSessionId && !branchedFirstTurn
+        ? (
+            await getSession(worktreePath, controllerSessionId)
+          )?.agentInactivityTimeoutMs
+        : undefined,
+  });
   let heartbeat: NodeJS.Timeout | undefined;
   let watchdog: NodeJS.Timeout | undefined;
   let watchdogFired = false;
+  // In-memory liveness ping (issue #386). Sends a lightweight `run.idle`
+  // event every RUN_IDLE_PING_INTERVAL_MS while the child is alive and no
+  // terminal event has fired, so the UI can render a visible "still
+  // running" indicator during long synchronous tool calls. Stopped on
+  // terminal events / stream close.
+  let idlePing: NodeJS.Timeout | undefined;
 
   function clearStreamTimers() {
     if (heartbeat) {
@@ -1710,6 +1852,10 @@ export async function handleSessionStream(
     if (watchdog) {
       clearTimeout(watchdog);
       watchdog = undefined;
+    }
+    if (idlePing) {
+      clearInterval(idlePing);
+      idlePing = undefined;
     }
   }
 
@@ -1721,7 +1867,7 @@ export async function handleSessionStream(
       watchdog = undefined;
       return;
     }
-    watchdog = setTimeout(onInactivityTimeout, AGENT_INACTIVITY_TIMEOUT_MS);
+    watchdog = setTimeout(onInactivityTimeout, inactivityTimeoutMs);
   }
 
   function onInactivityTimeout() {
@@ -1746,7 +1892,7 @@ export async function handleSessionStream(
       type: "run.failed",
       sessionId: streamSessionId,
       error: `No output from ${providerName} for ${Math.round(
-        AGENT_INACTIVITY_TIMEOUT_MS / 1000
+        inactivityTimeoutMs / 1000
       )}s; stopping the stalled run.`,
       timestamp: new Date().toISOString(),
     };
@@ -1767,6 +1913,19 @@ export async function handleSessionStream(
   heartbeat = setInterval(() => {
     if (clientConnected) res.write(": ping\n\n");
   }, SSE_HEARTBEAT_INTERVAL_MS);
+  // Emit an in-memory `run.idle` ping periodically while the run is alive
+  // (issue #386). The ping is suppressed by the SSE handler once a terminal
+  // event fires (`runTerminated` flips true) or the stream closes. We do not
+  // persist `run.idle` — it is purely a UI liveness signal.
+  idlePing = setInterval(() => {
+    if (runTerminated || !clientConnected) return;
+    const idleEvent: AgentStreamEvent = {
+      type: "run.idle",
+      sessionId: streamSessionId,
+      timestamp: new Date().toISOString(),
+    };
+    sseSend({ type: "anita_event", event: idleEvent });
+  }, resolveRunIdlePingIntervalMs());
   resetWatchdog();
 
   if (controllerSessionId && !branchedFirstTurn) {
@@ -2049,10 +2208,16 @@ export async function handleSessionStream(
   req.on("close", () => {
     clientConnected = false;
     // Stop pinging a gone client, but keep the watchdog so a hung child is
-    // still reaped even after the SSE connection drops.
+    // still reaped even after the SSE connection drops. The `run.idle`
+    // ping (issue #386) is a client-only liveness signal, so we stop it
+    // here too — there's no one to read it.
     if (heartbeat) {
       clearInterval(heartbeat);
       heartbeat = undefined;
+    }
+    if (idlePing) {
+      clearInterval(idlePing);
+      idlePing = undefined;
     }
   });
 }
@@ -2274,6 +2439,11 @@ async function streamCodexPlanSession(
     // provider thread yet and we must capture the one Codex picks.
     controllerSessionId?: string;
     branchedFirstTurn?: boolean;
+    // Resolved per-session agent-inactivity timeout in ms (issue
+    // #386). Computed by the SSE caller so the Codex path writes
+    // the same value through to the session file — no separate
+    // resolution needed inside the Codex handler.
+    agentInactivityTimeoutMs: number;
   }
 ) {
   const {
@@ -2294,6 +2464,7 @@ async function streamCodexPlanSession(
     parentId,
     controllerSessionId,
     branchedFirstTurn,
+    agentInactivityTimeoutMs,
   } = options;
 
   res.writeHead(200, {
@@ -2436,6 +2607,18 @@ async function streamCodexPlanSession(
               startOptions.providerThreadId ?? existing?.providerThreadId,
           }
         : {}),
+      // Per-session inactivity-timeout override (issue #386). Same
+      // preservation rules as the SSE-stream variant: brand-new
+      // sessions honor the resolved value (omitted when it matches
+      // the default so the file stays clean); resumes preserve the
+      // existing field unchanged.
+      ...(existing
+        ? existing.agentInactivityTimeoutMs
+          ? { agentInactivityTimeoutMs: existing.agentInactivityTimeoutMs }
+          : {}
+        : agentInactivityTimeoutMs !== DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS
+        ? { agentInactivityTimeoutMs }
+        : {}),
     });
     if (!existing) {
       emitSessionAdded(projectId, worktreeId, sessionId);
@@ -2481,7 +2664,8 @@ async function streamCodexPlanSession(
           event.type !== "run.completed" &&
           event.type !== "run.failed" &&
           event.type !== "thread.status" &&
-          event.type !== "plan.delta"
+          event.type !== "plan.delta" &&
+          event.type !== "run.idle"
         ) {
           await persistAgentEvent(event);
         }

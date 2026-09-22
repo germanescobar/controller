@@ -250,6 +250,17 @@ export type AnitaStreamEvent =
       activeFlags?: string[];
     }
   | {
+      // In-memory liveness ping (issue #386). The SSE handler emits
+      // this periodically while the agent is alive and no terminal
+      // event has fired so the UI can render a "still running"
+      // indicator during long synchronous tool calls (e.g.
+      // `gh pr checks --watch` waiting on CI). Not persisted to
+      // disk, so reloads will not see past pings.
+      type: "run.idle";
+      sessionId: string;
+      timestamp: string;
+    }
+  | {
       type: "run.completed";
       sessionId: string;
       status: "completed" | "max_iterations";
@@ -1390,6 +1401,16 @@ export function startSession(
      */
     mentions?: { path: string; type: "file" | "directory" }[];
     skillName?: string;
+    /**
+     * Per-session agent-inactivity timeout in ms (issue #386). When
+     * the session is expected to run a long synchronous tool call
+     * (e.g. `gh pr checks --watch` waiting on CI), the client can
+     * extend the watchdog window above the 5-minute default here.
+     * Forwarded on the `agentInactivityTimeoutMs` query param; the
+     * server persists it on the session file so resume / follow-up
+     * turns re-use it without re-supplying.
+     */
+    agentInactivityTimeoutMs?: number;
   }
 ): EventSource {
   const params = new URLSearchParams({ message });
@@ -1417,6 +1438,16 @@ export function startSession(
     params.set("mentions", encoded);
   }
   if (options?.skillName) params.set("skillName", options.skillName);
+  if (
+    typeof options?.agentInactivityTimeoutMs === "number" &&
+    Number.isFinite(options.agentInactivityTimeoutMs) &&
+    options.agentInactivityTimeoutMs > 0
+  ) {
+    params.set(
+      "agentInactivityTimeoutMs",
+      String(options.agentInactivityTimeoutMs)
+    );
+  }
   return new EventSource(
     `${BASE}/projects/${projectId}/sessions/stream?${params}`
   );

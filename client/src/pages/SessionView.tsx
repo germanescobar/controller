@@ -232,6 +232,15 @@ type StreamItem = (
   | { type: "thread_status"; status: string; activeFlags: string[] }
   | { type: "error"; text: unknown }
   | { type: "run_cancelled"; reason: string }
+  // In-memory liveness ping (issue #386). Renders as a small
+  // "still running" indicator so users see that the agent is
+  // alive-but-idle during long synchronous tool calls (e.g.
+  // `gh pr checks --watch` waiting on CI) instead of presenting
+  // a frozen transcript. Not persisted, so reloads never see
+  // past pings. Kept as a stream item type — same shape as
+  // `thread_status` — so the working-group renderer naturally
+  // groups consecutive pings together.
+  | { type: "run_idle"; timestamp: string }
 ) & { at: number };
 
 function isSessionIsolationDebugEnabled(): boolean {
@@ -1248,6 +1257,11 @@ const WORKING_STREAM_TYPES = new Set([
   "plan_updated",
   "plan_delta",
   "thread_status",
+  // `run_idle` is an in-memory liveness ping (issue #386). It
+  // groups with the working spinner so consecutive pings do not
+  // create an unbounded list of stream items while the agent
+  // sits idle on a long synchronous tool call.
+  "run_idle",
 ]);
 const EMPTY_STREAM_ITEMS: StreamItem[] = [];
 
@@ -2185,8 +2199,46 @@ const WorkingChildStreamItem = memo(function WorkingChildStreamItem({ item }: { 
       </div>
     );
   }
+  if (item.type === "run_idle") {
+    // In-memory liveness ping (issue #386). Rendered as a small
+    // "still running" indicator so users see that the agent is
+    // alive-but-idle during a long synchronous tool call (e.g.
+    // `gh pr checks --watch` waiting on CI) instead of presenting
+    // a frozen transcript. The label intentionally does not
+    // mention "no output for X seconds" — the watchdog already
+    // surfaces that, and the label here is about liveness, not
+    // inactivity.
+    return <RunIdleIndicator timestamp={item.timestamp} />;
+  }
   return null;
 });
+
+function RunIdleIndicator({ timestamp }: { timestamp: string }) {
+  // Relative time without seconds so the indicator does not
+  // visibly tick every cycle. Recomputes on re-render only — the
+  // server emits a fresh ping every ~30s so the user gets a
+  // periodic refresh.
+  const formatted = useMemo(() => {
+    const ms = Date.now() - new Date(timestamp).getTime();
+    if (ms < 60 * 1000) return "just now";
+    if (ms < 60 * 60 * 1000) return `${Math.round(ms / 60000)} min ago`;
+    return new Date(timestamp).toLocaleTimeString();
+  }, [timestamp]);
+  return (
+    <div
+      className="flex items-center gap-2 rounded-lg border border-border bg-card/70 px-4 py-2 text-xs text-muted-foreground"
+      data-testid="run-idle-indicator"
+    >
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+      </span>
+      <span>
+        Claude is still running — last activity {formatted}
+      </span>
+    </div>
+  );
+}
 
 function PlanUpdatedBlock({
   explanation,
@@ -5071,6 +5123,26 @@ export function SessionView({
         } else if (adaEvent.type === "thread.status") {
           // Thread status changes are useful internally, but they're noisy in
           // the visible transcript when there's no actionable information.
+        } else if (adaEvent.type === "run.idle") {
+          // In-memory liveness ping (issue #386). Surface a single
+          // "still running" indicator that lives at the tail of the
+          // stream-items list while the agent is alive-but-idle
+          // during a long synchronous tool call (e.g.
+          // `gh pr checks --watch` waiting on CI). We replace any
+          // previous ping so the list does not grow unbounded; the
+          // indicator picks up the latest timestamp so the user sees
+          // that the agent is still alive. Not persisted, so reloads
+          // never see past pings.
+          if (isVisible()) {
+            setStreamItems((prev) => [
+              ...prev.filter((item) => item.type !== "run_idle"),
+              {
+                type: "run_idle",
+                timestamp: adaEvent.timestamp,
+                at: Date.now(),
+              },
+            ]);
+          }
         } else if (adaEvent.type === "run.cancelled") {
           // Clean cancellation (Anita SIGINT path). Surface a soft
           // indicator carrying the orchestrator-supplied reason, but
@@ -5176,7 +5248,13 @@ export function SessionView({
                   setStreamItems((prev) =>
                     prev.filter(
                       (item) =>
-                        item.type === "error" || item.type === "run_cancelled"
+                        item.type === "error" ||
+                        item.type === "run_cancelled" ||
+                        // `run_idle` is an in-memory liveness ping
+                        // (issue #386). The run has terminated, so
+                        // the indicator is no longer meaningful —
+                        // drop it alongside the working items.
+                        item.type === "run_idle"
                     )
                   );
                 }
