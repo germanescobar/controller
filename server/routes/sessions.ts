@@ -3266,9 +3266,9 @@ childrenBySessionIdRouter.get(
     // Issue #384: the floating focus panel renders parent/children
     // titles as `controller://project/<pid>/worktree/<wid>/session/<sid>`
     // anchors, so we need project+worktree ids for every entry. The
-    // parent comes from `locateSessionById`; the children's ids
-    // require walking projects × worktrees again. We do this
-    // here rather than in `listChildSessions` so the cheaper
+    // actual parent comes from `located.session.parentId`; the
+    // children's ids require walking projects × worktrees again. We
+    // do this here rather than in `listChildSessions` so the cheaper
     // existing helper (used by `collectArchiveBlockers`) keeps its
     // current shape. The walk mirrors the strict-archive rule's
     // child recursion, so the cost is the same.
@@ -3316,32 +3316,53 @@ childrenBySessionIdRouter.get(
         projectId: resolved.projectId,
       });
     }
-    // Parent summary is the session the caller already located;
-    // include it so the floating panel can render a single
-    // clickable title without a second round-trip. `parentProjectId`
-    // is split out for the controller:// anchor builder.
-    const parentSummary: SessionSummary = {
-      id: located.session.id,
-      title: located.session.title,
-      workingDirectory: located.session.workingDirectory,
-      worktreeId: located.session.worktreeId,
-      model: located.session.model,
-      reasoningEffort: located.session.reasoningEffort,
-      serviceTier: located.session.serviceTier,
-      provider: located.session.provider,
-      mode: located.session.mode,
-      createdAt: located.session.createdAt,
-      lastActiveAt: located.session.lastActiveAt,
-      status: located.session.status,
-      focusPinnedAt: located.session.focusPinnedAt,
-      focusDoneAt: located.session.focusDoneAt,
-      userUnpinned: located.session.userUnpinned,
-      parentId: located.session.parentId,
-    };
+    // Parent summary is the *actual* parent of the located session
+    // — i.e. `located.session.parentId`, not `located.session`
+    // itself. The previous version of this route echoed the
+    // current session's id into `parent`, which made the floating
+    // panel render a `Parent` row whose title linked back to the
+    // current session even when the current session has no parent.
+    // Resolving the actual parent (and returning all three parent
+    // fields as `null` when it has none) keeps the panel's "no
+    // relationships → unchanged panel" contract honest: a session
+    // with no parent renders no `Parent` row.
+    //
+    // The CLI's `sessions children` consumer (issue #351) only
+    // reads `children`, never `parent`, so this semantic change
+    // is invisible to it. The send-from-route test asserted the
+    // old "parent echoes URL param" shape and is updated to
+    // reflect the new "parent is the actual parent" contract.
+    const actualParentId = located.session.parentId;
+    let parentSession: SessionSummary | null = null;
+    let parentProjectId: string | null = null;
+    if (typeof actualParentId === "string" && actualParentId) {
+      const parentLocated = await locateSessionById(actualParentId);
+      if (parentLocated) {
+        parentProjectId = parentLocated.projectId;
+        parentSession = {
+          id: parentLocated.session.id,
+          title: parentLocated.session.title,
+          workingDirectory: parentLocated.session.workingDirectory,
+          worktreeId: parentLocated.session.worktreeId,
+          model: parentLocated.session.model,
+          reasoningEffort: parentLocated.session.reasoningEffort,
+          serviceTier: parentLocated.session.serviceTier,
+          provider: parentLocated.session.provider,
+          mode: parentLocated.session.mode,
+          createdAt: parentLocated.session.createdAt,
+          lastActiveAt: parentLocated.session.lastActiveAt,
+          status: parentLocated.session.status,
+          focusPinnedAt: parentLocated.session.focusPinnedAt,
+          focusDoneAt: parentLocated.session.focusDoneAt,
+          userUnpinned: parentLocated.session.userUnpinned,
+          parentId: parentLocated.session.parentId,
+        };
+      }
+    }
     res.json({
-      parent: parentId,
-      parentSession: parentSummary,
-      parentProjectId: located.projectId,
+      parent: parentSession?.id ?? null,
+      parentSession,
+      parentProjectId,
       children: childrenWithProjects,
     });
   }
