@@ -81,6 +81,17 @@ export interface SessionState {
   // were never branched (where `id` IS the provider thread id, as it
   // always was pre-#382).
   providerThreadId?: string;
+  // Per-session override of the agent-inactivity watchdog timeout
+  // (issue #386). When a session is expected to run a long blocking
+  // tool call (e.g. `gh pr checks --watch` waiting on CI) the global
+  // 5-minute watchdog trips well before the tool call returns. The
+  // client can supply an override at session creation; it is
+  // persisted here and re-applied on every resume so the user does
+  // not have to re-pass it on follow-up turns. The inactivity
+  // timeout is read in `handleSessionStream` at stream time and falls
+  // back to the global `AGENT_INACTIVITY_TIMEOUT_MS` env var (and
+  // then the 5-minute default) when absent.
+  agentInactivityTimeoutMs?: number;
 }
 
 /**

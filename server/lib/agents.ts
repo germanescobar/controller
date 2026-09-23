@@ -121,6 +121,18 @@ export type AgentStreamEvent =
       activeFlags?: string[];
     }
   | {
+      // In-memory "agent is still alive but quiet" ping (issue #386).
+      // The SSE handler emits this periodically while the child is
+      // alive and no terminal event has fired, so the UI can render
+      // a visible "still running" indicator during long synchronous
+      // tool calls (e.g. `gh pr checks --watch` waiting on CI) instead
+      // of presenting a frozen transcript. Not persisted to disk — it
+      // is a transient liveness signal, not a transcript event.
+      type: "run.idle";
+      sessionId: string;
+      timestamp: string;
+    }
+  | {
       type: "run.completed";
       sessionId: string;
       status: "completed" | "max_iterations";
