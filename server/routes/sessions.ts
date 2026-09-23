@@ -29,6 +29,7 @@ import {
   getAttachments,
   type AgentEvent,
   type AttachmentMetadata,
+  type SessionSummary,
 } from "../lib/sessions.js";
 import {
   buildSessionFocus,
@@ -3261,8 +3262,109 @@ childrenBySessionIdRouter.get(
       return;
     }
     const { listChildSessions } = await import("../lib/sessions.js");
-    const children = await listChildSessions(parentId);
-    res.json({ parent: parentId, children });
+    const { getProjectWorktrees } = await import("../lib/worktrees.js");
+    // Issue #384: the floating focus panel renders parent/children
+    // titles as `controller://project/<pid>/worktree/<wid>/session/<sid>`
+    // anchors, so we need project+worktree ids for every entry. The
+    // actual parent comes from `located.session.parentId`; the
+    // children's ids require walking projects × worktrees again. We
+    // do this here rather than in `listChildSessions` so the cheaper
+    // existing helper (used by `collectArchiveBlockers`) keeps its
+    // current shape. The walk mirrors the strict-archive rule's
+    // child recursion, so the cost is the same.
+    const projects = await getProjects();
+    const childrenSummaries = await listChildSessions(parentId);
+    const childrenWithProjects: Array<
+      SessionSummary & { projectId: string }
+    > = [];
+    for (const child of childrenSummaries) {
+      // Re-locate the child so a session moved across worktrees
+      // since the parent walk still resolves correctly. `located`
+      // already returns the worktreeId on the session itself, but
+      // a child may live in a different project (a coordinator
+      // on one project can spawn a child on another via the
+      // `sessions start --project` route), so we cannot assume
+      // project id equality.
+      let resolved: { projectId: string; session: SessionSummary } | null =
+        null;
+      for (const project of projects) {
+        const worktrees = await getProjectWorktrees(project.id).catch(
+          () => [],
+        );
+        for (const worktree of worktrees) {
+          const candidate = await getSession(worktree.path, child.id).catch(
+            () => null,
+          );
+          if (candidate) {
+            resolved = { projectId: project.id, session: candidate };
+            break;
+          }
+        }
+        if (resolved) break;
+      }
+      if (!resolved) {
+        // The child was archived between the two walks. Fall back
+        // to the bare summary so the row still renders the title
+        // — better than silently dropping it — but mark the
+        // projectId as empty so the panel-side click handler can
+        // skip navigation for that entry.
+        childrenWithProjects.push({ ...child, projectId: "" });
+        continue;
+      }
+      childrenWithProjects.push({
+        ...resolved.session,
+        projectId: resolved.projectId,
+      });
+    }
+    // Parent summary is the *actual* parent of the located session
+    // — i.e. `located.session.parentId`, not `located.session`
+    // itself. The previous version of this route echoed the
+    // current session's id into `parent`, which made the floating
+    // panel render a `Parent` row whose title linked back to the
+    // current session even when the current session has no parent.
+    // Resolving the actual parent (and returning all three parent
+    // fields as `null` when it has none) keeps the panel's "no
+    // relationships → unchanged panel" contract honest: a session
+    // with no parent renders no `Parent` row.
+    //
+    // The CLI's `sessions children` consumer (issue #351) only
+    // reads `children`, never `parent`, so this semantic change
+    // is invisible to it. The send-from-route test asserted the
+    // old "parent echoes URL param" shape and is updated to
+    // reflect the new "parent is the actual parent" contract.
+    const actualParentId = located.session.parentId;
+    let parentSession: SessionSummary | null = null;
+    let parentProjectId: string | null = null;
+    if (typeof actualParentId === "string" && actualParentId) {
+      const parentLocated = await locateSessionById(actualParentId);
+      if (parentLocated) {
+        parentProjectId = parentLocated.projectId;
+        parentSession = {
+          id: parentLocated.session.id,
+          title: parentLocated.session.title,
+          workingDirectory: parentLocated.session.workingDirectory,
+          worktreeId: parentLocated.session.worktreeId,
+          model: parentLocated.session.model,
+          reasoningEffort: parentLocated.session.reasoningEffort,
+          serviceTier: parentLocated.session.serviceTier,
+          provider: parentLocated.session.provider,
+          mode: parentLocated.session.mode,
+          createdAt: parentLocated.session.createdAt,
+          lastActiveAt: parentLocated.session.lastActiveAt,
+          status: parentLocated.session.status,
+          focusPinnedAt: parentLocated.session.focusPinnedAt,
+          focusDoneAt: parentLocated.session.focusDoneAt,
+          userUnpinned: parentLocated.session.userUnpinned,
+          parentId: parentLocated.session.parentId,
+        };
+      }
+    }
+    res.json({
+      parent: parentSession?.id ?? null,
+      parentSession,
+      parentProjectId,
+      children: childrenWithProjects,
+    });
   }
 );
 

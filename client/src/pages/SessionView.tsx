@@ -45,6 +45,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { FocusConversationControls } from "@/components/focus-conversation-controls";
+import { useSessionRelationships } from "@/lib/session-relationships.ts";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import { isControllerAvailable } from "@/lib/controller";
 import { formatChord, matchesEvent, parseChord } from "@/lib/shortcut-match";
@@ -3212,6 +3213,21 @@ export function SessionView({
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showReasoningEffortPicker, setShowReasoningEffortPicker] = useState(false);
   const [activeStreamSessionId, setActiveStreamSessionId] = useState<string | null>(sessionId ?? null);
+  // Issue #384: cache the current session's parent + children so
+  // the floating focus panel can render its `Parent` / `Children`
+  // rows. The hook fires on session id change and on the global
+  // refresh counter (bumped by App.tsx when the project event
+  // stream fires) so a child spawned or finished in another tab
+  // shows up here without polling. The hook returns `null` until
+  // the first fetch resolves, which is the correct default for a
+  // session with no parent and no children (no rows to render).
+  // We key off `activeStreamSessionId ?? sessionId` so the rows
+  // stay correct while a brand-new session is attaching from a
+  // `startSession` call: the `activeStreamSessionId` flips the
+  // moment the SSE reports `run.started`, before the user
+  // navigates.
+  const relationshipsSessionId = activeStreamSessionId ?? sessionId ?? null;
+  const relationships = useSessionRelationships(relationshipsSessionId);
   const [agentProviders, setAgentProviders] = useState<AgentProviderInfo[]>([]);
   const [agents, setAgents] = useState<import("../api.ts").AgentStatus[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
@@ -6256,6 +6272,10 @@ export function SessionView({
           onAddToRadar={handleHeaderFocusPin}
           onToggleAutoAdvance={onToggleAutoAdvance}
           countdown={conversationFocusCountdown}
+          parent={relationships?.parentSession ?? null}
+          children={relationships?.children ?? []}
+          currentProjectId={projectId}
+          onOpenConversation={onOpenConversation}
         />
       ) : null}
 
@@ -6498,6 +6518,10 @@ export function SessionView({
               onAddToRadar={handleHeaderFocusPin}
               onToggleAutoAdvance={onToggleAutoAdvance}
               countdown={conversationFocusCountdown}
+              parent={relationships?.parentSession ?? null}
+              children={relationships?.children ?? []}
+              currentProjectId={projectId}
+              onOpenConversation={onOpenConversation}
             />
           ) : null}
 

@@ -36,6 +36,16 @@ interface RoutesEnv {
   worktreeId: string;
   parentId: string;
   childId: string;
+  // Helper used by the issue #384 parent-routing regression
+  // test to plant an extra session in the same project (e.g. a
+  // *grandparent* of `parentId` to exercise `parentId`'s real-
+  // parent resolution path). Returns the new session's id.
+  plantSession?: (session: {
+    id: string;
+    title: string;
+    parentId?: string;
+    worktreeId?: string;
+  }) => Promise<string>;
 }
 
 async function withRoutes<T>(fn: (env: RoutesEnv) => Promise<T>): Promise<T> {
@@ -128,8 +138,38 @@ async function withRoutes<T>(fn: (env: RoutesEnv) => Promise<T>): Promise<T> {
     throw new Error("Could not bind test server");
   }
   const baseUrl = `http://127.0.0.1:${address.port}`;
+  // Per-test session planter used by the issue #384 parent-routing
+  // regression test. Plants an extra session on either the main or
+  // feature worktree (defaults to main). The new session is part
+  // of the same fixture, so the `locateSessionById` walk the route
+  // uses will find it without further changes.
+  const plantSession: RoutesEnv["plantSession"] = async ({
+    id,
+    title,
+    parentId: extraParentId,
+    worktreeId: extraWorktreeId,
+  }) => {
+    const targetWorktreeId = extraWorktreeId ?? worktreeId;
+    const targetWorktreePath =
+      targetWorktreeId === featureWorktreeId
+        ? featureWorktreePath
+        : worktreePath;
+    await seedSession(targetWorktreePath, projectId, targetWorktreeId, {
+      id,
+      title,
+      parentId: extraParentId,
+    });
+    return id;
+  };
   try {
-    return await fn({ baseUrl, projectId, worktreeId, parentId, childId });
+    return await fn({
+      baseUrl,
+      projectId,
+      worktreeId,
+      parentId,
+      childId,
+      plantSession,
+    });
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previousHome === undefined) delete process.env.CONTROLLER_HOME;
@@ -319,7 +359,7 @@ test("GET /children walks every project × worktree and returns the parent's chi
     );
     assert.equal(response.status, 200);
     const body = (await response.json()) as {
-      parent: string;
+      parent: string | null;
       children: Array<{
         id: string;
         title: string;
@@ -327,7 +367,14 @@ test("GET /children walks every project × worktree and returns the parent's chi
         parentId?: string;
       }>;
     };
-    assert.equal(body.parent, parentId);
+    // `sess-parent` is itself a parent (no `parentId` of its own
+    // in the fixture), so the route's `parent` field is `null` —
+    // it carries the *actual* parent id, not the URL param. The
+    // CLI's `sessions children` consumer reads only `children`,
+    // so this change is invisible there; the floating focus
+    // panel uses it to skip the Parent row when the current
+    // session has no real parent.
+    assert.equal(body.parent, null);
     assert.equal(body.children.length, 1);
     assert.equal(body.children[0].id, childId);
     // The child lives on the feature worktree, not the parent's
@@ -356,5 +403,56 @@ test("GET /children returns 404 for an unknown parent (issue #351)", async () =>
       `${baseUrl}/api/sessions/sess-not-found/children`
     );
     assert.equal(response.status, 404);
+  });
+});
+
+test("GET /children returns the session's actual parent (issue #384 regression)", async () => {
+  // Regression test for the bug where the route's `parent` field
+  // echoed back the URL param (the *current* session's id), causing
+  // the floating focus panel to render a `Parent` row whose link
+  // pointed at the session the user was already viewing. The fix
+  // resolves `parentId` from the located session's persisted
+  // `parentId` field — when set, the response carries the *real*
+  // parent's id + summary; when unset, all three fields are null
+  // so the panel renders no row (matching the pre-#384 contract
+  // for sessions without a parent).
+  //
+  // The companion "no real parent" case is exercised by the
+  // existing "walks every project × worktree" test above — the
+  // fixture's `sess-parent` has no `parentId` of its own, so
+  // `body.parent === null`.
+  await withRoutes(async ({ baseUrl, parentId, childId, plantSession }) => {
+    assert.ok(plantSession, "expected the fixture to expose plantSession");
+    // `parentId` already exists in the fixture as the parent of
+    // `childId`. Plant a grandparent and link `parentId` to it.
+    const grandparentId = "sess-grandparent";
+    await plantSession({
+      id: grandparentId,
+      title: "Grandparent",
+    });
+    await plantSession({
+      id: parentId,
+      title: "Coordinator",
+      parentId: grandparentId,
+    });
+    const response = await fetch(
+      `${baseUrl}/api/sessions/${parentId}/children`
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      parent: string | null;
+      parentSession: { id: string; title: string } | null;
+      parentProjectId: string | null;
+      children: Array<{ id: string }>;
+    };
+    // `parent` is the real parent, NOT the URL param.
+    assert.equal(body.parent, grandparentId);
+    assert.equal(body.parentSession?.id, grandparentId);
+    assert.equal(body.parentSession?.title, "Grandparent");
+    assert.equal(body.parentProjectId, "proj-1");
+    // Children still come from the asked-about session, which has
+    // `childId` as its only child.
+    assert.equal(body.children.length, 1);
+    assert.equal(body.children[0].id, childId);
   });
 });
