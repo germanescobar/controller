@@ -321,6 +321,49 @@ test("per-session inactivity timeout is omitted from the session file when not s
   );
 });
 
+test("explicit opt-in at a value equal to the current default is persisted (issue #388 codex review)", async () => {
+  // Regression: a user who explicitly opts in at exactly the
+  // current global default (5 min) used to be silently treated as
+  // the default-fallback path, which meant a future deployment
+  // changing `AGENT_INACTIVITY_TIMEOUT_MS` would silently rebind
+  // the session to the new global value. Now we track
+  // `explicitlySupplied` separately from the resolved value, so a
+  // user opt-in is always persisted (codex review on PR #388).
+  const sessionId = "sess-issue-388-explicit-default";
+  const atDefault = 5 * 60 * 1000;
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId);
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Opt in.",
+          provider: "anita",
+          agentInactivityTimeoutMs: atDefault,
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+      assert.equal(body.sessionId, sessionId);
+
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const storeDir = projectStoreDir(projectPath);
+      const sessionFile = path.join(storeDir, "sessions", `${sessionId}.json`);
+      const sessionContent = await fs.readFile(sessionFile, "utf-8");
+      const session = JSON.parse(sessionContent);
+      assert.equal(
+        session.agentInactivityTimeoutMs,
+        atDefault,
+        "explicit user opt-in at exactly the current default MUST be persisted, not silently dropped (PR #388 codex review)"
+      );
+    }
+  );
+});
+
 test("per-session inactivity timeout rejects non-positive values (issue #386)", async () => {
   // Negative or zero overrides fall back to the default — they MUST NOT
   // starve the watchdog to a sub-second window, and they MUST NOT be

@@ -2217,7 +2217,10 @@ function RunIdleIndicator({ timestamp }: { timestamp: string }) {
   // Relative time without seconds so the indicator does not
   // visibly tick every cycle. Recomputes on re-render only — the
   // server emits a fresh ping every ~30s so the user gets a
-  // periodic refresh.
+  // periodic refresh. The label is intentionally provider-neutral
+  // (issue #386, codex review P2): the same watchdog covers the
+  // Anita, Codex, and Claude paths, and hard-coding "Claude" would
+  // mislabel sessions on other providers.
   const formatted = useMemo(() => {
     const ms = Date.now() - new Date(timestamp).getTime();
     if (ms < 60 * 1000) return "just now";
@@ -2234,7 +2237,7 @@ function RunIdleIndicator({ timestamp }: { timestamp: string }) {
         <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
       </span>
       <span>
-        Claude is still running — last activity {formatted}
+        Still running — last activity {formatted}
       </span>
     </div>
   );
@@ -5248,13 +5251,17 @@ export function SessionView({
                   setStreamItems((prev) =>
                     prev.filter(
                       (item) =>
+                        // Keep only the terminal-status banners
+                        // (issue #386, codex review P2). Every
+                        // other item — including the `run_idle`
+                        // liveness ping — is mirrored by the
+                        // persisted transcript that just landed;
+                        // leaving it in `streamItems` would render
+                        // a "still running" indicator indefinitely
+                        // because stream items render even after
+                        // `streaming` flips false.
                         item.type === "error" ||
-                        item.type === "run_cancelled" ||
-                        // `run_idle` is an in-memory liveness ping
-                        // (issue #386). The run has terminated, so
-                        // the indicator is no longer meaningful —
-                        // drop it alongside the working items.
-                        item.type === "run_idle"
+                        item.type === "run_cancelled"
                     )
                   );
                 }

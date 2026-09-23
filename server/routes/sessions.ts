@@ -156,17 +156,28 @@ function resolveRunIdlePingIntervalMs(): number {
  * value (when a positive integer) wins; otherwise we honor an override
  * previously persisted on the session file; otherwise we fall back to the
  * global `AGENT_INACTIVITY_TIMEOUT_MS` env var, then the 5-minute default.
+ *
+ * `explicitlySupplied` is `true` only when the caller passed a positive
+ * `agentInactivityTimeoutMs` on this turn — even if the value happens to
+ * equal the current global default. Persistence uses that flag to decide
+ * whether to write the field through to the session file. Without it we
+ * would silently drop a user opt-in that matched the default, then
+ * re-resolve from the global env on resume; after a deployment that
+ * changes `AGENT_INACTIVITY_TIMEOUT_MS` the user's explicit choice
+ * would be lost. (Codex review on PR #388.)
  */
 function resolveAgentInactivityTimeoutMs(args: {
   queryValue: string | string[] | undefined;
   persistedValue: number | undefined;
-}): number {
+}): { ms: number; explicitlySupplied: boolean } {
   const fromQuery = parsePositiveInt(args.queryValue);
-  if (fromQuery !== undefined) return fromQuery;
-  if (typeof args.persistedValue === "number" && args.persistedValue > 0) {
-    return args.persistedValue;
+  if (fromQuery !== undefined) {
+    return { ms: fromQuery, explicitlySupplied: true };
   }
-  return DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS;
+  if (typeof args.persistedValue === "number" && args.persistedValue > 0) {
+    return { ms: args.persistedValue, explicitlySupplied: true };
+  }
+  return { ms: DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS, explicitlySupplied: false };
 }
 
 function parsePositiveInt(
@@ -1513,25 +1524,28 @@ export async function handleSessionStream(
       // Per-session agent-inactivity timeout (issue #386). Resolved
       // by the caller so the Codex path reuses the same logic — the
       // persisted field is the only thing that survives across
-      // resumes, so we forward the resolved value here and the
-      // Codex `persistSessionStart` writes it through. Uses
-      // `worktree.path` rather than the locally-shadowed
-      // `worktreePath` constant because the Codex branch fires
-      // before the SSE-handler-internal `const worktreePath` is
-      // declared further down.
-      agentInactivityTimeoutMs:
-        resolveAgentInactivityTimeoutMs({
-          queryValue: req.query.agentInactivityTimeoutMs as
-            | string
-            | string[]
-            | undefined,
-          persistedValue:
-            controllerSessionId && !branchedFirstTurn
-              ? (
-                  await getSession(worktree.path, controllerSessionId)
-                )?.agentInactivityTimeoutMs
-              : undefined,
-        }),
+      // resumes, so we forward the resolved `{ ms,
+      // explicitlySupplied }` pair here and the Codex
+      // `persistSessionStart` writes it through. `explicitlySupplied`
+      // is what distinguishes "user opted in for this session" from
+      // "fallback to the global default" — without it, a user opt-in
+      // that happens to equal the current default would be silently
+      // dropped (codex review on PR #388). Uses `worktree.path`
+      // rather than the locally-shadowed `worktreePath` constant
+      // because the Codex branch fires before the SSE-handler-
+      // internal `const worktreePath` is declared further down.
+      agentInactivityTimeoutMs: resolveAgentInactivityTimeoutMs({
+        queryValue: req.query.agentInactivityTimeoutMs as
+          | string
+          | string[]
+          | undefined,
+        persistedValue:
+          controllerSessionId && !branchedFirstTurn
+            ? (
+                await getSession(worktree.path, controllerSessionId)
+              )?.agentInactivityTimeoutMs
+            : undefined,
+      }),
     });
     return;
   }
@@ -1749,19 +1763,21 @@ export async function handleSessionStream(
           }
         : {}),
       // Per-session inactivity-timeout override (issue #386). Persisted
-      // here so a follow-up turn on the same session does not require the
-      // client to re-supply it. On a brand-new session we honor the value
-      // computed for this stream (`inactivityTimeoutMs` falls back to the
-      // default when no override is supplied, which is what `undefined`
-      // correctly encodes). On resume we preserve the existing override
-      // because changing the inactivity window mid-session from a different
-      // turn would be surprising — the same logic that protects
-      // `parentId` and `providerThreadId` above.
+      // here so a follow-up turn on the same session does not
+      // require the client to re-supply it. On resume we preserve
+      // the existing override because changing the inactivity
+      // window mid-session from a different turn would be
+      // surprising — the same logic that protects `parentId` and
+      // `providerThreadId` above. On a brand-new session we
+      // persist whenever the user opted in — even at a value equal
+      // to the current global default — so a future deployment
+      // that changes `AGENT_INACTIVITY_TIMEOUT_MS` does not
+      // silently rebind the session. (Codex review on PR #388.)
       ...(existing
         ? existing.agentInactivityTimeoutMs
           ? { agentInactivityTimeoutMs: existing.agentInactivityTimeoutMs }
           : {}
-        : inactivityTimeoutMs !== DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS
+        : inactivityTimeoutExplicitlySupplied
         ? { agentInactivityTimeoutMs: inactivityTimeoutMs }
         : {}),
     });
@@ -1821,8 +1837,14 @@ export async function handleSessionStream(
   // visibly instead of hanging forever. Issue #386: the inactivity window is
   // resolved per-stream so a client can extend it on sessions expected to run
   // long synchronous tool calls (e.g. `gh pr checks --watch` waiting on CI).
+  // The Codex review on PR #388 also pushed us to track
+  // `inactivityTimeoutExplicitlySupplied` separately so a user opt-in at
+  // exactly the current global default survives a future env-var change.
   const providerName = provider.name;
-  const inactivityTimeoutMs = resolveAgentInactivityTimeoutMs({
+  const {
+    ms: inactivityTimeoutMs,
+    explicitlySupplied: inactivityTimeoutExplicitlySupplied,
+  } = resolveAgentInactivityTimeoutMs({
     queryValue: req.query.agentInactivityTimeoutMs as
       | string
       | string[]
@@ -2439,11 +2461,17 @@ async function streamCodexPlanSession(
     // provider thread yet and we must capture the one Codex picks.
     controllerSessionId?: string;
     branchedFirstTurn?: boolean;
-    // Resolved per-session agent-inactivity timeout in ms (issue
-    // #386). Computed by the SSE caller so the Codex path writes
-    // the same value through to the session file — no separate
-    // resolution needed inside the Codex handler.
-    agentInactivityTimeoutMs: number;
+    // Resolved per-session agent-inactivity timeout (issue #386).
+    // Computed by the SSE caller so the Codex path writes the same
+    // value through to the session file — no separate resolution
+    // needed inside the Codex handler. `explicitlySupplied` is the
+    // decision flag for whether to persist the field at all; the
+    // resolved `ms` is what to write. See the codex review on PR
+    // #388 for why we track the flag separately from the value.
+    agentInactivityTimeoutMs: {
+      ms: number;
+      explicitlySupplied: boolean;
+    };
   }
 ) {
   const {
@@ -2466,6 +2494,13 @@ async function streamCodexPlanSession(
     branchedFirstTurn,
     agentInactivityTimeoutMs,
   } = options;
+
+  // Convenience: the resolved value and the decision flag separately,
+  // so the persistence path doesn't have to know the shape of the
+  // `agentInactivityTimeoutMs` option above.
+  const inactivityTimeoutMs = agentInactivityTimeoutMs.ms;
+  const inactivityTimeoutExplicitlySupplied =
+    agentInactivityTimeoutMs.explicitlySupplied;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -2607,17 +2642,21 @@ async function streamCodexPlanSession(
               startOptions.providerThreadId ?? existing?.providerThreadId,
           }
         : {}),
-      // Per-session inactivity-timeout override (issue #386). Same
-      // preservation rules as the SSE-stream variant: brand-new
-      // sessions honor the resolved value (omitted when it matches
-      // the default so the file stays clean); resumes preserve the
-      // existing field unchanged.
+      // Per-session inactivity-timeout override (issue #386, codex
+      // review on PR #388). Same preservation rules as the
+      // SSE-stream variant: on resume we keep whatever was on the
+      // file; on a brand-new session we persist whenever the user
+      // opted in — even at a value equal to the current global
+      // default — so a future deployment that changes
+      // `AGENT_INACTIVITY_TIMEOUT_MS` does not silently rebind the
+      // session. The default-fallback (no opt-in) leaves the field
+      // absent so the file stays clean.
       ...(existing
         ? existing.agentInactivityTimeoutMs
           ? { agentInactivityTimeoutMs: existing.agentInactivityTimeoutMs }
           : {}
-        : agentInactivityTimeoutMs !== DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS
-        ? { agentInactivityTimeoutMs }
+        : inactivityTimeoutExplicitlySupplied
+        ? { agentInactivityTimeoutMs: inactivityTimeoutMs }
         : {}),
     });
     if (!existing) {
