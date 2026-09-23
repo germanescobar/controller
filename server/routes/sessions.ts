@@ -1498,7 +1498,23 @@ export async function handleSessionStream(
 
   const runStartTree = await createWorktreeSnapshot(worktree.path);
 
-  if (providerId === "codex" && attachments.length === 0) {
+  // Use the long-lived codex-app-server path whenever we are resuming an
+  // existing codex thread, regardless of attachments (issue #390). The
+  // app-server keeps a per-thread writer lock alive in
+  // `~/.codex/thread-writer-locks/<threadId>.lock` (see
+  // `codex_thread_store::local::writer_lock` in codex-cli). A separate
+  // `codex exec resume …` invocation falls back to the legacy
+  // `provider.spawn` path below, which tries to acquire the same lock
+  // and is rejected with `thread <id> already has an active writer
+  // (code -32600)` within ~400 ms. This was masked when the only codex
+  // sessions ever went through `codex exec`; once the app-server path
+  // landed (issue #382 / branch plumbing), resuming such a session
+  // with an image attachment tripped the conflict.
+  //
+  // For brand-new codex threads (`resumeSessionId === undefined`),
+  // there is no app-server lock yet, so the legacy `codex exec` path
+  // is still safe and remains a useful fallback.
+  if (providerId === "codex" && (attachments.length === 0 || resumeSessionId)) {
     await streamCodexPlanSession(req, res, {
       worktreePath: worktree.path,
       worktreeId: worktree.id,

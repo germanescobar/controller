@@ -974,3 +974,432 @@ test("GET /api/projects/:projectId/sessions sets Cache-Control: no-store so the 
     }
   );
 });
+
+/*
+ * Issue #390: a codex session that took the `streamCodexPlanSession`
+ * (long-lived `codex app-server`) path on its first turn must continue
+ * via the same path when the user attaches an image — falling back to
+ * `codex exec resume … --image` against the still-alive app-server
+ * fails immediately with `thread <id> already has an active writer
+ * (code -32600)` because the app-server holds the per-thread writer
+ * lock. The route's condition at `server/routes/sessions.ts:1407` was
+ * the gate; the tests below pin both halves of the new behavior:
+ *
+ *   1. **Resumed codex session + attachment → `codex app-server` path.**
+ *      The pre-existing session file is enough to make the route treat
+ *      the request as a resume (so `resumeSessionId` is set in the
+ *      branch the route sees). The fake `codex` records its argv and
+ *      implements the JSON-RPC handshake the app-server path expects
+ *      so the test exercises the real end-to-end pipeline.
+ *
+ *   2. **Brand-new codex session + attachment → `codex exec resume`
+ *      path.** No pre-existing session file, no `resumeSessionId` —
+ *      the legacy fallback is still correct here because no app-server
+ *      lock exists yet to compete for. This pins the other half of the
+ *      fix so we don't accidentally route brand-new sessions through
+ *      the app-server path (which would force every codex turn onto
+ *      the long-lived process before the user has any history to
+ *      resume against).
+ */
+
+interface FakeCodexOptions {
+  argvFile: string;
+  /** sessionId echoed in the agent's `run.started` JSONL line / app-server `thread/started` event. */
+  sessionId: string;
+  /**
+   * Optional file the app-server branch writes the most recent
+   * `turn/start` params to (JSON-serialized). Lets the test assert the
+   * payload — specifically the image-input variant — matches the real
+   * codex app-server schema. Set to a string to enable; leave
+   * undefined for tests that don't care about the payload.
+   */
+  turnStartParamsFile?: string;
+}
+
+/**
+ * Stand up a fake `codex` binary on PATH that:
+ *   - records its argv (newline-joined) to `argvFile` so the test can
+ *     distinguish `codex app-server …` from `codex exec resume …`;
+ *   - when invoked as `codex app-server`, speaks just enough
+ *     newline-delimited JSON-RPC to satisfy the orchestrator's
+ *     `codexAppServerManager.startPlanTurn` flow (`initialize`,
+ *     `thread/resume`, `turn/start` + a `thread/started` event +
+ *     `turn/completed` event so the SSE handler exits cleanly);
+ *     validates `turn/start` payloads against the same image-variant
+ *     rules the real codex app-server enforces (see v2 schema
+ *     `ImageUserInput` / `LocalImageUserInput` in
+ *     `codex app-server generate-json-schema`) so a regression to
+ *     `type: "image"` with a filesystem path surfaces here instead
+ *     of as a silent integration failure;
+ *   - when invoked as `codex exec …`, emits one `run.started` JSONL
+ *     line followed by `run.completed`, like the existing
+ *     `installFakeAgent` helper.
+ *
+ * Writing it in Node keeps the JSON-RPC parsing honest — a bash script
+ * would need a hand-rolled line reader and the tests would be harder
+ * to read.
+ */
+async function installFakeCodex(
+  binDir: string,
+  options: FakeCodexOptions
+): Promise<void> {
+  const turnStartParamsFile = options.turnStartParamsFile ?? "";
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+
+const argvFile = ${JSON.stringify(options.argvFile)};
+const sessionId = ${JSON.stringify(options.sessionId)};
+const turnStartParamsFile = ${JSON.stringify(turnStartParamsFile)};
+
+// Record the spawned argv for the test to assert against. Joined with
+// spaces so a single \`fs.readFileSync\` produces a grep-friendly
+// string ("exec", "app-server", "resume <id>", "--image PATH").
+fs.writeFileSync(argvFile, process.argv.slice(2).join(" ") + "\\n");
+
+const isAppServer = process.argv.includes("app-server");
+
+if (isAppServer) {
+  // Speak JSON-RPC over stdio. The orchestrator sends requests as
+  // newline-delimited JSON; we reply with the matching id and a
+  // minimal \`result\` payload, then emit a \`thread/started\` server
+  // notification and a \`turn/completed\` notification so the route's
+  // SSE handler reaches its \`run.completed\` path and exits cleanly.
+  let buffered = "";
+  let nextId = 1;
+  const threadsById = new Map();
+
+  function send(msg) {
+    process.stdout.write(JSON.stringify(msg) + "\\n");
+  }
+
+  function reply(id, result) {
+    send({ jsonrpc: "2.0", id, result });
+  }
+
+  // Mirrors the v2 codex app-server schema for the two image input
+  // variants in \`turn/start\` params (see
+  // \`codex app-server generate-json-schema\`). Real codex rejects
+  // \`type: "image"\` paired with a filesystem \`path\` (it requires
+  // \`url\` instead) and \`type: "localImage"\` paired with \`url\` (it
+  // requires \`path\`). The orchestrator was sending the first shape
+  // for filesystem attachments, which the real app-server rejects —
+  // the bug masked in the original #34 attachments support and
+  // surfaced once #390 routed resumed turns through this code path.
+  function validateTurnStartParams(params) {
+    const input = (params && params.input) || [];
+    for (const item of input) {
+      if (!item || typeof item !== "object") continue;
+      if (item.type === "image") {
+        if (typeof item.url !== "string" || !item.url) {
+          throw new Error(
+            'turn/start input variant "image" requires a non-empty "url" (codex app-server v2 schema)'
+          );
+        }
+        if ("path" in item) {
+          throw new Error(
+            'turn/start input variant "image" does not accept a "path" field; use type: "localImage" for filesystem paths'
+          );
+        }
+      } else if (item.type === "localImage") {
+        if (typeof item.path !== "string" || !item.path) {
+          throw new Error(
+            'turn/start input variant "localImage" requires a non-empty "path"'
+          );
+        }
+      }
+    }
+  }
+
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffered += chunk;
+    let nl;
+    while ((nl = buffered.indexOf("\\n")) !== -1) {
+      const line = buffered.slice(0, nl).trim();
+      buffered = buffered.slice(nl + 1);
+      if (!line) continue;
+      let req;
+      try {
+        req = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof req.id !== "undefined" && req.method) {
+        if (req.method === "initialize") {
+          reply(req.id, {});
+        } else if (req.method === "thread/resume") {
+          const requested = req.params && req.params.threadId;
+          threadsById.set(requested, { id: requested });
+          reply(req.id, { thread: { id: requested } });
+          // Emit the lifecycle event the parser turns into \`run.started\`.
+          send({ jsonrpc: "2.0", method: "thread/started", params: { threadId: requested } });
+        } else if (req.method === "turn/start") {
+          try {
+            validateTurnStartParams(req.params);
+          } catch (err) {
+            // Surface the validation failure as a JSON-RPC error
+            // response — same shape the real app-server returns when
+            // \`turn/start\` params fail schema validation, so the
+            // orchestrator's existing rejection path runs and the
+            // test sees the synthetic \`run.failed\` it would see in
+            // production.
+            send({
+              jsonrpc: "2.0",
+              id: req.id,
+              error: {
+                code: -32602,
+                message: err && err.message ? err.message : String(err),
+              },
+            });
+            continue;
+          }
+          if (turnStartParamsFile) {
+            fs.writeFileSync(turnStartParamsFile, JSON.stringify(req.params));
+          }
+          const turnId = "turn-" + nextId++;
+          reply(req.id, { turn: { id: turnId } });
+          // Emit the lifecycle event the parser turns into \`run.completed\`.
+          const threadId = req.params && req.params.threadId;
+          send({
+            jsonrpc: "2.0",
+            method: "turn/completed",
+            params: {
+              threadId,
+              turn: { id: turnId, status: "completed" },
+            },
+          });
+        } else {
+          reply(req.id, {});
+        }
+      }
+    }
+  });
+  process.stdin.on("end", () => process.exit(0));
+} else {
+  // Legacy \`codex exec …\` shape: newline-delimited JSON events on
+  // stdout. The orchestrator's \`mapCodexEvent\` (\`server/lib/agents.ts\`)
+  // translates \`thread.started\` → \`run.started\` and \`turn.completed\`
+  // → \`run.completed\`, so the legacy fake emits the codex-native event
+  // names — not the normalized ones anita uses. Mirrors
+  // \`installFakeAgent()\`'s shape so the SSE handler's close path
+  // (which only emits a synthetic \`run.failed\` on non-zero exit) sees
+  // a clean two-event run.
+  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId, timestamp: "2026-01-01T00:00:00.000Z" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "turn.completed", timestamp: "2026-01-01T00:00:00.000Z" }) + "\\n");
+  process.exit(0);
+}
+`;
+  await fs.writeFile(path.join(binDir, "codex"), script, { mode: 0o755 });
+}
+
+async function saveImageAttachment(
+  projectPath: string,
+  id: string
+): Promise<void> {
+  // The route resolves attachment ids via
+  // \`server/lib/sessions.ts#saveAttachment\`, which writes the file
+  // to \`<controllerHome>/projects/<id>/attachments/<attId>/<name>\`
+  // and a sidecar \`metadata.json\` containing the path + \`isImage\`.
+  // We only need \`isImage: true\` for this test — the path can be a
+  // tiny PNG-equivalent placeholder; the route hands the path to the
+  // agent, the agent never opens it.
+  const { saveAttachment } = await import("../../lib/sessions.js");
+  await saveAttachment(
+    projectPath,
+    {
+      id,
+      name: "image.png",
+      mimeType: "image/png",
+      size: 16,
+      path: "", // overwritten by saveAttachment
+      isImage: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+    Buffer.from("fake-png-bytes-1234")
+  );
+}
+
+test("issue #390: resumed codex session with attachment goes through the codex app-server path (not codex exec)", async () => {
+  // Regression: before #390, the route at
+  // \`server/routes/sessions.ts:1407\` only used the app-server path
+  // when \`attachments.length === 0\`. As soon as the user attached
+  // an image, the route fell back to spawning \`codex exec resume
+  // <id> <prompt> --image PATH\`. That \`codex exec\` was rejected by
+  // codex with "thread already has an active writer (code -32600)"
+  // because the long-lived app-server still held the per-thread writer
+  // lock from the prior turn. The fix routes resumed sessions through
+  // the app-server path regardless of attachments.
+  //
+  // This test also pins the schema-correct image input variant: the
+  // v2 codex app-server schema (verified via
+  // \`codex app-server generate-json-schema\`) accepts
+  // \`{ type: "localImage", path }\` for filesystem paths and rejects
+  // \`{ type: "image", path }\` (which requires \`url\`). The
+  // orchestrator's \`buildCodexInput\` was sending the wrong variant
+  // for filesystem attachments — a latent bug from the original
+  // attachments support (#34) that this PR's routing change made
+  // reachable. The fake codex validates the payload against the same
+  // rules; the assertion below reads what the orchestrator actually
+  // sent so the regression class is pinned end-to-end.
+  const sessionId = "sess-issue-390-resume-with-image";
+  const attachmentId = "att-issue-390-image";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir, projectPath }) => {
+      await installFakeCodex(binDir, {
+        argvFile: path.join(homeDir, "codex-argv.txt"),
+        sessionId,
+        turnStartParamsFile: path.join(homeDir, "turn-start-params.json"),
+      });
+      // Point the codex provider at our fake. The default
+      // \`resolveAgentCommand\` walks PATH, but the test's
+      // \`process.env.PATH\` change above already covers that — no
+      // \`agents.json\` override needed.
+      await saveImageAttachment(projectPath, attachmentId);
+
+      // Pre-seed the session file as a previously-running codex
+      // session. The route's \`getSession\` lookup at line 1251 must
+      // find it so \`resumeSessionId\` stays set after the
+      // unstarted/providerThreadId branch (line 1253). Without this
+      // file the route would treat the request as brand-new and never
+      // take either branch we're trying to pin.
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const sessionsDir = path.join(projectStoreDir(projectPath), "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      await fs.writeFile(
+        path.join(sessionsDir, `${sessionId}.json`),
+        JSON.stringify({
+          id: sessionId,
+          title: "Pre-existing codex session",
+          workingDirectory: projectPath,
+          worktreeId: "wt-main",
+          model: "",
+          provider: "codex",
+          mode: "default",
+          messages: [],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          lastActiveAt: "2026-01-01T00:00:00.000Z",
+          status: "active",
+        })
+      );
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Here's an image to look at.",
+          provider: "codex",
+          resumeSessionId: sessionId,
+          attachmentIds: [attachmentId],
+        }),
+      });
+      // The shim returns 200 + { sessionId, url } once the agent's
+      // first run.started-equivalent event lands. Both codex paths
+      // surface that event, so a 200 here only confirms the request
+      // reached the spawn step — the argv + payload files below are
+      // what pin which path was taken and what it sent.
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(
+        res.status,
+        200,
+        `expected 200, got ${res.status}: ${JSON.stringify(body)}`
+      );
+
+      const argv = (await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8")).trim();
+      assert.ok(
+        argv.includes("app-server"),
+        `resumed codex session with attachment must use the app-server path; got argv: ${argv}`
+      );
+      assert.ok(
+        !argv.includes("exec"),
+        `resumed codex session must not fall back to codex exec (writer-lock conflict, issue #390); got argv: ${argv}`
+      );
+
+      // Schema-correct image input: filesystem attachments must use
+      // \`{ type: "localImage", path }\`, not \`{ type: "image", path }\`
+      // (which the real app-server rejects because \`image\` requires
+      // \`url\`). The fake's validator also rejects the wrong shape at
+      // the JSON-RPC layer, so this assertion is doubly-pinned.
+      const paramsContent = await fs.readFile(
+        path.join(homeDir, "turn-start-params.json"),
+        "utf-8"
+      );
+      const turnParams = JSON.parse(paramsContent) as {
+        input?: Array<Record<string, unknown>>;
+      };
+      const imageInputs = (turnParams.input ?? []).filter(
+        (item) => item.type === "image" || item.type === "localImage"
+      );
+      assert.equal(
+        imageInputs.length,
+        1,
+        `turn/start should include exactly one image input for the attachment, got: ${JSON.stringify(turnParams.input)}`
+      );
+      assert.equal(
+        imageInputs[0].type,
+        "localImage",
+        `filesystem attachments must use type "localImage" (codex v2 schema); got: ${JSON.stringify(imageInputs[0])}`
+      );
+      assert.equal(
+        typeof imageInputs[0].path,
+        "string",
+        `localImage input must carry the attachment's filesystem path; got: ${JSON.stringify(imageInputs[0])}`
+      );
+      assert.ok(
+        (imageInputs[0].path as string).endsWith(
+          path.join("attachments", attachmentId, "image.png")
+        ),
+        `localImage path should live under <home>/projects/<...>/attachments/<id>/image.png; got: ${imageInputs[0].path}`
+      );
+    }
+  );
+});
+
+test("issue #390: brand-new codex session with attachment still uses the legacy codex exec path", async () => {
+  // The other half of the fix: a brand-new codex turn (no
+  // \`resumeSessionId\`) must keep using \`codex exec …\`. There's no
+  // app-server lock yet to compete for, so spawning the short-lived
+  // exec process is the right call — the app-server path would force
+  // every codex turn onto the long-lived process from turn 1, which
+  // is a bigger behavior change than #390 is asking for. Pinning this
+  // here means a future "always use app-server" refactor has to
+  // explicitly opt in to changing it.
+  const sessionId = "sess-issue-390-brand-new-with-image";
+  const attachmentId = "att-issue-390-image-2";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir, projectPath }) => {
+      await installFakeCodex(binDir, { argvFile: path.join(homeDir, "codex-argv.txt"), sessionId });
+      await saveImageAttachment(projectPath, attachmentId);
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Here's an image to look at.",
+          provider: "codex",
+          // No resumeSessionId — brand-new thread.
+          attachmentIds: [attachmentId],
+        }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(
+        res.status,
+        200,
+        `expected 200, got ${res.status}: ${JSON.stringify(body)}`
+      );
+
+      const argv = (await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8")).trim();
+      assert.ok(
+        argv.startsWith("exec") || argv.includes(" exec "),
+        `brand-new codex session with attachment must use codex exec; got argv: ${argv}`
+      );
+      assert.ok(
+        !argv.includes("app-server"),
+        `brand-new codex session must not use app-server (issue #390); got argv: ${argv}`
+      );
+    }
+  );
+});

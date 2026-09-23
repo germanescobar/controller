@@ -726,7 +726,21 @@ function buildCodexInput(message: string, attachments: AgentAttachment[]): Recor
 
   for (const attachment of attachments) {
     if (attachment.isImage) {
-      input.push({ type: "image", path: attachment.path });
+      // Codex's app-server protocol distinguishes two image variants in
+      // `turn/start` input (see `codex app-server generate-json-schema`
+      // → v2/TurnStartParams.json):
+      //   - `ImageUserInput` (`type: "image"`) requires `url` and has no
+      //     `path` field.
+      //   - `LocalImageUserInput` (`type: "localImage"`) requires `path`.
+      // We hand the agent a filesystem path (`AttachmentMetadata.path`,
+      // which Controller owns under its project store), so the
+      // local-path variant is the right tag. Using `type: "image"`
+      // here is what made the resumed-with-image flow fail with an
+      // "invalid params" rejection after #390 routed those turns
+      // through the app-server — the latent bug dates back to the
+      // original attachments support in #34, but only this PR's
+      // routing change made it reachable.
+      input.push({ type: "localImage", path: attachment.path });
     }
   }
 
