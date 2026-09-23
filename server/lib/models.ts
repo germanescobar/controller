@@ -246,9 +246,8 @@ function normalizeCodexModels(models: Model[]): Model[] {
 function getCodexModels(): Model[] {
   return normalizeCodexModels([
     { id: "gpt-6-astra", name: "GPT-6 Astra", provider: "codex", size: "flagship" },
-    { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "codex", size: "default" },
-    { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", provider: "codex", size: "balanced" },
-    { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: "codex", size: "fast" },
+    { id: "gpt-6-sol", name: "GPT-6 Sol", provider: "codex", size: "default" },
+    { id: "gpt-6-luna", name: "GPT-6 Luna", provider: "codex", size: "fast" },
   ]);
 }
 
