@@ -1006,6 +1006,14 @@ interface FakeCodexOptions {
   argvFile: string;
   /** sessionId echoed in the agent's `run.started` JSONL line / app-server `thread/started` event. */
   sessionId: string;
+  /**
+   * Optional file the app-server branch writes the most recent
+   * `turn/start` params to (JSON-serialized). Lets the test assert the
+   * payload — specifically the image-input variant — matches the real
+   * codex app-server schema. Set to a string to enable; leave
+   * undefined for tests that don't care about the payload.
+   */
+  turnStartParamsFile?: string;
 }
 
 /**
@@ -1017,6 +1025,12 @@ interface FakeCodexOptions {
  *     `codexAppServerManager.startPlanTurn` flow (`initialize`,
  *     `thread/resume`, `turn/start` + a `thread/started` event +
  *     `turn/completed` event so the SSE handler exits cleanly);
+ *     validates `turn/start` payloads against the same image-variant
+ *     rules the real codex app-server enforces (see v2 schema
+ *     `ImageUserInput` / `LocalImageUserInput` in
+ *     `codex app-server generate-json-schema`) so a regression to
+ *     `type: "image"` with a filesystem path surfaces here instead
+ *     of as a silent integration failure;
  *   - when invoked as `codex exec …`, emits one `run.started` JSONL
  *     line followed by `run.completed`, like the existing
  *     `installFakeAgent` helper.
@@ -1029,11 +1043,13 @@ async function installFakeCodex(
   binDir: string,
   options: FakeCodexOptions
 ): Promise<void> {
+  const turnStartParamsFile = options.turnStartParamsFile ?? "";
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 
 const argvFile = ${JSON.stringify(options.argvFile)};
 const sessionId = ${JSON.stringify(options.sessionId)};
+const turnStartParamsFile = ${JSON.stringify(turnStartParamsFile)};
 
 // Record the spawned argv for the test to assert against. Joined with
 // spaces so a single \`fs.readFileSync\` produces a grep-friendly
@@ -1060,6 +1076,40 @@ if (isAppServer) {
     send({ jsonrpc: "2.0", id, result });
   }
 
+  // Mirrors the v2 codex app-server schema for the two image input
+  // variants in \`turn/start\` params (see
+  // \`codex app-server generate-json-schema\`). Real codex rejects
+  // \`type: "image"\` paired with a filesystem \`path\` (it requires
+  // \`url\` instead) and \`type: "localImage"\` paired with \`url\` (it
+  // requires \`path\`). The orchestrator was sending the first shape
+  // for filesystem attachments, which the real app-server rejects —
+  // the bug masked in the original #34 attachments support and
+  // surfaced once #390 routed resumed turns through this code path.
+  function validateTurnStartParams(params) {
+    const input = (params && params.input) || [];
+    for (const item of input) {
+      if (!item || typeof item !== "object") continue;
+      if (item.type === "image") {
+        if (typeof item.url !== "string" || !item.url) {
+          throw new Error(
+            'turn/start input variant "image" requires a non-empty "url" (codex app-server v2 schema)'
+          );
+        }
+        if ("path" in item) {
+          throw new Error(
+            'turn/start input variant "image" does not accept a "path" field; use type: "localImage" for filesystem paths'
+          );
+        }
+      } else if (item.type === "localImage") {
+        if (typeof item.path !== "string" || !item.path) {
+          throw new Error(
+            'turn/start input variant "localImage" requires a non-empty "path"'
+          );
+        }
+      }
+    }
+  }
+
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => {
     buffered += chunk;
@@ -1084,6 +1134,28 @@ if (isAppServer) {
           // Emit the lifecycle event the parser turns into \`run.started\`.
           send({ jsonrpc: "2.0", method: "thread/started", params: { threadId: requested } });
         } else if (req.method === "turn/start") {
+          try {
+            validateTurnStartParams(req.params);
+          } catch (err) {
+            // Surface the validation failure as a JSON-RPC error
+            // response — same shape the real app-server returns when
+            // \`turn/start\` params fail schema validation, so the
+            // orchestrator's existing rejection path runs and the
+            // test sees the synthetic \`run.failed\` it would see in
+            // production.
+            send({
+              jsonrpc: "2.0",
+              id: req.id,
+              error: {
+                code: -32602,
+                message: err && err.message ? err.message : String(err),
+              },
+            });
+            continue;
+          }
+          if (turnStartParamsFile) {
+            fs.writeFileSync(turnStartParamsFile, JSON.stringify(req.params));
+          }
           const turnId = "turn-" + nextId++;
           reply(req.id, { turn: { id: turnId } });
           // Emit the lifecycle event the parser turns into \`run.completed\`.
@@ -1157,11 +1229,27 @@ test("issue #390: resumed codex session with attachment goes through the codex a
   // because the long-lived app-server still held the per-thread writer
   // lock from the prior turn. The fix routes resumed sessions through
   // the app-server path regardless of attachments.
+  //
+  // This test also pins the schema-correct image input variant: the
+  // v2 codex app-server schema (verified via
+  // \`codex app-server generate-json-schema\`) accepts
+  // \`{ type: "localImage", path }\` for filesystem paths and rejects
+  // \`{ type: "image", path }\` (which requires \`url\`). The
+  // orchestrator's \`buildCodexInput\` was sending the wrong variant
+  // for filesystem attachments — a latent bug from the original
+  // attachments support (#34) that this PR's routing change made
+  // reachable. The fake codex validates the payload against the same
+  // rules; the assertion below reads what the orchestrator actually
+  // sent so the regression class is pinned end-to-end.
   const sessionId = "sess-issue-390-resume-with-image";
   const attachmentId = "att-issue-390-image";
   await withSessionStartEnv(
     async ({ binDir, homeDir, projectPath }) => {
-      await installFakeCodex(binDir, { argvFile: path.join(homeDir, "codex-argv.txt"), sessionId });
+      await installFakeCodex(binDir, {
+        argvFile: path.join(homeDir, "codex-argv.txt"),
+        sessionId,
+        turnStartParamsFile: path.join(homeDir, "turn-start-params.json"),
+      });
       // Point the codex provider at our fake. The default
       // \`resolveAgentCommand\` walks PATH, but the test's
       // \`process.env.PATH\` change above already covers that — no
@@ -1209,8 +1297,8 @@ test("issue #390: resumed codex session with attachment goes through the codex a
       // The shim returns 200 + { sessionId, url } once the agent's
       // first run.started-equivalent event lands. Both codex paths
       // surface that event, so a 200 here only confirms the request
-      // reached the spawn step — the argv file below is what pins
-      // which path was taken.
+      // reached the spawn step — the argv + payload files below are
+      // what pin which path was taken and what it sent.
       const body = (await res.json()) as { sessionId?: string; error?: string };
       assert.equal(
         res.status,
@@ -1226,6 +1314,43 @@ test("issue #390: resumed codex session with attachment goes through the codex a
       assert.ok(
         !argv.includes("exec"),
         `resumed codex session must not fall back to codex exec (writer-lock conflict, issue #390); got argv: ${argv}`
+      );
+
+      // Schema-correct image input: filesystem attachments must use
+      // \`{ type: "localImage", path }\`, not \`{ type: "image", path }\`
+      // (which the real app-server rejects because \`image\` requires
+      // \`url\`). The fake's validator also rejects the wrong shape at
+      // the JSON-RPC layer, so this assertion is doubly-pinned.
+      const paramsContent = await fs.readFile(
+        path.join(homeDir, "turn-start-params.json"),
+        "utf-8"
+      );
+      const turnParams = JSON.parse(paramsContent) as {
+        input?: Array<Record<string, unknown>>;
+      };
+      const imageInputs = (turnParams.input ?? []).filter(
+        (item) => item.type === "image" || item.type === "localImage"
+      );
+      assert.equal(
+        imageInputs.length,
+        1,
+        `turn/start should include exactly one image input for the attachment, got: ${JSON.stringify(turnParams.input)}`
+      );
+      assert.equal(
+        imageInputs[0].type,
+        "localImage",
+        `filesystem attachments must use type "localImage" (codex v2 schema); got: ${JSON.stringify(imageInputs[0])}`
+      );
+      assert.equal(
+        typeof imageInputs[0].path,
+        "string",
+        `localImage input must carry the attachment's filesystem path; got: ${JSON.stringify(imageInputs[0])}`
+      );
+      assert.ok(
+        (imageInputs[0].path as string).endsWith(
+          path.join("attachments", attachmentId, "image.png")
+        ),
+        `localImage path should live under <home>/projects/<...>/attachments/<id>/image.png; got: ${imageInputs[0].path}`
       );
     }
   );
