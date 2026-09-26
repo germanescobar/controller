@@ -169,7 +169,38 @@ interface CacheEntry {
   payload: { pr: PullRequest | null; error?: PrErrorCode };
 }
 
+/**
+ * Hard cap on cache size. Each entry holds a fully-normalized PR
+ * (with comments + reviews + statusCheckRollup), so unbounded
+ * growth is a real concern on long-running servers that touch
+ * many worktrees over time. When the cache exceeds this size we
+ * drop the oldest entries first — a simple FIFO policy keeps
+ * recently-used branches warm at the cost of re-fetching the
+ * deep tail on a TTL expiry. 256 is comfortably above the number
+ * of branches a developer is likely to switch between in a
+ * single 30s window (issue #387 review feedback).
+ */
+const CACHE_MAX_ENTRIES = 256;
+export { CACHE_MAX_ENTRIES };
+
 const cache = new Map<string, CacheEntry>();
+
+/**
+ * Insert (or replace) an entry and evict oldest entries until the
+ * cache is back under the size cap. Called from every place that
+ * writes to the cache so the cap is enforced regardless of code
+ * path (success, failure, transient fallback).
+ */
+function setCacheEntry(key: string, entry: CacheEntry): void {
+  cache.set(key, entry);
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    // `Map` preserves insertion order; the first key iterated is
+    // the oldest. Drop it.
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
 
 /**
  * Build the cache key. We include the path + branch so the same
@@ -563,7 +594,7 @@ export async function fetchPullRequestForWorktree(
       // Definitively no PR — cache and return. The client can safely
       // tear the tab down on the next poll.
       const payload: PrResponse = { pr: null };
-      cache.set(key, { fetchedAt: now, headSha, payload });
+      setCacheEntry(key, { fetchedAt: now, headSha, payload });
       return payload;
     }
     if (code === "gh_not_installed" || code === "gh_not_authenticated") {
@@ -575,7 +606,7 @@ export async function fetchPullRequestForWorktree(
         return prior.payload;
       }
       const payload: PrResponse = { pr: null, error: code };
-      cache.set(key, { fetchedAt: now, headSha, payload });
+      setCacheEntry(key, { fetchedAt: now, headSha, payload });
       return payload;
     }
     // Uncategorized / transient failure (network error, timeout,
@@ -642,11 +673,11 @@ export async function fetchPullRequestForWorktree(
   // keep displaying forever (issue #387 review feedback).
   if (pr && pr.state.toUpperCase() !== "OPEN") {
     const payload: PrResponse = { pr: null };
-    cache.set(key, { fetchedAt: now, headSha, payload });
+    setCacheEntry(key, { fetchedAt: now, headSha, payload });
     return payload;
   }
   const payload: PrResponse = pr ? { pr } : { pr: null };
-  cache.set(key, { fetchedAt: now, headSha, payload });
+  setCacheEntry(key, { fetchedAt: now, headSha, payload });
   return payload;
 }
 
@@ -657,6 +688,28 @@ export async function fetchPullRequestForWorktree(
  */
 export function __resetPrCacheForTests(): void {
   cache.clear();
+}
+
+/**
+ * Test seam: insert / overwrite an entry. The route always
+ * routes through `setCacheEntry` (which enforces the size cap);
+ * this export lets tests pin the cap invariant directly without
+ * having to construct hundreds of real branches through the
+ * route (issue #387 review feedback).
+ */
+export function __setCacheEntryForTests(
+  key: string,
+  entry: CacheEntry
+): void {
+  setCacheEntry(key, entry);
+}
+
+/**
+ * Test seam: read the current cache size. Lets tests pin the cap
+ * invariant directly (issue #387 review feedback).
+ */
+export function __getCacheSizeForTests(): number {
+  return cache.size;
 }
 
 /**

@@ -1121,3 +1121,53 @@ test("GET /git/pr does not reuse cached ancillary sections across PRs (issue #38
     }
   });
 });
+
+test("the pr-data cache evicts the oldest entries past the size cap (issue #387)", async () => {
+  // Drive the cache directly through the test-only `__setCacheEntryForTests`
+  // helper, push more than the cap, and assert the cache stays
+  // bounded. The cap is exported so the test can target the
+  // exact threshold without committing to a specific number.
+  const {
+    __resetPrCacheForTests,
+    __setCacheEntryForTests,
+    __getCacheSizeForTests,
+    CACHE_MAX_ENTRIES,
+  } = await import("../pr-data.js");
+  __resetPrCacheForTests();
+  try {
+    const cap = CACHE_MAX_ENTRIES;
+    assert.ok(cap >= 32, "cap too small for production");
+    assert.ok(cap <= 1024, "cap too large to bound memory");
+    assert.equal(__getCacheSizeForTests(), 0, "cache starts empty");
+
+    const entry = (fetchedAt: number): {
+      fetchedAt: number;
+      headSha: string | null;
+      payload: { pr: null };
+    } => ({
+      fetchedAt,
+      headSha: null,
+      payload: { pr: null },
+    });
+    // Insert cap + 25 entries with synthetic keys. Each touches a
+    // fresh key (never an existing one) so every entry is "new" —
+    // the eviction loop must drop the oldest entries to stay within
+    // the cap.
+    const overshoot = 25;
+    const total = cap + overshoot;
+    for (let i = 0; i < total; i++) {
+      __setCacheEntryForTests(`key-${i.toString().padStart(5, "0")}`, entry(i));
+    }
+    // Cache must be exactly the cap after overshoot.
+    assert.equal(
+      __getCacheSizeForTests(),
+      cap,
+      `cache should be capped at ${cap} after ${total} insertions`
+    );
+    // Re-inserting an existing key doesn't grow the cache.
+    __setCacheEntryForTests("key-00000", entry(9999));
+    assert.equal(__getCacheSizeForTests(), cap);
+  } finally {
+    __resetPrCacheForTests();
+  }
+});
