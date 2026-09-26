@@ -1837,6 +1837,7 @@ const AssistantBlock = memo(function AssistantBlock({
   onCopy,
   onBranch,
   branching,
+  children,
 }: {
   text: unknown;
   /** id of the AgentEvent this assistant turn corresponds to.
