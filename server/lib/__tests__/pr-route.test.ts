@@ -416,6 +416,35 @@ test("GET /git/pr surfaces gh_not_installed when gh spawn fails with ENOENT (iss
   });
 });
 
+test("GET /git/pr surfaces gh_not_installed when the shell exits 127 with 'gh: not found' (issue #387)", async () => {
+  // Mirrors the production behavior the default runner sees: the
+  // wrapper `sh -c "gh ..."` runs, fails to find `gh` on PATH, and
+  // surfaces an exit code of 127 with a stderr hint that mentions
+  // "not found". Previously this round-tripped as a generic
+  // `non_zero_exit` failure; the route should classify it as
+  // `gh_not_installed` instead so the client can log it accurately.
+  await withPrEnv(async () => {}, async (env) => {
+    const shellMissingRunner: import("../pr-data.js").GhRunner = async () => {
+      const err = new Error("Command failed: gh pr view --json ...") as NodeJS.ErrnoException;
+      err.code = 127;
+      err.stdout = "";
+      err.stderr = "sh: gh: not found";
+      throw err;
+    };
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(shellMissingRunner);
+    try {
+      const res = await fetchPr(env.baseUrl, env.worktreeId);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.pr, null);
+      assert.equal(body.error, "gh_not_installed");
+    } finally {
+      dispose();
+    }
+  });
+});
+
 test("GET /git/pr caches by HEAD — second call with the same head does not re-invoke the runner (issue #387)", async () => {
   await withPrEnv(async () => {}, async (env) => {
     const stub = buildRunner({

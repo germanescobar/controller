@@ -208,7 +208,24 @@ async function fetchGhJson(
       // Node also surfaces "ENOENT" as a string when the binary is
       // missing. Widen explicitly here.
       const errCode: unknown = err.code;
+      const numericCode = typeof errCode === "number" ? errCode : null;
+      // Detect "gh binary missing" two ways:
+      //   1. Direct ENOENT — Node's `child_process.exec` itself
+      //      could not spawn the wrapper script (rare; we always go
+      //      through `sh -c`).
+      //   2. Exit code 127 + stderr mentioning "not found" — the
+      //      shell ran, could not locate `gh` on PATH, and reported
+      //      the conventional `sh: gh: not found` / `gh: command
+      //      not found` message. This is what production actually
+      //      surfaces (issue #387 review feedback).
       if (errCode === "ENOENT") {
+        return { ok: false, failure: { kind: "not_installed" } };
+      }
+      const stderrLooksLikeMissingGh =
+        stderr.includes("not found") ||
+        stderr.includes("No such file") ||
+        /gh(?::\s*command)? not found/i.test(stderr);
+      if (numericCode === 127 && stderrLooksLikeMissingGh) {
         return { ok: false, failure: { kind: "not_installed" } };
       }
       if (stderr.includes("not logged into") || stderr.includes("gh auth login")) {
@@ -220,7 +237,6 @@ async function fetchGhJson(
       if (errCode === 8 || stderr.includes("no pull requests found")) {
         return { ok: false, failure: { kind: "no_pr", message: stderr.trim() } };
       }
-      const numericCode = typeof errCode === "number" ? errCode : null;
       return {
         ok: false,
         failure: {
