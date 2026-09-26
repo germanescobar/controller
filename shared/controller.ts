@@ -82,3 +82,107 @@ export interface ControllerBridge {
   showWindow: () => void;
   quit: () => void;
 }
+
+/**
+ * Read-only view of a pull request, surfaced in the right sidebar's
+ * PR tab (issue #387). Fields mirror what `gh pr view --json` returns
+ * today — keep them loose on optional fields so a future change in
+ * `gh` output shape doesn't break the panel.
+ */
+export interface PrAuthor {
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+export type PrCheckState =
+  | "SUCCESS"
+  | "FAILURE"
+  | "PENDING"
+  | "NEUTRAL"
+  | "SKIPPED"
+  | "STALE"
+  | "QUEUED"
+  | "IN_PROGRESS"
+  | "WAITING"
+  | "REQUESTED"
+  | "EXPECTED"
+  | "CANCELLED"
+  | "ERROR"
+  | "ACTION_REQUIRED"
+  | string;
+
+export interface PrCheck {
+  /** Check name as GitHub displays it. */
+  name: string;
+  state: PrCheckState;
+  /** Description blob — often a single-line summary. */
+  description?: string;
+  /** Target URL for the check details page, when available. */
+  targetUrl?: string;
+  /** Context bucket so the panel can group per workflow / check run. */
+  workflow?: string;
+}
+
+export interface PrComment {
+  id: string;
+  author: PrAuthor;
+  body: string;
+  createdAt: string;
+  /** Canonical URL for this comment on GitHub. */
+  url: string;
+}
+
+export type PrReviewState =
+  | "APPROVED"
+  | "CHANGES_REQUESTED"
+  | "COMMENTED"
+  | "DISMISSED"
+  | "PENDING"
+  | string;
+
+export interface PrReview {
+  id: string;
+  author: PrAuthor;
+  state: PrReviewState;
+  body: string;
+  submittedAt: string;
+  url: string;
+}
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED" | string;
+  url: string;
+  author: PrAuthor;
+  body: string;
+  createdAt: string;
+  headRefName: string;
+  baseRefName: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | string;
+  isDraft: boolean;
+  reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | string;
+  statusCheckRollup?: PrCheck[];
+  comments: PrComment[];
+  reviews: PrReview[];
+}
+
+export type PrErrorCode =
+  | "gh_not_installed"
+  | "gh_not_authenticated"
+  | "no_pr_for_branch";
+
+/**
+ * Return shape of `GET /api/projects/:projectId/git/pr`. `pr: null`
+ * is a normal response for a worktree whose branch has no PR; the
+ * `error` field is set only when the data fetch failed for a reason
+ * the client might want to log.
+ */
+export interface PrResponse {
+  pr: PullRequest | null;
+  error?: PrErrorCode;
+}

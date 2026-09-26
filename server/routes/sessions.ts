@@ -650,6 +650,55 @@ sessionsRouter.get("/:projectId/git/branch-diff", async (req, res) => {
   res.json({ diff });
 });
 
+/*
+ * Pull-request metadata for the worktree's current branch (issue #387).
+ *
+ * Sibling to `git/diff` and `git/branch-diff`. Shells out to
+ * `gh pr view --json …` (three parallel calls) inside the worktree's
+ * cwd, with `GIT_TERMINAL_PROMPT=0` so a stale credential prompt
+ * cannot hang the request. Returns `{ pr: PullRequest | null }` —
+ * `pr: null` is the normal response when the branch has no PR; the
+ * optional `error` field carries install / auth categories so the
+ * client can log them.
+ *
+ * Caching: in-memory, keyed by `${worktreePath}::${branch}`, with
+ * a 30s TTL and a fast-path invalidation whenever `git rev-parse
+ * HEAD` returns a different SHA than the cached entry. The 30s TTL
+ * exists as a backstop; the head-SHA match is the primary
+ * invalidation so a new commit always re-fetches immediately.
+ */
+sessionsRouter.get("/:projectId/git/pr", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const worktree = await resolveWorktree(
+    req.params.projectId,
+    req.query.worktreeId as string | undefined
+  );
+  if (!worktree) {
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        req.params.projectId,
+        req.query.worktreeId as string | undefined
+      )
+    );
+    return;
+  }
+
+  try {
+    const { fetchPullRequestForWorktree } = await import("../lib/pr-data.js");
+    const payload = await fetchPullRequestForWorktree(worktree.path);
+    res.json(payload);
+  } catch (err) {
+    // Never 5xx the panel over a benign gh failure — the v1 panel is
+    // simply not rendered when `pr == null`.
+    console.error("git/pr failed", err);
+    res.json({ pr: null });
+  }
+});
+
 // Stream a new session via SSE — must be before /:sessionId routes
 sessionsRouter.get("/:projectId/sessions/stream", handleSessionStream);
 
