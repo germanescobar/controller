@@ -215,6 +215,36 @@ test("PrPanel markdown anchors open in a new tab so the Electron shell routes th
   }
 });
 
+test("PrPanel relative markdown links resolve to the PR's /files/ page on GitHub (issue #387)", () => {
+  // GitHub-rendered PR / comment / review bodies usually contain
+  // relative links (e.g., `docs/setup.md`) which the browser would
+  // otherwise resolve against the Controller renderer's origin.
+  // The panel rewrites them to `${pr.url}/files/<path>` so the user
+  // lands on the matching file in the PR.
+  const withRelativeLink: PullRequest = {
+    ...SAMPLE_PR,
+    body: "See [the guide](docs/setup.md) for context. Also try [Google](https://google.com) and a [fragment](#anchor).",
+  };
+  const html = render(withRelativeLink);
+  // Relative path → rewritten to the PR's /files/ page.
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files\/docs\/setup\.md"/
+  );
+  // Absolute URL → unchanged.
+  assert.match(html, /href="https:\/\/google\.com"/);
+  // Fragment-only → unchanged.
+  assert.match(html, /href="#anchor"/);
+  // Every link still targets _blank. We scan full <a …> tags
+  // (start to end) instead of slicing at `href=` so we don't lose
+  // the tail attributes when `href` is the first attribute.
+  const anchored = html.match(/<a [^>]*>/g) ?? [];
+  for (const tag of anchored) {
+    assert.match(tag, /target="_blank"/, `unprocessed tag: ${tag}`);
+    assert.match(tag, /rel="noopener noreferrer"/, `unprocessed tag: ${tag}`);
+  }
+});
+
 test("PrPanel footer holds a single 'Open on GitHub' link to the canonical PR URL (issue #387)", () => {
   const html = render(SAMPLE_PR);
   // Anchor count to the PR url should be ≥ 1 (header title + footer).

@@ -72,26 +72,74 @@ interface TimelineItem {
  * Controller renderer away from the app instead of opening the
  * browser. Force every link to `target="_blank"` so the
  * orchestration host takes over (issue #387 review feedback).
+ *
+ * Relative URLs (e.g., `docs/setup.md`) are rewritten against the
+ * PR's canonical `/files/` view on GitHub so the browser doesn't
+ * resolve them against the Controller origin. Absolute URLs,
+ * fragments, mailto:, and protocol-relative links are left alone
+ * (issue #387 review feedback).
  */
-function prMarkdownAnchor(
-  props: React.AnchorHTMLAttributes<HTMLAnchorElement>
-) {
-  const { href, children, ...rest } = props;
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      {...rest}
-    >
-      {children}
-    </a>
-  );
+function prMarkdownAnchor(prUrl: string) {
+  return function PrMarkdownAnchor(
+    props: React.AnchorHTMLAttributes<HTMLAnchorElement>
+  ) {
+    const { href, children, ...rest } = props;
+    const resolved = resolvePrRelativeLink(href, prUrl);
+    return (
+      <a
+        href={resolved}
+        target="_blank"
+        rel="noopener noreferrer"
+        {...rest}
+      >
+        {children}
+      </a>
+    );
+  };
 }
 
-const prMarkdownComponents = {
-  a: prMarkdownAnchor,
-};
+/**
+ * Resolve a markdown link against the PR's GitHub context. The
+ * GitHub PR web UI renders relative URLs against the repo's tree at
+ * the PR's head SHA; since the markdown renderer doesn't know the
+ * head SHA here, we send relative links to `${pr.url}/files/…`,
+ * which is GitHub's canonical "show this file in the PR" view.
+ */
+function resolvePrRelativeLink(
+  href: string | undefined,
+  prUrl: string
+): string | undefined {
+  if (!href) return href;
+  // Anchors, absolute URLs, protocol-relative URLs, and mailto:
+  // all resolve fine without rewriting.
+  if (
+    href.startsWith("#") ||
+    href.startsWith("http://") ||
+    href.startsWith("https://") ||
+    href.startsWith("mailto:") ||
+    href.startsWith("//") ||
+    href.startsWith("/")
+  ) {
+    return href;
+  }
+  // Treat anything else as relative to the repo. Sending the user
+  // to the PR's `/files/` deep link preserves the intent ("this
+  // file changed in this PR") even when we can't know the exact
+  // sha to bind to.
+  const trimmed = href.replace(/^\.\//, "");
+  const base = prUrl.endsWith("/") ? prUrl : `${prUrl}/`;
+  return `${base}files/${trimmed}`;
+}
+
+/**
+ * Build the per-PR `react-markdown` overrides. Pulled into a
+ * helper so the description, comment, and review bodies all share
+ * the same link-rewriting + target=_blank logic without leaking
+ * the `prUrl` closure into module scope.
+ */
+function buildPrMarkdownComponents(prUrl: string) {
+  return { a: prMarkdownAnchor(prUrl) };
+}
 
 const RELATIVE_TIME_UNITS: Array<{ limit: number; divisor: number; suffix: string }> = [
   { limit: 60, divisor: 1, suffix: "s" },
@@ -273,9 +321,11 @@ function PrCheckRow({ check, prUrl }: { check: PrCheck; prUrl: string }) {
 function TimelineComment({
   comment,
   now,
+  prUrl,
 }: {
   comment: PrComment;
   now: () => number;
+  prUrl: string;
 }) {
   return (
     <article className="space-y-1.5 border-l border-border/60 pl-3">
@@ -301,7 +351,7 @@ function TimelineComment({
         <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={prMarkdownComponents}
+            components={buildPrMarkdownComponents(prUrl)}
           >
             {comment.body}
           </ReactMarkdown>
@@ -314,9 +364,11 @@ function TimelineComment({
 function TimelineReview({
   review,
   now,
+  prUrl,
 }: {
   review: PrReview;
   now: () => number;
+  prUrl: string;
 }) {
   const decision = reviewStateLabel(review.state);
   const classes = reviewStateClasses(review.state);
@@ -347,7 +399,7 @@ function TimelineReview({
         <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={prMarkdownComponents}
+            components={buildPrMarkdownComponents(prUrl)}
           >
             {review.body}
           </ReactMarkdown>
@@ -357,7 +409,15 @@ function TimelineReview({
   );
 }
 
-function Timeline({ items, now }: { items: TimelineItem[]; now: () => number }) {
+function Timeline({
+  items,
+  now,
+  prUrl,
+}: {
+  items: TimelineItem[];
+  now: () => number;
+  prUrl: string;
+}) {
   if (items.length === 0) {
     return (
       <div className="flex items-center gap-1.5 px-1 py-2 text-[11px] text-muted-foreground/60">
@@ -371,10 +431,10 @@ function Timeline({ items, now }: { items: TimelineItem[]; now: () => number }) 
       {items.map((item) => (
         <li key={`${item.kind}:${item.id}`}>
           {isComment(item) ? (
-            <TimelineComment comment={item.data} now={now} />
+            <TimelineComment comment={item.data} now={now} prUrl={prUrl} />
           ) : null}
           {isReview(item) ? (
-            <TimelineReview review={item.data} now={now} />
+            <TimelineReview review={item.data} now={now} prUrl={prUrl} />
           ) : null}
         </li>
       ))}
@@ -484,7 +544,7 @@ function Header({ pr }: { pr: PullRequest }) {
   );
 }
 
-function Description({ body }: { body: string }) {
+function Description({ body, prUrl }: { body: string; prUrl: string }) {
   const trimmed = body.trim();
   if (!trimmed) {
     return (
@@ -498,7 +558,7 @@ function Description({ body }: { body: string }) {
       <div className="prose prose-invert prose-sm max-w-none break-words text-xs leading-5">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          components={prMarkdownComponents}
+          components={buildPrMarkdownComponents(prUrl)}
         >
           {trimmed}
         </ReactMarkdown>
@@ -590,7 +650,7 @@ export function PrPanel({
               checks={pullRequest.statusCheckRollup ?? []}
               prUrl={pullRequest.url}
             />
-            <Description body={pullRequest.body} />
+            <Description body={pullRequest.body} prUrl={pullRequest.url} />
             <section className="px-3 py-2">
               <div className="mb-2 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
                 <MessageSquare className="h-3 w-3" />
@@ -599,7 +659,11 @@ export function PrPanel({
                   {timeline.length}
                 </span>
               </div>
-              <Timeline items={timeline} now={now} />
+              <Timeline
+                items={timeline}
+                now={now}
+                prUrl={pullRequest.url}
+              />
             </section>
           </div>
           <Footer prUrl={pullRequest.url} />

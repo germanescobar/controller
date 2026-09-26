@@ -495,3 +495,145 @@ test("GET /git/pr cache invalidates when the worktree's HEAD changes (issue #387
     }
   });
 });
+
+test("GET /git/pr preserves the cached PR across a transient gh failure (issue #387)", async () => {
+  // First request succeeds and seeds the cache. A subsequent call
+  // hits a transient failure (e.g. network blip, unrecognized
+  // non-zero exit) — the route should serve the last good payload
+  // instead of `{ pr: null }`, otherwise the client tears the tab
+  // out and switches to Terminal on every hiccup. Definitive
+  // outcomes (no PR, install / auth errors) still take precedence
+  // and overwrite the cache.
+  await withPrEnv(async () => {}, async (env) => {
+    let mode: "ok" | "transient" = "ok";
+    const switchableRunner: import("../pr-data.js").GhRunner = async (
+      args,
+      cwd,
+    ) => {
+      if (mode === "transient") {
+        // Simulate a network error / unrecognized non-zero exit.
+        // Pick an arbitrary code we don't classify, plus stderr
+        // that doesn't match any of our auth / no-PR / not-found
+        // fingerprints.
+        const err = new Error("spawn failed") as NodeJS.ErrnoException;
+        err.code = 1;
+        err.stdout = "";
+        err.stderr = "some other random failure";
+        throw err;
+      }
+      // First call: synthetic success matching the standard shape.
+      // Build a stdlib `RunnerResult` by parsing the same payload
+      // the well-formed stub would return.
+      const payload = {
+        number: 388,
+        title: "transient test",
+        state: "OPEN",
+        url: "https://github.com/germanescobar/controller/pull/388",
+        author: { login: "germanescobar", name: "German Escobar" },
+        body: "Closes #387.",
+        createdAt: "2026-09-22T21:09:40Z",
+        headRefName: "issue-386",
+        baseRefName: "main",
+        additions: 1,
+        deletions: 1,
+        changedFiles: 1,
+        mergeable: "MERGEABLE",
+        isDraft: false,
+        reviewDecision: "APPROVED",
+        statusCheckRollup: [],
+        comments: [],
+        reviews: [],
+      };
+      const fields = args[args.indexOf("--json") + 1].split(",");
+      if (fields.includes("number")) {
+        return { stdout: JSON.stringify(payload), stderr: "" };
+      }
+      if (fields.includes("reviewDecision")) {
+        return {
+          stdout: JSON.stringify({
+            reviewDecision: "APPROVED",
+            statusCheckRollup: [],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: JSON.stringify({ comments: [], reviews: [] }), stderr: "" };
+    };
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(switchableRunner);
+    try {
+      const first = await fetchPr(env.baseUrl, env.worktreeId);
+      const firstBody = await first.json();
+      assert.ok(firstBody.pr, "first call should populate the cache");
+      assert.equal(firstBody.pr.title, "transient test");
+
+      // Switch to transient failure mode. The route should serve the
+      // cached PR rather than `{ pr: null }`.
+      mode = "transient";
+      const second = await fetchPr(env.baseUrl, env.worktreeId);
+      const secondBody = await second.json();
+      assert.ok(
+        secondBody.pr,
+        "transient failure should fall back to the cached payload",
+      );
+      assert.equal(secondBody.pr.title, "transient test");
+      assert.equal(secondBody.error, undefined);
+    } finally {
+      dispose();
+    }
+  });
+});
+
+test("GET /git/pr surfaces gh_not_installed without nuking a cached PR (issue #387)", async () => {
+  // Once we have a cached payload, an install error should be
+  // surfaced for logging but the cached PR is the response — the
+  // panel keeps showing what we knew last. This avoids a loop
+  // where the user installs gh → fetches a PR → uninstalls gh →
+  // sees the tab vanish.
+  await withPrEnv(async () => {}, async (env) => {
+    let mode: "ok" | "missing" = "ok";
+    const switchableRunner: import("../pr-data.js").GhRunner = async () => {
+      if (mode === "missing") {
+        const err = new Error("spawn gh ENOENT") as NodeJS.ErrnoException;
+        err.code = "ENOENT";
+        err.stdout = "";
+        err.stderr = "";
+        throw err;
+      }
+      // Return a minimal-but-valid PR shape.
+      return {
+        stdout: JSON.stringify({
+          number: 388,
+          title: "cached pr",
+          state: "OPEN",
+          url: "https://github.com/germanescobar/controller/pull/388",
+          author: { login: "germanescobar", name: "German Escobar" },
+          body: "",
+          createdAt: "2026-09-22T21:09:40Z",
+          headRefName: "issue-386",
+          baseRefName: "main",
+          additions: 0,
+          deletions: 0,
+          changedFiles: 0,
+          mergeable: "MERGEABLE",
+          isDraft: false,
+        }),
+        stderr: "",
+      };
+    };
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(switchableRunner);
+    try {
+      const first = await fetchPr(env.baseUrl, env.worktreeId);
+      assert.ok((await first.json()).pr);
+
+      mode = "missing";
+      const second = await fetchPr(env.baseUrl, env.worktreeId);
+      const secondBody = await second.json();
+      assert.ok(secondBody.pr, "cached PR should still be served");
+      assert.equal(secondBody.error, undefined);
+    } finally {
+      dispose();
+    }
+  });
+});

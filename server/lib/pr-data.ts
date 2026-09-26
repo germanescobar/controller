@@ -535,18 +535,39 @@ export async function fetchPullRequestForWorktree(
     !meta.ok ? meta.failure : !stateRes.ok ? stateRes.failure : !threads.ok ? threads.failure : null;
   if (firstFailure) {
     const code = ghFailureToErrorCode(firstFailure);
-    if (code) {
-      // For "no PR", `pr: null` is the normal payload — no error to
-      // log. For install / auth, surface the error code so the client
-      // can log it.
-      const payload: PrResponse = code === "no_pr_for_branch"
-        ? { pr: null }
-        : { pr: null, error: code };
+    if (code === "no_pr_for_branch") {
+      // Definitively no PR — cache and return. The client can safely
+      // tear the tab down on the next poll.
+      const payload: PrResponse = { pr: null };
       cache.set(key, { fetchedAt: now, headSha, payload });
       return payload;
     }
-    // Unknown failure (e.g., network) — bubble up as null without an
-    // error code so the panel keeps retrying on its 30s cadence.
+    if (code === "gh_not_installed" || code === "gh_not_authenticated") {
+      // Surface the error so the client can log it; we still cache
+      // the negative result so we don't repeatedly spawn `gh` while
+      // the user's environment is broken (issue #387 review feedback
+      // — only overwrites the cache when there was no prior payload).
+      const prior = cache.get(key);
+      if (prior) {
+        return prior.payload;
+      }
+      const payload: PrResponse = { pr: null, error: code };
+      cache.set(key, { fetchedAt: now, headSha, payload });
+      return payload;
+    }
+    // Uncategorized / transient failure (network error, timeout,
+    // non-zero exit we don't recognize, invalid JSON envelope, …).
+    // Returning `{ pr: null }` here is indistinguishable from "no PR
+    // exists" to the client and would cause it to rip the tab out
+    // and switch to Terminal. Prefer the most recent successful
+    // payload instead — even if its `headSha` no longer matches —
+    // so the user keeps seeing data through transient blips. The
+    // 30s poll retries the live fetch; on success the cache catches
+    // up (issue #387 review feedback).
+    const prior = cache.get(key);
+    if (prior) {
+      return prior.payload;
+    }
     return { pr: null };
   }
 
