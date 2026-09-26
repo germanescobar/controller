@@ -255,7 +255,9 @@ test("PrPanel relative markdown links resolve to the PR's /files/ page on GitHub
   // relative links (e.g., `docs/setup.md`) which the browser would
   // otherwise resolve against the Controller renderer's origin.
   // The panel rewrites them to `${pr.url}/files/<path>` so the user
-  // lands on the matching file in the PR.
+  // lands on the matching file in the PR. Fragment-only links are
+  // rewritten against the PR URL for the same reason — bare `#anchor`
+  // would resolve against the Controller renderer origin.
   const withRelativeLink: PullRequest = {
     ...SAMPLE_PR,
     body: "See [the guide](docs/setup.md) for context. Also try [Google](https://google.com) and a [fragment](#anchor).",
@@ -268,8 +270,12 @@ test("PrPanel relative markdown links resolve to the PR's /files/ page on GitHub
   );
   // Absolute URL → unchanged.
   assert.match(html, /href="https:\/\/google\.com"/);
-  // Fragment-only → unchanged.
-  assert.match(html, /href="#anchor"/);
+  // Fragment-only → merged onto the PR URL (no trailing slash on the
+  // PR url — `<prUrl>#anchor`, not `<prUrl/>#anchor`).
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388#anchor"/
+  );
   // Every link still targets _blank. We scan full <a …> tags
   // (start to end) instead of slicing at `href=` so we don't lose
   // the tail attributes when `href` is the first attribute.

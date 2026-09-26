@@ -753,3 +753,123 @@ test("GET /git/pr surfaces gh_not_installed without nuking a cached PR (issue #3
     }
   });
 });
+
+test("GET /git/pr returns { pr: null } when the branch's PR is MERGED or CLOSED (issue #387)", async () => {
+  // The panel's tab is documented as rendered only for OPEN PRs.
+  // `gh pr view --json` returns MERGED / CLOSED entries for the
+  // current branch — without an explicit state filter — so the
+  // server has to suppress them, otherwise the tab never performs
+  // its documented auto-hide (issue #387 review feedback).
+  for (const closedState of ["MERGED", "CLOSED"]) {
+    const mergedMeta: RunnerResult = {
+      stdout: JSON.stringify({
+        ...JSON.parse(SAMPLE_META.stdout),
+        state: closedState,
+        mergedAt:
+          closedState === "MERGED" ? "2026-09-26T17:00:00Z" : undefined,
+      }),
+      stderr: "",
+    };
+    await withPrEnv(async () => {}, async (env) => {
+      const stub = buildRunner({
+        META: mergedMeta,
+        STATE: SAMPLE_STATE,
+        THREADS: SAMPLE_THREADS,
+      });
+      const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+      const dispose = __setPrGhRunnerForTests(stub.runner);
+      try {
+        const res = await fetchPr(env.baseUrl, env.worktreeId);
+        const body = await res.json();
+        assert.equal(body.error, undefined);
+        assert.equal(
+          body.pr,
+          null,
+          `${closedState} PRs should surface as { pr: null } so the panel auto-hides`,
+        );
+      } finally {
+        dispose();
+      }
+    });
+  }
+});
+
+test("GET /git/pr preserves metadata when only the ancillary calls fail transiently (issue #387)", async () => {
+  // On an initial request the cache is empty. If metadata succeeds
+  // but the parallel state / threads calls time out or return
+  // invalid JSON, an earlier revision discarded the working
+  // metadata and returned { pr: null }. The current implementation
+  // merges the successful metadata with empty defaults for the
+  // ancillary parts and returns a partial PR the panel can render.
+  await withPrEnv(async () => {}, async (env) => {
+    let metaOnly = true;
+    const partialFailureRunner: import("../pr-data.js").GhRunner = async (
+      args,
+      _cwd,
+    ) => {
+      const fields = args[args.indexOf("--json") + 1].split(",");
+      if (fields.includes("number")) {
+        // Metadata call succeeds with full payload.
+        return {
+          stdout: JSON.stringify({
+            number: 388,
+            title: "partial failure test",
+            state: "OPEN",
+            url: "https://github.com/germanescobar/controller/pull/388",
+            author: { login: "germanescobar", name: "German Escobar" },
+            body: "Closes #387.",
+            createdAt: "2026-09-22T21:09:40Z",
+            headRefName: "issue-386",
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            mergeable: "MERGEABLE",
+            isDraft: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (metaOnly) {
+        // First request: ancillary calls succeed too, so the cache
+        // is seeded. Then we toggle `metaOnly = false` so the next
+        // request must bypass the cache (via a head change) to
+        // observe the ancillary-only failure path.
+        metaOnly = false;
+        return { stdout: JSON.stringify({}), stderr: "" };
+      }
+      // Ancillary-only failure: a non-classified transient error.
+      const err = new Error("socket hang up") as NodeJS.ErrnoException;
+      err.code = 1;
+      err.stdout = "";
+      err.stderr = "connection reset";
+      throw err;
+    };
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(partialFailureRunner);
+    try {
+      // First call seeds the cache (all three calls succeed; no
+      // ancillary failures yet).
+      const first = await fetchPr(env.baseUrl, env.worktreeId);
+      const firstBody = await first.json();
+      assert.ok(firstBody.pr, "seed call should populate the cache");
+
+      // Force HEAD to change so the cache check misses and the
+      // runner is actually invoked. The ancillary calls now fail.
+      await runGit(env.projectPath, ["commit", "--allow-empty", "-m", "v3"]);
+      const second = await fetchPr(env.baseUrl, env.worktreeId);
+      const secondBody = await second.json();
+      assert.ok(
+        secondBody.pr,
+        "successful metadata should still surface even when ancillary calls fail",
+      );
+      assert.equal(secondBody.pr.title, "partial failure test");
+      // Empty checks / timeline are silently merged in.
+      assert.equal(secondBody.pr.statusCheckRollup.length, 0);
+      assert.equal(secondBody.pr.comments.length, 0);
+      assert.equal(secondBody.pr.reviews.length, 0);
+    } finally {
+      dispose();
+    }
+  });
+});
