@@ -311,40 +311,67 @@ test("PrPanel relative markdown links resolve against the PR's GitHub context (i
 });
 
 test("PrPanel relative markdown image sources resolve against the PR's GitHub context (issue #387)", () => {
-  // Without an image override, markdown like
-  // `![diagram](docs/diagram.png)` emits a relative `<img src>`
-  // that the packaged renderer would request from the Controller
-  // origin and fail to display. The panel rewrites repo-relative
-  // sources to the PR's `/files` overview (the safe landing page
-  // for any file path) and root-relative sources to the GitHub
-  // origin; absolute URLs and data: URIs pass through.
+  // Markdown image sources can be repo-relative, root-relative,
+  // or absolute. Earlier revisions either passed the source
+  // through unchanged (which the packaged renderer would request
+  // from the Controller origin) or rewrote it to the PR's `/files`
+  // page — but that URL serves HTML, not image bytes, so the
+  // `<img>` would still render broken. The current implementation
+  // renders untrusted / non-renderable sources as click-to-open
+  // anchor links with the alt text as the label, so the image
+  // fetch only happens when the user opts in (issue #387 review
+  // feedback — also addresses the untrusted-image IP-leakage
+  // concern, since attacker-controlled absolute URLs no longer
+  // auto-fetch through the renderer).
   const withImage: PullRequest = {
     ...SAMPLE_PR,
     body: [
       "Repo-relative: ![diagram](docs/diagram.png).",
       "Repo-relative with `./`: ![the same](./docs/diagram.png).",
       "Root-relative: ![avatar](/germanescobar/avatar.png).",
-      "Absolute: ![logo](https://example.com/logo.png).",
+      "Absolute (untrusted host): ![logo](https://example.com/logo.png).",
     ].join("\n\n"),
   };
   const html = render(withImage);
-  // Repo-relative → PR's /files overview.
+  // Repo-relative → PR's /files overview, rendered as an anchor.
   assert.match(
     html,
-    /src="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files"/
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files"[^>]*title="Open image on GitHub"/
   );
-  // Root-relative → GitHub origin.
+  // Root-relative → GitHub origin, rendered as an anchor.
   assert.match(
     html,
-    /src="https:\/\/github\.com\/germanescobar\/avatar\.png"/
+    /href="https:\/\/github\.com\/germanescobar\/avatar\.png"/
   );
-  // Absolute → unchanged.
-  assert.match(html, /src="https:\/\/example\.com\/logo\.png"/);
-  // Every image is marked lazy so the panel doesn't block on
-  // dozens of broken fetches when the PR has a long description.
+  // Absolute URL → still rendered as an anchor, NOT an `<img>`,
+  // because the renderer would otherwise auto-fetch an
+  // attacker-controlled host and leak IP/timing.
+  assert.match(
+    html,
+    /href="https:\/\/example\.com\/logo\.png"/
+  );
+  // Crucially: no `<img>` for any of these sources. Avatars are
+  // the only image category the panel trusts to auto-load (see
+  // SAMPLE_PR data — both `author.avatarUrl` and the comment /
+  // review author avatars live on `avatars.githubusercontent.com`).
+  assert.doesNotMatch(html, /<img src="https:\/\/example\.com/);
+  assert.doesNotMatch(html, /<img src="https:\/\/github\.com\/germanescobar\/avatar\.png"/);
+  assert.doesNotMatch(html, /<img src="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files"/);
+});
+
+test("PrPanel trusts avatars.githubusercontent.com to render inline (issue #387)", () => {
+  // Avatars and GitHub-hosted screenshots are served through a
+  // known CDN / proxy and we want them inline. The
+  // `AuthorLine` component renders those — they should still
+  // produce an `<img src=… loading="lazy">`.
+  const html = render(SAMPLE_PR);
+  // At least one avatar rendered as <img>; loading="lazy" keeps
+  // the panel responsive when many reviewers show up in the
+  // timeline.
   const imgs = html.match(/<img [^>]*>/g) ?? [];
   for (const tag of imgs) {
-    assert.match(tag, /loading="lazy"/, `unprocessed img: ${tag}`);
+    assert.match(tag, /src="https:\/\/avatars\.githubusercontent\.com/);
+    assert.match(tag, /loading="lazy"/, `avatar not lazy: ${tag}`);
   }
 });
 

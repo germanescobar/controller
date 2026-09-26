@@ -598,26 +598,39 @@ export async function fetchPullRequestForWorktree(
   // Ancillary failures fall through to defaults so the panel can
   // still render the title / author / description; the missing
   // check / comment / review sections get the corresponding
-  // fields from the cached PR when one exists, so a transient
-  // ancillary blip doesn't blank out sections we already know.
-  // On an initial load (no prior cache) the empty defaults are
-  // the correct fallback — the panel just shows empty-state rows
-  // for the missing sections (issue #387 review feedback).
+  // Ancillary failures fall through to defaults so the panel can
+  // still render the title / author / description; the missing
+  // check / comment / review sections get the corresponding
+  // fields from the cached PR when one exists for the *same PR*,
+  // so a transient ancillary blip doesn't blank out sections we
+  // already know. The cache key is per-branch, not per-PR —
+  // closing PR #N and opening PR #N+1 on the same branch leaves
+  // the prior entry in place, and reusing its checks / comments
+  // would attach them to the wrong PR. Guard with a number match
+  // (issue #387 review feedback). On an initial load (no prior
+  // cache) the empty defaults are the correct fallback — the
+  // panel just shows empty-state rows for the missing sections.
   const prior = cache.get(key);
+  const priorPr = prior?.payload.pr;
+  const samePr =
+    priorPr !== undefined &&
+    priorPr !== null &&
+    typeof metaRaw.number === "number" &&
+    priorPr.number === metaRaw.number;
   const stateRaw: RawPr = stateRes.ok
     ? ((stateRes as { ok: true; data: unknown }).data as RawPr)
-    : prior && prior.payload.pr
+    : samePr && priorPr
     ? {
-        reviewDecision: prior.payload.pr.reviewDecision,
-        statusCheckRollup: prior.payload.pr.statusCheckRollup,
+        reviewDecision: priorPr.reviewDecision,
+        statusCheckRollup: priorPr.statusCheckRollup,
       }
     : {};
   const threadsRaw: RawPr = threads.ok
     ? ((threads as { ok: true; data: unknown }).data as RawPr)
-    : prior && prior.payload.pr
+    : samePr && priorPr
     ? {
-        comments: prior.payload.pr.comments,
-        reviews: prior.payload.pr.reviews,
+        comments: priorPr.comments,
+        reviews: priorPr.reviews,
       }
     : {};
   const pr = normalizePr(mergePrParts(metaRaw, stateRaw, threadsRaw));

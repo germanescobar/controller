@@ -3507,16 +3507,18 @@ export function SessionView({
   // `Changes` (~30s) — fast enough to catch merges / CI changes
   // without thrashing `gh` three times per minute.
   //
-  // We deliberately gate on the *visibility* signals (desktop:
-  // `terminalOpen`; mobile: `mobilePanel === "pr"`) rather than
-  // the retained tab selection: closing the right panel via the
-  // toggle keeps `rightTab` at "pr", so a `rightTab === "pr"` gate
-  // would keep spawning three `gh` processes per tick indefinitely
-  // while the panel is hidden (issue #387 review feedback). The
-  // `load()` body still fires once on mount, so the panel is
-  // populated the moment the user opens it.
+  // We deliberately gate on the *specific* desktop / mobile
+  // visibility signals for the PR tab. `terminalOpen` flips true
+  // for any right-sidebar tab — Terminal / Files / Changes /
+  // Preview — so a desktop user parked on Terminal would still
+  // spawn three `gh` processes per tick. Combine with the
+  // selected-tab signal on desktop; the mobile case is already
+  // a single panel (`mobilePanel === "pr"`) so no further
+  // filtering is needed. The `load()` body still fires once on
+  // mount, so the panel is populated the moment the user opens
+  // it (issue #387 review feedback).
   const shouldPollPullRequest =
-    terminalOpen || mobilePanel === "pr";
+    (terminalOpen && rightTab === "pr") || mobilePanel === "pr";
   const providerStatusMessage =
     !sessionId && providerLoadError
       ? providerLoadError
