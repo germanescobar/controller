@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
+import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -29,6 +29,7 @@ import {
   parseControllerUri,
   type ControllerLinkTarget,
 } from "../../../shared/conversation-links.ts";
+import type { PullRequest } from "../../../shared/controller.ts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -44,6 +45,7 @@ import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
+import { PrPanel } from "@/components/PrPanel";
 import { FocusConversationControls } from "@/components/focus-conversation-controls";
 import { useSessionRelationships } from "@/lib/session-relationships.ts";
 import { useResizablePanel } from "@/lib/useResizablePanel";
@@ -63,6 +65,7 @@ import {
   fetchEvents,
   fetchBranchDiff,
   fetchGitDiff,
+  fetchPullRequest,
   fetchModels,
   fetchSourceDirectory,
   fetchSourceFile,
@@ -720,7 +723,7 @@ interface PreviewActions {
   open: (url: string) => void;
 }
 
-type RightPanelTab = "terminal" | "changes" | "files" | "preview";
+type RightPanelTab = "terminal" | "changes" | "files" | "preview" | "pr";
 type MobilePanel = "agent" | RightPanelTab;
 
 const OpenSourceReferenceContext = createContext<
@@ -3316,6 +3319,11 @@ export function SessionView({
   const [gitDiffFiles, setGitDiffFiles] = useState<DiffFile[]>([]);
   const [gitDiffLoaded, setGitDiffLoaded] = useState(false);
   const [branchDiffFiles, setBranchDiffFiles] = useState<DiffFile[]>([]);
+  // Open PR for the worktree's current branch (issue #387). `null`
+  // means "no PR" — the tab hides itself in that case. `undefined`
+  // means we haven't loaded yet, so the tab is also hidden to avoid
+  // flashing its button before the first fetch resolves.
+  const [pullRequest, setPullRequest] = useState<PullRequest | null | undefined>(undefined);
   // Mirror the diff totals to the parent so it can render the same
   // `+X -Y` chip in surfaces SessionView doesn't own (the mobile top
   // header in App.tsx). Null when there's no session or no changes.
@@ -3494,6 +3502,33 @@ export function SessionView({
   const previewAvailable = isControllerAvailable();
   const previewProjectRoot = activeWorktree?.path ?? project?.path;
   const shouldPollChanges = terminalOpen || rightTab === "changes" || mobilePanel === "changes";
+  // The PR tab is gated on `pullRequest != null`, so polling
+  // matters whenever the panel could conceivably surface the tab.
+  // The cadence matches `Changes` (~30s) when the tab is focused
+  // — fast enough to catch merges / CI changes without thrashing
+  // `gh` three times per minute. A slower cadence (90s) runs
+  // while the panel is visible but parked on a different tab
+  // (Terminal / Files / Changes / Preview) so a PR that appears
+  // or closes while the user is elsewhere still makes the tab
+  // button appear / disappear within ~90s — the previous "tab
+  // focused only" gate stranded the user with a stale tab until
+  // the view remounted (issue #387 review feedback).
+  const prTabFocused =
+    (terminalOpen && rightTab === "pr") || mobilePanel === "pr";
+  // Discovery runs whenever the user is *anywhere except* the
+  // agent / terminal view on mobile — `terminalOpen` already
+  // gates desktop, and on mobile every non-agent view (including
+  // the terminal view itself, since switching back to the agent
+  // route is the user's likely next step) should keep the
+  // 90-second cadence alive so a PR appearing or closing
+  // surfaces within ~90s of the change (issue #387 review
+  // feedback).
+  const prDiscoveryActive =
+    terminalOpen || mobilePanel !== "agent";
+  // 30s when focused; 90s when discovery-only — the user only
+  // notices the change when they switch to the PR tab, so a
+  // slower cadence there is fine.
+  const pullRequestPollIntervalMs = prTabFocused ? 30_000 : 90_000;
   const providerStatusMessage =
     !sessionId && providerLoadError
       ? providerLoadError
@@ -4458,6 +4493,54 @@ export function SessionView({
     const interval = setInterval(load, 5000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectId, worktreeId, shouldPollChanges]);
+
+  // Poll the open PR (issue #387). Two-tier cadence:
+  //   - 30s while the PR tab is focused (focusedPoll = true).
+  //   - 90s while the panel is visible but parked on a different
+  //     tab (discoveryPoll = true) — keeps the tab button's
+  //     presence in sync without spawning three `gh` calls per
+  //     minute for users who never look at the PR panel.
+  // Both modes share the same `load()` body; the only difference
+  // is the interval. The effect re-subscribes when either flag
+  // flips, so a focused user who parks on Terminal drops to the
+  // 90s cadence (and back up on the next PR-tab focus).
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetchPullRequest(projectId, worktreeId)
+        .then(({ pr }) => { if (!cancelled) setPullRequest(pr); })
+        .catch(() => { /* keep last known value on transient blips */ });
+    };
+    load();
+    if (!prTabFocused && !prDiscoveryActive) {
+      return () => { cancelled = true; };
+    }
+    const interval = setInterval(load, pullRequestPollIntervalMs);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [
+    projectId,
+    worktreeId,
+    prTabFocused,
+    prDiscoveryActive,
+    pullRequestPollIntervalMs,
+  ]);
+
+  // Auto-switch away from the PR tab when the branch no longer has
+  // an open PR (e.g., it was merged / closed). Mirrors the Changes
+  // tab auto-hide behavior above. The endpoint resolves the default
+  // worktree when `worktreeId` is unset (e.g., the project root
+  // surface), so the cleanup runs even in that case — otherwise the
+  // tab button disappears but `rightTab` stays at `"pr"` and the
+  // right panel goes blank (issue #387 review feedback).
+  useEffect(() => {
+    if (
+      pullRequest === null &&
+      (rightTab === "pr" || mobilePanel === "pr")
+    ) {
+      setRightTab("terminal");
+      if (mobilePanel === "pr") setMobilePanel("terminal");
+    }
+  }, [pullRequest, rightTab, mobilePanel]);
 
   // Auto-switch away from Changes tab when there are no changes
   useEffect(() => {
@@ -6399,7 +6482,18 @@ export function SessionView({
         {sessionId && (
           <div className="flex items-center gap-1 md:hidden">
             <button
-              onClick={() => setMobilePanel("agent")}
+              onClick={() => {
+                setMobilePanel("agent");
+                // On mobile, returning to Agent means the right
+                // panel is hidden — clear `terminalOpen` so the
+                // PR-tab discovery polling pauses (it would
+                // otherwise continue spawning `gh` calls three
+                // times per cycle because Preview opens the
+                // panel with `setTerminalOpen(true)` and the
+                // mobile Agent button doesn't otherwise flip it
+                // back — issue #387 review feedback).
+                setTerminalOpen(false);
+              }}
               className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                 mobilePanel === "agent"
                   ? "bg-accent text-foreground"
@@ -6444,6 +6538,19 @@ export function SessionView({
               <FileCode className="h-3 w-3" />
               Files
             </button>
+            {pullRequest && (
+              <button
+                onClick={() => { setMobilePanel("pr"); setRightTab("pr"); }}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                  mobilePanel === "pr"
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground"
+                }`}
+              >
+                <GitPullRequest className="h-3 w-3" />
+                PR
+              </button>
+            )}
             {previewAvailable && (
               <button
                 onClick={() => { setMobilePanel("preview"); setRightTab("preview"); setTerminalOpen(true); }}
@@ -7683,13 +7790,13 @@ export function SessionView({
           />
         )}
 
-        {/* Right panel — desktop: side panel with Terminal/Changes/Files/Preview tabs; mobile: full screen when a panel tab is active */}
-        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview") && (() => {
+        {/* Right panel — desktop: side panel with Terminal/Changes/Files/PR/Preview tabs; mobile: full screen when a panel tab is active */}
+        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" || mobilePanel === "pr") && (() => {
           const { added: changesAdded, deleted: changesDeleted } = summarizeDiffFiles(gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles);
           const hasChanges = gitDiffFiles.length > 0 || branchDiffFiles.length > 0;
           return (
           <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${
-            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" ? "flex-1 md:w-1/2" : "hidden md:flex"
+            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" || mobilePanel === "pr" ? "flex-1 md:w-1/2" : "hidden md:flex"
           }`}
           style={terminalOpen && mobilePanel === "agent" ? { width: `${rightPanelResize.width}px`, minWidth: `${rightPanelResize.width}px` } : undefined}
           >
@@ -7741,6 +7848,23 @@ export function SessionView({
                   </span>
                 ) : null}
               </button>
+              {pullRequest && (
+                <button
+                  onClick={() => { setRightTab("pr"); if (mobilePanel !== "agent") setMobilePanel("pr"); }}
+                  className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    rightTab === "pr"
+                      ? "bg-accent/30 text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={`PR #${pullRequest.number} · ${pullRequest.title}`}
+                >
+                  <GitPullRequest className="h-3 w-3 shrink-0" />
+                  <span className="shrink-0">PR</span>
+                  <span className="max-w-36 truncate font-mono text-[10px] text-muted-foreground/70">
+                    #{pullRequest.number}
+                  </span>
+                </button>
+              )}
               {previewAvailable && (
                 <button
                   onClick={() => { setRightTab("preview"); if (mobilePanel !== "agent") setMobilePanel("preview"); }}
@@ -7864,6 +7988,11 @@ export function SessionView({
                     projectId={projectId}
                     worktreeId={worktreeId}
                   />
+                </div>
+              )}
+              {rightTab === "pr" && pullRequest && (
+                <div className="absolute inset-0 overflow-hidden bg-background">
+                  <PrPanel pullRequest={pullRequest} />
                 </div>
               )}
               {rightTab === "preview" && previewAvailable && (

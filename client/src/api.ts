@@ -1,7 +1,21 @@
 const BASE = "/api";
 
 import type { ShortcutBindings } from "../../shared/shortcuts.ts";
+import type {
+  PrErrorCode,
+  PrResponse,
+} from "../../shared/controller.ts";
 import { shouldExcludeDirectory } from "./lib/file-excludes.ts";
+
+export type {
+  PrAuthor,
+  PrCheck,
+  PrComment,
+  PrErrorCode,
+  PrResponse,
+  PrReview,
+  PullRequest,
+} from "../../shared/controller.ts";
 
 export interface Project {
   id: string;
@@ -1607,6 +1621,22 @@ export async function fetchBranchDiff(
 ): Promise<{ diff: string }> {
   const params = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : "";
   const res = await fetch(`${BASE}/projects/${projectId}/git/branch-diff${params}`);
+  return res.json();
+}
+
+/**
+ * Read-only PR metadata for the worktree's current branch (issue #387).
+ *
+ * `pr: null` is the normal "no PR for this branch" response — the
+ * panel hides itself entirely. `error` is only set for install / auth
+ * failure modes the client may want to log.
+ */
+export async function fetchPullRequest(
+  projectId: string,
+  worktreeId?: string
+): Promise<PrResponse> {
+  const params = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : "";
+  const res = await fetch(`${BASE}/projects/${projectId}/git/pr${params}`);
   return res.json();
 }
 
