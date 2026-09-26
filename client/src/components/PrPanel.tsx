@@ -384,16 +384,27 @@ function TimelineReview({
             {decision}
           </Badge>
         </span>
-        <a
-          href={review.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
-          title="Open review on GitHub"
-          aria-label="Open review on GitHub"
-        >
-          <ExternalLink className="h-3 w-3" />
-        </a>
+        {review.url ? (
+          <a
+            href={review.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
+            title="Open review on GitHub"
+            aria-label="Open review on GitHub"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : (
+          // `gh pr view --json reviews` does not emit a per-review
+          // URL — only the parent PR + comment URLs — so the
+          // "open on GitHub" affordance is omitted rather than
+          // fabricated (issue #387 review feedback).
+          <span
+            aria-hidden="true"
+            className="inline-block h-5 w-5 shrink-0"
+          />
+        )}
       </div>
       {review.body ? (
         <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">

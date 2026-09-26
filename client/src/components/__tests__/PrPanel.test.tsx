@@ -182,6 +182,41 @@ test("PrPanel timeline items link out to GitHub (issue #387)", () => {
   );
 });
 
+test("PrPanel renders a review that has no url field (issue #387)", () => {
+  // `gh pr view --json reviews` does not emit a per-review URL,
+  // so the panel must still display the review row without an
+  // outbound "↗" link. Earlier code threw the review away at the
+  // server-side validator; the relaxed PrReview shape lets it
+  // through and the component renders the author / state badge
+  // without a link button.
+  const noReviewUrl: PullRequest = {
+    ...SAMPLE_PR,
+    reviews: [
+      {
+        id: "PRR_no_url",
+        author: {
+          login: "reviewer-bot",
+          name: "Reviewer Bot",
+          avatarUrl:
+            "https://avatars.githubusercontent.com/reviewer-bot?size=80",
+        },
+        state: "APPROVED",
+        body: "No URL here.",
+        submittedAt: "2026-09-22T22:00:00Z",
+      },
+    ],
+  };
+  const html = render(noReviewUrl);
+  assert.match(html, /Reviewer Bot/);
+  assert.match(html, /Approved/);
+  assert.match(html, /No URL here\./);
+  // No outbound link for the review (since `url` is absent).
+  assert.doesNotMatch(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388#pullrequestreview-no_url"/
+  );
+});
+
 test("PrPanel description is rendered as markdown with preserved links (issue #387)", () => {
   const html = render(SAMPLE_PR);
   assert.match(html, /<p>Closes #386\./);

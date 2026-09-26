@@ -147,7 +147,14 @@ export interface PrReview {
   state: PrReviewState;
   body: string;
   submittedAt: string;
-  url: string;
+  /**
+   * Canonical URL for this review on GitHub. `gh pr view --json
+   * reviews` does not emit this field on its review selection, so
+   * the panel must work without it (issue #387 review feedback —
+   * without a fallback the real review stream would be silently
+   * filtered out by the server-side validator).
+   */
+  url?: string;
 }
 
 export interface PullRequest {
