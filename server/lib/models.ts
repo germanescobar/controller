@@ -270,7 +270,8 @@ export async function fetchCodexModels(): Promise<Model[]> {
 /** Well-known Claude Code aliases (user authenticates separately through Claude CLI). */
 export function getClaudeModels(): Model[] {
   return [
-    { id: "claude-opus-5", name: "Opus 5", provider: "claude", size: "default" },
+    { id: "claude-opus-5-5", name: "Opus 5.5", provider: "claude", size: "default" },
+    { id: "claude-opus-5", name: "Opus 5", provider: "claude", size: "" },
     { id: "claude-sonnet-5", name: "Sonnet 5", provider: "claude", size: "" },
     { id: "claude-fable-5", name: "Fable 5", provider: "claude", size: "" },
   ];
