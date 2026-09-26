@@ -104,16 +104,23 @@ function prMarkdownAnchor(prUrl: string) {
  * the PR's head SHA; since the markdown renderer doesn't know the
  * head SHA here, we send relative links to `${pr.url}/files/…`,
  * which is GitHub's canonical "show this file in the PR" view.
+ *
+ * Fragment-only links (`[details](#details)`) must also be
+ * rewritten — with `target="_blank"` Electron resolves them
+ * against the Controller renderer URL and forwards that origin to
+ * the system browser instead of the PR on GitHub. Merge them
+ * onto the PR URL so the anchor lands on the right page
+ * (issue #387 review feedback).
  */
 function resolvePrRelativeLink(
   href: string | undefined,
   prUrl: string
 ): string | undefined {
   if (!href) return href;
-  // Anchors, absolute URLs, protocol-relative URLs, and mailto:
-  // all resolve fine without rewriting.
+  // Absolute URLs, protocol-relative URLs, mailto:, and root-
+  // relative paths resolve to a real external host already; pass
+  // them through. Anchors are rewritten against the PR URL below.
   if (
-    href.startsWith("#") ||
     href.startsWith("http://") ||
     href.startsWith("https://") ||
     href.startsWith("mailto:") ||
@@ -121,6 +128,14 @@ function resolvePrRelativeLink(
     href.startsWith("/")
   ) {
     return href;
+  }
+  if (href.startsWith("#")) {
+    // Drop any trailing slash on the PR url so `<prUrl>#anchor`
+    // (not `<prUrl/>#anchor`) — both render correctly, the
+    // former matches what users have seen in the canonical URL
+    // copy on GitHub.
+    const base = prUrl.endsWith("/") ? prUrl.slice(0, -1) : prUrl;
+    return `${base}${href}`;
   }
   // Treat anything else as relative to the repo. Sending the user
   // to the PR's `/files/` deep link preserves the intent ("this

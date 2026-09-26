@@ -552,13 +552,13 @@ export async function fetchPullRequestForWorktree(
     fetchGhJson(worktreePath, ["comments", "reviews"]),
   ]);
 
-  // Install / auth / no-PR errors short-circuit everything. We use the
-  // first failure we see, preferring metadata (the call that's most
-  // likely to surface "no PR").
-  const firstFailure =
-    !meta.ok ? meta.failure : !stateRes.ok ? stateRes.failure : !threads.ok ? threads.failure : null;
-  if (firstFailure) {
-    const code = ghFailureToErrorCode(firstFailure);
+  // Metadata is the only call whose success / failure determines
+  // whether we can build a payload at all. Ancillary calls
+  // (state + threads) are layered on top — their transient failure
+  // must not discard valid metadata, since the panel still has a
+  // usable title / author / body / etc. (issue #387 review feedback).
+  if (!meta.ok) {
+    const code = ghFailureToErrorCode(meta.failure);
     if (code === "no_pr_for_branch") {
       // Definitively no PR — cache and return. The client can safely
       // tear the tab down on the next poll.
@@ -567,10 +567,9 @@ export async function fetchPullRequestForWorktree(
       return payload;
     }
     if (code === "gh_not_installed" || code === "gh_not_authenticated") {
-      // Surface the error so the client can log it; we still cache
-      // the negative result so we don't repeatedly spawn `gh` while
-      // the user's environment is broken (issue #387 review feedback
-      // — only overwrites the cache when there was no prior payload).
+      // Surface the error so the client can log it; preserve any
+      // prior cached payload so the tab doesn't vanish when the
+      // user's environment degrades (issue #387 review feedback).
       const prior = cache.get(key);
       if (prior) {
         return prior.payload;
@@ -596,9 +595,27 @@ export async function fetchPullRequestForWorktree(
   }
 
   const metaRaw = (meta as { ok: true; data: unknown }).data as RawPr;
-  const stateRaw = (stateRes as { ok: true; data: unknown }).data as RawPr;
-  const threadsRaw = (threads as { ok: true; data: unknown }).data as RawPr;
+  // Ancillary failures fall through to empty defaults so the panel
+  // can still render the title / author / description; the missing
+  // check / comment / review sections just show empty-state rows.
+  const stateRaw: RawPr = stateRes.ok
+    ? ((stateRes as { ok: true; data: unknown }).data as RawPr)
+    : {};
+  const threadsRaw: RawPr = threads.ok
+    ? ((threads as { ok: true; data: unknown }).data as RawPr)
+    : {};
   const pr = normalizePr(mergePrParts(metaRaw, stateRaw, threadsRaw));
+  // The panel's tab is documented as "rendered only when the branch
+  // has an open PR"; closed / merged PRs must surface as `{ pr: null }`
+  // so the auto-hide effect fires. `gh pr view --json` does not
+  // filter by state — it returns whatever PR exists for the current
+  // branch, including MERGED / CLOSED, which the panel would otherwise
+  // keep displaying forever (issue #387 review feedback).
+  if (pr && pr.state.toUpperCase() !== "OPEN") {
+    const payload: PrResponse = { pr: null };
+    cache.set(key, { fetchedAt: now, headSha, payload });
+    return payload;
+  }
   const payload: PrResponse = pr ? { pr } : { pr: null };
   cache.set(key, { fetchedAt: now, headSha, payload });
   return payload;
