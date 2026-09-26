@@ -595,14 +595,30 @@ export async function fetchPullRequestForWorktree(
   }
 
   const metaRaw = (meta as { ok: true; data: unknown }).data as RawPr;
-  // Ancillary failures fall through to empty defaults so the panel
-  // can still render the title / author / description; the missing
-  // check / comment / review sections just show empty-state rows.
+  // Ancillary failures fall through to defaults so the panel can
+  // still render the title / author / description; the missing
+  // check / comment / review sections get the corresponding
+  // fields from the cached PR when one exists, so a transient
+  // ancillary blip doesn't blank out sections we already know.
+  // On an initial load (no prior cache) the empty defaults are
+  // the correct fallback — the panel just shows empty-state rows
+  // for the missing sections (issue #387 review feedback).
+  const prior = cache.get(key);
   const stateRaw: RawPr = stateRes.ok
     ? ((stateRes as { ok: true; data: unknown }).data as RawPr)
+    : prior && prior.payload.pr
+    ? {
+        reviewDecision: prior.payload.pr.reviewDecision,
+        statusCheckRollup: prior.payload.pr.statusCheckRollup,
+      }
     : {};
   const threadsRaw: RawPr = threads.ok
     ? ((threads as { ok: true; data: unknown }).data as RawPr)
+    : prior && prior.payload.pr
+    ? {
+        comments: prior.payload.pr.comments,
+        reviews: prior.payload.pr.reviews,
+      }
     : {};
   const pr = normalizePr(mergePrParts(metaRaw, stateRaw, threadsRaw));
   // The panel's tab is documented as "rendered only when the branch

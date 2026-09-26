@@ -99,6 +99,57 @@ function prMarkdownAnchor(prUrl: string) {
 }
 
 /**
+ * Markdown image override — mirrors the anchor resolver so a
+ * description like `![diagram](docs/diagram.png)` does not request
+ * a relative path from the Controller renderer origin. We rewrite
+ * repo-relative sources to the PR's `/files` overview (the safe
+ * landing page for any file path) and root-relative sources to
+ * the GitHub origin; absolute URLs and data: URIs pass through.
+ * The image itself won't render if the file isn't in the PR's
+ * diff, but the request will at least target a real GitHub URL
+ * instead of 404-ing against the Controller renderer (issue #387
+ * review feedback).
+ */
+function prMarkdownImage(prUrl: string) {
+  return function PrMarkdownImage(
+    props: React.ImgHTMLAttributes<HTMLImageElement>
+  ) {
+    const { src, alt, ...rest } = props;
+    const resolved = resolvePrRelativeImageSrc(src, prUrl);
+    return <img src={resolved} alt={alt ?? ""} loading="lazy" {...rest} />;
+  };
+}
+
+/**
+ * Same rewrite rules as `resolvePrRelativeLink`, but specialised
+ * for image `src` attributes. Skips `data:` URIs and absolute
+ * URLs (which are valid as-is).
+ */
+function resolvePrRelativeImageSrc(
+  src: string | undefined,
+  prUrl: string
+): string | undefined {
+  if (!src) return src;
+  if (
+    src.startsWith("http://") ||
+    src.startsWith("https://") ||
+    src.startsWith("data:") ||
+    src.startsWith("//")
+  ) {
+    return src;
+  }
+  if (src.startsWith("/")) {
+    const origin = extractGitHubOrigin(prUrl);
+    return origin ? `${origin}${src}` : src;
+  }
+  // Repo-relative image source → point at the PR's `/files`
+  // overview (no deep path; arbitrary repo-relative paths would
+  // 404 on GitHub otherwise).
+  const base = prUrl.endsWith("/") ? prUrl : `${prUrl}/`;
+  return `${base}files`;
+}
+
+/**
  * Resolve a markdown link against the PR's GitHub context.
  *
  * Three classes of rewrites (issue #387 review feedback):
@@ -179,7 +230,7 @@ function extractGitHubOrigin(prUrl: string): string | null {
  * the `prUrl` closure into module scope.
  */
 function buildPrMarkdownComponents(prUrl: string) {
-  return { a: prMarkdownAnchor(prUrl) };
+  return { a: prMarkdownAnchor(prUrl), img: prMarkdownImage(prUrl) };
 }
 
 const RELATIVE_TIME_UNITS: Array<{ limit: number; divisor: number; suffix: string }> = [
