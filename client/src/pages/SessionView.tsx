@@ -3502,23 +3502,25 @@ export function SessionView({
   const previewAvailable = isControllerAvailable();
   const previewProjectRoot = activeWorktree?.path ?? project?.path;
   const shouldPollChanges = terminalOpen || rightTab === "changes" || mobilePanel === "changes";
-  // The PR tab is gated on `pullRequest != null`, so polling only
-  // matters when the panel is actually visible. The cadence matches
-  // `Changes` (~30s) — fast enough to catch merges / CI changes
-  // without thrashing `gh` three times per minute.
-  //
-  // We deliberately gate on the *specific* desktop / mobile
-  // visibility signals for the PR tab. `terminalOpen` flips true
-  // for any right-sidebar tab — Terminal / Files / Changes /
-  // Preview — so a desktop user parked on Terminal would still
-  // spawn three `gh` processes per tick. Combine with the
-  // selected-tab signal on desktop; the mobile case is already
-  // a single panel (`mobilePanel === "pr"`) so no further
-  // filtering is needed. The `load()` body still fires once on
-  // mount, so the panel is populated the moment the user opens
-  // it (issue #387 review feedback).
-  const shouldPollPullRequest =
+  // The PR tab is gated on `pullRequest != null`, so polling
+  // matters whenever the panel could conceivably surface the tab.
+  // The cadence matches `Changes` (~30s) when the tab is focused
+  // — fast enough to catch merges / CI changes without thrashing
+  // `gh` three times per minute. A slower cadence (90s) runs
+  // while the panel is visible but parked on a different tab
+  // (Terminal / Files / Changes / Preview) so a PR that appears
+  // or closes while the user is elsewhere still makes the tab
+  // button appear / disappear within ~90s — the previous "tab
+  // focused only" gate stranded the user with a stale tab until
+  // the view remounted (issue #387 review feedback).
+  const prTabFocused =
     (terminalOpen && rightTab === "pr") || mobilePanel === "pr";
+  const prDiscoveryActive =
+    terminalOpen || (mobilePanel !== "agent" && mobilePanel !== "terminal");
+  // 30s when focused; 90s when discovery-only — the user only
+  // notices the change when they switch to the PR tab, so a
+  // slower cadence there is fine.
+  const pullRequestPollIntervalMs = prTabFocused ? 30_000 : 90_000;
   const providerStatusMessage =
     !sessionId && providerLoadError
       ? providerLoadError
@@ -4484,11 +4486,16 @@ export function SessionView({
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectId, worktreeId, shouldPollChanges]);
 
-  // Poll the open PR (issue #387). Gated on `rightTab === "pr"` /
-  // `mobilePanel === "pr"` so a 30s cadence ticks only while the tab
-  // is visible. The tab itself is also rendered conditionally on
-  // `pullRequest != null`, so a successful fetch is what causes the
-  // tab button to appear.
+  // Poll the open PR (issue #387). Two-tier cadence:
+  //   - 30s while the PR tab is focused (focusedPoll = true).
+  //   - 90s while the panel is visible but parked on a different
+  //     tab (discoveryPoll = true) — keeps the tab button's
+  //     presence in sync without spawning three `gh` calls per
+  //     minute for users who never look at the PR panel.
+  // Both modes share the same `load()` body; the only difference
+  // is the interval. The effect re-subscribes when either flag
+  // flips, so a focused user who parks on Terminal drops to the
+  // 90s cadence (and back up on the next PR-tab focus).
   useEffect(() => {
     let cancelled = false;
     const load = () => {
@@ -4497,12 +4504,18 @@ export function SessionView({
         .catch(() => { /* keep last known value on transient blips */ });
     };
     load();
-    if (!shouldPollPullRequest) {
+    if (!prTabFocused && !prDiscoveryActive) {
       return () => { cancelled = true; };
     }
-    const interval = setInterval(load, 30_000);
+    const interval = setInterval(load, pullRequestPollIntervalMs);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [projectId, worktreeId, shouldPollPullRequest]);
+  }, [
+    projectId,
+    worktreeId,
+    prTabFocused,
+    prDiscoveryActive,
+    pullRequestPollIntervalMs,
+  ]);
 
   // Auto-switch away from the PR tab when the branch no longer has
   // an open PR (e.g., it was merged / closed). Mirrors the Changes
