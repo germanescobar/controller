@@ -873,3 +873,114 @@ test("GET /git/pr preserves metadata when only the ancillary calls fail transien
     }
   });
 });
+
+test("GET /git/pr keeps cached ancillary sections when only those calls fail (issue #387)", async () => {
+  // After the cache TTL expires and metadata succeeds but the
+  // ancillary (checks / threads) calls fail transiently, the
+  // previous revision merged in empty defaults and wiped the
+  // checks / comments / reviews we already had. The fix is to
+  // reuse the corresponding fields from the cached PR when one
+  // exists — initial loads still get empty defaults (no prior
+  // payload), so the panel shows the empty-state rows correctly.
+  await withPrEnv(async () => {}, async (env) => {
+    let phase: "seed" | "transient" = "seed";
+    const seedState = {
+      reviewDecision: "APPROVED",
+      statusCheckRollup: [
+        {
+          name: "ci / build",
+          state: "SUCCESS",
+          targetUrl: "https://github.com/germanescobar/controller/runs/1",
+        },
+      ],
+    };
+    const seedThreads = {
+      comments: [
+        {
+          id: "C-cached",
+          body: "cached comment",
+          createdAt: "2026-09-22T21:09:51Z",
+          url: "https://github.com/germanescobar/controller/pull/388#issuecomment-1",
+          author: { login: "germanescobar", name: "German Escobar" },
+        },
+      ],
+      reviews: [
+        {
+          id: "R-cached",
+          state: "APPROVED",
+          body: "cached review",
+          submittedAt: "2026-09-22T22:00:00Z",
+          url: "https://github.com/germanescobar/controller/pull/388#pullrequestreview-1",
+          author: { login: "reviewer-bot", name: "Reviewer Bot" },
+        },
+      ],
+    };
+    const switchableRunner: import("../pr-data.js").GhRunner = async (
+      args,
+      _cwd,
+    ) => {
+      const fields = args[args.indexOf("--json") + 1].split(",");
+      if (fields.includes("number")) {
+        return {
+          stdout: JSON.stringify({
+            number: 388,
+            title: "cached ancillary",
+            state: "OPEN",
+            url: "https://github.com/germanescobar/controller/pull/388",
+            author: { login: "germanescobar", name: "German Escobar" },
+            body: "Closes #387.",
+            createdAt: "2026-09-22T21:09:40Z",
+            headRefName: "issue-386",
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            mergeable: "MERGEABLE",
+            isDraft: false,
+          }),
+          stderr: "",
+        };
+      }
+      if (phase === "seed") {
+        if (fields.includes("reviewDecision")) {
+          return { stdout: JSON.stringify(seedState), stderr: "" };
+        }
+        return { stdout: JSON.stringify(seedThreads), stderr: "" };
+      }
+      // Transient phase: ancillary calls fail.
+      const err = new Error("transient") as NodeJS.ErrnoException;
+      err.code = 1;
+      err.stdout = "";
+      err.stderr = "transient ancillary failure";
+      throw err;
+    };
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(switchableRunner);
+    try {
+      // Seed the cache (full success).
+      const first = await fetchPr(env.baseUrl, env.worktreeId);
+      const firstBody = await first.json();
+      assert.equal(firstBody.pr.statusCheckRollup.length, 1);
+      assert.equal(firstBody.pr.comments.length, 1);
+      assert.equal(firstBody.pr.reviews.length, 1);
+
+      // Force HEAD change so the cache check misses and we hit
+      // the runner again.
+      await runGit(env.projectPath, ["commit", "--allow-empty", "-m", "v4"]);
+      phase = "transient";
+      const second = await fetchPr(env.baseUrl, env.worktreeId);
+      const secondBody = await second.json();
+      assert.ok(secondBody.pr, "metadata success should still surface a PR");
+      // Cached sections are reused — the panel keeps showing them
+      // instead of resetting to empty.
+      assert.equal(secondBody.pr.statusCheckRollup.length, 1);
+      assert.equal(secondBody.pr.statusCheckRollup[0].name, "ci / build");
+      assert.equal(secondBody.pr.comments.length, 1);
+      assert.equal(secondBody.pr.comments[0].body, "cached comment");
+      assert.equal(secondBody.pr.reviews.length, 1);
+      assert.equal(secondBody.pr.reviews[0].body, "cached review");
+    } finally {
+      dispose();
+    }
+  });
+});

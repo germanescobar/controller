@@ -3503,11 +3503,20 @@ export function SessionView({
   const previewProjectRoot = activeWorktree?.path ?? project?.path;
   const shouldPollChanges = terminalOpen || rightTab === "changes" || mobilePanel === "changes";
   // The PR tab is gated on `pullRequest != null`, so polling only
-  // matters when the tab is actually visible. The cadence matches
+  // matters when the panel is actually visible. The cadence matches
   // `Changes` (~30s) — fast enough to catch merges / CI changes
   // without thrashing `gh` three times per minute.
+  //
+  // We deliberately gate on the *visibility* signals (desktop:
+  // `terminalOpen`; mobile: `mobilePanel === "pr"`) rather than
+  // the retained tab selection: closing the right panel via the
+  // toggle keeps `rightTab` at "pr", so a `rightTab === "pr"` gate
+  // would keep spawning three `gh` processes per tick indefinitely
+  // while the panel is hidden (issue #387 review feedback). The
+  // `load()` body still fires once on mount, so the panel is
+  // populated the moment the user opens it.
   const shouldPollPullRequest =
-    terminalOpen || rightTab === "pr" || mobilePanel === "pr";
+    terminalOpen || mobilePanel === "pr";
   const providerStatusMessage =
     !sessionId && providerLoadError
       ? providerLoadError

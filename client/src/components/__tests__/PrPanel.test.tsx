@@ -310,6 +310,44 @@ test("PrPanel relative markdown links resolve against the PR's GitHub context (i
   }
 });
 
+test("PrPanel relative markdown image sources resolve against the PR's GitHub context (issue #387)", () => {
+  // Without an image override, markdown like
+  // `![diagram](docs/diagram.png)` emits a relative `<img src>`
+  // that the packaged renderer would request from the Controller
+  // origin and fail to display. The panel rewrites repo-relative
+  // sources to the PR's `/files` overview (the safe landing page
+  // for any file path) and root-relative sources to the GitHub
+  // origin; absolute URLs and data: URIs pass through.
+  const withImage: PullRequest = {
+    ...SAMPLE_PR,
+    body: [
+      "Repo-relative: ![diagram](docs/diagram.png).",
+      "Repo-relative with `./`: ![the same](./docs/diagram.png).",
+      "Root-relative: ![avatar](/germanescobar/avatar.png).",
+      "Absolute: ![logo](https://example.com/logo.png).",
+    ].join("\n\n"),
+  };
+  const html = render(withImage);
+  // Repo-relative → PR's /files overview.
+  assert.match(
+    html,
+    /src="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files"/
+  );
+  // Root-relative → GitHub origin.
+  assert.match(
+    html,
+    /src="https:\/\/github\.com\/germanescobar\/avatar\.png"/
+  );
+  // Absolute → unchanged.
+  assert.match(html, /src="https:\/\/example\.com\/logo\.png"/);
+  // Every image is marked lazy so the panel doesn't block on
+  // dozens of broken fetches when the PR has a long description.
+  const imgs = html.match(/<img [^>]*>/g) ?? [];
+  for (const tag of imgs) {
+    assert.match(tag, /loading="lazy"/, `unprocessed img: ${tag}`);
+  }
+});
+
 test("PrPanel footer holds a single 'Open on GitHub' link to the canonical PR URL (issue #387)", () => {
   const html = render(SAMPLE_PR);
   // Anchor count to the PR url should be ≥ 1 (header title + footer).
