@@ -3515,8 +3515,16 @@ export function SessionView({
   // the view remounted (issue #387 review feedback).
   const prTabFocused =
     (terminalOpen && rightTab === "pr") || mobilePanel === "pr";
+  // Discovery runs whenever the user is *anywhere except* the
+  // agent / terminal view on mobile — `terminalOpen` already
+  // gates desktop, and on mobile every non-agent view (including
+  // the terminal view itself, since switching back to the agent
+  // route is the user's likely next step) should keep the
+  // 90-second cadence alive so a PR appearing or closing
+  // surfaces within ~90s of the change (issue #387 review
+  // feedback).
   const prDiscoveryActive =
-    terminalOpen || (mobilePanel !== "agent" && mobilePanel !== "terminal");
+    terminalOpen || mobilePanel !== "agent";
   // 30s when focused; 90s when discovery-only — the user only
   // notices the change when they switch to the PR tab, so a
   // slower cadence there is fine.
