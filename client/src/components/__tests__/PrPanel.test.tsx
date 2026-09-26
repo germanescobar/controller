@@ -250,28 +250,52 @@ test("PrPanel markdown anchors open in a new tab so the Electron shell routes th
   }
 });
 
-test("PrPanel relative markdown links resolve to the PR's /files/ page on GitHub (issue #387)", () => {
+test("PrPanel relative markdown links resolve against the PR's GitHub context (issue #387)", () => {
   // GitHub-rendered PR / comment / review bodies usually contain
-  // relative links (e.g., `docs/setup.md`) which the browser would
-  // otherwise resolve against the Controller renderer's origin.
-  // The panel rewrites them to `${pr.url}/files/<path>` so the user
-  // lands on the matching file in the PR. Fragment-only links are
-  // rewritten against the PR URL for the same reason — bare `#anchor`
-  // would resolve against the Controller renderer origin.
+  // relative / root-relative / fragment links which the browser
+  // would otherwise resolve against the Controller renderer's
+  // origin. The panel rewrites each class against the PR's GitHub
+  // context so the user lands on a real GitHub URL (and the
+  // Electron-shell's `_blank` forwarding routes it to the system
+  // browser, not the Controller renderer).
   const withRelativeLink: PullRequest = {
     ...SAMPLE_PR,
-    body: "See [the guide](docs/setup.md) for context. Also try [Google](https://google.com) and a [fragment](#anchor).",
+    body: [
+      "Repo-relative file: [guide](docs/setup.md).",
+      "Repo-relative with `./`: [the same guide](./docs/setup.md).",
+      "Root-relative: [the issue](/germanescobar/controller/issues/1).",
+      "Absolute: [Google](https://google.com).",
+      "Fragment: [details](#anchor).",
+    ].join("\n\n"),
   };
   const html = render(withRelativeLink);
-  // Relative path → rewritten to the PR's /files/ page.
+  // Repo-relative file link → rewritten to the PR's `/files`
+  // overview. The full path is dropped because GitHub's
+  // `/files/<path>` only resolves paths that already appear in
+  // the PR's diff; the overview is the safe landing page for any
+  // arbitrary relative file link.
   assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files"/
+  );
+  assert.doesNotMatch(
     html,
     /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files\/docs\/setup\.md"/
   );
+  // `./docs/setup.md` resolves the same way (the `./` prefix is
+  // dropped).
+  assert.match(html, /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/files"/);
+  // Root-relative → rebuild against the GitHub origin parsed
+  // from the PR URL (avoids the Controller origin in the packaged
+  // app).
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/issues\/1"/
+  );
   // Absolute URL → unchanged.
   assert.match(html, /href="https:\/\/google\.com"/);
-  // Fragment-only → merged onto the PR URL (no trailing slash on the
-  // PR url — `<prUrl>#anchor`, not `<prUrl/>#anchor`).
+  // Fragment-only → merged onto the PR URL (no trailing slash on
+  // the PR url — `<prUrl>#anchor`, not `<prUrl/>#anchor`).
   assert.match(
     html,
     /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388#anchor"/

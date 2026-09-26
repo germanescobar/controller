@@ -99,51 +99,77 @@ function prMarkdownAnchor(prUrl: string) {
 }
 
 /**
- * Resolve a markdown link against the PR's GitHub context. The
- * GitHub PR web UI renders relative URLs against the repo's tree at
- * the PR's head SHA; since the markdown renderer doesn't know the
- * head SHA here, we send relative links to `${pr.url}/files/…`,
- * which is GitHub's canonical "show this file in the PR" view.
+ * Resolve a markdown link against the PR's GitHub context.
  *
- * Fragment-only links (`[details](#details)`) must also be
- * rewritten — with `target="_blank"` Electron resolves them
- * against the Controller renderer URL and forwards that origin to
- * the system browser instead of the PR on GitHub. Merge them
- * onto the PR URL so the anchor lands on the right page
- * (issue #387 review feedback).
+ * Three classes of rewrites (issue #387 review feedback):
+ *
+ *   1. Fragment-only links (`[details](#details)`) — Electron
+ *      resolves a bare `#anchor` against the Controller renderer
+ *      origin and forwards that to the system browser instead of
+ *      the PR. Merge onto the PR URL so the anchor lands on the
+ *      PR page.
+ *   2. Root-relative links (`[issue](/owner/repo/issues/1)`) —
+ *      the browser resolves these against the Controller origin
+ *      and opens a Controller URL rather than GitHub. Prepend the
+ *      GitHub origin parsed from `prUrl`.
+ *   3. Repo-relative file links (`[guide](docs/setup.md)`) — the
+ *      PR's `/files/<path>` URL only addresses paths that already
+ *      appear in the PR's diff; for an arbitrary relative file
+ *      link, GitHub would 404. Send the user to the PR's `/files`
+ *      overview instead, which lists every changed file and
+ *      clearly indicates whether the linked file is part of the
+ *      PR.
  */
 function resolvePrRelativeLink(
   href: string | undefined,
   prUrl: string
 ): string | undefined {
   if (!href) return href;
-  // Absolute URLs, protocol-relative URLs, mailto:, and root-
-  // relative paths resolve to a real external host already; pass
-  // them through. Anchors are rewritten against the PR URL below.
+  // Absolute URLs, protocol-relative URLs, and mailto: all resolve
+  // to a real external host already; pass them through.
   if (
     href.startsWith("http://") ||
     href.startsWith("https://") ||
     href.startsWith("mailto:") ||
-    href.startsWith("//") ||
-    href.startsWith("/")
+    href.startsWith("//")
   ) {
     return href;
   }
   if (href.startsWith("#")) {
-    // Drop any trailing slash on the PR url so `<prUrl>#anchor`
-    // (not `<prUrl/>#anchor`) — both render correctly, the
-    // former matches what users have seen in the canonical URL
-    // copy on GitHub.
+    // `<prUrl>#anchor` — drop any trailing slash on the PR url so
+    // the rendered form matches what GitHub copies to the
+    // clipboard (no double-slash).
     const base = prUrl.endsWith("/") ? prUrl.slice(0, -1) : prUrl;
     return `${base}${href}`;
   }
-  // Treat anything else as relative to the repo. Sending the user
-  // to the PR's `/files/` deep link preserves the intent ("this
-  // file changed in this PR") even when we can't know the exact
-  // sha to bind to.
-  const trimmed = href.replace(/^\.\//, "");
+  if (href.startsWith("/")) {
+    // Root-relative — rebuild against the GitHub origin parsed
+    // from the PR URL. `/issues/1` becomes
+    // `https://github.com/issues/1`, etc.
+    const origin = extractGitHubOrigin(prUrl);
+    if (!origin) return href;
+    return `${origin}${href}`;
+  }
+  // Repo-relative file link — point at the PR's `/files` overview
+  // rather than fabricating a path under `/files/...` that won't
+  // resolve for arbitrary file paths (issue #387 review feedback).
   const base = prUrl.endsWith("/") ? prUrl : `${prUrl}/`;
-  return `${base}files/${trimmed}`;
+  return `${base}files`;
+}
+
+/**
+ * Pull the GitHub origin (scheme + host + optional :port) out of a
+ * PR URL like `https://github.com/foo/bar/pull/388`. Returns null
+ * if the URL is malformed or doesn't look like a real GitHub host
+ * — the caller then leaves the original href untouched.
+ */
+function extractGitHubOrigin(prUrl: string): string | null {
+  try {
+    const u = new URL(prUrl);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return null;
+  }
 }
 
 /**
