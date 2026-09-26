@@ -984,3 +984,140 @@ test("GET /git/pr keeps cached ancillary sections when only those calls fail (is
     }
   });
 });
+
+test("GET /git/pr does not reuse cached ancillary sections across PRs (issue #387)", async () => {
+  // The cache key is `${worktreePath}::${branch}`, not per-PR.
+  // If PR #388 is closed and PR #389 is opened on the same
+  // branch, the prior cache entry sticks around. The previous
+  // revision would have blindly attached PR #388's checks /
+  // comments / reviews to PR #389's metadata on the next
+  // refresh. The guard now verifies the cached PR number matches
+  // the new metadata's number before reusing either cached
+  // section (issue #387 review feedback).
+  await withPrEnv(async () => {}, async (env) => {
+    const seedMeta: RunnerResult = {
+      stdout: JSON.stringify({
+        number: 388,
+        title: "PR #388",
+        state: "OPEN",
+        url: "https://github.com/germanescobar/controller/pull/388",
+        author: { login: "germanescobar", name: "German Escobar" },
+        body: "first PR",
+        createdAt: "2026-09-22T21:09:40Z",
+        headRefName: "issue-386",
+        baseRefName: "main",
+        additions: 1,
+        deletions: 1,
+        changedFiles: 1,
+        mergeable: "MERGEABLE",
+        isDraft: false,
+      }),
+      stderr: "",
+    };
+    const seedState: RunnerResult = {
+      stdout: JSON.stringify({
+        reviewDecision: "APPROVED",
+        statusCheckRollup: [
+          {
+            name: "ci / build",
+            state: "SUCCESS",
+            targetUrl: "https://github.com/germanescobar/controller/runs/1",
+          },
+        ],
+      }),
+      stderr: "",
+    };
+    const seedThreads: RunnerResult = {
+      stdout: JSON.stringify({
+        comments: [
+          {
+            id: "C-old",
+            body: "old comment",
+            createdAt: "2026-09-22T22:00:00Z",
+            url: "https://github.com/germanescobar/controller/pull/388#issuecomment-1",
+            author: { login: "germanescobar", name: "German Escobar" },
+          },
+        ],
+        reviews: [
+          {
+            id: "R-old",
+            state: "APPROVED",
+            body: "old review",
+            submittedAt: "2026-09-22T22:00:00Z",
+            url: "https://github.com/germanescobar/controller/pull/388#pullrequestreview-1",
+            author: { login: "reviewer-bot", name: "Reviewer Bot" },
+          },
+        ],
+      }),
+      stderr: "",
+    };
+    let phase: "seed" | "transient" = "seed";
+    const switchableRunner: import("../pr-data.js").GhRunner = async (
+      args,
+      _cwd,
+    ) => {
+      const fields = args[args.indexOf("--json") + 1].split(",");
+      if (fields.includes("number")) {
+        // Phase "seed" returns PR #388. Phase "transient" returns
+        // PR #389 with a fresh commit to force the head-SHA cache
+        // check to miss.
+        return {
+          stdout: JSON.stringify(
+            phase === "seed"
+              ? JSON.parse(seedMeta.stdout)
+              : {
+                  ...JSON.parse(seedMeta.stdout),
+                  number: 389,
+                  title: "PR #389",
+                  url: "https://github.com/germanescobar/controller/pull/389",
+                  body: "second PR",
+                }
+          ),
+          stderr: "",
+        };
+      }
+      if (phase === "seed") {
+        if (fields.includes("reviewDecision")) {
+          return seedState;
+        }
+        return seedThreads;
+      }
+      // Ancillary failures for the second request — the path under
+      // test. We deliberately do NOT return cached state / threads;
+      // the merge should fall back to empty defaults because the
+      // cached PR number (388) ≠ current PR number (389).
+      const err = new Error("transient") as NodeJS.ErrnoException;
+      err.code = 1;
+      err.stdout = "";
+      err.stderr = "transient ancillary failure";
+      throw err;
+    };
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(switchableRunner);
+    try {
+      const first = await fetchPr(env.baseUrl, env.worktreeId);
+      const firstBody = await first.json();
+      assert.equal(firstBody.pr.number, 388);
+      assert.equal(firstBody.pr.comments.length, 1);
+      assert.equal(firstBody.pr.reviews.length, 1);
+
+      // New commit, new branch tip → HEAD changed. The branch
+      // stays "issue-387" (the worktree's branch), but the cache
+      // key is `${path}::${branch}` so it stays valid; the
+      // headSha check is what invalidates the entry.
+      await runGit(env.projectPath, ["commit", "--allow-empty", "-m", "v5"]);
+      phase = "transient";
+      const second = await fetchPr(env.baseUrl, env.worktreeId);
+      const secondBody = await second.json();
+      assert.equal(secondBody.pr.number, 389);
+      // The cached sections belonged to PR #388 — they MUST NOT
+      // appear on PR #389's response. Empty defaults are the
+      // correct render path here.
+      assert.equal(secondBody.pr.statusCheckRollup.length, 0);
+      assert.equal(secondBody.pr.comments.length, 0);
+      assert.equal(secondBody.pr.reviews.length, 0);
+    } finally {
+      dispose();
+    }
+  });
+});

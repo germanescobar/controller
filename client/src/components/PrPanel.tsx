@@ -99,37 +99,83 @@ function prMarkdownAnchor(prUrl: string) {
 }
 
 /**
- * Markdown image override — mirrors the anchor resolver so a
- * description like `![diagram](docs/diagram.png)` does not request
- * a relative path from the Controller renderer origin. We rewrite
- * repo-relative sources to the PR's `/files` overview (the safe
- * landing page for any file path) and root-relative sources to
- * the GitHub origin; absolute URLs and data: URIs pass through.
- * The image itself won't render if the file isn't in the PR's
- * diff, but the request will at least target a real GitHub URL
- * instead of 404-ing against the Controller renderer (issue #387
- * review feedback).
+ * Hosts whose absolute image URLs we trust to render as `<img>`.
+ * GitHub serves user avatars through a known CDN and proxy's PR
+ * screenshots through `private-user-images` / `camo` — fetching
+ * these is safe and the panel needs them inline. Anything else is
+ * untrusted: a public PR description or review body can embed
+ * any image URL, and the Electron renderer would otherwise fetch
+ * it directly, leaking the user's IP / view timing to the
+ * attacker (issue #387 review feedback).
+ */
+const TRUSTED_IMAGE_HOSTS = new Set([
+  "avatars.githubusercontent.com",
+]);
+
+/**
+ * Markdown image override.
+ *
+ * Two distinct render paths:
+ *
+ *   1. Trusted host → render `<img src=… loading="lazy">`. Used
+ *      for avatars and GitHub-hosted screenshots.
+ *   2. Untrusted host / repo-relative / root-relative / data URI
+ *      → render a small anchor instead of `<img>`. This handles
+ *      three concerns at once: (a) repo-relative sources like
+ *      `docs/diagram.png` would 404 against the Controller
+ *      renderer; (b) GitHub's `/files/<path>` URL serves HTML,
+ *      not image bytes, so a rewritten `<img>` would still be
+ *      broken; (c) an attacker-controlled absolute URL would
+ *      auto-fetch and leak the user's IP / view timing without
+ *      consent. Click-to-open makes the fetch explicit.
  */
 function prMarkdownImage(prUrl: string) {
   return function PrMarkdownImage(
     props: React.ImgHTMLAttributes<HTMLImageElement>
   ) {
     const { src, alt, ...rest } = props;
-    const resolved = resolvePrRelativeImageSrc(src, prUrl);
-    return <img src={resolved} alt={alt ?? ""} loading="lazy" {...rest} />;
+    if (typeof src !== "string" || src.length === 0) {
+      return null;
+    }
+    const href = resolvePrRelativeImageSrc(src, prUrl);
+    if (!href) {
+      return null;
+    }
+    if (isTrustedImageHost(href)) {
+      return <img src={href} alt={alt ?? ""} loading="lazy" {...rest} />;
+    }
+    // Untrusted / non-renderable image source → render a small
+    // click-to-open link so the user can decide whether to load
+    // it. The label uses the alt text (or the URL as a fallback)
+    // and the same target=_blank / rel=noopener-noferrer-noreferrer
+    // attributes as anchors.
+    const label = (alt && alt.length > 0 ? alt : href) ?? "image";
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1.5 rounded border border-dashed border-border/70 bg-background/40 px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
+        title="Open image on GitHub"
+      >
+        <ExternalLink className="h-3 w-3 shrink-0" />
+        <span className="truncate">{label}</span>
+      </a>
+    );
   };
 }
 
 /**
- * Same rewrite rules as `resolvePrRelativeLink`, but specialised
- * for image `src` attributes. Skips `data:` URIs and absolute
- * URLs (which are valid as-is).
+ * Resolve a markdown image source against the PR's GitHub
+ * context. We resolve to a real URL regardless of the source
+ * shape so the anchor (or `<img>`) has a stable href — the
+ * `prMarkdownImage` render path decides what kind of element
+ * wraps it.
  */
 function resolvePrRelativeImageSrc(
-  src: string | undefined,
+  src: string,
   prUrl: string
-): string | undefined {
-  if (!src) return src;
+): string {
   if (
     src.startsWith("http://") ||
     src.startsWith("https://") ||
@@ -143,10 +189,20 @@ function resolvePrRelativeImageSrc(
     return origin ? `${origin}${src}` : src;
   }
   // Repo-relative image source → point at the PR's `/files`
-  // overview (no deep path; arbitrary repo-relative paths would
-  // 404 on GitHub otherwise).
+  // overview. We don't try to construct a raw.githubusercontent
+  // URL because we don't know the head SHA; the overview page
+  // is the safe landing page for any file path.
   const base = prUrl.endsWith("/") ? prUrl : `${prUrl}/`;
   return `${base}files`;
+}
+
+function isTrustedImageHost(href: string): boolean {
+  try {
+    const u = new URL(href);
+    return TRUSTED_IMAGE_HOSTS.has(u.host);
+  } catch {
+    return false;
+  }
 }
 
 /**
