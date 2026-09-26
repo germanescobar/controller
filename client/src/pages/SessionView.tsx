@@ -6482,7 +6482,18 @@ export function SessionView({
         {sessionId && (
           <div className="flex items-center gap-1 md:hidden">
             <button
-              onClick={() => setMobilePanel("agent")}
+              onClick={() => {
+                setMobilePanel("agent");
+                // On mobile, returning to Agent means the right
+                // panel is hidden — clear `terminalOpen` so the
+                // PR-tab discovery polling pauses (it would
+                // otherwise continue spawning `gh` calls three
+                // times per cycle because Preview opens the
+                // panel with `setTerminalOpen(true)` and the
+                // mobile Agent button doesn't otherwise flip it
+                // back — issue #387 review feedback).
+                setTerminalOpen(false);
+              }}
               className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                 mobilePanel === "agent"
                   ? "bg-accent text-foreground"
