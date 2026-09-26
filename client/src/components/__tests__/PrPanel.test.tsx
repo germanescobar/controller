@@ -135,6 +135,25 @@ test("PrPanel CI checks link to each check's targetUrl (issue #387)", () => {
   assert.match(html, /ci \/ lint/);
 });
 
+test("PrPanel CI checks without a targetUrl fall back to the PR's /checks page (issue #387)", () => {
+  const noTarget: PullRequest = {
+    ...SAMPLE_PR,
+    statusCheckRollup: [
+      {
+        name: "ci / docs",
+        state: "PENDING",
+        description: "Building docs",
+      },
+    ],
+  };
+  const html = render(noTarget);
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388\/checks"/
+  );
+  assert.match(html, /ci \/ docs/);
+});
+
 test("PrPanel chronologically merges comments and reviews oldest-first (issue #387)", () => {
   const html = render(SAMPLE_PR);
   // Comment was created BEFORE the review. Whichever item appears
@@ -170,6 +189,30 @@ test("PrPanel description is rendered as markdown with preserved links (issue #3
     html,
     /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388"/
   );
+});
+
+test("PrPanel markdown anchors open in a new tab so the Electron shell routes them to the browser (issue #387)", () => {
+  // The markdown renderer (description + comment + review bodies) must
+  // emit `target="_blank" rel="noopener noreferrer"` on every anchor.
+  // Otherwise the packaged Controller app navigates the renderer away
+  // from the app instead of opening the link in the system browser.
+  const html = render(SAMPLE_PR);
+  const anchored = html.match(
+    /<a [^>]*href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388"[^>]*>/g
+  );
+  assert.ok(anchored, "expected at least one anchor to the PR url");
+  for (const tag of anchored) {
+    assert.match(
+      tag,
+      /target="_blank"/,
+      `anchor missing target="_blank": ${tag}`
+    );
+    assert.match(
+      tag,
+      /rel="noopener noreferrer"/,
+      `anchor missing rel="noopener noreferrer": ${tag}`
+    );
+  }
 });
 
 test("PrPanel footer holds a single 'Open on GitHub' link to the canonical PR URL (issue #387)", () => {

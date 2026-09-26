@@ -4495,17 +4495,20 @@ export function SessionView({
 
   // Auto-switch away from the PR tab when the branch no longer has
   // an open PR (e.g., it was merged / closed). Mirrors the Changes
-  // tab auto-hide behavior above.
+  // tab auto-hide behavior above. The endpoint resolves the default
+  // worktree when `worktreeId` is unset (e.g., the project root
+  // surface), so the cleanup runs even in that case — otherwise the
+  // tab button disappears but `rightTab` stays at `"pr"` and the
+  // right panel goes blank (issue #387 review feedback).
   useEffect(() => {
     if (
       pullRequest === null &&
-      (rightTab === "pr" || mobilePanel === "pr") &&
-      worktreeId
+      (rightTab === "pr" || mobilePanel === "pr")
     ) {
       setRightTab("terminal");
       if (mobilePanel === "pr") setMobilePanel("terminal");
     }
-  }, [pullRequest, rightTab, mobilePanel, worktreeId]);
+  }, [pullRequest, rightTab, mobilePanel]);
 
   // Auto-switch away from Changes tab when there are no changes
   useEffect(() => {
@@ -6492,6 +6495,19 @@ export function SessionView({
               <FileCode className="h-3 w-3" />
               Files
             </button>
+            {pullRequest && (
+              <button
+                onClick={() => { setMobilePanel("pr"); setRightTab("pr"); }}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                  mobilePanel === "pr"
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground"
+                }`}
+              >
+                <GitPullRequest className="h-3 w-3" />
+                PR
+              </button>
+            )}
             {previewAvailable && (
               <button
                 onClick={() => { setMobilePanel("preview"); setRightTab("preview"); setTerminalOpen(true); }}

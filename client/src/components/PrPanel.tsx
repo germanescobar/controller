@@ -61,6 +61,38 @@ interface TimelineItem {
   data: PrComment | PrReview;
 }
 
+/**
+ * `react-markdown` overrides for the PR panel.
+ *
+ * GitHub PR / comment / review bodies are arbitrary user markdown —
+ * they often contain external links. The default anchor renderer
+ * emits a same-window anchor; in the packaged Electron app only
+ * `_blank` requests are forwarded to `shell.openExternal` (see
+ * `electron/main.ts`), so a same-window click would navigate the
+ * Controller renderer away from the app instead of opening the
+ * browser. Force every link to `target="_blank"` so the
+ * orchestration host takes over (issue #387 review feedback).
+ */
+function prMarkdownAnchor(
+  props: React.AnchorHTMLAttributes<HTMLAnchorElement>
+) {
+  const { href, children, ...rest } = props;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      {...rest}
+    >
+      {children}
+    </a>
+  );
+}
+
+const prMarkdownComponents = {
+  a: prMarkdownAnchor,
+};
+
 const RELATIVE_TIME_UNITS: Array<{ limit: number; divisor: number; suffix: string }> = [
   { limit: 60, divisor: 1, suffix: "s" },
   { limit: 60 * 60, divisor: 60, suffix: "m" },
@@ -207,35 +239,30 @@ function AuthorLine({ author }: { author: PrAuthor }) {
   );
 }
 
-function PrCheckRow({ check }: { check: PrCheck }) {
-  const href = check.targetUrl ?? null;
-  const inner = (
-    <span className="flex min-w-0 items-center gap-1.5">
-      {checkIcon(check.state)}
-      <span className="min-w-0 truncate text-foreground/90">{check.name}</span>
-      {check.description ? (
-        <span className="hidden truncate text-[10px] text-muted-foreground/70 md:inline">
-          {check.description}
-        </span>
-      ) : null}
-    </span>
-  );
+function PrCheckRow({ check, prUrl }: { check: PrCheck; prUrl: string }) {
+  // The check's own `targetUrl` is the deep link to the run details
+  // page; when `gh` doesn't supply one (some rollup entries), fall
+  // back to the PR's overall `/checks` page so the row is still
+  // clickable into GitHub (issue #387 review feedback).
+  const href = check.targetUrl ?? `${prUrl}/checks`;
   return (
     <li className="flex min-w-0 items-center justify-between gap-2 py-1 text-xs">
-      {href ? (
-        <a
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded px-1 py-0.5 transition-colors hover:bg-accent/30"
-        >
-          {inner}
-        </a>
-      ) : (
-        <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-1 py-0.5">
-          {inner}
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex min-w-0 flex-1 items-center gap-1.5 truncate rounded px-1 py-0.5 transition-colors hover:bg-accent/30"
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          {checkIcon(check.state)}
+          <span className="min-w-0 truncate text-foreground/90">{check.name}</span>
+          {check.description ? (
+            <span className="hidden truncate text-[10px] text-muted-foreground/70 md:inline">
+              {check.description}
+            </span>
+          ) : null}
         </span>
-      )}
+      </a>
       <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
         {checkStateLabel(check.state)}
       </span>
@@ -272,7 +299,12 @@ function TimelineComment({
       </div>
       {comment.body ? (
         <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{comment.body}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={prMarkdownComponents}
+          >
+            {comment.body}
+          </ReactMarkdown>
         </div>
       ) : null}
     </article>
@@ -313,7 +345,12 @@ function TimelineReview({
       </div>
       {review.body ? (
         <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{review.body}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={prMarkdownComponents}
+          >
+            {review.body}
+          </ReactMarkdown>
         </div>
       ) : null}
     </article>
@@ -459,7 +496,12 @@ function Description({ body }: { body: string }) {
   return (
     <section className="border-b border-border/60 px-3 py-2">
       <div className="prose prose-invert prose-sm max-w-none break-words text-xs leading-5">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{trimmed}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={prMarkdownComponents}
+        >
+          {trimmed}
+        </ReactMarkdown>
       </div>
     </section>
   );
@@ -516,7 +558,11 @@ function ChecksSection({ checks, prUrl }: { checks: PrCheck[]; prUrl: string }) 
         ) : (
           <ul className="mt-1 space-y-0.5">
             {checks.map((check, idx) => (
-              <PrCheckRow key={`${check.name}:${idx}`} check={check} />
+              <PrCheckRow
+                key={`${check.name}:${idx}`}
+                check={check}
+                prUrl={prUrl}
+              />
             ))}
           </ul>
         )
