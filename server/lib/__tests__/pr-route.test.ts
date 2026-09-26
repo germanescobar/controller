@@ -470,6 +470,103 @@ test("GET /git/pr caches by HEAD — second call with the same head does not re-
   });
 });
 
+test("GET /git/pr keeps reviews that omit the optional url field (issue #387)", async () => {
+  // `gh pr view --json reviews` does not actually include a `url`
+  // field on its review selection (only on comments). The earlier
+  // server-side validator rejected every real review because of the
+  // required URL. This test pins the relaxed shape: reviews with
+  // no `url` survive normalization, and the panel still renders a
+  // review entry per item.
+  const threadsWithoutReviewUrls: RunnerResult = {
+    stdout: JSON.stringify({
+      comments: [],
+      reviews: [
+        {
+          id: "PRR_kwDOR-kYZ88AAAABPX0dTA",
+          state: "APPROVED",
+          body: "Looks great to me.",
+          submittedAt: "2026-09-22T22:00:00Z",
+          author: { login: "reviewer-bot", name: "Reviewer Bot" },
+        },
+        {
+          id: "PRR_kwDOR-kYZ88AAAABPX0dTB",
+          state: "CHANGES_REQUESTED",
+          body: "",
+          submittedAt: "2026-09-22T22:30:00Z",
+          author: { login: "second-reviewer", name: "Second Reviewer" },
+        },
+      ],
+    }),
+    stderr: "",
+  };
+  await withPrEnv(async () => {}, async (env) => {
+    const stub = buildRunner({
+      META: SAMPLE_META,
+      STATE: SAMPLE_STATE,
+      THREADS: threadsWithoutReviewUrls,
+    });
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(stub.runner);
+    try {
+      const res = await fetchPr(env.baseUrl, env.worktreeId);
+      const body = await res.json();
+      assert.equal(body.error, undefined);
+      assert.ok(body.pr, "PR should be returned");
+      // Both reviews survive even though neither carries a `url`.
+      assert.equal(body.pr.reviews.length, 2);
+      assert.equal(body.pr.reviews[0].state, "APPROVED");
+      assert.equal(body.pr.reviews[1].state, "CHANGES_REQUESTED");
+      assert.equal(body.pr.reviews[0].url, undefined);
+      assert.equal(body.pr.reviews[1].url, undefined);
+      assert.equal(body.pr.reviews[0].body, "Looks great to me.");
+    } finally {
+      dispose();
+    }
+  });
+});
+
+test("GET /git/pr prefers the in-progress status over an empty conclusion (issue #387)", async () => {
+  // For a CheckRun that is still running, `gh pr view` emits
+  // `"conclusion":""` and `"status":"IN_PROGRESS"`. The earlier
+  // validator treated the empty conclusion as truthy and used it
+  // as the visible state, masking in-progress runs. Pin the new
+  // behavior: the empty conclusion should fall through to status.
+  const stateWithEmptyConclusion: RunnerResult = {
+    stdout: JSON.stringify({
+      reviewDecision: null,
+      statusCheckRollup: [
+        {
+          name: "ci / build",
+          conclusion: "",
+          status: "IN_PROGRESS",
+          targetUrl: "https://github.com/germanescobar/controller/runs/12345",
+          description: "Building",
+        },
+      ],
+    }),
+    stderr: "",
+  };
+  await withPrEnv(async () => {}, async (env) => {
+    const stub = buildRunner({
+      META: SAMPLE_META,
+      STATE: stateWithEmptyConclusion,
+      THREADS: SAMPLE_THREADS,
+    });
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(stub.runner);
+    try {
+      const res = await fetchPr(env.baseUrl, env.worktreeId);
+      const body = await res.json();
+      assert.ok(body.pr, "PR should be returned");
+      assert.equal(body.pr.statusCheckRollup.length, 1);
+      const check = body.pr.statusCheckRollup[0];
+      assert.equal(check.state, "IN_PROGRESS", "should fall through to status");
+    } finally {
+      dispose();
+    }
+  });
+});
+
 test("GET /git/pr cache invalidates when the worktree's HEAD changes (issue #387)", async () => {
   await withPrEnv(async () => {}, async (env) => {
     const stub = buildRunner({
@@ -498,32 +595,34 @@ test("GET /git/pr cache invalidates when the worktree's HEAD changes (issue #387
 
 test("GET /git/pr preserves the cached PR across a transient gh failure (issue #387)", async () => {
   // First request succeeds and seeds the cache. A subsequent call
-  // hits a transient failure (e.g. network blip, unrecognized
-  // non-zero exit) — the route should serve the last good payload
-  // instead of `{ pr: null }`, otherwise the client tears the tab
-  // out and switches to Terminal on every hiccup. Definitive
-  // outcomes (no PR, install / auth errors) still take precedence
-  // and overwrite the cache.
+  // (forced to bypass the cache by changing HEAD) hits a transient
+  // failure (e.g. network blip, unrecognized non-zero exit) — the
+  // route should serve the last good payload instead of
+  // `{ pr: null }`, otherwise the client tears the tab out and
+  // switches to Terminal on every hiccup. Definitive outcomes (no
+  // PR, install / auth errors) still take precedence and overwrite
+  // the cache.
+  //
+  // `gh pr view --json reviews` shape on this code path is exercised
+  // indirectly via the constructor above — the transient branch
+  // here never parses it; we keep the focus of this test on the
+  // cache + failure handling.
   await withPrEnv(async () => {}, async (env) => {
     let mode: "ok" | "transient" = "ok";
+    let callsInTransientMode = 0;
     const switchableRunner: import("../pr-data.js").GhRunner = async (
       args,
       cwd,
     ) => {
       if (mode === "transient") {
+        callsInTransientMode++;
         // Simulate a network error / unrecognized non-zero exit.
-        // Pick an arbitrary code we don't classify, plus stderr
-        // that doesn't match any of our auth / no-PR / not-found
-        // fingerprints.
         const err = new Error("spawn failed") as NodeJS.ErrnoException;
         err.code = 1;
         err.stdout = "";
         err.stderr = "some other random failure";
         throw err;
       }
-      // First call: synthetic success matching the standard shape.
-      // Build a stdlib `RunnerResult` by parsing the same payload
-      // the well-formed stub would return.
       const payload = {
         number: 388,
         title: "transient test",
@@ -567,8 +666,13 @@ test("GET /git/pr preserves the cached PR across a transient gh failure (issue #
       assert.ok(firstBody.pr, "first call should populate the cache");
       assert.equal(firstBody.pr.title, "transient test");
 
-      // Switch to transient failure mode. The route should serve the
-      // cached PR rather than `{ pr: null }`.
+      // Change HEAD so the cache check (which guards on headSha
+      // equality) misses and the route actually invokes the runner
+      // in transient mode. Without this the second request would
+      // return the cached payload via the fast path and never
+      // exercise the new transient-failure fallback (review feedback
+      // on commit `6ca1849c`).
+      await runGit(env.projectPath, ["commit", "--allow-empty", "-m", "v3"]);
       mode = "transient";
       const second = await fetchPr(env.baseUrl, env.worktreeId);
       const secondBody = await second.json();
@@ -578,6 +682,10 @@ test("GET /git/pr preserves the cached PR across a transient gh failure (issue #
       );
       assert.equal(secondBody.pr.title, "transient test");
       assert.equal(secondBody.error, undefined);
+      assert.ok(
+        callsInTransientMode >= 3,
+        "transient mode runner should actually have been invoked",
+      );
     } finally {
       dispose();
     }
@@ -589,18 +697,21 @@ test("GET /git/pr surfaces gh_not_installed without nuking a cached PR (issue #3
   // surfaced for logging but the cached PR is the response — the
   // panel keeps showing what we knew last. This avoids a loop
   // where the user installs gh → fetches a PR → uninstalls gh →
-  // sees the tab vanish.
+  // sees the tab vanish. Same HEAD-bypass trick as the transient
+  // test above: the cache would otherwise short-circuit the
+  // missing-gh runner.
   await withPrEnv(async () => {}, async (env) => {
     let mode: "ok" | "missing" = "ok";
+    let callsInMissingMode = 0;
     const switchableRunner: import("../pr-data.js").GhRunner = async () => {
       if (mode === "missing") {
+        callsInMissingMode++;
         const err = new Error("spawn gh ENOENT") as NodeJS.ErrnoException;
         err.code = "ENOENT";
         err.stdout = "";
         err.stderr = "";
         throw err;
       }
-      // Return a minimal-but-valid PR shape.
       return {
         stdout: JSON.stringify({
           number: 388,
@@ -627,11 +738,16 @@ test("GET /git/pr surfaces gh_not_installed without nuking a cached PR (issue #3
       const first = await fetchPr(env.baseUrl, env.worktreeId);
       assert.ok((await first.json()).pr);
 
+      await runGit(env.projectPath, ["commit", "--allow-empty", "-m", "v3"]);
       mode = "missing";
       const second = await fetchPr(env.baseUrl, env.worktreeId);
       const secondBody = await second.json();
       assert.ok(secondBody.pr, "cached PR should still be served");
       assert.equal(secondBody.error, undefined);
+      assert.ok(
+        callsInMissingMode >= 3,
+        "missing mode runner should actually have been invoked",
+      );
     } finally {
       dispose();
     }

@@ -80,7 +80,14 @@ export interface PrReview {
   state: PrReviewState;
   body: string;
   submittedAt: string;
-  url: string;
+  /**
+   * Canonical URL for this review on GitHub. `gh pr view --json
+   * reviews` does not emit this field on its review selection, so
+   * the panel must work without it (issue #387 review feedback —
+   * without a fallback the real review stream would be silently
+   * filtered out by the server-side validator).
+   */
+  url?: string;
 }
 
 export interface PullRequest {
@@ -307,11 +314,11 @@ function asCheck(value: unknown): PrCheck | null {
       : null;
   if (!name) return null;
   const state =
-    typeof obj.state === "string"
+    typeof obj.state === "string" && obj.state.length > 0
       ? obj.state
-      : typeof obj.conclusion === "string"
+      : typeof obj.conclusion === "string" && obj.conclusion.length > 0
       ? obj.conclusion
-      : typeof obj.status === "string"
+      : typeof obj.status === "string" && obj.status.length > 0
       ? obj.status
       : "PENDING";
   const description =
@@ -347,16 +354,33 @@ function asComment(value: unknown): PrComment | null {
 function asReview(value: unknown): PrReview | null {
   const obj = (value ?? {}) as Record<string, unknown>;
   const id = typeof obj.id === "string" ? obj.id : null;
-  const state = typeof obj.state === "string" ? obj.state : "COMMENTED";
+  const state = typeof obj.state === "string" && obj.state.length > 0
+    ? obj.state
+    : "COMMENTED";
   const body = typeof obj.body === "string" ? obj.body : "";
   const submittedAt = typeof obj.submittedAt === "string"
     ? obj.submittedAt
     : typeof obj.createdAt === "string"
     ? obj.createdAt
     : null;
-  const url = typeof obj.url === "string" ? obj.url : null;
-  if (!id || !submittedAt || !url) return null;
-  return { id, body, state, submittedAt, url, author: asAuthor(obj.author) };
+  // `gh pr view --json reviews` does not include a `url` field on
+  // its review selection — only on comments. Treat the URL as
+  // optional so real reviews survive normalization; the panel
+  // gracefully renders a review without an outbound "↗" link when
+  // it's missing (issue #387 review feedback).
+  const url = typeof obj.url === "string" && obj.url.length > 0
+    ? obj.url
+    : undefined;
+  if (!id || !submittedAt) return null;
+  const review: PrReview = {
+    id,
+    body,
+    state,
+    submittedAt,
+    author: asAuthor(obj.author),
+  };
+  if (url) review.url = url;
+  return review;
 }
 
 interface RawPr {
