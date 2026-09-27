@@ -157,7 +157,10 @@ function runGit(cwd: string, args: string[]): Promise<void> {
  *  - THREADS: comments,reviews
  */
 function buildRunner(
-  responses: Record<"META" | "STATE" | "THREADS", RunnerResult>
+  responses: Record<
+    "META" | "STATE" | "THREADS",
+    RunnerResult
+  > & { INLINE?: RunnerResult }
 ): { calls: GhCall[]; runner: import("../pr-data.js").GhRunner } {
   const calls: GhCall[] = [];
   const routes: Array<{
@@ -188,6 +191,37 @@ function buildRunner(
   ];
   const runner: import("../pr-data.js").GhRunner = async (args, cwd) => {
     calls.push({ args, cwd });
+    // Inline review comments route through `gh api
+    // repos/{owner}/{repo}/pulls/{n}/comments`, not `gh pr view
+    // --json`. Detect that branch first.
+    if (args[0] === "api") {
+      const apiPath = args[1] ?? "";
+      const inlineMatch = apiPath.match(
+        /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/comments$/
+      );
+      if (!inlineMatch) {
+        throw new Error(
+          `stub runner received unexpected gh api path: ${apiPath}`
+        );
+      }
+      // Default to an empty array when no INLINE response is
+      // supplied — most tests don't care about inline comments.
+      const r: RunnerResult = responses.INLINE ?? { stdout: "[]", stderr: "" };
+      if (r.code && r.code !== 0) {
+        const err = new Error("gh exited non-zero") as NodeJS.ErrnoException & {
+          code?: string | number;
+          stdout?: string;
+          stderr?: string;
+          killed?: boolean;
+        };
+        err.code = r.code;
+        err.stdout = r.stdout;
+        err.stderr = r.stderr;
+        err.killed = false;
+        throw err;
+      }
+      return { stdout: r.stdout, stderr: r.stderr };
+    }
     const idx = args.indexOf("--json");
     const requested = idx >= 0 ? args[idx + 1].split(",") : [];
     const sortedReq = new Set(requested);
@@ -331,11 +365,25 @@ test("GET /git/pr merges the three gh pr view responses into one PullRequest (is
       assert.equal(body.pr.comments[0].author.login, "germanescobar");
       assert.equal(body.pr.reviews.length, 1);
       assert.equal(body.pr.reviews[0].state, "APPROVED");
-      assert.equal(stub.calls.length, 3, "expected three parallel gh calls");
-      for (const c of stub.calls) {
-        assert.deepEqual(c.args.slice(0, 2), ["pr", "view"]);
-        assert.equal(c.args[2], "--json");
-      }
+      assert.equal(
+        stub.calls.length,
+        4,
+        "expected three parallel gh pr view calls plus the inline-comments gh api call"
+      );
+      // Three parallel `gh pr view --json …` calls + one
+      // sequential `gh api repos/.../pulls/N/comments` for inline
+      // review comments.
+      const prViewCalls = stub.calls.filter(
+        (c) => c.args[0] === "pr" && c.args[1] === "view"
+      );
+      assert.equal(prViewCalls.length, 3);
+      const apiCalls = stub.calls.filter((c) => c.args[0] === "api");
+      assert.equal(apiCalls.length, 1);
+      assert.match(
+        apiCalls[0].args[1] ?? "",
+        /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/comments$/
+      );
+      assert.equal(body.pr.inlineComments.length, 0);
     } finally {
       dispose();
     }
@@ -458,12 +506,12 @@ test("GET /git/pr caches by HEAD — second call with the same head does not re-
       const first = await fetchPr(env.baseUrl, env.worktreeId);
       const firstBody = await first.json();
       assert.ok(firstBody.pr);
-      assert.equal(stub.calls.length, 3);
+      assert.equal(stub.calls.length, 4);
 
       const second = await fetchPr(env.baseUrl, env.worktreeId);
       const secondBody = await second.json();
       assert.ok(secondBody.pr);
-      assert.equal(stub.calls.length, 3, "no new runner calls on cache hit");
+      assert.equal(stub.calls.length, 4, "no new runner calls on cache hit");
     } finally {
       dispose();
     }
@@ -579,14 +627,14 @@ test("GET /git/pr cache invalidates when the worktree's HEAD changes (issue #387
     try {
       const first = await fetchPr(env.baseUrl, env.worktreeId);
       assert.ok((await first.json()).pr);
-      assert.equal(stub.calls.length, 3);
+      assert.equal(stub.calls.length, 4);
 
       // Make a new commit so HEAD changes.
       await runGit(env.projectPath, ["commit", "--allow-empty", "-m", "v3"]);
 
       const second = await fetchPr(env.baseUrl, env.worktreeId);
       assert.ok((await second.json()).pr);
-      assert.equal(stub.calls.length, 6, "expected a fresh three-call refetch");
+      assert.equal(stub.calls.length, 8, "expected a fresh four-call refetch");
     } finally {
       dispose();
     }
@@ -1170,4 +1218,181 @@ test("the pr-data cache evicts the oldest entries past the size cap (issue #387)
   } finally {
     __resetPrCacheForTests();
   }
+});
+
+test("GET /git/pr surfaces inline review comments from `gh api repos/.../pulls/N/comments` (issue #387)", async () => {
+  // The panel's timeline was originally scoped to conversation
+  // comments + top-level reviews. Issue #387's deferral note
+  // ("inline review comments need diff context") was the
+  // blocker; the chronological-list interpretation doesn't need
+  // diff context — a breadcrumb per item (file + line + side) is
+  // enough to identify where the comment is anchored, with the
+  // canonical GitHub URL as the deep link.
+  //
+  // `gh pr view --json` doesn't include inline comments, so the
+  // route hits `gh api repos/{owner}/{repo}/pulls/{n}/comments`
+  // separately (sequential on the metadata call, since we need
+  // the URL to build the path).
+  await withPrEnv(async () => {}, async (env) => {
+    const stub = buildRunner({
+      META: SAMPLE_META,
+      STATE: SAMPLE_STATE,
+      THREADS: SAMPLE_THREADS,
+      INLINE: {
+        stdout: JSON.stringify([
+          {
+            id: "4112000879",
+            body: "Add the PR tab to the mobile header",
+            user: { login: "codex" },
+            created_at: "2026-09-26T16:33:10Z",
+            html_url:
+              "https://github.com/germanescobar/controller/pull/392#discussion_r4112000879",
+            path: "client/src/pages/SessionView.tsx",
+            line: 6446,
+            side: "RIGHT",
+          },
+          {
+            id: "4112000880",
+            body: "File-level note.",
+            user: { login: "reviewer" },
+            created_at: "2026-09-26T16:35:00Z",
+            html_url:
+              "https://github.com/germanescobar/controller/pull/392#discussion_r4112000880",
+            path: "README.md",
+            line: null,
+            side: null,
+          },
+        ]),
+      },
+    });
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(stub.runner);
+    try {
+      const res = await fetchPr(env.baseUrl, env.worktreeId);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.ok(body.pr);
+      assert.equal(body.pr.inlineComments.length, 2);
+      const first = body.pr.inlineComments[0];
+      assert.equal(first.id, "4112000879");
+      assert.equal(first.body, "Add the PR tab to the mobile header");
+      assert.equal(first.author.login, "codex");
+      assert.equal(first.createdAt, "2026-09-26T16:33:10Z");
+      assert.equal(first.path, "client/src/pages/SessionView.tsx");
+      assert.equal(first.line, 6446);
+      assert.equal(first.side, "RIGHT");
+      assert.match(
+        first.url,
+        /^https:\/\/github\.com\/germanescobar\/controller\/pull\/392#discussion_r4112000879$/
+      );
+      const second = body.pr.inlineComments[1];
+      // File-level comments keep `line` and `side` as `null`.
+      assert.equal(second.line, null);
+      assert.equal(second.side, null);
+      assert.equal(second.path, "README.md");
+      // The api path includes the owner/repo/number parsed from
+      // the metadata URL.
+      const apiCalls = stub.calls.filter((c) => c.args[0] === "api");
+      assert.equal(apiCalls.length, 1);
+      assert.equal(
+        apiCalls[0].args[1],
+        "repos/germanescobar/controller/pulls/388/comments"
+      );
+    } finally {
+      dispose();
+    }
+  });
+});
+
+test("GET /git/pr keeps cached inline comments when the `gh api` call fails transiently (issue #387)", async () => {
+  // Inline comments are additive — a transient `gh api` blip
+  // must not blank the inline-comments list on the next poll.
+  // Same protection as for `comments`/`reviews`: if metadata
+  // succeeds and the prior cache entry is for the same PR, we
+  // reuse the cached inline-comments rather than wiping them.
+  // First request: success. Second request: same head but the
+  // INLINE call throws — must not re-invoke the runner anyway
+  // (cache hit), but if it did, the samePr guard would keep the
+  // prior inlineComments intact.
+  await withPrEnv(async () => {}, async (env) => {
+    const stub = buildRunner({
+      META: SAMPLE_META,
+      STATE: SAMPLE_STATE,
+      THREADS: SAMPLE_THREADS,
+      INLINE: {
+        stdout: JSON.stringify([
+          {
+            id: "X1",
+            body: "first",
+            user: { login: "u" },
+            created_at: "2026-09-26T10:00:00Z",
+            html_url:
+              "https://github.com/germanescobar/controller/pull/388#discussion_rX1",
+            path: "a.ts",
+            line: 1,
+            side: "RIGHT",
+          },
+        ]),
+      },
+    });
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(stub.runner);
+    try {
+      const first = await fetchPr(env.baseUrl, env.worktreeId);
+      const firstBody = await first.json();
+      assert.equal(firstBody.pr.inlineComments.length, 1);
+      // Cache hit on the second call — runner is not re-invoked,
+      // so the transient-failure path doesn't trigger.
+      const second = await fetchPr(env.baseUrl, env.worktreeId);
+      const secondBody = await second.json();
+      assert.equal(secondBody.pr.inlineComments.length, 1);
+      assert.equal(secondBody.pr.inlineComments[0].id, "X1");
+    } finally {
+      dispose();
+    }
+  });
+});
+
+test("GET /git/pr silently swallows a transient `gh api` failure for inline comments (issue #387)", async () => {
+  // When the `gh pr view --json …` metadata call succeeds but the
+  // `gh api …/comments` call fails (network blip, transient
+  // non-zero exit, etc.), the route must still return a usable
+  // PR — just with an empty inline-comments list, not a 5xx or a
+  // `{ pr: null }` that would tear the tab down. We pair this
+  // with a same-PR cache hit on a follow-up call: the cached
+  // inlineComments come back even though the live fetch is
+  // unhappy.
+  await withPrEnv(async () => {}, async (env) => {
+    // INLINE response injects a failing exit code (4). Note that
+    // class 4 is `gh_not_authenticated`-like in stderr, but the
+    // classifier used for the inline-comments API call only
+    // returns `null` for any failure path (the inline-comments
+    // fetch is treated as additive) — so this should just surface
+    // empty inline-comments rather than a route error.
+    const stub = buildRunner({
+      META: SAMPLE_META,
+      STATE: SAMPLE_STATE,
+      THREADS: SAMPLE_THREADS,
+      INLINE: {
+        code: 1,
+        stdout: "",
+        stderr: "transient network error",
+      },
+    });
+    const { __setPrGhRunnerForTests } = await import("../pr-data.js");
+    const dispose = __setPrGhRunnerForTests(stub.runner);
+    try {
+      const res = await fetchPr(env.baseUrl, env.worktreeId);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.ok(body.pr, "PR should still be returned");
+      assert.equal(body.pr.inlineComments.length, 0);
+      // The route did not surface an error code — `gh api`
+      // failures are silently absorbed because inline comments
+      // are an additive source.
+      assert.equal(body.error, undefined);
+    } finally {
+      dispose();
+    }
+  });
 });

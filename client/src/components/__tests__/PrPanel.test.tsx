@@ -90,6 +90,7 @@ const SAMPLE_PR: PullRequest = {
       url: "https://github.com/germanescobar/controller/pull/388#pullrequestreview-1",
     },
   ],
+  inlineComments: [],
 };
 
 function render(pr: PullRequest | null): string {
@@ -612,4 +613,134 @@ test("PrPanel description bodies render <details> as real collapsibles (issue #3
   // stripped, but the paragraphs are still rendered).
   assert.match(html, /First section\./);
   assert.match(html, /Second section\./);
+});
+
+test("PrPanel surfaces inline review comments in the chronological timeline (issue #387)", () => {
+  // Inline comments are threaded into the same chronological
+  // timeline as conversation comments + top-level reviews — the
+  // visual order matches GitHub's "Conversation" tab when
+  // collapsed (oldest-first). Each inline-comment item carries a
+  // file/line breadcrumb so the user knows where the comment is
+  // anchored without needing the diff context inline (issue #387
+  // — inline-comments deferral rationale was "needs diff
+  // context"; a chronological list with breadcrumbs + deep link
+  // is a tractable approximation).
+  const withInline: PullRequest = {
+    ...SAMPLE_PR,
+    inlineComments: [
+      {
+        id: "IC1",
+        author: {
+          login: "reviewer",
+          name: "Reviewer",
+          avatarUrl:
+            "https://avatars.githubusercontent.com/reviewer?size=80",
+        },
+        body: "Anchor on a specific line.",
+        createdAt: "2026-09-22T21:30:00Z",
+        url: "https://github.com/germanescobar/controller/pull/388#discussion_rIC1",
+        path: "client/src/components/PrPanel.tsx",
+        line: 42,
+        side: "RIGHT",
+      },
+      {
+        id: "IC2",
+        author: {
+          login: "reviewer",
+          name: "Reviewer",
+          avatarUrl:
+            "https://avatars.githubusercontent.com/reviewer?size=80",
+        },
+        body: "File-level note (no line).",
+        createdAt: "2026-09-22T21:35:00Z",
+        url: "https://github.com/germanescobar/controller/pull/388#discussion_rIC2",
+        path: "README.md",
+        line: null,
+        side: null,
+      },
+      {
+        id: "IC3",
+        author: {
+          login: "reviewer",
+          name: "Reviewer",
+          avatarUrl:
+            "https://avatars.githubusercontent.com/reviewer?size=80",
+        },
+        body: "LEFT-side comment.",
+        createdAt: "2026-09-22T21:40:00Z",
+        url: "https://github.com/germanescobar/controller/pull/388#discussion_rIC3",
+        path: "server/lib/pr-data.ts",
+        line: 100,
+        side: "LEFT",
+      },
+    ],
+  };
+  const html = render(withInline);
+  // File/line breadcrumb for line-anchored comment.
+  assert.match(
+    html,
+    /client\/src\/components\/PrPanel\.tsx:42\s*\(RIGHT\)/
+  );
+  // File-only breadcrumb for file-level comments.
+  assert.match(html, /README\.md \(file\)/);
+  // LEFT side surface.
+  assert.match(html, /server\/lib\/pr-data\.ts:100\s*\(LEFT\)/);
+  // Deep links to GitHub's diff anchors.
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388#discussion_rIC1"/
+  );
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388#discussion_rIC2"/
+  );
+  assert.match(
+    html,
+    /href="https:\/\/github\.com\/germanescobar\/controller\/pull\/388#discussion_rIC3"/
+  );
+  // Comment bodies rendered.
+  assert.match(html, /Anchor on a specific line\./);
+  assert.match(html, /File-level note \(no line\)\./);
+  assert.match(html, /LEFT-side comment\./);
+  // The conversation count in the timeline header now reflects
+  // the inline comments too (1 conversation comment + 1 review +
+  // 3 inline = 5 items).
+  assert.match(html, /Conversation[\s\S]{0,200}<span[^>]*>5<\/span>/);
+});
+
+test("PrPanel renders inline comments chronologically with conversation comments and reviews (issue #387)", () => {
+  // The inline comment's `createdAt` lands between the
+  // conversation comment (21:09:51) and the review (22:00:00) so
+  // we can pin the merged-order by inspecting which item appears
+  // first in the rendered HTML.
+  const withInline: PullRequest = {
+    ...SAMPLE_PR,
+    inlineComments: [
+      {
+        id: "IC-MID",
+        author: {
+          login: "u",
+          name: "User",
+        },
+        body: "Mid-list inline comment.",
+        createdAt: "2026-09-22T21:45:00Z",
+        url: "https://github.com/germanescobar/controller/pull/388#discussion_rIC-MID",
+        path: "x.ts",
+        line: 1,
+        side: "RIGHT",
+      },
+    ],
+  };
+  const html = render(withInline);
+  // Find the position of each item in the rendered output.
+  const idxConversation = html.indexOf("Comment by author.");
+  const idxInline = html.indexOf("Mid-list inline comment.");
+  const idxReview = html.indexOf("LGTM.");
+  assert.ok(idxConversation >= 0);
+  assert.ok(idxInline >= 0);
+  assert.ok(idxReview >= 0);
+  assert.ok(
+    idxConversation < idxInline && idxInline < idxReview,
+    `expected conversation < inline < review; got conv=${idxConversation}, inline=${idxInline}, review=${idxReview}`
+  );
 });

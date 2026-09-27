@@ -14,6 +14,7 @@ import {
   GitPullRequestDraft,
   CircleSlash,
   MessageSquare,
+  FileCode,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -22,6 +23,7 @@ import type {
   PrAuthor,
   PrCheck,
   PrComment,
+  PrInlineComment,
   PrReview,
   PullRequest,
 } from "../api.ts";
@@ -53,12 +55,12 @@ interface PrPanelProps {
 const NOW_FALLBACK: () => number = () => Date.now();
 
 interface TimelineItem {
-  kind: "comment" | "review";
+  kind: "comment" | "review" | "inline";
   /** ISO timestamp — used for chronological sort. */
   at: string;
   /** Render discriminator — distinct per item kind. */
   id: string;
-  data: PrComment | PrReview;
+  data: PrComment | PrReview | PrInlineComment;
 }
 
 /**
@@ -500,6 +502,10 @@ function isReview(item: TimelineItem): item is TimelineItem & { data: PrReview }
   return item.kind === "review";
 }
 
+function isInline(item: TimelineItem): item is TimelineItem & { data: PrInlineComment } {
+  return item.kind === "inline";
+}
+
 function stateColorClasses(state: string): string {
   const upper = state.toUpperCase();
   if (upper === "OPEN") return "bg-emerald-500/15 text-emerald-300 border-emerald-500/30";
@@ -592,6 +598,18 @@ function buildTimeline(pr: PullRequest): TimelineItem[] {
   }
   for (const r of pr.reviews) {
     items.push({ kind: "review", id: r.id, at: r.submittedAt, data: r });
+  }
+  // Inline review comments are threaded into the same
+  // chronological timeline as conversation comments and
+  // top-level reviews — the visual order matches the GitHub
+  // PR "Conversation" tab when collapsed (oldest-first). Each
+  // item carries a file/line breadcrumb so the user can see
+  // where it's anchored without needing the diff context
+  // (issue #387 — inline-comments deferral rationale was "needs
+  // diff context", but a chronological list with breadcrumbs +
+  // deep link to the GitHub diff is a tractable approximation).
+  for (const i of pr.inlineComments ?? []) {
+    items.push({ kind: "inline", id: i.id, at: i.createdAt, data: i });
   }
   // Oldest-first so the reading order matches the GitHub timeline.
   items.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
@@ -740,6 +758,78 @@ function TimelineReview({
   );
 }
 
+/**
+ * Render one inline review comment in the timeline.
+ *
+ * Inline comments are anchored to a specific file (and optionally
+ * a specific line) in the PR's diff — the GitHub PR "Files Changed"
+ * tab surfaces them next to the relevant hunk. We don't render the
+ * diff in the sidebar (issue #387 explicitly deferred diff-aware
+ * rendering), so each item carries a file/line breadcrumb at the
+ * top and a deep link to GitHub's `#discussion_r{id}` anchor where
+ * the user can see the diff context.
+ *
+ * The breadcrumb format mirrors the GitHub PR UI:
+ *   📄 client/src/components/PrPanel.tsx:42 (RIGHT)
+ *   📄 README.md  (file-level — no line)
+ *   📄 foo.ts:42 (LEFT)
+ *
+ * The "LEFT" / "RIGHT" side indicator is short for the diff side
+ * the comment is on; file-level comments (line === null) drop it.
+ */
+function TimelineInlineComment({
+  comment,
+  now,
+  prUrl: _prUrl,
+}: {
+  comment: PrInlineComment;
+  now: () => number;
+  prUrl: string;
+}) {
+  const location =
+    comment.line !== null
+      ? `${comment.path}:${comment.line}` +
+        (comment.side ? ` (${comment.side})` : "")
+      : `${comment.path} (file)`;
+  return (
+    <article className="space-y-1.5 border-l border-border/60 pl-3">
+      <div className="flex min-w-0 items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <AuthorLine author={comment.author} />
+          <span className="text-muted-foreground/70">
+            commented {relativeTime(comment.createdAt, now)} ago
+          </span>
+          <Badge
+            variant="outline"
+            className="border border-border/60 bg-muted text-[10px] font-medium text-muted-foreground"
+            title={`Inline review comment anchored to ${comment.path}${
+              comment.line !== null ? `:${comment.line}` : ""
+            }`}
+          >
+            <FileCode className="mr-1 inline h-2.5 w-2.5" />
+            {location}
+          </Badge>
+        </span>
+        <a
+          href={comment.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
+          title="Open comment on GitHub"
+          aria-label="Open comment on GitHub"
+        >
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
+      {comment.body ? (
+        <div className="rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
+          <MarkdownBody body={comment.body} prUrl={comment.url} />
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function Timeline({
   items,
   now,
@@ -766,6 +856,13 @@ function Timeline({
           ) : null}
           {isReview(item) ? (
             <TimelineReview review={item.data} now={now} prUrl={prUrl} />
+          ) : null}
+          {isInline(item) ? (
+            <TimelineInlineComment
+              comment={item.data}
+              now={now}
+              prUrl={prUrl}
+            />
           ) : null}
         </li>
       ))}

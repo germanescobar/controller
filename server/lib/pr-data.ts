@@ -46,6 +46,36 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Parse `https://github.com/{owner}/{repo}/pull/{number}` into its
+ * components. Returns `null` if the URL doesn't match the expected
+ * shape — the inline-comments fetcher is the only consumer and it
+ * treats `null` as "no inline comments" rather than as a fatal
+ * failure (issue #387 — inline comments are an additive source).
+ */
+function parsePrUrl(
+  url: string
+): { owner: string; repo: string; number: number } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.hostname !== "github.com" && parsed.hostname !== "api.github.com") {
+    return null;
+  }
+  const match = parsed.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/
+  );
+  if (!match) return null;
+  const owner = match[1];
+  const repo = match[2];
+  const number = Number(match[3]);
+  if (!owner || !repo || !Number.isFinite(number) || number <= 0) return null;
+  return { owner, repo, number };
+}
+
 /* --- Type mirror of `shared/controller.ts` PR shape ----------------- */
 
 export interface PrAuthor {
@@ -90,6 +120,24 @@ export interface PrReview {
   url?: string;
 }
 
+export interface PrInlineComment {
+  id: string;
+  author: PrAuthor;
+  body: string;
+  createdAt: string;
+  /** Canonical URL — anchor fragment points at `#discussion_r{id}`. */
+  url: string;
+  /** Repo-relative path to the file the comment is anchored to. */
+  path: string;
+  /**
+   * Line number in the diff the comment is anchored to. `null` for
+   * file-level comments that aren't tied to a specific line.
+   */
+  line: number | null;
+  /** "LEFT" / "RIGHT" / null (file-level). */
+  side: "LEFT" | "RIGHT" | null;
+}
+
 export interface PullRequest {
   number: number;
   title: string;
@@ -109,6 +157,13 @@ export interface PullRequest {
   statusCheckRollup?: PrCheck[];
   comments: PrComment[];
   reviews: PrReview[];
+  /**
+   * Inline review comments anchored to diff lines. Surfaced in the
+   * panel's chronological timeline below the conversation
+   * comments and top-level reviews. Empty when the fetch failed
+   * transiently or the PR has no inline comments yet.
+   */
+  inlineComments: PrInlineComment[];
 }
 
 export type PrErrorCode =
@@ -155,13 +210,6 @@ let activeRunner: GhRunner = defaultRunner;
  * maps these into `PrErrorCode` strings the panel can log; the UI
  * silently hides the tab in v1 regardless of cause.
  */
-type GhFailure =
-  | { kind: "not_installed" }
-  | { kind: "not_authenticated"; message: string }
-  | { kind: "no_pr"; message: string }
-  | { kind: "spawn_failed"; message: string }
-  | { kind: "non_zero_exit"; code: number | null; message: string }
-  | { kind: "invalid_json"; message: string };
 
 interface CacheEntry {
   fetchedAt: number;
@@ -223,19 +271,34 @@ function isExecException(value: unknown): value is ExecException {
 }
 
 /**
- * Run `gh pr view --json <fields>` and classify the outcome. Returns
- * the parsed JSON on success or a `GhFailure` describing why we
- * couldn't get it. We rely on `gh`'s exit codes + stderr text — the
- * CLI never returns a structured error envelope we can parse.
- *
- * Spawns `gh` through {@link activeRunner} so tests can swap in a
- * stub without touching PATH.
+ * Categorized failure modes of a `gh` invocation. The route maps
+ * these into `PrErrorCode` strings the panel can log; the UI
+ * silently hides the tab in v1 regardless of cause.
  */
-async function fetchGhJson(
-  cwd: string,
-  fields: string[]
-): Promise<{ ok: true; data: unknown } | { ok: false; failure: GhFailure }> {
-  const args = ["pr", "view", "--json", fields.join(",")];
+type GhFailure =
+  | { kind: "not_installed" }
+  | { kind: "not_authenticated"; message: string }
+  | { kind: "no_pr"; message: string }
+  | { kind: "spawn_failed"; message: string }
+  | { kind: "non_zero_exit"; code: number | null; message: string }
+  | { kind: "invalid_json"; message: string };
+
+/**
+ * Run `gh <args>` through the active runner and classify the
+ * outcome. `ghFailure` covers the same errors whether we invoked
+ * `gh pr view --json …` or `gh api …` — both shell out through the
+ * same binary and surface the same exit codes / stderr text.
+ *
+ * Spawns through {@link activeRunner} so tests can stub it without
+ * touching PATH.
+ */
+async function classifyGhInvocation(
+  args: string[],
+  cwd: string
+): Promise<
+  | { ok: true; data: unknown }
+  | { ok: false; failure: GhFailure }
+> {
   let result: ExecResult;
   try {
     result = await activeRunner(args, cwd);
@@ -303,6 +366,25 @@ async function fetchGhJson(
       },
     };
   }
+}
+
+/**
+ * Run `gh pr view --json <fields>` and classify the outcome. Returns
+ * the parsed JSON on success or a `GhFailure` describing why we
+ * couldn't get it. We rely on `gh`'s exit codes + stderr text — the
+ * CLI never returns a structured error envelope we can parse.
+ *
+ * Spawns `gh` through {@link activeRunner} so tests can swap in a
+ * stub without touching PATH.
+ */
+async function fetchGhJson(
+  cwd: string,
+  fields: string[]
+): Promise<{ ok: true; data: unknown } | { ok: false; failure: GhFailure }> {
+  return classifyGhInvocation(
+    ["pr", "view", "--json", fields.join(",")],
+    cwd
+  );
 }
 
 function ghFailureToErrorCode(failure: GhFailure): PrErrorCode | null {
@@ -382,6 +464,65 @@ function asComment(value: unknown): PrComment | null {
   return { id, body, createdAt, url, author: asAuthor(obj.author) };
 }
 
+/**
+ * Normalize a single inline review comment. `gh api
+ * repos/{owner}/{repo}/pulls/{n}/comments` returns objects with:
+ *   - `id`            — string (we keep as string).
+ *   - `body`          — markdown string.
+ *   - `user`          — `{login, …}`; we map to {@link asAuthor}.
+ *   - `created_at`    — ISO timestamp; rename to `createdAt`.
+ *   - `html_url`      — canonical URL with `#discussion_r{id}` fragment.
+ *   - `path`          — repo-relative file path; required.
+ *   - `line`          — nullable; `null` for file-level comments.
+ *   - `side`          — "LEFT" / "RIGHT" / null.
+ *
+ * We drop entries without a path (defensive — `path` is required
+ * for the panel's breadcrumb UI to make sense) and entries without
+ * a URL or createdAt (would leave the timeline out of order).
+ */
+function asInlineComment(value: unknown): PrInlineComment | null {
+  const obj = (value ?? {}) as Record<string, unknown>;
+  const idRaw = obj.id;
+  const id = typeof idRaw === "string"
+    ? idRaw
+    : typeof idRaw === "number"
+    ? String(idRaw)
+    : null;
+  const body = typeof obj.body === "string" ? obj.body : "";
+  const createdAt =
+    typeof obj.createdAt === "string"
+      ? obj.createdAt
+      : typeof obj.created_at === "string"
+      ? obj.created_at
+      : null;
+  const url =
+    typeof obj.url === "string"
+      ? obj.url
+      : typeof obj.html_url === "string"
+      ? obj.html_url
+      : null;
+  const path = typeof obj.path === "string" ? obj.path : null;
+  if (!id || !createdAt || !url || !path) return null;
+  // `line` can legitimately be `null` (file-level comments); the
+  // GitHub API surfaces either a number or null. Anything else
+  // (string, boolean, …) is a bad payload.
+  let line: number | null = null;
+  if (typeof obj.line === "number") line = obj.line;
+  else if (obj.line === null) line = null;
+  let side: "LEFT" | "RIGHT" | null = null;
+  if (obj.side === "LEFT" || obj.side === "RIGHT") side = obj.side;
+  return {
+    id,
+    body,
+    createdAt,
+    url,
+    path,
+    line,
+    side,
+    author: asAuthor(obj.author ?? obj.user),
+  };
+}
+
 function asReview(value: unknown): PrReview | null {
   const obj = (value ?? {}) as Record<string, unknown>;
   const id = typeof obj.id === "string" ? obj.id : null;
@@ -433,12 +574,14 @@ interface RawPr {
   statusCheckRollup?: unknown[];
   comments?: unknown[];
   reviews?: unknown[];
+  inlineComments?: unknown[];
 }
 
 function mergePrParts(
   meta: RawPr | null,
   state: RawPr | null,
-  threads: RawPr | null
+  threads: RawPr | null,
+  inlineComments: unknown[] | null
 ): RawPr {
   return {
     ...(meta ?? {}),
@@ -446,6 +589,7 @@ function mergePrParts(
     statusCheckRollup: state?.statusCheckRollup ?? meta?.statusCheckRollup ?? [],
     comments: threads?.comments ?? meta?.comments ?? [],
     reviews: threads?.reviews ?? meta?.reviews ?? [],
+    inlineComments: inlineComments ?? [],
   };
 }
 
@@ -494,6 +638,11 @@ function normalizePr(raw: RawPr): PullRequest | null {
     reviews: Array.isArray(raw.reviews)
       ? raw.reviews.map(asReview).filter((r): r is PrReview => r !== null)
       : [],
+    inlineComments: Array.isArray(raw.inlineComments)
+      ? raw.inlineComments
+          .map(asInlineComment)
+          .filter((c): c is PrInlineComment => c !== null)
+      : [],
   };
 }
 
@@ -524,6 +673,39 @@ async function resolveBranch(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Fetch inline review comments for the given PR. `gh pr view --json`
+ * does NOT include these (it surfaces only conversation
+ * `comments` and top-level `reviews`), so we fall back to
+ * `gh api repos/{owner}/{repo}/pulls/{n}/comments`.
+ *
+ * Returns `null` on any failure path (missing `gh`, transient
+ * network blip, JSON parse error, unexpected shape, …) so the
+ * caller can treat inline comments as an *additive* source —
+ * the panel should still render the rest of the PR even when the
+ * inline-comments fetch is unhappy. The owner/repo/number come
+ * from the PR's canonical URL (returned by the metadata call);
+ * a URL we can't parse yields `null` rather than an error.
+ *
+ * The fetch is sequential on the metadata call because we need
+ * the URL to construct the API path. Latency is one `gh api`
+ * round-trip (~100–300 ms); acceptable for a 30s polling cadence.
+ */
+async function fetchInlineCommentsForPr(
+  cwd: string,
+  prUrl: string
+): Promise<unknown[] | null> {
+  const parsed = parsePrUrl(prUrl);
+  if (!parsed) return null;
+  const apiPath =
+    `repos/${parsed.owner}/${parsed.repo}` +
+    `/pulls/${parsed.number}/comments`;
+  const result = await classifyGhInvocation(["api", apiPath], cwd);
+  if (!result.ok) return null;
+  const data = result.data;
+  return Array.isArray(data) ? data : null;
 }
 
 /**
@@ -664,7 +846,25 @@ export async function fetchPullRequestForWorktree(
         reviews: priorPr.reviews,
       }
     : {};
-  const pr = normalizePr(mergePrParts(metaRaw, stateRaw, threadsRaw));
+  // Inline review comments. The fetch is sequential on the
+  // metadata call (we need the PR URL to construct the API path).
+  // Treat any failure as additive — the panel can still render
+  // the rest of the PR with an empty inline-comments list. On a
+  // same-PR cache hit we reuse the prior entry's inline comments
+  // so a transient `gh api` blip doesn't blank the timeline
+  // (consistent with the threads-state fallback above —
+  // issue #387 review feedback).
+  const prUrl = typeof metaRaw.url === "string" ? metaRaw.url : "";
+  const inlineLive = prUrl ? await fetchInlineCommentsForPr(worktreePath, prUrl) : null;
+  const inlineCommentsRaw: unknown[] | null =
+    inlineLive !== null
+      ? inlineLive
+      : samePr && priorPr
+      ? priorPr.inlineComments
+      : [];
+  const pr = normalizePr(
+    mergePrParts(metaRaw, stateRaw, threadsRaw, inlineCommentsRaw)
+  );
   // The panel's tab is documented as "rendered only when the branch
   // has an open PR"; closed / merged PRs must surface as `{ pr: null }`
   // so the auto-hide effect fires. `gh pr view --json` does not

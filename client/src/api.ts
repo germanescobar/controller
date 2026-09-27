@@ -12,6 +12,7 @@ export type {
   PrCheck,
   PrComment,
   PrErrorCode,
+  PrInlineComment,
   PrResponse,
   PrReview,
   PullRequest,
