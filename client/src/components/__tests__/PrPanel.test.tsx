@@ -254,6 +254,25 @@ test("PrPanel markdown anchors open in a new tab so the Electron shell routes th
   }
 });
 
+test("PrPanel markdown anchors do not leak react-markdown's internal `node` prop as an HTML attribute (issue #387)", () => {
+  // `react-markdown` passes the underlying hast `Element` as a
+  // `node` prop to every component override. If we spread it
+  // through `...rest` into `<a>`, it serializes as
+  // `node="[object Object]"` — an ugly / confusing attribute
+  // that browsers ignore but renderers / SSR pass through. The
+  // anchor override must drop it.
+  const html = render(SAMPLE_PR);
+  // No anchor or image anywhere in the panel should carry the
+  // `node` attribute. The regex is loose enough to catch both
+  // `<a …>` and `<img …>`.
+  const tagWithNode = html.match(/<(?:a|img)\b[^>]*\bnode=/i);
+  assert.equal(
+    tagWithNode,
+    null,
+    `unexpected \\bnode= attribute in rendered HTML: ${tagWithNode?.[0]}`
+  );
+});
+
 test("PrPanel relative markdown links resolve against the PR's GitHub context (issue #387)", () => {
   // GitHub-rendered PR / comment / review bodies usually contain
   // relative / root-relative / fragment links which the browser

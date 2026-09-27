@@ -252,9 +252,16 @@ export function stripNoisyHtmlTags(input: string): string {
  */
 function prMarkdownAnchor(prUrl: string) {
   return function PrMarkdownAnchor(
-    props: React.AnchorHTMLAttributes<HTMLAnchorElement>
+    props: React.AnchorHTMLAttributes<HTMLAnchorElement> & {
+      // `react-markdown` passes the underlying hast `Element` as a
+      // prop to every component override. It's meant for code that
+      // needs AST access (rare). Spreading it into `<a>` would
+      // emit `node="[object Object]"` as a literal attribute on
+      // the anchor — strip it before the rest spread.
+      node?: unknown;
+    }
   ) {
-    const { href, children, ...rest } = props;
+    const { href, children, node: _node, ...rest } = props;
     const resolved = resolvePrRelativeLink(href, prUrl);
     return (
       <a
@@ -302,9 +309,13 @@ const TRUSTED_IMAGE_HOSTS = new Set([
  */
 function prMarkdownImage(prUrl: string) {
   return function PrMarkdownImage(
-    props: React.ImgHTMLAttributes<HTMLImageElement>
+    props: React.ImgHTMLAttributes<HTMLImageElement> & {
+      // See `prMarkdownAnchor` for the rationale — drop react-markdown's
+      // hast `node` prop before spreading into DOM elements.
+      node?: unknown;
+    }
   ) {
-    const { src, alt, ...rest } = props;
+    const { src, alt, node: _node, ...rest } = props;
     if (typeof src !== "string" || src.length === 0) {
       return null;
     }
