@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
-import { PrPanel } from "../PrPanel.tsx";
+import {
+  PrPanel,
+  extractDetailsBlocks,
+  stripNoisyHtmlTags,
+} from "../PrPanel.tsx";
 import type { PullRequest } from "../../api.ts";
 
 /*
@@ -405,4 +409,188 @@ test("PrPanel honors isDraft + mergeable CONFLICTING via badge text (issue #387)
   // changes, neither the header's decision badge nor the review's
   // own badge should read "Approved".
   assert.doesNotMatch(html, /Approved/);
+});
+
+test("extractDetailsBlocks pulls details/summary pairs and replaces them with blank lines (issue #387)", () => {
+  // Real `<details>` collapsibles — the Codex bot's footer, bug
+  // report "Repro steps / Expected behavior", etc. — should NOT
+  // be discarded. We extract them so they can render as real JSX
+  // collapsibles in the panel.
+  const botBody = [
+    "<details> <summary>ℹ️ About Codex in GitHub</summary><br/>",
+    "",
+    "Your team has set up Codex to review pull requests in this repo.",
+    "",
+    "- Open a pull request for review",
+    "- Mark a draft as ready",
+    "",
+    "Codex reacts with 👀 while any review is running.",
+    "",
+    "</details>",
+  ].join("\n");
+  const { body, blocks } = extractDetailsBlocks(botBody);
+  // Summary text extracted.
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].summary, "ℹ️ About Codex in GitHub");
+  // Body inside the collapsible kept as Markdown source.
+  assert.match(blocks[0].body, /Your team has set up Codex/);
+  assert.match(blocks[0].body, /- Open a pull request for review/);
+  // `<details>` block replaced by blank lines in the surrounding body.
+  assert.doesNotMatch(body, /<details/i);
+  assert.doesNotMatch(body, /<\/details>/i);
+  assert.doesNotMatch(body, /About Codex in GitHub/);
+});
+
+test("extractDetailsBlocks returns the body untouched when no details blocks are present (issue #387)", () => {
+  const plain = [
+    "## Heading",
+    "",
+    "A paragraph with **bold**, *italic*, and `code`.",
+    "",
+    "- item one",
+    "- item two",
+  ].join("\n");
+  const { body, blocks } = extractDetailsBlocks(plain);
+  assert.equal(blocks.length, 0);
+  assert.equal(body, plain);
+});
+
+test("extractDetailsBlocks handles multiple details blocks in source order (issue #387)", () => {
+  const input = [
+    "## Repro steps",
+    "",
+    "<details>",
+    "<summary>Step 1</summary>",
+    "",
+    "Click here.",
+    "</details>",
+    "",
+    "## Expected",
+    "",
+    "<details>",
+    "<summary>Expected behavior</summary>",
+    "",
+    "The page reloads.",
+    "</details>",
+  ].join("\n");
+  const { body, blocks } = extractDetailsBlocks(input);
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].summary, "Step 1");
+  assert.equal(blocks[1].summary, "Expected behavior");
+  // Surrounding Markdown headings preserved.
+  assert.match(body, /## Repro steps/);
+  assert.match(body, /## Expected/);
+});
+
+test("stripNoisyHtmlTags drops <br>, <hr>, <img> but leaves everything else alone (issue #387)", () => {
+  const input = [
+    "First line.<br/>Second line.",
+    "",
+    "<hr/>",
+    "",
+    "Body text with <em>inline emphasis</em>, <code>code</code>.",
+    "",
+    "Inline <img src=\"https://x.example.com/y.png\" /> in body.",
+  ].join("\n");
+  const stripped = stripNoisyHtmlTags(input);
+  // Noisy void tags removed.
+  assert.doesNotMatch(stripped, /<br\b/i);
+  assert.doesNotMatch(stripped, /<hr\b/i);
+  assert.doesNotMatch(stripped, /<img\b/i);
+  // Inline wrappers preserved.
+  assert.match(stripped, /<em>inline emphasis<\/em>/);
+  assert.match(stripped, /<code>code<\/code>/);
+});
+
+test("PrPanel comment bodies render <details> as real collapsibles (issue #387)", () => {
+  // Integration: when a conversation comment (e.g. the Codex
+  // bot's review summary) carries `<details>` / `<br/>` wrappers,
+  // the panel no longer shows the raw tag names, AND the
+  // collapsible actually renders as a `<details>` element with
+  // `<summary>` — preserving the original "click to expand"
+  // affordance.
+  const withRawHtml: PullRequest = {
+    ...SAMPLE_PR,
+    comments: [
+      {
+        ...SAMPLE_PR.comments[0],
+        body: [
+          "<details> <summary>ℹ️ About Codex in GitHub</summary><br/>",
+          "",
+          "Your team has set up Codex to review pull requests.",
+          "",
+          "- Open a pull request for review",
+          "",
+          "</details>",
+        ].join("\n"),
+      },
+    ],
+  };
+  const html = render(withRawHtml);
+  // Raw `<details>` tag names are NOT in the output as text.
+  assert.doesNotMatch(html, /&lt;details&gt;/i);
+  assert.doesNotMatch(html, /&lt;summary&gt;/i);
+  assert.doesNotMatch(html, /&lt;\/details&gt;/i);
+  assert.doesNotMatch(html, /&lt;br\s*\/?&gt;/i);
+  // The collapsible is rendered as a real `<details>` element.
+  assert.match(html, /<details\b/i);
+  assert.match(html, /<summary[^>]*>ℹ️ About Codex in GitHub<\/summary>/i);
+  // The bulleted list inside the collapsible rendered as a list.
+  assert.match(html, /<li>Open a pull request for review<\/li>/);
+});
+
+test("PrPanel review bodies render <details> as real collapsibles (issue #387)", () => {
+  const withRawHtml: PullRequest = {
+    ...SAMPLE_PR,
+    reviews: [
+      {
+        ...SAMPLE_PR.reviews[0],
+        body: [
+          "<details>",
+          "<summary>Notes</summary>",
+          "",
+          "Reviewer left **inline** notes with a `code` snippet.",
+          "</details>",
+        ].join("\n"),
+      },
+    ],
+  };
+  const html = render(withRawHtml);
+  assert.doesNotMatch(html, /&lt;details&gt;/i);
+  assert.doesNotMatch(html, /&lt;summary&gt;/i);
+  assert.doesNotMatch(html, /&lt;\/details&gt;/i);
+  // Real `<details>` JSX rendered.
+  assert.match(html, /<details\b/i);
+  assert.match(html, /<summary[^>]*>Notes<\/summary>/i);
+  // Markdown formatting inside the collapsible still applied.
+  assert.match(html, /<strong>inline<\/strong>/);
+  assert.match(html, /<code>code<\/code>/);
+});
+
+test("PrPanel description bodies render <details> as real collapsibles (issue #387)", () => {
+  const withRawHtml: PullRequest = {
+    ...SAMPLE_PR,
+    body: [
+      "<details>",
+      "<summary>Sections</summary>",
+      "",
+      "First section.",
+      "",
+      "<br/>",
+      "",
+      "Second section.",
+      "</details>",
+    ].join("\n"),
+  };
+  const html = render(withRawHtml);
+  assert.doesNotMatch(html, /&lt;details&gt;/i);
+  assert.doesNotMatch(html, /&lt;\/details&gt;/i);
+  assert.doesNotMatch(html, /&lt;br\s*\/?&gt;/i);
+  assert.match(html, /<details\b/i);
+  assert.match(html, /<summary[^>]*>Sections<\/summary>/i);
+  // Inner text from both paragraph-break-separated sentences
+  // surfaced (within the `<details>` body, the `<br/>` is
+  // stripped, but the paragraphs are still rendered).
+  assert.match(html, /First section\./);
+  assert.match(html, /Second section\./);
 });

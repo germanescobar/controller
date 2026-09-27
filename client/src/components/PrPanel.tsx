@@ -62,6 +62,177 @@ interface TimelineItem {
 }
 
 /**
+ * Render a PR body (description / comment / review) as Markdown
+ * with `<details>` blocks promoted to real collapsibles and noisy
+ * raw-HTML void elements stripped.
+ *
+ * Bodies can be arbitrary GitHub-flavored Markdown plus raw HTML —
+ * the most useful raw-HTML construct is `<details>` / `<summary>`
+ * (collapsible "Repro steps", bot footers, etc.). The Codex bot
+ * uses this for its "About Codex in GitHub" footer. `react-markdown`
+ * doesn't pass raw HTML through to the output (we deliberately
+ * avoid `rehype-raw` for security), so without help those
+ * collapsibles show up as literal `<details>` text in the panel.
+ *
+ * `extractDetailsBlocks` pulls them out before render; we then
+ * render the surrounding Markdown normally and append each
+ * extracted block as a real `<details>` JSX element with the
+ * `<summary>` as its caption and the inner Markdown run through
+ * `react-markdown` separately.
+ *
+ * `stripNoisyHtmlTags` removes `<br/>` / `<hr/>` / `<img … />`
+ * that wouldn't add value in the sidebar: line breaks and
+ * horizontal rules are visual noise on a 300–500 px column, and
+ * `<img>` in body content is already handled by the
+ * `prMarkdownImage` resolver. Inline wrappers (`<em>`,
+ * `<strong>`, `<code>`, etc.) are NOT stripped because they're
+ * identical to the surrounding Markdown syntax.
+ */
+function MarkdownBody({ body, prUrl }: { body: string; prUrl: string }) {
+  const { body: stripped, blocks } = extractDetailsBlocks(body);
+  return (
+    <>
+      {stripped.trim() ? (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={buildPrMarkdownComponents(prUrl)}
+        >
+          {stripNoisyHtmlTags(stripped)}
+        </ReactMarkdown>
+      ) : null}
+      {blocks.map((block, idx) => (
+        <details
+          // Source-order index is stable for a given body — we
+          // don't have a stable id from the source, so we use the
+          // index. React's `key` warning would fire on a non-keyed
+          // sibling list.
+          key={idx}
+          className="my-1.5 rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5"
+        >
+          <summary className="cursor-pointer select-none text-xs font-medium text-foreground">
+            {block.summary}
+          </summary>
+          <div className="prose prose-invert prose-sm max-w-none break-words pt-1.5 text-xs leading-5">
+            {block.body.trim() ? (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={buildPrMarkdownComponents(prUrl)}
+              >
+                {stripNoisyHtmlTags(block.body)}
+              </ReactMarkdown>
+            ) : null}
+          </div>
+        </details>
+      ))}
+    </>
+  );
+}
+
+/**
+ * Extract `<details>…</details>` blocks from a markdown body so
+ * they can be rendered as real collapsibles in the panel.
+ *
+ * Why: GitHub PR / comment / review bodies can contain arbitrary
+ * raw HTML — the most common useful block is `<details>` /
+ * `<summary>` (collapsible "Steps to reproduce", "About this bot",
+ * etc.). `react-markdown` (which we use for the body) does NOT
+ * enable `rehype-raw` because raw HTML through the Electron
+ * renderer is a security risk (it would let a public PR description
+ * embed iframes / scripts / image beacons). Without `rehype-raw`,
+ * raw HTML tags leak through to the output as literal text —
+ * `<details>` shows up as the four characters `<details>` in the
+ * panel, which is ugly and confusing.
+ *
+ * Instead of stripping the collapsibles (which would discard real
+ * user content like a "Repro steps" / "Expected behavior" pair),
+ * pull them out of the source and render them as actual JSX
+ * `<details>` elements. The rest of the body — including any
+ * inline `<em>` / `<strong>` / `<code>` wrappers — is left alone
+ * because `react-markdown` already handles those via standard
+ * Markdown syntax.
+ *
+ * Returns the body with `<details>` blocks replaced by `\n\n`
+ * placeholders, plus a list of extracted blocks in source order.
+ * Each block holds the `<summary>` text (rendered as plain text)
+ * and the inner body (rendered through `react-markdown` separately).
+ *
+ * The regex is deliberately limited to top-level `<details>…</details>`
+ * pairs; nested collapsibles are unusual in PR content and would
+ * require a proper HTML parser. We tolerate one level of nesting
+ * (a `<summary>` inside a `<details>`) since that's the GitHub
+ * canonical pattern.
+ *
+ * @internal — exported for tests only.
+ */
+export interface ExtractedDetailsBlock {
+  /** Plain-text summary line (e.g., "ℹ️ About Codex in GitHub"). */
+  summary: string;
+  /** Markdown body inside the `<details>`. */
+  body: string;
+}
+
+export interface ExtractedBody {
+  /** Markdown body with `<details>` blocks replaced by blank lines. */
+  body: string;
+  /** Extracted `<details>` blocks in source order. */
+  blocks: ExtractedDetailsBlock[];
+}
+
+export function extractDetailsBlocks(input: string): ExtractedBody {
+  const blocks: ExtractedDetailsBlock[] = [];
+  // Match `<details …>…</details>` (non-greedy on the body so we
+  // don't accidentally span across multiple top-level blocks).
+  // Attributes on `<details>` are allowed but ignored.
+  const detailsRegex =
+    /<\s*details\b[^>]*>([\s\S]*?)<\s*\/\s*details\s*>/gi;
+  const stripped = input.replace(detailsRegex, (_match, inner: string) => {
+    // Extract `<summary>…</summary>` if present; the rest of the
+    // inner HTML is the body's Markdown source. Anything outside
+    // `<summary>` is treated as Markdown (e.g., bullet lists,
+    // paragraphs) and rendered via `react-markdown` below.
+    const summaryRegex =
+      /<\s*summary\b[^>]*>([\s\S]*?)<\s*\/\s*summary\s*>/i;
+    const summaryMatch = inner.match(summaryRegex);
+    const summaryText = summaryMatch
+      ? summaryMatch[1].trim()
+      : "Details";
+    // Drop any `<summary>` block; what remains is the Markdown body.
+    const bodyMarkdown = summaryMatch
+      ? inner.replace(summaryMatch[0], "").trim()
+      : inner.trim();
+    blocks.push({ summary: summaryText, body: bodyMarkdown });
+    // Replace the `<details>` block with blank lines so the
+    // surrounding Markdown flow stays well-formed.
+    return "\n\n";
+  });
+  return { body: stripped, blocks };
+}
+
+/**
+ * Strip raw HTML tags from a markdown body that don't add value
+ * in the panel — `<br/>` and `<hr/>` are visual noise in a
+ * sidebar (Markdown paragraph breaks already produce separation,
+ * and the panel has its own section borders), and `<img>` is
+ * never trusted in body content (only avatars.githubusercontent.com
+ * is allowed inline; everything else goes through the
+ * `prMarkdownImage` resolver).
+ *
+ * Inline wrappers (`<em>`, `<strong>`, `<code>`, `<span>`, etc.)
+ * are NOT stripped — they're valid Markdown syntax, so the
+ * surrounding `**bold**` / `*italic*` / `` `code` `` source already
+ * renders correctly through `react-markdown` without needing the
+ * raw HTML form.
+ *
+ * @internal — exported for tests only.
+ */
+export function stripNoisyHtmlTags(input: string): string {
+  return input.replace(
+    /<\s*(?:br|hr|img)\b[^>]*\/?>/gi,
+    " "
+  );
+}
+
+/**
  * `react-markdown` overrides for the PR panel.
  *
  * GitHub PR / comment / review bodies are arbitrary user markdown —
@@ -496,13 +667,8 @@ function TimelineComment({
         </a>
       </div>
       {comment.body ? (
-        <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={buildPrMarkdownComponents(prUrl)}
-          >
-            {comment.body}
-          </ReactMarkdown>
+        <div className="rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
+          <MarkdownBody body={comment.body} prUrl={prUrl} />
         </div>
       ) : null}
     </article>
@@ -555,13 +721,8 @@ function TimelineReview({
         )}
       </div>
       {review.body ? (
-        <div className="prose prose-invert prose-sm max-w-none break-words rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={buildPrMarkdownComponents(prUrl)}
-          >
-            {review.body}
-          </ReactMarkdown>
+        <div className="rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5 text-xs leading-5">
+          <MarkdownBody body={review.body} prUrl={prUrl} />
         </div>
       ) : null}
     </article>
@@ -715,12 +876,7 @@ function Description({ body, prUrl }: { body: string; prUrl: string }) {
   return (
     <section className="border-b border-border/60 px-3 py-2">
       <div className="prose prose-invert prose-sm max-w-none break-words text-xs leading-5">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={buildPrMarkdownComponents(prUrl)}
-        >
-          {trimmed}
-        </ReactMarkdown>
+        <MarkdownBody body={trimmed} prUrl={prUrl} />
       </div>
     </section>
   );
