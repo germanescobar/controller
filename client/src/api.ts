@@ -650,6 +650,13 @@ export interface QueuedMessage {
   mode: "default" | "plan";
   attachmentIds: string[];
   skillName?: string;
+  /**
+   * Optional ISO timestamp for deferred wakeups (issue #339). When
+   * set, the wakes consumer holds the message until the wall clock
+   * passes it. The floating bar reads this off the queue head to
+   * surface an in-progress delay in the session.
+   */
+  runAt?: string;
   createdAt: string;
 }
 
@@ -704,6 +711,49 @@ export async function removeSessionQueuedMessage(
     { method: "DELETE" }
   );
   await throwIfNotOk(res, "Failed to remove queued message");
+}
+
+// --- Monitors (issue #339) ----------------------------------------------
+//
+// A monitor is a long-lived child process per session whose stdout
+// streams into the session event log (see `server/lib/monitors.ts`).
+// The floating bar reads the live list to surface running watches in
+// the current session. Stop / start are out of scope for the bar
+// (issue #339 review); they live in dedicated surfaces.
+
+export interface Monitor {
+  id: string;
+  sessionId: string;
+  worktreePath: string;
+  description: string;
+  command: string;
+  persistent: boolean;
+  /** Epoch ms; `null` for persistent monitors with no deadline. */
+  deadlineAt: number | null;
+  startedAt: string;
+  /** Number of stdout lines captured so far. */
+  lineCount: number;
+  /** Pattern string used to re-inject matching lines as user turns; `null` when unset. */
+  onLinePattern: string | null;
+}
+
+/**
+ * List every monitor running on a session. Uses the per-session mirror
+ * route (`/api/sessions/:sessionId/monitors`) so the floating bar
+ * doesn't need a project id — the relationship rows already carry
+ * that for the current session but the monitor surface is symmetric.
+ *
+ * Returns an empty list on a 404 so a server hiccup doesn't crash the
+ * panel; real errors propagate so they show up in logs.
+ */
+export async function listSessionMonitors(
+  sessionId: string
+): Promise<Monitor[]> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/monitors`);
+  if (res.status === 404) return [];
+  await throwIfNotOk(res, "Failed to fetch monitors");
+  const body = (await res.json()) as { monitors?: Monitor[] };
+  return body.monitors ?? [];
 }
 
 export async function submitSessionUserInput(

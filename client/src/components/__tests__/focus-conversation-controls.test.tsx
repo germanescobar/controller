@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { FocusConversationControls } from "../focus-conversation-controls.tsx";
-import type { SessionChildSummary, SessionSummary } from "../../api.ts";
+import type {
+  Monitor,
+  SessionChildSummary,
+  SessionSummary,
+} from "../../api.ts";
 
 function render(
   variant: "mobile" | "desktop",
@@ -18,6 +22,8 @@ function render(
       worktreeId: string;
       sessionId: string;
     }) => void;
+    delayRunAt?: string | null;
+    monitors?: Monitor[];
   } = {},
 ) {
   return renderToStaticMarkup(
@@ -39,6 +45,8 @@ function render(
       children={options.children ?? []}
       currentProjectId={options.currentProjectId}
       onOpenConversation={options.onOpenConversation}
+      delayRunAt={options.delayRunAt ?? null}
+      monitors={options.monitors ?? []}
     />,
   );
 }
@@ -292,4 +300,129 @@ test("the mobile variant never renders the relationship rows (issue #384 out-of-
   // Existing mobile contract still holds: Next / Done visible.
   assert.match(html, />Next</);
   assert.match(html, />Done</);
+});
+
+// --- Runtime rows (issue #339) --------------------------------------
+//
+// The panel grows two new desktop-only rows: a `Next run in Xs`
+// delay row sourced from the queue head's `runAt`, and a
+// `Monitors (N)` row sourced from the live monitor list. Mobile
+// stays out of scope (same rationale as the relationship rows).
+// Stop / start actions are not exposed in this issue's slice —
+// the bar is information-only.
+
+const MONITOR: Monitor = {
+  id: "mon-1",
+  sessionId: "parent-id",
+  worktreePath: "/worktree/main",
+  description: "Watch CI",
+  command: "gh pr checks --watch",
+  persistent: false,
+  deadlineAt: Date.now() + 5 * 60 * 1000,
+  startedAt: "2026-09-21T00:00:00.000Z",
+  lineCount: 3,
+  onLinePattern: null,
+};
+
+test("no delay and no monitors keeps the panel unchanged", () => {
+  // Baseline: with both new props unset the runtime block must
+  // not appear — same contract as the relationship rows. The
+  // existing panel shape is preserved for the common case.
+  const html = render("desktop", { currentProjectId: "proj-main" });
+  assert.doesNotMatch(html, /focus-conversation-runtime-desktop/);
+  assert.doesNotMatch(html, />Next run in/);
+  assert.doesNotMatch(html, />Monitors \(/);
+});
+
+test("a future delay renderAt renders a Next run countdown row on desktop", () => {
+  const html = render("desktop", {
+    delayRunAt: new Date(Date.now() + 5_000).toISOString(),
+  });
+  assert.match(html, /focus-conversation-runtime-desktop/);
+  assert.match(html, /focus-conversation-runtime-delay/);
+  assert.match(html, /Next run in/);
+  // The hourglass icon is the visual marker for a queued wake.
+  assert.match(html, /lucide-hourglass/);
+});
+
+test("a past delay renderAt does not render the delay row", () => {
+  // Past timestamps mean the wakes consumer would already have
+  // fired; the panel must not show a "Next run in <negative>s"
+  // or similar artifact. We use a timestamp far enough in the
+  // past that `Date.parse(...) < now` regardless of clock drift.
+  const html = render("desktop", {
+    delayRunAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  assert.doesNotMatch(html, /focus-conversation-runtime-delay/);
+  assert.doesNotMatch(html, />Next run in</);
+});
+
+test("active monitors render as a Monitors (N) row on desktop", () => {
+  const html = render("desktop", {
+    monitors: [
+      MONITOR,
+      { ...MONITOR, id: "mon-2", description: "Watch tests" },
+    ],
+  });
+  assert.match(html, /focus-conversation-runtime-desktop/);
+  assert.match(html, /focus-conversation-runtime-monitors/);
+  // Both descriptions show up, count is in the header.
+  assert.match(html, />Monitors \(2\)/);
+  assert.match(html, /Watch CI/);
+  assert.match(html, /Watch tests/);
+  // Activity icon marks each entry.
+  assert.match(html, /lucide-activity/);
+});
+
+test("monitor descriptions are truncated to keep the panel compact", () => {
+  const longDesc = "x".repeat(120);
+  const html = render("desktop", {
+    monitors: [{ ...MONITOR, description: longDesc }],
+  });
+  // Visible text uses the same 40-char truncation the relationship
+  // rows use. The full command is preserved on `title=` for
+  // hover / accessibility — matches the relationship-rows pattern
+  // (truncate the inline label, keep full detail on hover).
+  assert.match(html, />x{40}…</);
+  assert.match(html, /title="gh pr checks --watch/);
+});
+
+test("the runtime rows never render on mobile (issue #339 + #384)", () => {
+  // Mobile strip is too tight for vertical rows; this is the
+  // same out-of-scope rule that already excludes the
+  // relationship rows. SessionView passes both new props to
+  // both mounts — the mobile variant must still skip them.
+  const html = render("mobile", {
+    delayRunAt: new Date(Date.now() + 5_000).toISOString(),
+    monitors: [MONITOR],
+  });
+  assert.doesNotMatch(html, /focus-conversation-runtime-mobile/);
+  assert.doesNotMatch(html, />Next run in</);
+  assert.doesNotMatch(html, />Monitors \(/);
+});
+
+test("the runtime rows render after the relationships and after the action row", () => {
+  // Layout contract: the Next/Done action row stays on top, the
+  // relationship rows follow, then the new runtime rows. This
+  // keeps the most-used actions reachable regardless of how
+  // many relationships / monitors exist.
+  const html = render("desktop", {
+    parent: PARENT,
+    children: [CHILD],
+    delayRunAt: new Date(Date.now() + 5_000).toISOString(),
+    monitors: [MONITOR],
+    currentProjectId: "proj-main",
+    onOpenConversation: () => {},
+  });
+  const nextPos = html.indexOf(">Next<");
+  const parentPos = html.indexOf("focus-conversation-relationship-parent");
+  const delayPos = html.indexOf("focus-conversation-runtime-delay");
+  const monitorPos = html.indexOf("focus-conversation-runtime-monitors");
+  assert.ok(nextPos > 0, "expected Next button");
+  assert.ok(parentPos > 0, "expected parent row");
+  assert.ok(delayPos > 0, "expected delay row");
+  assert.ok(monitorPos > 0, "expected monitor row");
+  assert.ok(parentPos > nextPos, "parent should follow Next");
+  assert.ok(delayPos > parentPos, "delay row should follow parent row");
+  assert.ok(monitorPos > delayPos, "monitor row should follow delay row");
 });
