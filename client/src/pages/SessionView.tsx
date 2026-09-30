@@ -3240,6 +3240,13 @@ export function SessionView({
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
+  // True while the initial event fetch for the current `sessionId` is in
+  // flight. Surfaces a centered spinner in the transcript so the user gets
+  // feedback that the conversation is loading (large JSONL transcripts can
+  // take a few seconds to read + dedupe on disk). Cleared once the first
+  // fetch resolves; refetches during streaming / dismiss / approval do not
+  // re-trigger this.
+  const [initialEventsLoading, setInitialEventsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>(
@@ -4061,6 +4068,12 @@ export function SessionView({
     }
 
     if (sessionId) {
+      // Show a centered spinner for the duration of the initial event fetch
+      // (large transcripts can take a few seconds to read + dedupe on disk)
+      // and clear the previous session's events so the user never sees stale
+      // transcript content while the new conversation loads.
+      setInitialEventsLoading(true);
+      setEvents([]);
       setProviderResolved(false);
       Promise.allSettled([
         fetchSession(projectId, sessionId, worktreeId),
@@ -4095,6 +4108,10 @@ export function SessionView({
           } else {
             setEvents([]);
           }
+          // Initial load is done — clear the spinner regardless of success
+          // or failure. Subsequent refetches during streaming / dismiss /
+          // approval don't toggle this flag, so the spinner won't flicker.
+          setInitialEventsLoading(false);
 
           if (runtimesResult.status === "fulfilled") {
             const active = runtimesResult.value.some(
@@ -4115,6 +4132,7 @@ export function SessionView({
       setEvents([]);
       setStreamItems([]);
       setStreaming(false);
+      setInitialEventsLoading(false);
       setProviderResolved(true);
       // Restore the agent + run options from this new-session view's draft,
       // falling back to defaults when absent. An invalid provider is reconciled
@@ -6628,6 +6646,21 @@ export function SessionView({
                   </h2>
                   <p className="mt-1 text-sm text-muted-foreground/70">
                     Send a message to begin working with the coding agent
+                  </p>
+                </div>
+              )}
+
+              {sessionId && initialEventsLoading && events.length === 0 && (
+                <div
+                  className="flex flex-col items-center justify-center py-20"
+                  role="status"
+                  aria-live="polite"
+                  aria-label="Loading conversation"
+                  data-testid="session-loading-indicator"
+                >
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground/70" />
+                  <p className="mt-3 text-sm text-muted-foreground/70">
+                    Loading conversation…
                   </p>
                 </div>
               )}
