@@ -689,8 +689,9 @@ function blockPreviewPopups(contents: WebContents): void {
 // link rendered by the app) is silently dropped — the status bar's
 // Tailscale link and the transcript's external anchors never reach the
 // user's browser. We forward http(s) URLs to the system default browser
-// via shell.openExternal and deny anything else. Preview webviews
-// override this with a stricter deny-all handler installed by
+// and mailto: URLs to the user's mail client, both via
+// shell.openExternal, and deny anything else. Preview webviews override
+// this with a stricter deny-all handler installed by
 // attachPreviewWebviewGuards.
 function attachExternalLinkHandler(contents: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -701,8 +702,15 @@ function attachExternalLinkHandler(contents: WebContents): void {
       warnWithTime(`ignoring window.open with non-URL: ${url}`);
       return { action: "deny" };
     }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      warnWithTime(`denied window.open with non-http(s) scheme: ${url}`);
+    // Accept http(s) for the system browser and mailto: for the
+    // user's mail client. Reject every other scheme (file:, data:,
+    // javascript:, custom app schemes, …) — those would either
+    // fail to open or constitute a security risk.
+    const allowed = parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      parsed.protocol === "mailto:";
+    if (!allowed) {
+      warnWithTime(`denied window.open with disallowed scheme: ${url}`);
       return { action: "deny" };
     }
     void shell.openExternal(parsed.toString()).catch((error) => {

@@ -82,3 +82,157 @@ export interface ControllerBridge {
   showWindow: () => void;
   quit: () => void;
 }
+
+/**
+ * Read-only view of a pull request, surfaced in the right sidebar's
+ * PR tab (issue #387). Fields mirror what `gh pr view --json` returns
+ * today — keep them loose on optional fields so a future change in
+ * `gh` output shape doesn't break the panel.
+ */
+export interface PrAuthor {
+  login: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+export type PrCheckState =
+  | "SUCCESS"
+  | "FAILURE"
+  | "PENDING"
+  | "NEUTRAL"
+  | "SKIPPED"
+  | "STALE"
+  | "QUEUED"
+  | "IN_PROGRESS"
+  | "WAITING"
+  | "REQUESTED"
+  | "EXPECTED"
+  | "CANCELLED"
+  | "ERROR"
+  | "ACTION_REQUIRED"
+  | string;
+
+export interface PrCheck {
+  /** Check name as GitHub displays it. */
+  name: string;
+  state: PrCheckState;
+  /** Description blob — often a single-line summary. */
+  description?: string;
+  /** Target URL for the check details page, when available. */
+  targetUrl?: string;
+  /** Context bucket so the panel can group per workflow / check run. */
+  workflow?: string;
+}
+
+export interface PrComment {
+  id: string;
+  author: PrAuthor;
+  body: string;
+  createdAt: string;
+  /** Canonical URL for this comment on GitHub. */
+  url: string;
+}
+
+export type PrReviewState =
+  | "APPROVED"
+  | "CHANGES_REQUESTED"
+  | "COMMENTED"
+  | "DISMISSED"
+  | "PENDING"
+  | string;
+
+export interface PrReview {
+  id: string;
+  author: PrAuthor;
+  state: PrReviewState;
+  body: string;
+  submittedAt: string;
+  /**
+   * Canonical URL for this review on GitHub. `gh pr view --json
+   * reviews` does not emit this field on its review selection, so
+   * the panel must work without it (issue #387 review feedback —
+   * without a fallback the real review stream would be silently
+   * filtered out by the server-side validator).
+   */
+  url?: string;
+}
+
+/**
+ * Inline review comment — a comment anchored to a specific line
+ * (or whole file, when `line` is null) in the PR's diff.
+ *
+ * `gh pr view --json` does not surface these (only conversation
+ * comments under `comments` and top-level reviews under
+ * `reviews`), so the server hits `gh api
+ * repos/{owner}/{repo}/pulls/{n}/comments` separately to populate
+ * the timeline. The panel renders them with a file/line breadcrumb
+ * (e.g., "📄 client/src/PrPanel.tsx:42 (RIGHT)") and a deep link
+ * into the diff at GitHub's `#discussion_r{id}` anchor.
+ *
+ * `line` is `null` for file-level comments that aren't anchored to
+ * a specific diff line. `path` is the relative path to the file in
+ * the repository. `side` is "LEFT" for the base side of the diff
+ * and "RIGHT" for the head side; it can also be `null` for
+ * file-level comments.
+ */
+export interface PrInlineComment {
+  id: string;
+  author: PrAuthor;
+  body: string;
+  createdAt: string;
+  /** Canonical URL — anchor fragment points at `#discussion_r{id}`. */
+  url: string;
+  /** Repo-relative path to the file the comment is anchored to. */
+  path: string;
+  /**
+   * Line number in the diff the comment is anchored to. `null` for
+   * file-level comments that aren't tied to a specific line.
+   */
+  line: number | null;
+  /** "LEFT" / "RIGHT" / null (file-level). */
+  side: "LEFT" | "RIGHT" | null;
+}
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED" | string;
+  url: string;
+  author: PrAuthor;
+  body: string;
+  createdAt: string;
+  headRefName: string;
+  baseRefName: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | string;
+  isDraft: boolean;
+  reviewDecision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | string;
+  statusCheckRollup?: PrCheck[];
+  comments: PrComment[];
+  reviews: PrReview[];
+  /**
+   * Inline review comments anchored to diff lines. Surfaced in the
+   * panel's chronological timeline below the conversation
+   * comments and top-level reviews. Empty when the fetch failed
+   * transiently or the PR has no inline comments yet.
+   */
+  inlineComments: PrInlineComment[];
+}
+
+export type PrErrorCode =
+  | "gh_not_installed"
+  | "gh_not_authenticated"
+  | "no_pr_for_branch";
+
+/**
+ * Return shape of `GET /api/projects/:projectId/git/pr`. `pr: null`
+ * is a normal response for a worktree whose branch has no PR; the
+ * `error` field is set only when the data fetch failed for a reason
+ * the client might want to log.
+ */
+export interface PrResponse {
+  pr: PullRequest | null;
+  error?: PrErrorCode;
+}
