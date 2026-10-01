@@ -37,7 +37,11 @@ test("parseIntegrations maps subcommands to gateway endpoints", async () => {
   );
   assert.deepEqual(
     cli.parseIntegrations(["call", "Trello", "createCard", "--json", '{"idList":"abc"}']),
-    { action: "gateway", endpoint: "call", body: { integration: "Trello", tool: "createCard", args: { idList: "abc" } } }
+    { action: "gateway", endpoint: "call", body: { integration: "Trello", tool: "createCard", args: { idList: "abc" }, confirmed: false } }
+  );
+  assert.deepEqual(
+    cli.parseIntegrations(["call", "Apollo", "send_email", "--confirm"]),
+    { action: "gateway", endpoint: "call", body: { integration: "Apollo", tool: "send_email", args: {}, confirmed: true } }
   );
 });
 

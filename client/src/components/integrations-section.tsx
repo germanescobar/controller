@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { apolloConnectionInput, isApolloMcpConnection } from "../lib/apollo-connection.ts";
 import { Plug, Pencil, Trash2, Plus, Check, Loader2, X, Search, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +48,8 @@ import {
 export function IntegrationsSection() {
   const [connections, setConnections] = useState<IntegrationConnection[]>([]);
   const [editing, setEditing] = useState<IntegrationConnection | "new" | null>(null);
+  const [apolloError, setApolloError] = useState<string | null>(null);
+  const [addingApollo, setAddingApollo] = useState(false);
 
   const load = () => {
     fetchConnections().then(setConnections).catch(() => {});
@@ -67,14 +70,35 @@ export function IntegrationsSection() {
     load();
   };
 
+  const handleAddApollo = async () => {
+    const existing = connections.find((c) => isApolloMcpConnection(c.transport.mode, c.transport.config.url));
+    if (existing) return setEditing(existing);
+    setAddingApollo(true);
+    setApolloError(null);
+    try {
+      const connection = await createConnection(apolloConnectionInput());
+      load();
+      setEditing(connection);
+    } catch (error) {
+      setApolloError(error instanceof Error ? error.message : "Could not add Apollo.");
+    } finally {
+      setAddingApollo(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="outline" onClick={handleAddApollo} disabled={addingApollo}>
+          {addingApollo && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+          Connect Apollo
+        </Button>
         <Button size="sm" variant="ghost" onClick={() => setEditing("new")}>
           <Plus className="mr-1 h-3.5 w-3.5" />
           Add connection
         </Button>
       </div>
+      {apolloError && <p className="text-xs text-destructive">{apolloError}</p>}
 
       {connections.length === 0 && (
         <p className="text-xs text-muted-foreground">
@@ -216,6 +240,7 @@ function ConnectionForm({ connection, onCancel, onSaved }: ConnectionFormProps) 
   const [specMeta, setSpecMeta] = useState<{ baseUrl?: string; title?: string }>({});
 
   const transportSpec = connectionModeSpec(transportMode);
+  const isApollo = isApolloMcpConnection(transportMode, transportConfig.url);
   // While gated, only the spec URL + Import button show; everything the import
   // fills in (base URL, headers, auth, name) appears afterward.
   const gated = transportSpec.derivesAuth === true && !imported;
@@ -344,6 +369,13 @@ function ConnectionForm({ connection, onCancel, onSaved }: ConnectionFormProps) 
       </Field>
 
       <Axis title="Connection">
+        {isApollo && (
+          <p className="text-xs text-muted-foreground">
+            Apollo uses its official remote MCP server and browser OAuth. Select Connect below to sign in.
+            Apollo may require a registered partner OAuth app. Some tools consume credits or send
+            outreach; confirm these actions before calling them.
+          </p>
+        )}
         <Field label="Connection mode">
           <select
             value={transportMode}

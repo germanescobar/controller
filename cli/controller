@@ -60,7 +60,7 @@ const USAGE = `Usage:
   controller integrations search <query>
   controller integrations tools <integration>
   controller integrations describe <integration> <tool>
-  controller integrations call <integration> <tool> [--json '{"key":"value"}']
+  controller integrations call <integration> <tool> [--json '{"key":"value"}'] [--confirm]
   controller integrations request <integration> <METHOD> <path> [--query k=v]... [--header k=v]... [--data '<body>']
   controller integrations status <integration>
   controller integrations create --name <name> --transport-mode <mode> \\
@@ -2890,7 +2890,7 @@ export function parseIntegrations(argv) {
           fail("--json must be valid JSON");
         }
       }
-      return { action: "gateway", endpoint: "call", body: { integration: rest[0], tool: rest[1], args } };
+      return { action: "gateway", endpoint: "call", body: { integration: rest[0], tool: rest[1], args, confirmed: rest.includes("--confirm") } };
     }
     case "request": {
       if (!rest[0] || !rest[1] || !rest[2]) fail("integrations request requires <integration> <METHOD> <path>");

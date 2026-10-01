@@ -18,6 +18,7 @@ import {
 import { executeRequest, checkStatus, type ExecResult, type RequestInput } from "./integration-execute.js";
 import { loadTools, findTool, searchTools, buildCallRequest } from "./openapi-tools.js";
 import { mcpListTools, mcpCallTool, mcpStatus } from "./mcp-client.js";
+import { apolloRiskNote, apolloToolRisk, isApolloMcpConnection } from "./apollo.js";
 
 const CLI_VERIFY_TIMEOUT_MS = 15_000;
 
@@ -95,8 +96,10 @@ export async function gatewayDescribe(name: string, tool: string): Promise<unkno
   }
   if (connection.transport.mode === "mcp") {
     const found = (await mcpListTools(connection)).find((t) => t.name === tool);
-    if (!found) throw new Error(`Unknown tool "${tool}".`);
-    return found;
+    if (!found) throw new Error(missingToolMessage(connection, tool));
+    return isApollo(connection)
+      ? { ...found, actionWarning: apolloRiskNote(apolloToolRisk(found.name, found.description)) }
+      : found;
   }
   throw new Error(`"${connection.name}" has no describable tools — use \`request\`.`);
 }
@@ -104,7 +107,8 @@ export async function gatewayDescribe(name: string, tool: string): Promise<unkno
 export async function gatewayCall(
   name: string,
   tool: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  confirmed = false
 ): Promise<ExecResult | { ok: true; result: unknown }> {
   const connection = await resolve(name);
   if (connection.transport.mode === "openapi") {
@@ -113,7 +117,20 @@ export async function gatewayCall(
     return executeRequest(connection, buildCallRequest(found, args));
   }
   if (connection.transport.mode === "mcp") {
-    return { ok: true, result: await mcpCallTool(connection, tool, args) };
+    if (isApollo(connection)) {
+      const found = (await mcpListTools(connection)).find((t) => t.name === tool);
+      if (!found) throw new Error(missingToolMessage(connection, tool));
+      const warning = apolloRiskNote(apolloToolRisk(found.name, found.description));
+      if (warning && !confirmed) {
+        throw new Error(`${warning} After the user confirms, retry with --confirm.`);
+      }
+    }
+    const result = await mcpCallTool(connection, tool, args);
+    if (isApollo(connection) && result && typeof result === "object" &&
+        (result as { isError?: unknown }).isError === true) {
+      throw new Error("Apollo could not complete this tool call. Check workspace permissions, plan access, available credits, and the tool arguments.");
+    }
+    return { ok: true, result };
   }
   throw new Error(`\`call\` needs a schema-backed connection; "${connection.name}" is generic — use \`request\`.`);
 }
@@ -165,6 +182,7 @@ function isHttp(mode: ConnectionMode): boolean {
 }
 
 function summaryOf(c: IntegrationConnection): string {
+  if (isApollo(c)) return "Apollo MCP — discover tools with `tools`/`describe`. Credit use and changes require user confirmation and `call --confirm`.";
   const base = c.transport.config.baseUrl ?? c.transport.config.endpoint ?? "";
   switch (c.transport.mode) {
     case "openapi":
@@ -196,9 +214,24 @@ async function toolsFor(connection: IntegrationConnection): Promise<ToolRow[]> {
     return (await loadTools(specUrlOf(connection))).map((t) => ({ tool: t.name, summary: t.summary }));
   }
   if (connection.transport.mode === "mcp") {
-    return (await mcpListTools(connection)).map((t) => ({ tool: t.name, summary: t.description }));
+    return (await mcpListTools(connection)).map((t) => ({
+      tool: t.name,
+      summary: isApollo(connection)
+        ? `${t.description}${t.description ? " " : ""}${apolloRiskNote(apolloToolRisk(t.name, t.description))}`
+        : t.description,
+    }));
   }
   return [];
+}
+
+function isApollo(connection: IntegrationConnection): boolean {
+  return isApolloMcpConnection(connection.transport.mode, connection.transport.config.url);
+}
+
+function missingToolMessage(connection: IntegrationConnection, tool: string): string {
+  return isApollo(connection)
+    ? `Apollo tool "${tool}" is unavailable. Run integrations tools ${connection.name} to refresh the list; check workspace permissions, plan access, and Apollo rollout.`
+    : `Unknown tool "${tool}".`;
 }
 
 function searchByQuery(tools: ToolRow[], query: string): ToolRow[] {

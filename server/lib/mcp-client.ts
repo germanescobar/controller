@@ -17,8 +17,9 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { IntegrationConnection } from "./integrations.js";
+import { updateSchemeAcquired, type IntegrationConnection } from "./integrations.js";
 import { resolveConnectionAuth } from "./integration-execute.js";
+import { isApolloMcpConnection } from "./apollo.js";
 
 const TIMEOUT_MS = 30_000;
 const PROTOCOL_VERSION = "2024-11-05";
@@ -130,6 +131,17 @@ async function withHttpSession<T>(
     const handedSession = res.headers.get("mcp-session-id");
     if (handedSession) sessionId = handedSession;
 
+    if (isApolloMcpConnection(connection.transport.mode, url) && res.status === 403) {
+      throw new Error("Apollo denied this request (HTTP 403). Check workspace permissions, plan access, and available credits. If access was revoked, reconnect in Controller → Integrations.");
+    }
+    if (isApolloMcpConnection(connection.transport.mode, url) && res.status === 401) {
+      for (const scheme of connection.auth.schemes) {
+        if (scheme.acquisition === "oauth_dynamic") {
+          await updateSchemeAcquired(connection.id, scheme.id, { status: "expired" });
+        }
+      }
+      throw new Error("Apollo OAuth credentials were rejected (HTTP 401). Reconnect Apollo in Controller → Integrations.");
+    }
     if (res.status === 401 || res.status === 403) {
       throw new Error(
         `MCP server rejected the credentials (HTTP ${res.status}). ` +

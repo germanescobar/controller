@@ -27,6 +27,7 @@ import {
   type AuthSchemeInput,
 } from "../lib/integrations.js";
 import { fetchOpenApiAuth } from "../lib/openapi-auth.js";
+import { isApolloMcpConnection } from "../lib/apollo.js";
 import {
   startInteractiveOauth,
   acquireStatus as oauthDynamicStatus,
@@ -142,7 +143,13 @@ integrationsRouter.post("/:id/schemes/:schemeId/acquire", async (req, res) => {
   } catch (error) {
     if (error instanceof OAuthDynamicError) {
       const status = error.code === "refresh_failed" ? 401 : 400;
-      res.status(status).json({ error: error.message, code: error.code });
+      const apollo = isApolloMcpConnection(connection.transport.mode, connection.transport.config.url);
+      const message = apollo && error.code === "dcr_failed"
+        ? `Apollo client registration failed. ${error.message} Apollo may require partner OAuth app registration; contact Apollo about partner access. Manual OAuth client setup is tracked in Controller issue #286.`
+        : apollo && error.code === "as_error" && /access_denied/i.test(error.message)
+          ? "Apollo sign-in was denied. Approve the requested access in the browser, then retry Connect."
+          : error.message;
+      res.status(status).json({ error: message, code: error.code });
       return;
     }
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
@@ -213,7 +220,7 @@ integrationsRouter.post(
   "/gateway/call",
   gatewayHandler((body) => {
     const args = body.args && typeof body.args === "object" ? (body.args as Record<string, unknown>) : {};
-    return gatewayCall(str(body.integration), str(body.tool), args);
+    return gatewayCall(str(body.integration), str(body.tool), args, body.confirmed === true);
   })
 );
 

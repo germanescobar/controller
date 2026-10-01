@@ -32,6 +32,36 @@ Controller ships with integrations for:
 > Cloudflare *MCP* integration above is a different concern — it is a
 > tool the agent can call, not a model backend.
 
+## Connect Apollo
+
+In **Settings → Integrations**, choose **Connect Apollo**. Controller creates a
+connection with Apollo's official Streamable HTTP MCP endpoint
+(`https://mcp.apollo.io/mcp`) and OAuth scheme. Select **Connect** under
+Authentication to sign in and approve access in your browser. Controller stores
+the OAuth tokens in its encrypted secret store and refreshes them when Apollo
+provides a refresh token. Use **Reconnect** if access expires or is revoked.
+
+Apollo requires an active account, access to the relevant features, and credits
+for credit-consuming tools. Apollo's [MCP setup guide](https://docs.apollo.io/docs/apollo-mcp)
+also says partners building an integration should register an OAuth app before
+connecting. Controller's public dynamic client registration succeeds, but that
+does not establish whether Apollo considers a given Controller deployment a
+partner integration. If Apollo rejects registration or consent, arrange partner
+registration with Apollo; Controller does not yet support manually entered
+OAuth client credentials for this flow (tracked in [#286](https://github.com/germanescobar/controller/issues/286)).
+
+Agents can discover current tools with `controller integrations tools Apollo`
+and inspect one with `controller integrations describe Apollo <tool>`. Apollo
+changes tool availability by workspace, plan, and rollout. Missing tools should
+be checked against the current tool list and your Apollo plan.
+
+Apollo search, enrichment, and other actions can consume credits. Contact and
+sequence updates, email sends, and purchases can have external consequences.
+Controller marks these tools in discovery and requires `--confirm` on
+`controller integrations call Apollo <tool> --confirm`. The agent should explain
+the action and get the user's approval before using that flag. Existing agent
+approval settings still apply. Read-only tools can be called without it.
+
 ## Credentials stay out of the prompt
 
 Controller **injects credentials** into each integration call. You never paste

@@ -83,3 +83,37 @@ test("resolving an unknown or disabled integration errors", async () => {
     await assert.rejects(() => gateway.gatewayStatus("Nope"), /No enabled integration/);
   });
 });
+
+test("Apollo consequential tools require an explicit confirmation before invocation", async () => {
+  await withTempHome(async ({ integrations, gateway }) => {
+    await integrations.createConnection({
+      name: "Apollo",
+      transport: { mode: "mcp", config: { url: "https://mcp.apollo.io/mcp" } },
+      auth: { schemes: [] },
+    });
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async (_url, init) => {
+      const message = JSON.parse(String(init?.body));
+      if (message.method === "tools/call") calls++;
+      const result = message.method === "initialize"
+        ? { serverInfo: { name: "Apollo" } }
+        : message.method === "tools/list"
+          ? { tools: [{ name: "emailer_messages_send_now", description: "Send an email" }] }
+          : { content: [] };
+      return new Response(message.id === undefined ? null : JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), {
+        status: message.id === undefined ? 202 : 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      await assert.rejects(() => gateway.gatewayCall("Apollo", "emailer_messages_send_now", {}), /--confirm/);
+      assert.equal(calls, 0);
+      const result = await gateway.gatewayCall("Apollo", "emailer_messages_send_now", {}, true);
+      assert.equal(result.ok, true);
+      assert.equal(calls, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
