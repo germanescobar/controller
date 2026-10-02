@@ -90,18 +90,41 @@ function controllerRuntimeFile(): string {
   return path.join(orchestratorHome(), "controller-runtime.json");
 }
 
-function serverPort(): number {
+export function serverPort(): number {
   const parsed = Number(process.env.PORT);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : 3100;
 }
 
-function serverUrl(): string {
+export function serverUrl(): string {
   return `http://localhost:${serverPort()}`;
+}
+
+/**
+ * Write the runtime file the CLI reads when its `CONTROLLER_SERVER_URL`
+ * env var is unset. Always uses the *actual* bound port the caller passes
+ * in, not `process.env.PORT`, so a port that drifted from the env var
+ * (auto-walk on collision, restart on a different port, …) doesn't leave
+ * the file pointing at a dead URL — that bug bit the issue-1740 handoff
+ * when the file was written with a stale 3165 while the server was
+ * actually listening on 4500.
+ */
+export async function writeControllerRuntimeFile(port: number): Promise<void> {
+  await fs.writeFile(
+    controllerRuntimeFile(),
+    `${JSON.stringify({ serverUrl: `http://localhost:${port}` }, null, 2)}\n`,
+    "utf-8"
+  );
 }
 
 /**
  * Copy the unified CLI (and the `controller-browser` alias) to their stable
  * install paths and publish the server URL. Idempotent; safe on every startup.
+ *
+ * The runtime file is now written *inside* `server.listen`'s callback with
+ * the actual bound port (see `writeControllerRuntimeFile`); this entry
+ * point still publishes `serverUrl()` so any pre-listen agent env that
+ * wants to reach the server has a usable URL. After listen binds, the
+ * callback overwrites it with the authoritative port.
  */
 export async function installControllerCli(): Promise<void> {
   const binDir = path.join(orchestratorHome(), "bin");
@@ -119,11 +142,7 @@ export async function installControllerCli(): Promise<void> {
   // left strictly alone.
   await removeLegacyControllerSymlinks().catch(() => {});
 
-  await fs.writeFile(
-    controllerRuntimeFile(),
-    `${JSON.stringify({ serverUrl: serverUrl() }, null, 2)}\n`,
-    "utf-8"
-  );
+  await writeControllerRuntimeFile(serverPort());
 }
 
 /**

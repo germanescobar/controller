@@ -11,7 +11,10 @@ import {
   controllerCliInstalledPath,
   controllerCliShellPath,
   removeLegacyControllerSymlinks,
+  serverPort,
+  serverUrl,
   shellQuote,
+  writeControllerRuntimeFile,
 } from "../controller-cli.js";
 import { orchestratorHome } from "../paths.js";
 
@@ -231,6 +234,102 @@ async function fileExists(target: string): Promise<boolean> {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Runtime file publishing
+//
+// The CLI falls back to `<orchestratorHome>/controller-runtime.json` when
+// it has no `CONTROLLER_SERVER_URL` in its environment. The file must
+// reflect the *bound* port the server is actually listening on, not the
+// value of `process.env.PORT` at module-load time — a port collision that
+// walks to the next free port, or a restart on a port the user picked in
+// the welcome window, leaves `process.env.PORT` stale. `server/index.ts`
+// now writes the file inside `server.listen`'s callback via
+// `writeControllerRuntimeFile`.
+// ---------------------------------------------------------------------------
+
+test("serverPort reads process.env.PORT when it is set", () => {
+  const savedPort = process.env.PORT;
+  process.env.PORT = "4500";
+  try {
+    assert.equal(serverPort(), 4500);
+  } finally {
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
+  }
+});
+
+test("serverPort falls back to 3100 when PORT is unset", () => {
+  const savedPort = process.env.PORT;
+  delete process.env.PORT;
+  try {
+    assert.equal(serverPort(), 3100);
+  } finally {
+    if (savedPort !== undefined) process.env.PORT = savedPort;
+  }
+});
+
+test("serverPort rejects non-numeric or out-of-range PORT", () => {
+  const savedPort = process.env.PORT;
+  for (const bad of ["", "notanumber", "0", "-1", "70000", "3.14"]) {
+    process.env.PORT = bad;
+    assert.equal(serverPort(), 3100, `PORT=${JSON.stringify(bad)} should fall back to 3100`);
+  }
+  if (savedPort !== undefined) process.env.PORT = savedPort;
+});
+
+test("serverUrl is http://localhost:{serverPort}", () => {
+  const savedPort = process.env.PORT;
+  process.env.PORT = "4500";
+  try {
+    assert.equal(serverUrl(), "http://localhost:4500");
+  } finally {
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
+  }
+});
+
+test("writeControllerRuntimeFile records the exact port the caller passes", async () => {
+  // Use a temp orchestrator home so the test never touches the developer's
+  // real `controller-runtime.json`.
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "controller-cli-runtime-"));
+  const previousHome = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = tempHome;
+  try {
+    await writeControllerRuntimeFile(4500);
+    const written = JSON.parse(
+      await fs.readFile(path.join(tempHome, "controller-runtime.json"), "utf-8"),
+    );
+    assert.deepEqual(written, { serverUrl: "http://localhost:4500" });
+  } finally {
+    if (previousHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousHome;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  }
+});
+
+test("writeControllerRuntimeFile overwrites a previously-wrong port", async () => {
+  // Regression test for the issue-1740 handoff bug: the runtime file was
+  // written with 3165 while the server was actually on 4500, leaving every
+  // out-of-Controller CLI invocation unable to reach the orchestrator.
+  // The fix is to always pass the bound port; this test asserts the
+  // function unconditionally replaces the file rather than merging.
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "controller-cli-runtime-"));
+  const previousHome = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = tempHome;
+  try {
+    await writeControllerRuntimeFile(3165);
+    await writeControllerRuntimeFile(4500);
+    const written = JSON.parse(
+      await fs.readFile(path.join(tempHome, "controller-runtime.json"), "utf-8"),
+    );
+    assert.deepEqual(written, { serverUrl: "http://localhost:4500" });
+  } finally {
+    if (previousHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousHome;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Shell-quoting (issue #223 follow-up)
