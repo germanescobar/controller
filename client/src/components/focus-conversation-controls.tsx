@@ -1,11 +1,20 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, CheckCircle2, Pause, Plus, StepForward } from "lucide-react";
+import {
+  Activity,
+  ArrowRight,
+  CheckCircle2,
+  Hourglass,
+  Pause,
+  Plus,
+  StepForward,
+} from "lucide-react";
 import { Kbd } from "@/components/ui/kbd";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { formatChord, isMacPlatform } from "@/lib/shortcut-match";
 import type { ShortcutBindings } from "../../../shared/shortcuts.ts";
 import type {
+  Monitor,
   SessionChildSummary,
   SessionSummary,
 } from "../api.ts";
@@ -54,6 +63,23 @@ interface FocusConversationControlsProps {
     worktreeId: string;
     sessionId: string;
   }) => void;
+  /**
+   * ISO timestamp from the head queued message's `runAt`, or
+   * `null` when no delayed follow-up is queued (issue #339).
+   * When set, the desktop panel renders a countdown-style row so
+   * the user can see when the next run is scheduled without
+   * opening a separate surface. Mobile out of scope (see issue
+   * #384 — vertical rows don't fit the mobile strip).
+   */
+  delayRunAt?: string | null;
+  /**
+   * Live list of monitors running on the current session. When
+   * non-empty, the desktop panel renders a `Monitors` row with
+   * one entry per monitor. Same mobile out-of-scope rule as
+   * `delayRunAt`. Stop / start actions are not exposed here;
+   * that's a future separate surface (issue #339 review).
+   */
+  monitors?: Monitor[];
 }
 
 const MAX_RELATIONSHIP_TITLE_LENGTH = 40;
@@ -93,6 +119,8 @@ export function FocusConversationControls({
   children = [],
   currentProjectId,
   onOpenConversation,
+  delayRunAt = null,
+  monitors = [],
 }: FocusConversationControlsProps) {
   const nextChord = formatChord(
     bindings?.focusAdvanceNext ?? "ctrl-n",
@@ -112,12 +140,23 @@ export function FocusConversationControls({
   );
   const [now, setNow] = useState(() => Date.now());
 
+  // The delay row (issue #339) needs wall-clock updates independent
+  // of the auto-advance countdown, so derive `hasDelay` here (above
+  // the ticking effect) and pass it down. The countdown row keeps
+  // its 250ms progress-bar cadence; the delay row only needs ~1s
+  // granularity, so the same 250ms interval covers both.
+  const delayTargetMs = delayRunAt ? Date.parse(delayRunAt) : NaN;
+  const hasDelay =
+    variant === "desktop" &&
+    Number.isFinite(delayTargetMs) &&
+    delayTargetMs > now;
+
   useEffect(() => {
-    if (!countdown) return;
+    if (!countdown && !hasDelay) return;
     setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(interval);
-  }, [countdown?.scheduledAt]);
+  }, [countdown?.scheduledAt, hasDelay]);
 
   const elapsedMs = countdown
     ? Math.max(0, now - countdown.scheduledAt)
@@ -127,6 +166,10 @@ export function FocusConversationControls({
     : 0;
   const secondsRemaining = countdown
     ? Math.max(0, Math.ceil((countdown.durationMs - elapsedMs) / 1000))
+    : 0;
+
+  const delaySecondsRemaining = hasDelay
+    ? Math.max(0, Math.ceil((delayTargetMs - now) / 1000))
     : 0;
 
   // The parent row needs the current session's project id; the
@@ -153,6 +196,12 @@ export function FocusConversationControls({
   const showChildrenRow =
     isDesktop && Array.isArray(children) && children.length > 0;
   const showRelationships = showParentRow || showChildrenRow;
+
+  // Runtime rows (issue #339): delay + monitors, desktop only.
+  // `hasDelay` already enforces desktop + future timestamp.
+  const showMonitorRow =
+    isDesktop && Array.isArray(monitors) && monitors.length > 0;
+  const showRuntime = hasDelay || showMonitorRow;
 
   const handleOpenTarget = (
     event: React.MouseEvent<HTMLAnchorElement>,
@@ -336,6 +385,59 @@ export function FocusConversationControls({
                   >
                     {truncateTitle(child.title)}
                   </a>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {showRuntime ? (
+        <div
+          data-testid={`focus-conversation-runtime-${variant}`}
+          className="flex min-w-0 flex-col gap-1 border-t border-blue-500/20 pt-1.5 text-xs text-muted-foreground"
+        >
+          {hasDelay ? (
+            <div
+              data-testid="focus-conversation-runtime-delay"
+              className="flex min-w-0 items-center gap-2"
+            >
+              <Hourglass className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+              <span className="truncate" title={delayRunAt ?? undefined}>
+                Next run in {delaySecondsRemaining}s
+              </span>
+            </div>
+          ) : null}
+          {showMonitorRow ? (
+            <div
+              data-testid="focus-conversation-runtime-monitors"
+              className="flex min-w-0 flex-col gap-0.5"
+            >
+              <span className="font-medium uppercase tracking-wide text-[10px] text-muted-foreground/80">
+                Monitors ({monitors.length})
+              </span>
+              {monitors.map((monitor) => {
+                // Long descriptions / commands would wrap and steal
+                // panel width; truncate the description the same way
+                // relationship titles are truncated and drop the
+                // command to a hover tooltip. The Activity icon
+                // signals a live watch — an idle monitor (no lines
+                // yet) is still shown so the user knows it's running.
+                const description =
+                  typeof monitor.description === "string" &&
+                  monitor.description.trim()
+                    ? monitor.description.trim()
+                    : "Unnamed monitor";
+                const visible = truncateTitle(description);
+                const tooltip = `${monitor.command} (started ${monitor.startedAt})`;
+                return (
+                  <span
+                    key={monitor.id}
+                    title={tooltip}
+                    className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+                  >
+                    <Activity className="h-3 w-3 shrink-0 text-blue-500" />
+                    <span className="min-w-0 truncate">{visible}</span>
+                  </span>
                 );
               })}
             </div>

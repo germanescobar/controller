@@ -149,6 +149,7 @@ import {
   MOBILE_COMPOSER_MEDIA_QUERY,
 } from "../lib/mobile-composer.ts";
 import { getConversationCountdown } from "../lib/focus-conversation-countdown.ts";
+import { useSessionRuntimeState } from "../lib/session-runtime-state.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -6389,6 +6390,14 @@ export function SessionView({
     sessionId,
   );
 
+  // Floating bar runtime rows (issue #339): delayed follow-up in the
+  // queue head (`runAt`) and live monitors. The hook polls on a
+  // single 2s tick — fast enough for the countdown label, cheap
+  // enough that two endpoints per tick is fine. The mobile variant
+  // of the panel ignores both props (desktop-only), but we still
+  // pass them so the same hook + state feeds both mount points.
+  const sessionRuntime = useSessionRuntimeState(projectId, sessionId);
+
   // Branch-this-conversation affordance (issue #364, UI). We pass the
   // callback down through both the persisted timeline (EventBlock)
   // and the live stream (streamRenderItems) so every assistant turn
@@ -6463,6 +6472,8 @@ export function SessionView({
           children={relationships?.children ?? []}
           currentProjectId={projectId}
           onOpenConversation={onOpenConversation}
+          delayRunAt={sessionRuntime.delayRunAt}
+          monitors={sessionRuntime.monitors}
         />
       ) : null}
 
@@ -6733,6 +6744,8 @@ export function SessionView({
               children={relationships?.children ?? []}
               currentProjectId={projectId}
               onOpenConversation={onOpenConversation}
+              delayRunAt={sessionRuntime.delayRunAt}
+              monitors={sessionRuntime.monitors}
             />
           ) : null}
 
