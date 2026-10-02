@@ -23,6 +23,7 @@ function render(
       sessionId: string;
     }) => void;
     delayRunAt?: string | null;
+    delayMessagePreview?: string | null;
     monitors?: Monitor[];
   } = {},
 ) {
@@ -46,6 +47,7 @@ function render(
       currentProjectId={options.currentProjectId}
       onOpenConversation={options.onOpenConversation}
       delayRunAt={options.delayRunAt ?? null}
+      delayMessagePreview={options.delayMessagePreview ?? null}
       monitors={options.monitors ?? []}
     />,
   );
@@ -343,6 +345,42 @@ test("a future delay renderAt renders a Next run countdown row on desktop", () =
   assert.match(html, /Next run in/);
   // The hourglass icon is the visual marker for a queued wake.
   assert.match(html, /lucide-hourglass/);
+  // No preview was supplied, so the inner preview span must
+  // not be rendered — otherwise the row would always carry an
+  // empty quoted label.
+  assert.doesNotMatch(html, /focus-conversation-runtime-delay-preview/);
+});
+
+test("the delay row renders a quoted preview of the wake's message text", () => {
+  // Without the preview the row only tells the user *when*
+  // something is going to fire, not *what*. The preview makes
+  // it obvious in the floating panel that `wake self "Hello"`
+  // is queued, so the user doesn't need to glance at the
+  // queued-messages strip below the chat input to find out.
+  const html = render("desktop", {
+    delayRunAt: new Date(Date.now() + 5_000).toISOString(),
+    delayMessagePreview: "Hello",
+  });
+  assert.match(html, /focus-conversation-runtime-delay-preview/);
+  // Quoted + the literal preview text. The full string still
+  // appears on `title=` for hover / accessibility.
+  assert.match(html, /“Hello”/);
+  assert.match(html, /title="Hello"/);
+});
+
+test("the wake preview is truncated to keep the panel compact", () => {
+  const long = "x".repeat(120);
+  const html = render("desktop", {
+    delayRunAt: new Date(Date.now() + 5_000).toISOString(),
+    delayMessagePreview: long,
+  });
+  // 40-char truncation matches the relationship-row truncation
+  // (one truncation style across the panel). The visible text is
+  // wrapped in curly quotes ("…"), so the pattern accounts for
+  // both opening and closing quotes. Full text on hover via
+  // `title=`.
+  assert.match(html, /“x{40}…[”]<\/span>/);
+  assert.match(html, new RegExp(`title="${long}"`));
 });
 
 test("a past delay renderAt does not render the delay row", () => {
@@ -394,11 +432,15 @@ test("the runtime rows never render on mobile (issue #339 + #384)", () => {
   // both mounts — the mobile variant must still skip them.
   const html = render("mobile", {
     delayRunAt: new Date(Date.now() + 5_000).toISOString(),
+    delayMessagePreview: "Hello",
     monitors: [MONITOR],
   });
   assert.doesNotMatch(html, /focus-conversation-runtime-mobile/);
   assert.doesNotMatch(html, />Next run in</);
   assert.doesNotMatch(html, />Monitors \(/);
+  // Preview must not leak either — the delay row itself is
+  // desktop-only.
+  assert.doesNotMatch(html, /focus-conversation-runtime-delay-preview/);
 });
 
 test("the runtime rows render after the relationships and after the action row", () => {

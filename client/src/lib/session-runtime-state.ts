@@ -3,6 +3,7 @@ import {
   fetchSessionQueue,
   listSessionMonitors,
   type Monitor,
+  type QueuedMessage,
 } from "../api.ts";
 
 /*
@@ -33,14 +34,64 @@ import {
 export interface SessionRuntimeState {
   /** ISO timestamp from the head queued message's `runAt`, or `null`. */
   delayRunAt: string | null;
+  /**
+   * Short preview of the head queued message's text, or `null`
+   * when no delayed follow-up is queued. The floating panel
+   * surfaces this so the user can tell *what* is going to fire,
+   * not only *when* — otherwise a wake like `wake self "Hello"`
+   * looks identical to any other delayed follow-up, and the
+   * queued-messages strip at the bottom of the chat is the only
+   * place where the actual payload shows up. Truncated here to
+   * keep the floating panel compact (see
+   * `truncateWakePreview`); the full text is still available in
+   * the queued-messages strip below the chat input.
+   */
+  delayMessagePreview: string | null;
   /** Currently running monitors for the session. */
   monitors: Monitor[];
 }
 
 const EMPTY_STATE: SessionRuntimeState = {
   delayRunAt: null,
+  delayMessagePreview: null,
   monitors: [],
 };
+
+/**
+ * Truncate a wake message preview for the floating panel. Long
+ * messages would wrap inside the narrow column and steal width
+ * from the Next/Done action row. The ellipsis mirrors the same
+ * relationship-row truncation so the panel keeps one truncation
+ * style across all rows.
+ */
+const MAX_WAKE_PREVIEW_LENGTH = 40;
+export function truncateWakePreview(value: string): string {
+  if (value.length <= MAX_WAKE_PREVIEW_LENGTH) return value;
+  return `${value.slice(0, MAX_WAKE_PREVIEW_LENGTH)}…`;
+}
+
+/**
+ * Filter the queued-messages list for the composer queue strip.
+ * Drops wake messages (`runAt` in the future) so the strip
+ * doesn't double-list what the floating panel already shows
+ * (issue #339 + wake-preview follow-up). Messages without
+ * `runAt` (user-typed queue entries, `sessions send`, goal
+ * follow-ups that were advanced directly, etc.) and wakes whose
+ * delay has already elapsed but haven't been drained yet pass
+ * through unchanged.
+ *
+ * `now` is parameterized so the helper is unit-testable; the
+ * caller passes `Date.now()`. The function is intentionally
+ * pure — no React, no side effects.
+ */
+export function filterVisibleQueue(
+  queue: readonly QueuedMessage[],
+  now: number = Date.now(),
+): QueuedMessage[] {
+  return queue.filter(
+    (item) => !item.runAt || new Date(item.runAt).getTime() <= now,
+  );
+}
 
 /**
  * Poll the queue head's `runAt` and the monitor list for a session.
@@ -86,11 +137,26 @@ export function useSessionRuntimeState(
       ]);
       if (cancelled) return;
       const head = queue[0];
+      // `runAt` is the wakes consumer's "hold until" timestamp; a
+      // message without it goes straight to the head of the queue
+      // and isn't really a wake, so we don't surface it in the
+      // panel's delay row.
       const delayRunAt =
         head && typeof head.runAt === "string" && head.runAt
           ? head.runAt
           : null;
-      setState({ delayRunAt, monitors });
+      // Prefer `visibleText` (the user-visible form, e.g. after
+      // stripping skill preambles) and fall back to `text` for
+      // older queue shapes. Empty / whitespace-only previews are
+      // dropped so the row never renders an empty label.
+      const rawPreview =
+        head && typeof head.visibleText === "string" && head.visibleText.trim()
+          ? head.visibleText.trim()
+          : head && typeof head.text === "string" && head.text.trim()
+            ? head.text.trim()
+            : null;
+      const delayMessagePreview = delayRunAt && rawPreview ? rawPreview : null;
+      setState({ delayRunAt, delayMessagePreview, monitors });
     };
     void tick();
     const interval = window.setInterval(() => {

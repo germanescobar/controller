@@ -12,6 +12,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { formatChord, isMacPlatform } from "@/lib/shortcut-match";
+import { truncateWakePreview } from "@/lib/session-runtime-state";
 import type { ShortcutBindings } from "../../../shared/shortcuts.ts";
 import type {
   Monitor,
@@ -73,6 +74,16 @@ interface FocusConversationControlsProps {
    */
   delayRunAt?: string | null;
   /**
+   * Short preview of the head queued message's text. The delay
+   * row renders this alongside the countdown so the user can
+   * tell *what* is going to fire (a wake) without having to
+   * glance at the queued-messages strip below the chat input.
+   * Truncated to ~40 chars upstream (see
+   * `truncateWakePreview`) to keep the panel compact.
+   * Desktop only, same scope as `delayRunAt`.
+   */
+  delayMessagePreview?: string | null;
+  /**
    * Live list of monitors running on the current session. When
    * non-empty, the desktop panel renders a `Monitors` row with
    * one entry per monitor. Same mobile out-of-scope rule as
@@ -120,6 +131,7 @@ export function FocusConversationControls({
   currentProjectId,
   onOpenConversation,
   delayRunAt = null,
+  delayMessagePreview = null,
   monitors = [],
 }: FocusConversationControlsProps) {
   const nextChord = formatChord(
@@ -399,12 +411,26 @@ export function FocusConversationControls({
           {hasDelay ? (
             <div
               data-testid="focus-conversation-runtime-delay"
-              className="flex min-w-0 items-center gap-2"
+              className="flex min-w-0 items-start gap-2"
             >
-              <Hourglass className="h-3.5 w-3.5 shrink-0 text-blue-500" />
-              <span className="truncate" title={delayRunAt ?? undefined}>
-                Next run in {delaySecondsRemaining}s
-              </span>
+              <Hourglass className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-500" />
+              <div className="flex min-w-0 flex-col">
+                <span
+                  className="truncate"
+                  title={delayRunAt ?? undefined}
+                >
+                  Next run in {delaySecondsRemaining}s
+                </span>
+                {delayMessagePreview ? (
+                  <span
+                    data-testid="focus-conversation-runtime-delay-preview"
+                    className="min-w-0 truncate text-[11px] italic text-muted-foreground/80"
+                    title={delayMessagePreview}
+                  >
+                    “{truncateWakePreview(delayMessagePreview)}”
+                  </span>
+                ) : null}
+              </div>
             </div>
           ) : null}
           {showMonitorRow ? (

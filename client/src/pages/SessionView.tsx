@@ -149,7 +149,7 @@ import {
   MOBILE_COMPOSER_MEDIA_QUERY,
 } from "../lib/mobile-composer.ts";
 import { getConversationCountdown } from "../lib/focus-conversation-countdown.ts";
-import { useSessionRuntimeState } from "../lib/session-runtime-state.ts";
+import { useSessionRuntimeState, filterVisibleQueue } from "../lib/session-runtime-state.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -4260,6 +4260,18 @@ export function SessionView({
     queueRef.current = queue;
   }, [queue]);
 
+  // The composer queue strip mirrors `queue`, but deferred wake
+  // messages (`runAt` in the future) are surfaced in the floating
+  // panel's delay row instead (issue #339 + the wake-preview
+  // follow-up). Filter them out so the strip never double-lists
+  // the same follow-up. `filterVisibleQueue` is the shared
+  // predicate so the same logic is reachable from the
+  // SessionView render and from unit tests.
+  const visibleQueue = useMemo(
+    () => filterVisibleQueue(queue),
+    [queue],
+  );
+
   // Reflect server-driven runs for the viewed session. The server drains the
   // queue on its own (issue #113), so when it starts the next run we won't
   // have an EventSource for it — detect the active runtime here, flip into
@@ -6473,6 +6485,7 @@ export function SessionView({
           currentProjectId={projectId}
           onOpenConversation={onOpenConversation}
           delayRunAt={sessionRuntime.delayRunAt}
+          delayMessagePreview={sessionRuntime.delayMessagePreview}
           monitors={sessionRuntime.monitors}
         />
       ) : null}
@@ -6745,6 +6758,7 @@ export function SessionView({
               currentProjectId={projectId}
               onOpenConversation={onOpenConversation}
               delayRunAt={sessionRuntime.delayRunAt}
+              delayMessagePreview={sessionRuntime.delayMessagePreview}
               monitors={sessionRuntime.monitors}
             />
           ) : null}
@@ -7115,13 +7129,26 @@ export function SessionView({
           {/* Input */}
           <div className="shrink-0 border-t border-border bg-background px-3 pb-3 pt-2 md:px-4 md:pb-4 md:pt-3">
             <div className="mx-auto max-w-3xl">
-              {queue.length > 0 && (
+              {/*
+                The queue can hold two kinds of follow-ups:
+                  1. User-typed queue entries (no `runAt`) — shown here
+                     so the user can see and cancel what they queued.
+                  2. Deferred wake messages (`runAt` in the future)
+                     from `sessions wake` / `sessions goal set` /
+                     direct `runAt` POSTs — surfaced in the floating
+                     panel's delay row instead (issue #339 + the
+                     wake-preview follow-up), so a wake isn't
+                     double-listed. We filter the rendered list so the
+                     strip mirrors the floating panel's source of
+                     truth, not the raw queue file.
+               */}
+              {visibleQueue.length > 0 && (
                 <div className="mb-2 space-y-1">
                   <div className="flex items-center gap-1.5 px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                     <StepForward className="h-3 w-3" />
-                    <span>Queued ({queue.length})</span>
+                    <span>Queued ({visibleQueue.length})</span>
                   </div>
-                  {queue.map((item) => (
+                  {visibleQueue.map((item) => (
                     <div
                       key={item.id}
                       className="flex items-center gap-2 rounded-md border border-border bg-background/60 px-2 py-1.5 text-sm"
