@@ -59,7 +59,12 @@ import {
 import { startSessionInProcess } from "./lib/session-start.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
 import { ensureMemoryDirs } from "./lib/memory.js";
-import { installControllerCli, controllerCliInstalledPath } from "./lib/controller-cli.js";
+import {
+  installControllerCli,
+  controllerCliInstalledPath,
+  setBoundServerPort,
+  writeControllerRuntimeFile,
+} from "./lib/controller-cli.js";
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -305,7 +310,30 @@ async function start(): Promise<void> {
     console.error("Failed to install controller CLI:", error);
   }
   server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    // Publish the *actual* bound port to the runtime file. The pre-listen
+    // `installControllerCli()` call above used `PORT` as a best-effort hint,
+    // but the file is the contract out-of-Controller processes (e.g. a
+    // Codex session spawned outside the app) use to discover the URL, so
+    // it must reflect the port that's actually accepting connections.
+    // Without this overwrite a port collision that walks to the next free
+    // port would leave the file pointing at the unreachable original.
+    const address = server.address();
+    const boundPort =
+      address && typeof address === "object" && typeof address.port === "number"
+        ? address.port
+        : PORT;
+    // Stash the bound port in the module-scoped cache so every subsequent
+    // reader — `controllerAgentEnv()` stamping `CONTROLLER_SERVER_URL` for
+    // each spawned session, future callers of `serverUrl()` — agrees with
+    // the runtime file and the actual listener. Without this, agents
+    // spawned after a port drift would target the dead port from the stale
+    // `process.env.PORT`, since the CLI prioritizes the env var over the
+    // file (PR #402 follow-up to the issue-1740 P1 review thread).
+    setBoundServerPort(boundPort);
+    writeControllerRuntimeFile(boundPort).catch((error: unknown) => {
+      console.error("Failed to write controller runtime file:", error);
+    });
+    console.log(`Server running on http://localhost:${boundPort}`);
   });
 
   // Start the shared wakeup loop (issue #243) and register the schedules

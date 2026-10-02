@@ -90,18 +90,78 @@ function controllerRuntimeFile(): string {
   return path.join(orchestratorHome(), "controller-runtime.json");
 }
 
-function serverPort(): number {
+/**
+ * Authoritative port the server is bound to, set from `server.listen`'s
+ * callback in `server/index.ts`. When defined, every reader of the server
+ * URL (`serverPort()`, `serverUrl()`, `controllerAgentEnv()`, the runtime
+ * file writer) sees the same value, so a port that drifted from
+ * `process.env.PORT` — collision walk, restart on a different port — can't
+ * leave the runtime file, the agent env, and the actual listener all
+ * pointing at different numbers. Pre-listen it stays `undefined` and
+ * `serverPort()` falls back to `process.env.PORT` (or 3100).
+ *
+ * Module-scoped intentionally: the same Node process owns the listener and
+ * every spawned agent, so a single source of truth is correct.
+ */
+let boundServerPort: number | undefined;
+
+export function serverPort(): number {
+  if (boundServerPort !== undefined) return boundServerPort;
   const parsed = Number(process.env.PORT);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : 3100;
 }
 
-function serverUrl(): string {
+export function serverUrl(): string {
   return `http://localhost:${serverPort()}`;
+}
+
+/**
+ * Set the actual port the server is bound to. Called from
+ * `server/index.ts`'s `server.listen` callback so every subsequent reader
+ * (the runtime file, every `controllerAgentEnv()` invocation, future callers)
+ * agrees on the same authoritative URL. Exported alongside `serverPort()`
+ * so tests can drive the cache explicitly.
+ */
+export function setBoundServerPort(port: number): void {
+  boundServerPort = port;
+}
+
+/**
+ * Clear the bound-port cache. Test-only escape hatch — the cache is meant
+ * to be set once per process, but tests for `serverPort()` need to reset
+ * it back to the env-var fallback so the existing assertions stay
+ * meaningful regardless of which test ran first.
+ */
+export function resetBoundServerPort(): void {
+  boundServerPort = undefined;
+}
+
+/**
+ * Write the runtime file the CLI reads when its `CONTROLLER_SERVER_URL`
+ * env var is unset. Always uses the *actual* bound port the caller passes
+ * in, not `process.env.PORT`, so a port that drifted from the env var
+ * (auto-walk on collision, restart on a different port, …) doesn't leave
+ * the file pointing at a dead URL — that bug bit the issue-1740 handoff
+ * when the file was written with a stale 3165 while the server was
+ * actually listening on 4500.
+ */
+export async function writeControllerRuntimeFile(port: number): Promise<void> {
+  await fs.writeFile(
+    controllerRuntimeFile(),
+    `${JSON.stringify({ serverUrl: `http://localhost:${port}` }, null, 2)}\n`,
+    "utf-8"
+  );
 }
 
 /**
  * Copy the unified CLI (and the `controller-browser` alias) to their stable
  * install paths and publish the server URL. Idempotent; safe on every startup.
+ *
+ * The runtime file is now written *inside* `server.listen`'s callback with
+ * the actual bound port (see `writeControllerRuntimeFile`); this entry
+ * point still publishes `serverUrl()` so any pre-listen agent env that
+ * wants to reach the server has a usable URL. After listen binds, the
+ * callback overwrites it with the authoritative port.
  */
 export async function installControllerCli(): Promise<void> {
   const binDir = path.join(orchestratorHome(), "bin");
@@ -119,11 +179,7 @@ export async function installControllerCli(): Promise<void> {
   // left strictly alone.
   await removeLegacyControllerSymlinks().catch(() => {});
 
-  await fs.writeFile(
-    controllerRuntimeFile(),
-    `${JSON.stringify({ serverUrl: serverUrl() }, null, 2)}\n`,
-    "utf-8"
-  );
+  await writeControllerRuntimeFile(serverPort());
 }
 
 /**

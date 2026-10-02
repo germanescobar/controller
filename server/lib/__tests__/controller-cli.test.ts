@@ -11,7 +11,12 @@ import {
   controllerCliInstalledPath,
   controllerCliShellPath,
   removeLegacyControllerSymlinks,
+  resetBoundServerPort,
+  serverPort,
+  serverUrl,
+  setBoundServerPort,
   shellQuote,
+  writeControllerRuntimeFile,
 } from "../controller-cli.js";
 import { orchestratorHome } from "../paths.js";
 
@@ -231,6 +236,171 @@ async function fileExists(target: string): Promise<boolean> {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Runtime file publishing
+//
+// The CLI falls back to `<orchestratorHome>/controller-runtime.json` when
+// it has no `CONTROLLER_SERVER_URL` in its environment. The file must
+// reflect the *bound* port the server is actually listening on, not the
+// value of `process.env.PORT` at module-load time — a port collision that
+// walks to the next free port, or a restart on a port the user picked in
+// the welcome window, leaves `process.env.PORT` stale. `server/index.ts`
+// now writes the file inside `server.listen`'s callback via
+// `writeControllerRuntimeFile`.
+// ---------------------------------------------------------------------------
+
+test("serverPort reads process.env.PORT when it is set", () => {
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  process.env.PORT = "4500";
+  try {
+    assert.equal(serverPort(), 4500);
+  } finally {
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
+    resetBoundServerPort();
+  }
+});
+
+test("serverPort falls back to 3100 when PORT is unset", () => {
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  delete process.env.PORT;
+  try {
+    assert.equal(serverPort(), 3100);
+  } finally {
+    if (savedPort !== undefined) process.env.PORT = savedPort;
+    resetBoundServerPort();
+  }
+});
+
+test("serverPort rejects non-numeric or out-of-range PORT", () => {
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  for (const bad of ["", "notanumber", "0", "-1", "70000", "3.14"]) {
+    process.env.PORT = bad;
+    assert.equal(serverPort(), 3100, `PORT=${JSON.stringify(bad)} should fall back to 3100`);
+  }
+  if (savedPort !== undefined) process.env.PORT = savedPort;
+  resetBoundServerPort();
+});
+
+test("serverUrl is http://localhost:{serverPort}", () => {
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  process.env.PORT = "4500";
+  try {
+    assert.equal(serverUrl(), "http://localhost:4500");
+  } finally {
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
+    resetBoundServerPort();
+  }
+});
+
+test("serverPort returns the bound port set via setBoundServerPort", () => {
+  // PR #402 follow-up: the bound port (set from server/listen's callback)
+  // overrides process.env.PORT so controllerAgentEnv() stamps the correct
+  // CONTROLLER_SERVER_URL for every spawned session. Without the cache,
+  // the CLI prioritizes the stale env var over the corrected runtime file
+  // and agents hit a dead port — same class of bug as the original
+  // issue-1740 handoff, just on the in-Controller session-start path.
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  process.env.PORT = "3165";
+  try {
+    setBoundServerPort(4500);
+    assert.equal(serverPort(), 4500);
+    assert.equal(serverUrl(), "http://localhost:4500");
+  } finally {
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
+    resetBoundServerPort();
+  }
+});
+
+test("controllerAgentEnv reflects the bound port once set", () => {
+  // PR #402 follow-up: spawned agents must read the same authoritative
+  // URL as the runtime file. Regression test for the dev-mode scenario
+  // called out in the issue-1740 P1 review thread — server bound to
+  // 3102 (from DEV_API_BASE_PORT), env var unset, runtime file gets
+  // 3100 (from serverPort()'s separate 3100 fallback), agents receive
+  // 3100 via CONTROLLER_SERVER_URL, fail to connect. After the bound-port
+  // cache is wired up, all three agree on the listener's actual port.
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  delete process.env.PORT;
+  try {
+    setBoundServerPort(3102);
+    const env = controllerAgentEnv();
+    assert.equal(env.CONTROLLER_SERVER_URL, "http://localhost:3102");
+  } finally {
+    if (savedPort !== undefined) process.env.PORT = savedPort;
+    resetBoundServerPort();
+  }
+});
+
+test("resetBoundServerPort falls back to process.env.PORT again", () => {
+  // Symmetric pair with the one above — the reset exists specifically so
+  // tests (and any future manual override) can drop back to the env-var
+  // contract without a full process restart.
+  resetBoundServerPort();
+  const savedPort = process.env.PORT;
+  process.env.PORT = "4500";
+  try {
+    setBoundServerPort(9999);
+    assert.equal(serverPort(), 9999);
+    resetBoundServerPort();
+    assert.equal(serverPort(), 4500);
+  } finally {
+    if (savedPort === undefined) delete process.env.PORT;
+    else process.env.PORT = savedPort;
+    resetBoundServerPort();
+  }
+});
+
+test("writeControllerRuntimeFile records the exact port the caller passes", async () => {
+  // Use a temp orchestrator home so the test never touches the developer's
+  // real `controller-runtime.json`.
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "controller-cli-runtime-"));
+  const previousHome = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = tempHome;
+  try {
+    await writeControllerRuntimeFile(4500);
+    const written = JSON.parse(
+      await fs.readFile(path.join(tempHome, "controller-runtime.json"), "utf-8"),
+    );
+    assert.deepEqual(written, { serverUrl: "http://localhost:4500" });
+  } finally {
+    if (previousHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousHome;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  }
+});
+
+test("writeControllerRuntimeFile overwrites a previously-wrong port", async () => {
+  // Regression test for the issue-1740 handoff bug: the runtime file was
+  // written with 3165 while the server was actually on 4500, leaving every
+  // out-of-Controller CLI invocation unable to reach the orchestrator.
+  // The fix is to always pass the bound port; this test asserts the
+  // function unconditionally replaces the file rather than merging.
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "controller-cli-runtime-"));
+  const previousHome = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = tempHome;
+  try {
+    await writeControllerRuntimeFile(3165);
+    await writeControllerRuntimeFile(4500);
+    const written = JSON.parse(
+      await fs.readFile(path.join(tempHome, "controller-runtime.json"), "utf-8"),
+    );
+    assert.deepEqual(written, { serverUrl: "http://localhost:4500" });
+  } finally {
+    if (previousHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousHome;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Shell-quoting (issue #223 follow-up)
