@@ -62,6 +62,7 @@ import { ensureMemoryDirs } from "./lib/memory.js";
 import {
   installControllerCli,
   controllerCliInstalledPath,
+  setBoundServerPort,
   writeControllerRuntimeFile,
 } from "./lib/controller-cli.js";
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
@@ -321,6 +322,14 @@ async function start(): Promise<void> {
       address && typeof address === "object" && typeof address.port === "number"
         ? address.port
         : PORT;
+    // Stash the bound port in the module-scoped cache so every subsequent
+    // reader — `controllerAgentEnv()` stamping `CONTROLLER_SERVER_URL` for
+    // each spawned session, future callers of `serverUrl()` — agrees with
+    // the runtime file and the actual listener. Without this, agents
+    // spawned after a port drift would target the dead port from the stale
+    // `process.env.PORT`, since the CLI prioritizes the env var over the
+    // file (PR #402 follow-up to the issue-1740 P1 review thread).
+    setBoundServerPort(boundPort);
     writeControllerRuntimeFile(boundPort).catch((error: unknown) => {
       console.error("Failed to write controller runtime file:", error);
     });

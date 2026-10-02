@@ -90,13 +90,50 @@ function controllerRuntimeFile(): string {
   return path.join(orchestratorHome(), "controller-runtime.json");
 }
 
+/**
+ * Authoritative port the server is bound to, set from `server.listen`'s
+ * callback in `server/index.ts`. When defined, every reader of the server
+ * URL (`serverPort()`, `serverUrl()`, `controllerAgentEnv()`, the runtime
+ * file writer) sees the same value, so a port that drifted from
+ * `process.env.PORT` — collision walk, restart on a different port — can't
+ * leave the runtime file, the agent env, and the actual listener all
+ * pointing at different numbers. Pre-listen it stays `undefined` and
+ * `serverPort()` falls back to `process.env.PORT` (or 3100).
+ *
+ * Module-scoped intentionally: the same Node process owns the listener and
+ * every spawned agent, so a single source of truth is correct.
+ */
+let boundServerPort: number | undefined;
+
 export function serverPort(): number {
+  if (boundServerPort !== undefined) return boundServerPort;
   const parsed = Number(process.env.PORT);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : 3100;
 }
 
 export function serverUrl(): string {
   return `http://localhost:${serverPort()}`;
+}
+
+/**
+ * Set the actual port the server is bound to. Called from
+ * `server/index.ts`'s `server.listen` callback so every subsequent reader
+ * (the runtime file, every `controllerAgentEnv()` invocation, future callers)
+ * agrees on the same authoritative URL. Exported alongside `serverPort()`
+ * so tests can drive the cache explicitly.
+ */
+export function setBoundServerPort(port: number): void {
+  boundServerPort = port;
+}
+
+/**
+ * Clear the bound-port cache. Test-only escape hatch — the cache is meant
+ * to be set once per process, but tests for `serverPort()` need to reset
+ * it back to the env-var fallback so the existing assertions stay
+ * meaningful regardless of which test ran first.
+ */
+export function resetBoundServerPort(): void {
+  boundServerPort = undefined;
 }
 
 /**
