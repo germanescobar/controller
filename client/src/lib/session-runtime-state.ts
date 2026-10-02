@@ -114,6 +114,18 @@ export function useSessionRuntimeState(
       setState(EMPTY_STATE);
       return;
     }
+    // Clear the snapshot synchronously when the bound session
+    // changes, *before* the first fetch fires. The session view is
+    // reused across session ids within the same project+worktree
+    // (App.tsx keys it on `${projectId}:${worktreeId}`), so this
+    // effect can re-run on a session switch without a remount —
+    // without the synchronous reset, the new conversation would
+    // briefly show the previous one until the new fetch resolves.
+    // Setting EMPTY_STATE first also keeps the `cancelled` guard
+    // below correct: the stale `tick` from the previous session is
+    // already past by the time the new effect starts, and the
+    // effect-local `cancelled` flag now matches the new mount.
+    setState(EMPTY_STATE);
     let cancelled = false;
     const tick = async () => {
       // Run the two fetches in parallel — they hit different routes
