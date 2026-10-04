@@ -4260,13 +4260,19 @@ export function SessionView({
     queueRef.current = queue;
   }, [queue]);
 
-  // The composer queue strip mirrors `queue`, but deferred wake
-  // messages (`runAt` in the future) are surfaced in the floating
-  // panel's delay row instead (issue #339 + the wake-preview
-  // follow-up). Filter them out so the strip never double-lists
-  // the same follow-up. `filterVisibleQueue` is the shared
-  // predicate so the same logic is reachable from the
-  // SessionView render and from unit tests.
+  // The composer queue strip mirrors `queue`, but the *head* of
+  // the queue (when it is a wake with a future `runAt`) is
+  // surfaced in the floating panel's delay row instead (issue
+  // #339 + the wake-preview follow-up). The predicate drops
+  // only that one head wake so the strip never double-lists
+  // what the panel already shows. Every other queued item
+  // — including wakes queued behind an ordinary message, the
+  // second of two stacked wakes, and wakes past their `runAt`
+  // that haven't drained yet — is kept visible because the
+  // panel represents only `queue[0]` and those entries would
+  // otherwise lose their cancel button even though the server
+  // still fires them. See PR #403 codex-review follow-up for
+  // the bug this contract prevents.
   const visibleQueue = useMemo(
     () => filterVisibleQueue(queue),
     [queue],
@@ -7130,17 +7136,24 @@ export function SessionView({
           <div className="shrink-0 border-t border-border bg-background px-3 pb-3 pt-2 md:px-4 md:pb-4 md:pt-3">
             <div className="mx-auto max-w-3xl">
               {/*
-                The queue can hold two kinds of follow-ups:
+                The queue can hold three kinds of follow-ups:
                   1. User-typed queue entries (no `runAt`) — shown here
                      so the user can see and cancel what they queued.
-                  2. Deferred wake messages (`runAt` in the future)
-                     from `sessions wake` / `sessions goal set` /
-                     direct `runAt` POSTs — surfaced in the floating
-                     panel's delay row instead (issue #339 + the
-                     wake-preview follow-up), so a wake isn't
-                     double-listed. We filter the rendered list so the
-                     strip mirrors the floating panel's source of
-                     truth, not the raw queue file.
+                  2. The head wake — a deferred follow-up (`runAt` in
+                     the future) from `sessions wake` /
+                     `sessions goal set` / direct `runAt` POSTs that
+                     happens to be at `queue[0]`. Surfaced in the
+                     floating panel's delay row instead (issue #339 +
+                     the wake-preview follow-up), so the strip doesn't
+                     double-list what the panel already shows.
+                  3. Everything else — wakes queued behind an ordinary
+                     message, additional scheduled wakes beyond the
+                     head, and wakes past their `runAt` that the wakes
+                     consumer hasn't drained yet — kept visible here
+                     because the floating panel represents only
+                     `queue[0]` and removing them would erase the only
+                     cancel button even though the server still fires
+                     them. See PR #403 codex-review follow-up.
                */}
               {visibleQueue.length > 0 && (
                 <div className="mb-2 space-y-1">

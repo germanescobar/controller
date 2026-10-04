@@ -72,13 +72,24 @@ export function truncateWakePreview(value: string): string {
 
 /**
  * Filter the queued-messages list for the composer queue strip.
- * Drops wake messages (`runAt` in the future) so the strip
- * doesn't double-list what the floating panel already shows
- * (issue #339 + wake-preview follow-up). Messages without
- * `runAt` (user-typed queue entries, `sessions send`, goal
- * follow-ups that were advanced directly, etc.) and wakes whose
- * delay has already elapsed but haven't been drained yet pass
- * through unchanged.
+ * Drops only the *head* message if it is a wake (`runAt` in the
+ * future), because that is the only wake the floating panel
+ * represents — `useSessionRuntimeState` reads `queue[0]` and the
+ * desktop panel renders its `runAt` and preview in the delay
+ * row. Removing the head wake keeps the strip from
+ * double-listing what the panel already shows.
+ *
+ * Every other queued message — user-typed queue entries,
+ * `sessions send`, goal-driven follow-ups, wakes queued behind
+ * an ordinary message, additional scheduled wakes beyond the
+ * head, and the same wake whose delay has already elapsed but
+ * the wakes consumer hasn't drained yet — passes through
+ * unchanged so the user can still see and remove them. This is
+ * important because the floating panel only surfaces the head:
+ * a wake viewed on mobile (no delay row), the second of two
+ * stacked wakes, or a wake behind a user-typed message has no
+ * other UI surface, and removing it from the strip would erase
+ * the only cancel button even though the server still fires it.
  *
  * `now` is parameterized so the helper is unit-testable; the
  * caller passes `Date.now()`. The function is intentionally
@@ -88,9 +99,16 @@ export function filterVisibleQueue(
   queue: readonly QueuedMessage[],
   now: number = Date.now(),
 ): QueuedMessage[] {
-  return queue.filter(
-    (item) => !item.runAt || new Date(item.runAt).getTime() <= now,
-  );
+  const head = queue[0];
+  if (
+    head &&
+    typeof head.runAt === "string" &&
+    head.runAt &&
+    new Date(head.runAt).getTime() > now
+  ) {
+    return queue.slice(1);
+  }
+  return queue.slice();
 }
 
 /**
