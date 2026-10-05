@@ -39,6 +39,26 @@ export interface PaginatedStitchResult {
    */
   newPage: SharedAgentEvent[];
   /**
+   * The ids from `loadedPageHead` that were collapsed into a
+   * `newPage` event by dedupe. The caller must DROP these events
+   * from the loaded page (or, equivalently, from `loadedPageTail`,
+   * the part of the loaded page that comes after `loadedPageHead`)
+   * when assembling the final list — the merged canonical event
+   * is now in `newPage`, and the original echo / marker would
+   * otherwise be duplicated.
+   *
+   * Empty when no dedupe happened — in that case the loaded page
+   * head is preserved as-is and `newPage` simply prepends.
+   *
+   * PR review P2 round 2 from chatgpt-codex-connector on #405:
+   * the round-1 fix preserved the merged event in `newPage` but
+   * the caller still kept the original echo in `events`, so the
+   * timeline rendered both events. This field tells the caller
+   * which loaded-head events to drop so the deduped seam
+   * collapses to a single event.
+   */
+  consumedHeadIds: Set<string>;
+  /**
    * `true` if the entire new page was a no-op after dedupe (e.g.
    * the user scrolled past the head of the file and the server
    * returned events that all overlapped with the loaded page).
@@ -70,9 +90,16 @@ export interface PaginatedStitchResult {
  *    already part of the loaded page; a deduped event whose id
  *    came from the new page (or whose id is new because the
  *    merger produced it) belongs in the prepended set.
+ * 4. Returns the subset of `loadedPageHead` ids that were
+ *    consumed by dedupe — the loaded page must NOT keep them after
+ *    the prepend, otherwise the deduped seam renders twice. The
+ *    caller assembles the final list as
+ *    `[...newPage, ...loadedPageTail]` where `loadedPageTail`
+ *    is the loaded page with every `consumedHeadIds` event
+ *    removed from the head.
  *
  * Edge cases:
- * - Empty `newPageRaw` → returns `{ newPage: [], noMoreOlderEvents: true }`.
+ * - Empty `newPageRaw` → returns `{ newPage: [], consumedHeadIds: empty, noMoreOlderEvents: true }`.
  * - `loadedPageHead` shorter than `TAIL_DEDUPE_OVERLAP` (very
  *   short loaded page) → use whatever's available; the seam dedupe
  *   will still operate on the smaller context.
@@ -87,7 +114,7 @@ export function stitchPaginatedEvents(
   loadedPageHead: SharedAgentEvent[]
 ): PaginatedStitchResult {
   if (newPageRaw.length === 0) {
-    return { newPage: [], noMoreOlderEvents: true };
+    return { newPage: [], consumedHeadIds: new Set(), noMoreOlderEvents: true };
   }
   const overlapIds = new Set(loadedPageHead.map((e) => e.id));
   const concatenated = [...newPageRaw, ...loadedPageHead];
@@ -97,8 +124,22 @@ export function stitchPaginatedEvents(
     if (overlapIds.has(event.id)) continue;
     newPage.push(event);
   }
+  // An event from `loadedPageHead` is consumed iff it no longer
+  // appears as a distinct event in `deduped` (it was collapsed
+  // into a `newPage` event by dedupe). We compute the surviving
+  // loaded-head ids and report the consumed ones — the caller
+  // drops those from `loadedPageTail` when assembling the final
+  // list so the seam dedupes to a single canonical event.
+  const survivingHeadIds = new Set(
+    deduped.filter((e) => overlapIds.has(e.id)).map((e) => e.id),
+  );
+  const consumedHeadIds = new Set<string>();
+  for (const head of loadedPageHead) {
+    if (!survivingHeadIds.has(head.id)) consumedHeadIds.add(head.id);
+  }
   return {
     newPage,
+    consumedHeadIds,
     noMoreOlderEvents: newPage.length === 0,
   };
 }

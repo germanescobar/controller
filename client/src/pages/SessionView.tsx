@@ -4533,6 +4533,120 @@ export function SessionView({
     bottomRef.current?.scrollIntoView({ behavior: "auto" });
   }, [pendingMessage]);
 
+  // Bumped on every session change. In-flight "load earlier" fetches
+  // snapshot the current generation when they start; a late-arriving
+  // page whose generation no longer matches is discarded so we don't
+  // paint events for the wrong session.
+  const sessionGenerationRef = useRef(0);
+  useEffect(() => {
+    sessionGenerationRef.current += 1;
+  }, [sessionId]);
+
+  // Shared "load earlier one page" helper. Both the scroll-to-top
+  // trigger in `handleScroll` and the viewport-underflow effect below
+  // call into this so the stitch / scroll-position preservation /
+  // session-cancel logic lives in one spot. Returns a Promise that
+  // resolves once the state has been applied (or the latch flipped)
+  // so the overflow effect can chain back-to-back fetches.
+  //
+  // PR review P1 round 2 from chatgpt-codex-connector on #405:
+  // when the initial tail-only page is shorter than the viewport
+  // (e.g. the tail is a collapsed `WorkingBlock` of tool calls),
+  // the scroll handler never fires because there's nothing to
+  // scroll. We also auto-need on overflow below; both call sites
+  // share this helper so the dedupe / scroll-preserve / session-
+  // cancel logic stays in lockstep.
+  //
+  // `eventsRef` is read inside the function so the chained
+  // overflow-loop sees the latest `events` after each `setEvents`
+  // commit (not the value captured at fetch start). Without the
+  // ref the chain would build on a stale snapshot and mis-stitch
+  // the seam.
+  const eventsRef = useRef(events);
+  eventsRef.current = events;
+  const loadEarlierOnePage = async (): Promise<boolean> => {
+    const el = scrollContainerRef.current;
+    if (!el) return false;
+    const currentEvents = eventsRef.current;
+    const anchor = currentEvents[0]?.id;
+    if (!anchor) return false;
+    const myGeneration = sessionGenerationRef.current;
+    setLoadingEarlier(true);
+    // Snapshot the scroll height *before* the prepend so we can
+    // restore the user's reading position: after the new page is
+    // prepended the same scrollTop now sits further down the
+    // timeline. We re-apply on the next frame so the prepend has
+    // actually landed in the DOM. (The auto-load effect doesn't
+    // care about scrollTop — the user is at scrollTop=0 already —
+    // but the scroll handler does, and sharing the helper means
+    // the auto-load also gracefully handles the case where the
+    // user scrolled down a tiny bit before the next render.)
+    const previousScrollHeight = el.scrollHeight;
+    try {
+      const page = await fetchEventsPage(projectId, sessionId, {
+        limit: PAGE_SIZE,
+        before: anchor,
+        worktreeId,
+      });
+      if (myGeneration !== sessionGenerationRef.current) {
+        // Session switched mid-fetch — discard so we don't paint
+        // events for the wrong session.
+        return false;
+      }
+      if (page.length === 0) {
+        setReachedTranscriptStart(true);
+        return false;
+      }
+      // Read the live events again (the awaited fetch may have
+      // raced with another chain iteration) so the seam context
+      // matches the in-flight `events` we'll prepend against.
+      const liveEvents = eventsRef.current;
+      const stitch = stitchPaginatedEvents(
+        page,
+        liveEvents.slice(0, TAIL_DEDUPE_OVERLAP),
+      );
+      if (stitch.noMoreOlderEvents) {
+        setReachedTranscriptStart(true);
+        return false;
+      }
+      setEvents((prev) => {
+        // Drop the loaded-page head entries consumed by dedupe so
+        // the seam collapses to a single canonical event. The
+        // merged event lives in `stitch.newPage` (the round-1
+        // fix preserved it; the round-2 fix here also drops the
+        // duplicate echo from the loaded page). The functional
+        // updater + ref means the chained overflow-loop sees the
+        // committed value at each step.
+        //
+        // `consumedHeadIds` is empty when no dedupe happened, so
+        // the head is preserved verbatim — the round-1 behavior.
+        const tail = prev.filter((e) => !stitch.consumedHeadIds.has(e.id));
+        return [...stitch.newPage, ...tail];
+      });
+      // Restore the user's reading position. The auto-load effect
+      // and the scroll handler both benefit when the user is
+      // somewhere in the middle of the timeline. We no-op when
+      // scrollTop is already 0 (the common auto-load case) because
+      // there's nothing to preserve.
+      requestAnimationFrame(() => {
+        const after = scrollContainerRef.current;
+        if (!after) return;
+        if (after.scrollTop === 0) return;
+        const heightDelta = after.scrollHeight - previousScrollHeight;
+        after.scrollTop = after.scrollTop + heightDelta;
+      });
+      return true;
+    } catch {
+      // Swallow — the user can scroll again to retry. Don't
+      // set reachedTranscriptStart; the failure is recoverable.
+      return false;
+    } finally {
+      if (myGeneration === sessionGenerationRef.current) {
+        setLoadingEarlier(false);
+      }
+    }
+  };
+
   const handleScroll = () => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -4554,94 +4668,71 @@ export function SessionView({
       el.scrollTop <= 32 &&
       events.length > 0
     ) {
-      const anchor = events[0]?.id;
-      if (!anchor) return;
-      // Snapshot the session generation so a late-arriving page from
-      // a fetch the user started on a *different* session can be
-      // detected and discarded. `sessionGenerationRef` is bumped by
-      // the session-change effect below.
-      const myGeneration = sessionGenerationRef.current;
-      setLoadingEarlier(true);
-      // Snapshot the scroll height *before* the prepend so we can
-      // restore the user's reading position: after the new page
-      // is prepended the same scrollTop now sits further down the
-      // timeline. We re-apply on the next frame so the prepend
-      // has actually landed in the DOM.
-      const previousScrollHeight = el.scrollHeight;
-      fetchEventsPage(projectId, sessionId, {
-        limit: PAGE_SIZE,
-        before: anchor,
-        worktreeId,
-      })
-        .then((page) => {
-          if (myGeneration !== sessionGenerationRef.current) {
-            // The session switched mid-fetch — discard the late
-            // page so we don't paint events for the wrong
-            // session.
-            return;
-          }
-          if (page.length === 0) {
-            // No older events exist; flip the latch so we don't
-            // re-fire on every subsequent scroll nudge.
-            setReachedTranscriptStart(true);
-            return;
-          }
-          // Stitch the new page with the first TAIL_DEDUPE_OVERLAP
-          // (=2) events of the currently-loaded page so the
-          // dedupe seam collapses any user_message + agent-echo
-          // pair that straddles the boundary. The server returns
-          // raw events (no server-side dedupe for paginated reads),
-          // so this concatenation + dedupe is what makes the
-          // paginated timeline byte-equivalent to the
-          // full-transcript endpoint. The seam merge is
-          // implemented in `shared/events-pagination.ts` and unit
-          // tested there — PR review P2 from chatgpt-codex-connector
-          // on #405 caught an earlier fixed-count slice that
-          // dropped the merged event when a user_message + echo
-          // pair straddled the boundary.
-          const stitch = stitchPaginatedEvents(
-            page,
-            events.slice(0, TAIL_DEDUPE_OVERLAP),
-          );
-          if (stitch.noMoreOlderEvents) {
-            // No older events exist (either the server returned
-            // an empty page, or the entire new page was collapsed
-            // into the loaded-page head by dedupe). Flip the
-            // latch so subsequent scroll nudges don't re-fire.
-            setReachedTranscriptStart(true);
-            return;
-          }
-          setEvents((prev) => [...stitch.newPage, ...prev]);
-          // Restore the user's reading position: the same
-          // scrollTop now points further down because of the
-          // prepended page. Use rAF so React has flushed the
-          // prepend into the DOM before we measure.
-          requestAnimationFrame(() => {
-            const after = scrollContainerRef.current;
-            if (!after) return;
-            const heightDelta = after.scrollHeight - previousScrollHeight;
-            after.scrollTop = after.scrollTop + heightDelta;
-          });
-        })
-        .catch(() => {
-          // Swallow — the user can scroll again to retry. Don't
-          // set reachedTranscriptStart; the failure is recoverable.
-        })
-        .finally(() => {
-          if (myGeneration === sessionGenerationRef.current) {
-            setLoadingEarlier(false);
-          }
-        });
+      void loadEarlierOnePage();
     }
   };
-  // Bumped on every session change. In-flight "load earlier" fetches
-  // snapshot the current generation when they start; a late-arriving
-  // page whose generation no longer matches is discarded so we don't
-  // paint events for the wrong session.
-  const sessionGenerationRef = useRef(0);
+
+  // Viewport-underflow auto-load (PR review P1 round 2 from
+  // chatgpt-codex-connector on #405). The initial tail-only page can
+  // be shorter than the viewport — `groupEventsForRender` collapses
+  // consecutive tool/reasoning events into a single short working
+  // group, so even a long session can paint a tail shorter than the
+  // screen. When that happens the scroll container has no scrollbar,
+  // no scroll events fire, and the user is stranded looking at just
+  // the bottom of the timeline with no way to reach older events.
+  //
+  // After every render that touches `events` we measure the scroll
+  // container's overflow. If it isn't (or barely) overflowing, kick
+  // off another `loadEarlierOnePage`. The chain runs until either
+  // (a) the container overflows (visible scrollbar appears, the
+  // user can scroll to the top), (b) `reachedTranscriptStart`
+  // latches (the file's head is reached), or (c) we hit a defensive
+  // max-page cap so the chain can't run forever on an
+  // infinite-growing session.
+  //
+  // The cap defaults to 10 pages × PAGE_SIZE events = 1000 events,
+  // which matches the issue #404 acceptance-criteria reference point
+  // ("a 1000-turn conversation paints within ~250ms"). Sessions
+  // longer than 1000 events still get the first PAGE_SIZE painted
+  // fast; the user sees a "Load earlier" affordance below the cap
+  // ceiling (the scroll handler) to continue manually.
+  const AUTOLOAD_MAX_PAGES = 10;
+  const autoloadInFlightRef = useRef(false);
   useEffect(() => {
-    sessionGenerationRef.current += 1;
-  }, [sessionId]);
+    if (!sessionId) return;
+    if (initialEventsLoading) return;
+    if (reachedTranscriptStart) return;
+    if (events.length === 0) return;
+    if (autoloadInFlightRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // A scrollHeight within 1px of clientHeight means no
+    // overflow — the user can't scroll up to trigger the
+    // scroll handler. `> 1` (rather than `> 0`) defends against
+    // sub-pixel rounding in the browser's layout pass.
+    const overflows = el.scrollHeight - el.clientHeight > 1;
+    if (overflows) return;
+    autoloadInFlightRef.current = true;
+    (async () => {
+      let pages = 0;
+      try {
+        while (pages < AUTOLOAD_MAX_PAGES) {
+          const container = scrollContainerRef.current;
+          if (!container) break;
+          if (container.scrollHeight - container.clientHeight > 1) {
+            // The newest render already overflows (the previous
+            // page made it big enough). Stop the chain.
+            break;
+          }
+          pages += 1;
+          const more = await loadEarlierOnePage();
+          if (!more) break;
+        }
+      } finally {
+        autoloadInFlightRef.current = false;
+      }
+    })();
+  }, [events, initialEventsLoading, sessionId]);
 
   // Poll git diff for the Changes tab
   useEffect(() => {

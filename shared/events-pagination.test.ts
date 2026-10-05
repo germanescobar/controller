@@ -9,17 +9,32 @@ import type { SharedAgentEvent } from "./events-dedupe.ts";
 
 /*
  * Tests for the client-side pagination stitch introduced in
- * issue #404, and updated for the chatgpt-codex-connector review
- * P2 finding on PR #405 (the original `deduped.length - overlap.length`
- * slice dropped the merged event whenever a user_message + echo pair
- * straddled the boundary, losing the skill badge and any data the
- * echo had carried).
+ * issue #404, and updated across two rounds of codex review on
+ * PR #405.
  *
- * The fix identifies the events to prepend by membership in the
- * *new* page's id set rather than a fixed-count slice. These tests
- * cover the regression (seam merger preserves the canonical event)
- * and the surrounding edge cases (empty new page, distinct events,
- * malformed inputs).
+ * Round 1 (chatgpt-codex-connector P2): the original
+ * `deduped.length - overlap.length` slice dropped the merged
+ * canonical event whenever a user_message + echo pair straddled
+ * the boundary, losing the skill badge and any data the echo had
+ * carried. Fixed by identifying the events to prepend by
+ * membership in the *new* page's id set.
+ *
+ * Round 2 (chatgpt-codex-connector P2): the round-1 fix preserved
+ * the merged event in `newPage`, but the caller's
+ * `[...stitch.newPage, ...prev]` still kept the original echo in
+ * `prev`, so the timeline rendered both events. Fixed by adding
+ * `consumedHeadIds` to the return value so the caller can splice
+ * the loaded page head (drop the consumed ids) when assembling the
+ * final list.
+ *
+ * Round 2 P1 (chatgpt-codex-connector): when the initial tail-only
+ * page is shorter than the viewport (the tail is a collapsed
+ * `WorkingBlock`), the scroll handler never fires because there's
+ * nothing to scroll. Fixed on the client side (a viewport-underflow
+ * auto-load effect); this file doesn't exercise the auto-load
+ * loop directly because it's a render-effect, but the multi-page
+ * test below verifies the chain semantics by stitching two pages
+ * in a row.
  */
 
 function ev(
@@ -42,12 +57,14 @@ test("stitchPaginatedEvents: empty new page signals no-more-older-events", () =>
   const result = stitchPaginatedEvents([], loaded);
   assert.deepEqual(result.newPage, []);
   assert.equal(result.noMoreOlderEvents, true);
+  assert.equal(result.consumedHeadIds.size, 0);
 });
 
 test("stitchPaginatedEvents: distinct new page events are preserved as-is", () => {
   // No user_message + echo pair at the seam. The seam dedupe is a
   // no-op; the new page is just the new page, capped at the
-  // overlap window.
+  // overlap window. The loaded-head ids are reported as not
+  // consumed so the caller leaves the loaded page head intact.
   const newPage = [ev("new-0", "older-0"), ev("new-1", "older-1")];
   const loaded = [ev("loaded-0", "current"), ev("loaded-1", "current-2")];
   const result = stitchPaginatedEvents(newPage, loaded);
@@ -56,10 +73,11 @@ test("stitchPaginatedEvents: distinct new page events are preserved as-is", () =
     ["new-0", "new-1"],
   );
   assert.equal(result.noMoreOlderEvents, false);
+  assert.equal(result.consumedHeadIds.size, 0);
 });
 
 test("stitchPaginatedEvents: skill marker + echo straddling the seam collapses to the marker", () => {
-  // Regression for the codex P2 finding. The fetched page ends
+  // Regression for the round-1 P2 finding. The fetched page ends
   // with the orchestrator's `[/skill: foo]` marker; the loaded
   // page begins with the agent's echo of the same turn. The seam
   // dedupe must collapse the pair to the marker (the canonical
@@ -80,14 +98,6 @@ test("stitchPaginatedEvents: skill marker + echo straddling the seam collapses t
   assert.ok(
     markerInResult,
     `the merged marker must be in newPage, got ids: ${result.newPage.map((e) => e.id).join(",")}`,
-  );
-  // The echo (which shares no text-equivalent with the marker in
-  // the file order) is dropped from the prepended set because its
-  // id is in the loaded-page head and it was merged into the
-  // marker.
-  assert.ok(
-    !result.newPage.some((e) => e.id === echo.id),
-    "the echo should not be duplicated into the prepended set",
   );
   assert.equal(result.noMoreOlderEvents, false);
 });
@@ -130,6 +140,7 @@ test("stitchPaginatedEvents: empty loaded-page head falls back to no-dedupe", ()
     ["new-0"],
   );
   assert.equal(result.noMoreOlderEvents, false);
+  assert.equal(result.consumedHeadIds.size, 0);
 });
 
 test("stitchPaginatedEvents: full-collapse (every new event is in the seam) latches the head", () => {
@@ -156,7 +167,7 @@ test("TAIL_DEDUPE_OVERLAP is 2 (matches the route's overlap window)", () => {
 });
 
 test("stitchPaginatedEvents: the merged event for a marker + echo preserves the skill badge", () => {
-  // Stronger version of the P2 regression: confirm the skill
+  // Stronger version of the round-1 P2 regression: confirm the skill
   // badge AND any data the echo carried are inherited by the
   // merged marker.
   const marker = ev("marker-1", "[/skill: pr-feedback] do thing", {
@@ -179,4 +190,121 @@ test("stitchPaginatedEvents: the merged event for a marker + echo preserves the 
   // the attachments.
   assert.equal(merged?.data.skillName, "pr-feedback");
   assert.equal(merged?.data.text, "[/skill: pr-feedback] do thing");
+});
+
+test("stitchPaginatedEvents: round-2 P2 — the consumed loaded-head ids are reported so the caller can drop them", () => {
+  // Round-2 regression. When the marker is on the new page and
+  // the echo is on the loaded page (the round-1 scenario), the
+  // merged marker is in `newPage` AND the echo must be reported
+  // as a consumed head id so the caller drops it from the loaded
+  // page. If the caller forgot to filter, the timeline would
+  // render both events — exactly the round-2 finding.
+  const marker = ev("marker-2", "[/skill: foo] hi", {
+    data: { text: "[/skill: foo] hi", skillName: "foo" },
+  });
+  const echo = ev("echo-2", "Apply the following skill...hi");
+  const fetched = [ev("new-3", "older-3"), marker];
+  const loaded = [echo, ev("loaded-3", "next")];
+  const result = stitchPaginatedEvents(fetched, loaded);
+  // The echo is on the loaded page head. Dedupe collapsed it
+  // into the marker (which is in `newPage`), so the echo is
+  // reported as consumed and the caller drops it.
+  assert.ok(
+    result.consumedHeadIds.has(echo.id),
+    `echo must be in consumedHeadIds so the caller drops it from the loaded page; got ${JSON.stringify([...result.consumedHeadIds])}`,
+  );
+  // The other loaded-head event (`loaded-3`) is NOT consumed —
+  // it appears unchanged in the deduped timeline.
+  assert.ok(
+    !result.consumedHeadIds.has("loaded-3"),
+    "non-overlapping loaded-head events must not be marked consumed",
+  );
+  // Assemble the final list as the caller would and assert the
+  // timeline dedupes correctly: the merged marker is in
+  // `newPage`, the echo is NOT in the final list (dropped via
+  // `consumedHeadIds`), and `loaded-3` survives.
+  const loadedTail = loaded.filter(
+    (e) => !result.consumedHeadIds.has(e.id),
+  );
+  const finalEvents = [...result.newPage, ...loadedTail];
+  const ids = finalEvents.map((e) => e.id);
+  assert.ok(
+    ids.includes(marker.id),
+    `final timeline must include the merged marker; got ${ids.join(",")}`,
+  );
+  assert.ok(
+    !ids.includes(echo.id),
+    `final timeline must NOT include the original echo; got ${ids.join(",")}`,
+  );
+  assert.ok(
+    ids.includes("loaded-3"),
+    `final timeline must include the non-overlapping loaded-head event; got ${ids.join(",")}`,
+  );
+});
+
+test("stitchPaginatedEvents: round-2 P2 — empty consumedHeadIds when no dedupe happened", () => {
+  // When there's no user_message + echo pair at the seam, no
+  // loaded-head events are consumed. The caller uses
+  // `consumedHeadIds` as a filter; an empty set means the loaded
+  // page is preserved as-is. This test pins the empty-set return
+  // shape so a future refactor doesn't accidentally start
+  // reporting spurious ids.
+  const newPage = [ev("new-4", "older-4"), ev("new-5", "older-5")];
+  const loaded = [ev("loaded-4", "current-4"), ev("loaded-5", "current-5")];
+  const result = stitchPaginatedEvents(newPage, loaded);
+  assert.equal(result.consumedHeadIds.size, 0);
+  assert.deepEqual(
+    result.newPage.map((e) => e.id),
+    ["new-4", "new-5"],
+  );
+});
+
+test("stitchPaginatedEvents: multi-page chain — three pages stitch into one consistent result", () => {
+  // Sanity check for the overflow auto-load chain (client-side,
+  // but the stitch helper is the per-page primitive). Three pages
+  // stitched in sequence produce a single chronological timeline
+  // where every consumed-head pair is reported and the canonical
+  // markers survive.
+  const old = [ev("older-0", "older-0")];
+  const mid = [ev("mid-0", "mid-0"), ev("mid-1", "mid-1")];
+  const newer = [ev("newest-0", "newest-0")];
+
+  // Stitch old into mid.
+  const first = stitchPaginatedEvents(
+    old,
+    mid.slice(0, TAIL_DEDUPE_OVERLAP),
+  );
+  assert.equal(first.noMoreOlderEvents, false);
+  assert.equal(first.newPage.length, 1);
+  assert.equal(first.newPage[0].id, "older-0");
+  // The loaded-mid head had no dedupe-able pair, so nothing was
+  // consumed.
+  assert.equal(first.consumedHeadIds.size, 0);
+
+  // Now stitch newer into (old + mid-tail).
+  const stitchedAfterFirst = [
+    ...first.newPage,
+    ...mid.filter((e) => !first.consumedHeadIds.has(e.id)),
+  ];
+  const second = stitchPaginatedEvents(
+    newer,
+    stitchedAfterFirst.slice(0, TAIL_DEDUPE_OVERLAP),
+  );
+  assert.equal(second.noMoreOlderEvents, false);
+  assert.equal(second.newPage.length, 1);
+  assert.equal(second.newPage[0].id, "newest-0");
+  assert.equal(second.consumedHeadIds.size, 0);
+
+  // The final assembled timeline is chronological and contains
+  // every event exactly once.
+  const final = [
+    ...second.newPage,
+    ...stitchedAfterFirst.filter(
+      (e) => !second.consumedHeadIds.has(e.id),
+    ),
+  ];
+  assert.deepEqual(
+    final.map((e) => e.id),
+    ["newest-0", "older-0", "mid-0", "mid-1"],
+  );
 });
