@@ -16,6 +16,7 @@ import {
   sharedDedupeUserMessageEvents as dedupeUserMessageEvents,
   sharedParseSkillMarker as parseSkillMarker,
 } from "../../shared/events-dedupe.js";
+import { TAIL_DEDUPE_OVERLAP } from "../../shared/events-pagination.js";
 
 const execAsync = promisify(exec);
 import {
@@ -4663,7 +4664,8 @@ sessionsRouter.get(
 // concatenating the new page with the first `TAIL_DEDUPE_OVERLAP`
 // events of its currently-loaded page, running dedupe over the
 // concatenation, and trimming the overlap before prepending.
-const TAIL_DEDUPE_OVERLAP = 2;
+// `TAIL_DEDUPE_OVERLAP` is imported from `shared/events-pagination.js`
+// so the route, the client, and the tests share one constant.
 
 function parseLimitParam(raw: unknown): number | null {
   if (raw === undefined || raw === null || raw === "") return null;

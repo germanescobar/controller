@@ -126,13 +126,17 @@ test("getEventsTail skips malformed tail lines without dropping the page size", 
   });
 });
 
-test("getEventsTail honors ?before= and returns every event ending just before the anchor", async () => {
+test("getEventsTail honors ?before= and returns the lines OLDER than the anchor", async () => {
   await withTempProject(async (projectPath) => {
     const sessionId = "s-tail-before";
     for (let i = 0; i < 10; i++) {
       await appendEvent(projectPath, sessionId, makeEvent(i, { id: `evt-${i}` }));
     }
-    // Everything ending just before evt-5: should be evt-0..evt-4.
+    // `before=evt-5` returns the events *older* than the anchor in
+    // file order — the page the client prepends to its
+    // currently-loaded page (which ends at the anchor). With 10
+    // events the five events strictly older than evt-5 are
+    // evt-0..evt-4.
     const tail = await getEventsTail(projectPath, sessionId, {
       limit: 10,
       before: "evt-5",
@@ -144,16 +148,17 @@ test("getEventsTail honors ?before= and returns every event ending just before t
   });
 });
 
-test("getEventsTail ?before= with a limit smaller than the available window trims from the head", async () => {
+test("getEventsTail ?before= with a small limit returns up to `limit` older events", async () => {
   await withTempProject(async (projectPath) => {
     const sessionId = "s-tail-before-trim";
     for (let i = 0; i < 10; i++) {
       await appendEvent(projectPath, sessionId, makeEvent(i, { id: `evt-${i}` }));
     }
-    // Ask for 3 events ending just before evt-8. The window is
-    // [evt-0..evt-7] (8 events before the anchor). The helper trims
-    // from the head to honor `limit`, returning the *last* 3 events
-    // in the window: evt-5, evt-6, evt-7.
+    // Ask for 3 events older than evt-8. The 8 events strictly
+    // older than evt-8 are evt-0..evt-7; capped to 3 = the 3
+    // OLDEST — wait, no: the route expects the page that ends
+    // *just before* the anchor, so the 3 events *immediately*
+    // before evt-8: evt-5, evt-6, evt-7.
     const tail = await getEventsTail(projectPath, sessionId, {
       limit: 3,
       before: "evt-8",
@@ -161,6 +166,37 @@ test("getEventsTail ?before= with a limit smaller than the available window trim
     assert.deepEqual(
       tail.map((e) => e.id),
       ["evt-5", "evt-6", "evt-7"],
+    );
+  });
+});
+
+test("getEventsTail ?before= on a long transcript reads back to the anchor + `limit` older lines", async () => {
+  // Regression for the codex review P1 finding: a 1000-event file
+  // with `before=` near the head used to return only 2 older lines
+  // because the read loop stopped after `limit + overlap` lines
+  // from EOF, which fell short of the anchor. After the fix the
+  // read continues until the anchor is found, so the page is sized
+  // correctly even when the anchor sits far from EOF.
+  await withTempProject(async (projectPath) => {
+    const sessionId = "s-tail-before-long";
+    for (let i = 0; i < 1000; i++) {
+      await appendEvent(
+        projectPath,
+        sessionId,
+        makeEvent(i, { id: `evt-${i}` }),
+      );
+    }
+    // Anchor at evt-500; `limit=100`. The 100 events strictly
+    // older than evt-500 are evt-400..evt-499 — the window's
+    // oldest 100 events before the anchor.
+    const tail = await getEventsTail(projectPath, sessionId, {
+      limit: 100,
+      before: "evt-500",
+    });
+    assert.equal(tail.length, 100);
+    assert.deepEqual(
+      tail.map((e) => e.id),
+      Array.from({ length: 100 }, (_, i) => `evt-${400 + i}`),
     );
   });
 });

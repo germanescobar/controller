@@ -137,22 +137,23 @@ test("GET /sessions/:id/events?limit=N returns the last N events raw (dedupe hap
 test("GET /sessions/:id/events?limit=N&before=<id> returns the page that ends just before the anchor", async () => {
   await withEventsEndpointEnv(async ({ projectPath, baseUrl }) => {
     await seedEvents(projectPath, "s-before", 10);
-    // Ask for 5 events ending just before evt-7. The route asks the
-    // helper for `limit + 2 = 7` lines ending at (excluding) evt-7.
-    // The helper reads 7 lines (its `minLines` is `7 + 1 + 1 = 9`,
-    // but the file has only 7 lines before evt-7), iterates them in
-    // chronological order, and breaks on evt-7. Result is the 6
-    // events before the anchor in chronological order.
+    // Ask for 5 events ending just before evt-7. The route asks
+    // the helper for `limit + 2 = 7` lines. With the P1 fix the
+    // helper keeps reading until it has found the anchor AND
+    // collected `limit` (= 7) lines older than it, then returns
+    // those lines in chronological order. In a 10-event file
+    // with `before=evt-7` and `limit=7` the seven oldest events
+    // that are older than evt-7 are evt-0..evt-6.
     const res = await fetch(
       `${baseUrl}/sessions/s-before/events?limit=5&before=evt-7`
     );
     assert.equal(res.status, 200);
     const body = (await res.json()) as Array<{ id: string }>;
-    assert.equal(body.length, 6, `expected 6 events, got ${body.length}`);
+    assert.equal(body.length, 7, `expected 7 events, got ${body.length}`);
     const ids = body.map((e) => e.id);
-    // First event in the response is evt-1 (oldest of the 6 lines
-    // we read: evt-1..evt-6).
-    assert.equal(ids[0], "evt-1");
+    // First event in the response is evt-0 (oldest of the 7
+    // lines older than the anchor: evt-0..evt-6).
+    assert.equal(ids[0], "evt-0");
     // Last event is evt-6 (one before the anchor).
     assert.equal(ids[ids.length - 1], "evt-6");
     assert.ok(!ids.includes("evt-7"), "the anchor must not be in the response");

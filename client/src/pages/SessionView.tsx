@@ -30,6 +30,10 @@ import {
   type ControllerLinkTarget,
 } from "../../../shared/conversation-links.ts";
 import { sharedDedupeUserMessageEvents } from "../../../shared/events-dedupe.ts";
+import {
+  stitchPaginatedEvents,
+  TAIL_DEDUPE_OVERLAP,
+} from "../../../shared/events-pagination.ts";
 import type { PullRequest } from "../../../shared/controller.ts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -4589,19 +4593,25 @@ export function SessionView({
           // raw events (no server-side dedupe for paginated reads),
           // so this concatenation + dedupe is what makes the
           // paginated timeline byte-equivalent to the
-          // full-transcript endpoint.
-          const TAIL_DEDUPE_OVERLAP = 2;
-          const overlap = events.slice(0, TAIL_DEDUPE_OVERLAP);
-          const concatenated = [...page, ...overlap];
-          const deduped = sharedDedupeUserMessageEvents(concatenated);
-          const newPage = deduped.slice(0, Math.max(0, deduped.length - overlap.length));
-          if (newPage.length === 0) {
-            // The new page entirely overlapped and was collapsed
-            // by dedupe — treat as "no older events".
+          // full-transcript endpoint. The seam merge is
+          // implemented in `shared/events-pagination.ts` and unit
+          // tested there — PR review P2 from chatgpt-codex-connector
+          // on #405 caught an earlier fixed-count slice that
+          // dropped the merged event when a user_message + echo
+          // pair straddled the boundary.
+          const stitch = stitchPaginatedEvents(
+            page,
+            events.slice(0, TAIL_DEDUPE_OVERLAP),
+          );
+          if (stitch.noMoreOlderEvents) {
+            // No older events exist (either the server returned
+            // an empty page, or the entire new page was collapsed
+            // into the loaded-page head by dedupe). Flip the
+            // latch so subsequent scroll nudges don't re-fire.
             setReachedTranscriptStart(true);
             return;
           }
-          setEvents((prev) => [...newPage, ...prev]);
+          setEvents((prev) => [...stitch.newPage, ...prev]);
           // Restore the user's reading position: the same
           // scrollTop now points further down because of the
           // prepended page. Use rAF so React has flushed the
