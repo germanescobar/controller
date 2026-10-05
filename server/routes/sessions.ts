@@ -4664,7 +4664,7 @@ sessionsRouter.get(
 // concatenating the new page with the first `TAIL_DEDUPE_OVERLAP`
 // events of its currently-loaded page, running dedupe over the
 // concatenation, and trimming the overlap before prepending.
-// `TAIL_DEDUPE_OVERLAP` is imported from `shared/events-pagination.js`
+// `TAIL_DEDUPE_OVERLAP` is imported from `shared/events-pagination.ts`
 // so the route, the client, and the tests share one constant.
 
 function parseLimitParam(raw: unknown): number | null {
@@ -4740,11 +4740,11 @@ sessionsRouter.get(
 );
 
 /**
- * Re-export the dedupe helpers from `shared/events-dedupe.js` so the
+ * Re-export the dedupe helpers from `shared/events-dedupe.ts` so the
  * legacy import path (`server/routes/sessions.js`) keeps working for
  * existing tests and any other server-side caller that imports the
  * helpers directly. The actual implementation lives in
- * `shared/events-dedupe.js` so the same rules apply on the client
+ * `shared/events-dedupe.ts` so the same rules apply on the client
  * (issue #404, paginated open path).
  */
 export { dedupeUserMessageEvents, parseSkillMarker };

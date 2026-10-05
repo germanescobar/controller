@@ -19,7 +19,7 @@
  * (e.g. a future native-shell consumer).
  */
 
-import { sharedDedupeUserMessageEvents, type SharedAgentEvent } from "./events-dedupe.ts";
+import { sharedDedupeUserMessageEvents, type SharedAgentEvent } from "./events-dedupe.js";
 
 /**
  * Width of the dedupe-overlap window. The route asks the server

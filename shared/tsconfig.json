@@ -6,10 +6,12 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "../dist/server",
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "outDir": "../dist/shared",
     "rootDir": "."
   },
-  "include": ["."],
-  "exclude": ["**/__tests__/**", "node_modules"],
-  "references": [{ "path": "../shared" }]
+  "include": ["*.ts"],
+  "exclude": ["**/*.test.ts", "node_modules"]
 }

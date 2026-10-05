@@ -7,8 +7,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "../dist",
-    "rootDir": ".."
+    "rootDir": "..",
+    "composite": false
   },
-  "include": ["*.ts", "../shared/*.ts"],
-  "exclude": ["../shared/**/*.test.ts", "node_modules"]
+  "include": ["*.ts"],
+  "exclude": ["../shared/**/*.test.ts", "node_modules"],
+  "references": [{ "path": "../shared" }]
 }
