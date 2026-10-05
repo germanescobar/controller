@@ -598,6 +598,42 @@ export async function fetchEvents(
   return body;
 }
 
+/*
+ * Tail-paginated read of a session's events (issue #404). The default
+ * `fetchEvents` always ships the full transcript — fine for the
+ * streaming/dismiss/approval refetches that need to rebuild the
+ * persisted timeline, but the spinner added in #397 only papers over
+ * the seconds-long wait for a 1000-turn conversation. Use this on
+ * the initial open path so the user sees the bottom of the timeline
+ * within ~250ms regardless of conversation length.
+ *
+ * Pass `before` to request the page that ends just before the named
+ * event id (the client passes the oldest event id of its
+ * currently-loaded page when the user scrolls up). The response is
+ * **raw** (not deduped) — `dedupeUserMessageEvents` is an
+ * adjacent-event operation, so the client stitches the new page
+ * with its currently-loaded events to dedupe at the seam.
+ */
+export async function fetchEventsPage(
+  projectId: string,
+  sessionId: string,
+  options: { limit: number; before?: string; worktreeId?: string }
+): Promise<AgentEvent[]> {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit));
+  if (options.before) params.set("before", options.before);
+  if (options.worktreeId) params.set("worktreeId", options.worktreeId);
+  const qs = params.toString();
+  const url = `${BASE}/projects/${projectId}/sessions/${sessionId}/events?${qs}`;
+  const res = await fetch(url);
+  await throwIfNotOk(res, "Failed to fetch events page");
+  const body = await res.json();
+  if (!Array.isArray(body)) {
+    throw new Error("Failed to fetch events page");
+  }
+  return body;
+}
+
 export async function stopSession(
   projectId: string,
   sessionId: string,

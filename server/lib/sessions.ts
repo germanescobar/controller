@@ -1,3 +1,4 @@
+import { openSync, readSync, closeSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -560,6 +561,250 @@ export async function getEvents(
   } catch {
     return [];
   }
+}
+
+/**
+ * Read just the last `limit` events from a session's append-only JSONL file
+ * (issue #404). Designed for the "open a long conversation fast" path:
+ * the client only paints the bottom of the timeline on first open, so the
+ * server used to ship (and JSON.parse + dedupe) thousands of events the
+ * user wouldn't see for minutes. The events file is append-only
+ * (`appendEvent` is the only writer and always writes to EOF), so the
+ * last N lines are a constant-memory scan from EOF backward.
+ *
+ * Returns events in chronological order (oldest first) so the client can
+ * prepend them as-is. When the file has fewer than `limit` events the
+ * full transcript is returned; when the file is empty, the empty array.
+ * Malformed tail lines are skipped (same behavior as the existing
+ * `getEvents` would have for them) so a half-flushed append never wedges
+ * the open path.
+ *
+ * Read uses `fs.open` + chunked backward reads so we only allocate the
+ * last N lines rather than reading the whole file into memory and then
+ * discarding the head. A `before` id may also be supplied to "give me
+ * the page ending at (but not including) this event id" — used by the
+ * client when the user scrolls up for the previous page. `before`
+ * requires `limit > 0`.
+ */
+export async function getEventsTail(
+  projectPath: string,
+  sessionId: string,
+  options: { limit?: number; before?: string } = {}
+): Promise<AgentEvent[]> {
+  const limit = options.limit ?? 0;
+  const before = options.before;
+  if (limit <= 0) {
+    throw new Error("getEventsTail requires a positive limit");
+  }
+  if (before !== undefined && before.length === 0) {
+    throw new Error("getEventsTail `before` must be a non-empty event id");
+  }
+  const filePath = path.join(
+    storagePaths(projectPath).events,
+    `${sessionId}.jsonl`
+  );
+  let size: number;
+  try {
+    size = statSync(filePath).size;
+  } catch {
+    return [];
+  }
+  if (size === 0) return [];
+  // The read loop walks the file from EOF backward in chunked byte
+  // reads, splitting on `\n`, until one of:
+  //
+  //   (a) `before` is unset and we've collected `limit` lines
+  //       (the "give me the last N events" case),
+  //   (b) `before` is set and we've found the anchor line AND
+  //       collected `limit` lines OLDER than the anchor (the
+  //       pagination case). The caller wants the page that ends
+  //       *just before* the anchor in chronological order, so we
+  //       must read past the anchor by `limit` lines. The
+  //       original implementation capped the read budget at
+  //       `limit + 2` lines from EOF, which stranded 800+ events
+  //       on a 1000-event transcript (PR review P1 from
+  //       chatgpt-codex-connector on #405): the anchor lived
+  //       outside the read window, the page kept shrinking
+  //       toward zero, and the client latched
+  //       `reachedTranscriptStart` while hundreds of turns
+  //       remained in the file.
+  //   (c) we've consumed the whole file (anchor not found — the
+  //       caller passed a stale id, or the file was truncated
+  //       mid-session; we return `[]` below).
+  //
+  // Reads are 64KiB and aligned to newline boundaries so we don't
+  // depend on UTF-8 multi-byte characters being split across a
+  // chunk — the JSONL payload is required to be one line per
+  // event so a `\n` is always a line boundary.
+  const readChunkSize = 64 * 1024;
+  // `linesAfterAnchor` counts lines we've read that are NEWER
+  // than the anchor in file order (i.e. the lines we encountered
+  // BEFORE the anchor while reading backward from EOF). It does
+  // NOT count the anchor itself. The page the caller wants is
+  // the `limit` lines that come AFTER the anchor in file order
+  // (= the lines we encounter AFTER the anchor while continuing
+  // to read backward, which are OLDER in file order).
+  const tailLines: string[] = [];
+  const anchorNeedle = before !== undefined ? `"id":"${before}"` : null;
+  let foundAnchor = false;
+  let linesBeforeAnchor = 0;
+  const fd = openSync(filePath, "r");
+  try {
+    let position = size;
+    let pending = Buffer.alloc(0);
+    while (position > 0 || pending.length > 0) {
+      if (before === undefined && tailLines.length >= limit) {
+        // No anchor — we just need the last `limit` lines.
+        break;
+      }
+      if (before !== undefined && foundAnchor && linesBeforeAnchor >= limit) {
+        // We've collected `limit` lines older than the anchor.
+        // The response will be these `limit` lines in
+        // chronological order; the anchor itself and everything
+        // newer is already in the client's loaded page.
+        break;
+      }
+      if (position > 0) {
+        const readSize = Math.min(readChunkSize, position);
+        position -= readSize;
+        const buf = Buffer.alloc(readSize);
+        readSync(fd, buf, 0, readSize, position);
+        pending = Buffer.concat([buf, pending]);
+      }
+      let newlineIdx = pending.length;
+      let madeProgress = false;
+      while (newlineIdx > 0) {
+        if (before === undefined && tailLines.length >= limit) break;
+        if (
+          before !== undefined &&
+          foundAnchor &&
+          linesBeforeAnchor >= limit
+        ) {
+          break;
+        }
+        const prev = pending.lastIndexOf(0x0a, newlineIdx - 1);
+        if (prev < 0) break;
+        const line = pending
+          .subarray(prev + 1, newlineIdx)
+          .toString("utf-8")
+          .replace(/\r$/, "");
+        // Skip empty lines — they happen at the tail when the
+        // file ends with `\n` (the bytes after the last newline
+        // are an empty string) and at the head when the file has
+        // a leading newline. Counting them toward the line
+        // budget would shrink the page we hand back without any
+        // benefit; drop them at extraction time.
+        if (line) {
+          tailLines.push(line);
+          if (anchorNeedle !== null && !foundAnchor && line.includes(anchorNeedle)) {
+            // First time we see the anchor — keep going, we
+            // need to collect `limit` lines after it (older
+            // in file order).
+            foundAnchor = true;
+          } else if (foundAnchor) {
+            // Line is older than the anchor in file order
+            // (we're past the anchor in the backward scan).
+            linesBeforeAnchor += 1;
+          }
+        }
+        newlineIdx = prev;
+        madeProgress = true;
+      }
+      if (madeProgress) {
+        // Trim the consumed suffix off `pending`. `newlineIdx` is
+        // the start of the unconsumed head; if it's > 0 there is
+        // a head-of-file partial line waiting for the next chunk;
+        // if it's 0 the inner loop consumed everything down to
+        // byte 0.
+        pending =
+          newlineIdx > 0 ? pending.subarray(0, newlineIdx) : Buffer.alloc(0);
+      } else if (position === 0) {
+        // We've read the whole file and the remaining `pending`
+        // is a head-of-file line with no trailing newline (the
+        // file may legitimately lack a trailing newline if the
+        // last append is mid-flight). Push it as the oldest line
+        // so it survives into the result. Same semantics as
+        // `getEvents`'s `filter(Boolean)` on the split: a
+        // non-empty head with no trailing newline is still a line.
+        if (pending.length > 0) {
+          tailLines.push(pending.toString("utf-8"));
+          if (anchorNeedle !== null && !foundAnchor && pending.toString("utf-8").includes(anchorNeedle)) {
+            foundAnchor = true;
+          } else if (foundAnchor) {
+            linesBeforeAnchor += 1;
+          }
+        }
+        pending = Buffer.alloc(0);
+      } else {
+        // No newline found in this chunk — `pending` is a single
+        // line that spans the entire chunk boundary. Read more.
+        continue;
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+  // If `before` was requested but the anchor was never found, the
+  // caller passed a stale id (or the file was truncated mid-session
+  // and the anchor fell off). Surface an empty page — the client's
+  // `reachedTranscriptStart` latch will turn this into "we've
+  // reached the top" on its next scroll, which is the right
+  // observable behavior even though the underlying state is
+  // inconsistent.
+  if (before !== undefined && !foundAnchor) {
+    return [];
+  }
+  // Walk the collected lines in reverse (oldest-first) and parse
+  // them. With `before` set, `tailLines` holds the anchor + the
+  // `limit` lines that are older than it in file order (and a
+  // few "wasted" lines newer than the anchor that we had to
+  // read to find it — those get dropped by the `if (found)` /
+  // `break` path below). With `before` unset, `tailLines`
+  // holds exactly the last `limit` lines in file order.
+  const ordered = tailLines.reverse();
+  const events: AgentEvent[] = [];
+  let sawAnchor = false;
+  for (const line of ordered) {
+    if (!line) continue;
+    let event: AgentEvent;
+    try {
+      event = JSON.parse(line) as AgentEvent;
+    } catch {
+      // Malformed tail line: skip it (matches `getEvents` tolerating
+      // bad JSON via the broader read+parse, which would also
+      // produce an exception; the caller is in charge of retrying
+      // or showing an error). Don't break the loop — keep reading
+      // so the page size is honored as best we can.
+      continue;
+    }
+    if (before !== undefined && event.id === before) {
+      // Anchor reached. Everything we already pushed into
+      // `events` was read AFTER the anchor in the backward scan,
+      // which means it's OLDER than the anchor in file order —
+      // exactly the page the caller asked for. The anchor
+      // itself and anything newer is already in the client's
+      // loaded page; drop them.
+      sawAnchor = true;
+      break;
+    }
+    events.push(event);
+  }
+  if (before !== undefined && !sawAnchor) {
+    // The anchor was inside `tailLines` (the read loop found
+    // it) but the post-process JSON.parse couldn't parse it
+    // (e.g. the raw-line prefilter matched a substring that
+    // isn't actually the anchor's id). Treat as "anchor not
+    // found" so the client latches the end-of-transcript
+    // state instead of silently prepending garbage.
+    return [];
+  }
+  // Cap the result at `limit` so callers get exactly the page
+  // size they asked for even when the file has more lines than
+  // the read window.
+  if (events.length > limit) {
+    events.splice(0, events.length - limit);
+  }
+  return events;
 }
 
 /**

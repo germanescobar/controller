@@ -12,6 +12,11 @@ import {
   worktreeNotFoundPayload,
 } from "../lib/worktrees.js";
 import { projectStoreDir } from "../lib/paths.js";
+import {
+  sharedDedupeUserMessageEvents as dedupeUserMessageEvents,
+  sharedParseSkillMarker as parseSkillMarker,
+} from "../../shared/events-dedupe.js";
+import { TAIL_DEDUPE_OVERLAP } from "../../shared/events-pagination.js";
 
 const execAsync = promisify(exec);
 import {
@@ -19,6 +24,7 @@ import {
   getSessionSummaries,
   getSession,
   getEvents,
+  getEventsTail,
   archiveSession,
   updateSessionFocus,
   updateSessionTitle,
@@ -4636,7 +4642,40 @@ sessionsRouter.get(
   }
 );
 
-// Get events for a session
+// Get events for a session. Accepts optional `?limit=N&before=<eventId>`
+// query params for tail-paginated reads (issue #404). Default behavior
+// (no params) returns the full deduped transcript, byte-equivalent to
+// the pre-pagination endpoint — existing callers (tests, CLI,
+// streaming/dismiss/approval refetches) keep working without
+// changes. When `limit` is supplied, the response carries the last
+// `limit` events in chronological order with a small overlap window
+// at the head so the dedupe seam between two adjacent pages produces
+// the same final timeline as today's single-shot endpoint. `before`
+// requests the page that ends just before the named event id (the
+// client passes the oldest event id of its currently-loaded page when
+// scrolling up).
+//
+// The paginated response is **not** deduped on the server. The full-
+// transcript default path keeps its existing dedupe behavior (so the
+// `user-message-dedupe` and `anita-transcript-persistence` tests
+// stay green). Paginated reads defer dedupe to the client because
+// `dedupeUserMessageEvents` is an adjacent-event operation: the
+// overlap window lets the client stitch two adjacent pages by
+// concatenating the new page with the first `TAIL_DEDUPE_OVERLAP`
+// events of its currently-loaded page, running dedupe over the
+// concatenation, and trimming the overlap before prepending.
+// `TAIL_DEDUPE_OVERLAP` is imported from `shared/events-pagination.js`
+// so the route, the client, and the tests share one constant.
+
+function parseLimitParam(raw: unknown): number | null {
+  if (raw === undefined || raw === null || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    return null;
+  }
+  return n;
+}
+
 sessionsRouter.get(
   "/:projectId/sessions/:sessionId/events",
   async (req, res) => {
@@ -4658,125 +4697,57 @@ sessionsRouter.get(
       );
       return;
     }
-    const events = await getEvents(worktree.path, req.params.sessionId);
-    res.json(dedupeUserMessageEvents(events));
+    const limit = parseLimitParam(req.query.limit);
+    if (req.query.limit !== undefined && limit === null) {
+      res.status(400).json({ error: "limit must be a positive integer" });
+      return;
+    }
+    const before = req.query.before;
+    if (before !== undefined) {
+      if (typeof before !== "string" || before.length === 0) {
+        res.status(400).json({ error: "before must be a non-empty event id" });
+        return;
+      }
+      if (limit === null) {
+        res.status(400).json({ error: "before requires a positive limit" });
+        return;
+      }
+    }
+    if (limit === null) {
+      // Default: full transcript, byte-equivalent to the pre-pagination
+      // endpoint. Existing callers (tests, CLI, branch probe) are not
+      // affected.
+      const events = await getEvents(worktree.path, req.params.sessionId);
+      res.json(dedupeUserMessageEvents(events));
+      return;
+    }
+    // Paginated read. The response carries the last `limit` events in
+    // chronological order, prefixed by a small overlap window so the
+    // client can stitch two adjacent pages together without losing
+    // user_message + agent-echo dedupe at the seam. The events are
+    // returned RAW (not deduped on the server) because
+    // `dedupeUserMessageEvents` is an adjacent-event operation; the
+    // client concatenates the new page with the first
+    // `TAIL_DEDUPE_OVERLAP` events of its currently-loaded page,
+    // runs dedupe over the concatenation, and trims the overlap
+    // before prepending.
+    const rawPage = await getEventsTail(worktree.path, req.params.sessionId, {
+      limit: limit + TAIL_DEDUPE_OVERLAP,
+      before: typeof before === "string" ? before : undefined,
+    });
+    res.json(rawPage);
   }
 );
 
 /**
- * Collapse consecutive `user_message` events that represent the same turn.
- *
- * Two cases trigger a collapse:
- *
- * 1. **Identical text.** The orchestrator and the agent sometimes each write
- *    a `user_message` for the same turn (the orchestrator to persist
- *    attachments, the agent to log what it received). Identical text means
- *    the same turn.
- *
- * 2. **Skill marker vs. agent echo.** When a skill is active the orchestrator
- *    writes a `user_message` whose text is `[/skill: name] <user text>`, and
- *    the agent writes its own `user_message` with the full prompt (skill
- *    body + user text). The two texts differ, but the orchestrator's text is
- *    the canonical user turn; the agent's is just an echo of the wire
- *    payload. Collapse them, keeping the orchestrator's marker so the UI
- *    can render a `Skill: <name>` badge.
+ * Re-export the dedupe helpers from `shared/events-dedupe.js` so the
+ * legacy import path (`server/routes/sessions.js`) keeps working for
+ * existing tests and any other server-side caller that imports the
+ * helpers directly. The actual implementation lives in
+ * `shared/events-dedupe.js` so the same rules apply on the client
+ * (issue #404, paginated open path).
  */
-export function dedupeUserMessageEvents(events: AgentEvent[]): AgentEvent[] {
-  const result: AgentEvent[] = [];
-  for (const event of events) {
-    const previous = result[result.length - 1];
-    if (
-      previous &&
-      previous.type === "user_message" &&
-      event.type === "user_message"
-    ) {
-      const previousText = getUserMessageText(previous);
-      const currentText = getUserMessageText(event);
-
-      if (previousText !== "" && previousText === currentText) {
-        const previousAttachments = pickUserMessageAttachments(previous);
-        const currentAttachments = pickUserMessageAttachments(event);
-        result[result.length - 1] = {
-          ...previous,
-          data: {
-            ...previous.data,
-            ...event.data,
-            attachments: previousAttachments ?? currentAttachments,
-          },
-        };
-        continue;
-      }
-
-      const previousMarker = parseSkillMarker(previousText);
-      if (
-        previousMarker &&
-        !parseSkillMarker(currentText) &&
-        currentText.endsWith(previousMarker.rest) &&
-        currentText.includes(previousMarker.rest)
-      ) {
-        // The previous event is the orchestrator's `[/skill: name] <rest>`
-        // marker, and the current one is the agent's echo of the same turn
-        // (the full prompt it received, which contains the same `<rest>` as
-        // a suffix). Keep the marker as the canonical text — it carries
-        // the skill tag for the UI. Inherit the echo's attachments only
-        // when the marker has none.
-        const previousAttachments = pickUserMessageAttachments(previous);
-        const currentAttachments = pickUserMessageAttachments(event);
-        result[result.length - 1] = {
-          ...previous,
-          data: {
-            ...previous.data,
-            attachments: previousAttachments ?? currentAttachments,
-          },
-        };
-        continue;
-      }
-
-      // The reverse ordering: the agent wrote the echo first, the
-      // orchestrator's marker second. Keep the marker (drop the previous
-      // echo) and inherit any attachments the echo may have carried.
-      const currentMarker = parseSkillMarker(currentText);
-      if (
-        currentMarker &&
-        !previousMarker &&
-        previousText.endsWith(currentMarker.rest) &&
-        previousText.includes(currentMarker.rest)
-      ) {
-        const previousAttachments = pickUserMessageAttachments(previous);
-        const currentAttachments = pickUserMessageAttachments(event);
-        result[result.length - 1] = {
-          ...event,
-          data: {
-            ...event.data,
-            attachments: currentAttachments ?? previousAttachments,
-          },
-        };
-        continue;
-      }
-    }
-    result.push(event);
-  }
-  return result;
-}
-
-function getUserMessageText(event: AgentEvent): string {
-  const text = (event.data as { text?: unknown }).text;
-  return typeof text === "string" ? text : "";
-}
-
-function pickUserMessageAttachments(event: AgentEvent): unknown[] | undefined {
-  const attachments = (event.data as { attachments?: unknown }).attachments;
-  if (!Array.isArray(attachments) || attachments.length === 0) return undefined;
-  return attachments;
-}
-
-export function parseSkillMarker(
-  text: string
-): { skillName: string; rest: string } | null {
-  const match = /^\[\/skill:\s*([A-Za-z0-9._-]+)\]\s*([\s\S]*)$/.exec(text);
-  if (!match) return null;
-  return { skillName: match[1], rest: match[2] };
-}
+export { dedupeUserMessageEvents, parseSkillMarker };
 
 /**
  * Derive a session's auto-title from the persisted history text. A leading
