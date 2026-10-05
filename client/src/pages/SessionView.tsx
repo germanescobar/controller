@@ -29,6 +29,7 @@ import {
   parseControllerUri,
   type ControllerLinkTarget,
 } from "../../../shared/conversation-links.ts";
+import { sharedDedupeUserMessageEvents } from "../../../shared/events-dedupe.ts";
 import type { PullRequest } from "../../../shared/controller.ts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -63,6 +64,7 @@ import {
   fetchActiveRuntimes,
   fetchAgents,
   fetchEvents,
+  fetchEventsPage,
   fetchBranchDiff,
   fetchGitDiff,
   fetchPullRequest,
@@ -3247,11 +3249,31 @@ export function SessionView({
   const [events, setEvents] = useState<AgentEvent[]>([]);
   // True while the initial event fetch for the current `sessionId` is in
   // flight. Surfaces a centered spinner in the transcript so the user gets
-  // feedback that the conversation is loading (large JSONL transcripts can
-  // take a few seconds to read + dedupe on disk). Cleared once the first
-  // fetch resolves; refetches during streaming / dismiss / approval do not
-  // re-trigger this.
+  // feedback that the conversation is loading. The first page is
+  // tail-paginated (issue #404) so a 1000-turn conversation paints
+  // within ~250ms regardless of transcript size; subsequent
+  // scroll-to-top loads use the `loadingEarlier` flag instead of this
+  // one. Cleared once the first page resolves; refetches during
+  // streaming / dismiss / approval do not re-trigger this.
   const [initialEventsLoading, setInitialEventsLoading] = useState(false);
+  // True while a "load earlier" page request (issue #404) is in
+  // flight — i.e. the user has scrolled to the top of the timeline
+  // and we're fetching the next-older page to prepend. Renders an
+  // inline indicator at the top of the transcript instead of the
+  // centered spinner, so the user's reading position stays visible.
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  // `true` once the user has scrolled past the oldest event currently
+  // loaded. When the transcript is paginated, a long conversation
+  // only has the LAST page in memory; once the user has scrolled
+  // back to the top, we set this to `true` and never set it back so
+  // the page-load trigger doesn't re-fire on every nudge of the
+  // scrollbar. Reset by the session-switch effect above.
+  const [reachedTranscriptStart, setReachedTranscriptStart] = useState(false);
+  // Page size for the initial tail-paginated read. 100 is enough
+  // for a screenful of turns and keeps the dedupe cost trivial; a
+  // scrolled-up fetch uses the same value so adjacent pages are
+  // stitchable without re-tuning.
+  const PAGE_SIZE = 100;
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>(
@@ -4106,15 +4128,32 @@ export function SessionView({
 
     if (sessionId) {
       // Show a centered spinner for the duration of the initial event fetch
-      // (large transcripts can take a few seconds to read + dedupe on disk)
       // and clear the previous session's events so the user never sees stale
-      // transcript content while the new conversation loads.
+      // transcript content while the new conversation loads. The first page
+      // is tail-paginated (issue #404) so the spinner only needs to cover
+      // the last-page read — measured in tens of ms even for a 1000-turn
+      // conversation, but the spinner still helps on slow disks.
       setInitialEventsLoading(true);
+      setLoadingEarlier(false);
+      setReachedTranscriptStart(false);
       setEvents([]);
       setProviderResolved(false);
       Promise.allSettled([
         fetchSession(projectId, sessionId, worktreeId),
-        fetchEvents(projectId, sessionId, worktreeId),
+        // Tail-paginated initial load: only the last `PAGE_SIZE` events
+        // (plus a small overlap the server adds so the next-older
+        // page's dedupe seam is correct). For a session with fewer
+        // than `PAGE_SIZE` events the server returns the full
+        // transcript; the client still runs the shared dedupe here so
+        // a sub-page conversation gets the same collapse as the
+        // full-transcript endpoint. The streaming/dismiss/approval
+        // refetches keep using the full-transcript `fetchEvents`
+        // because they need every event to rebuild `streamItems` and
+        // the persisted timeline mirror.
+        fetchEventsPage(projectId, sessionId, {
+          limit: PAGE_SIZE,
+          worktreeId,
+        }).then((page) => sharedDedupeUserMessageEvents(page)),
         fetchActiveRuntimes(),
       ])
         .then(([sessionResult, eventsResult, runtimesResult]) => {
@@ -4170,6 +4209,8 @@ export function SessionView({
       setStreamItems([]);
       setStreaming(false);
       setInitialEventsLoading(false);
+      setLoadingEarlier(false);
+      setReachedTranscriptStart(false);
       setProviderResolved(true);
       // Restore the agent + run options from this new-session view's draft,
       // falling back to defaults when absent. An invalid provider is reconciled
@@ -4493,7 +4534,104 @@ export function SessionView({
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < 80;
+    // Trigger a tail-paginated "load earlier" fetch when the user
+    // reaches the top of the currently-loaded page (issue #404).
+    // `el.scrollTop <= 32` is the practical "I scrolled to the top"
+    // band; using a small threshold so the fetch fires before the
+    // user starts complaining about a stalled scroll. We guard
+    // against re-entry: `reachedTranscriptStart` flips true on the
+    // first fetch that returned an empty result (no more events in
+    // the file), so subsequent scrolls to the top do nothing.
+    if (
+      sessionId &&
+      !reachedTranscriptStart &&
+      !loadingEarlier &&
+      !initialEventsLoading &&
+      el.scrollTop <= 32 &&
+      events.length > 0
+    ) {
+      const anchor = events[0]?.id;
+      if (!anchor) return;
+      // Snapshot the session generation so a late-arriving page from
+      // a fetch the user started on a *different* session can be
+      // detected and discarded. `sessionGenerationRef` is bumped by
+      // the session-change effect below.
+      const myGeneration = sessionGenerationRef.current;
+      setLoadingEarlier(true);
+      // Snapshot the scroll height *before* the prepend so we can
+      // restore the user's reading position: after the new page
+      // is prepended the same scrollTop now sits further down the
+      // timeline. We re-apply on the next frame so the prepend
+      // has actually landed in the DOM.
+      const previousScrollHeight = el.scrollHeight;
+      fetchEventsPage(projectId, sessionId, {
+        limit: PAGE_SIZE,
+        before: anchor,
+        worktreeId,
+      })
+        .then((page) => {
+          if (myGeneration !== sessionGenerationRef.current) {
+            // The session switched mid-fetch — discard the late
+            // page so we don't paint events for the wrong
+            // session.
+            return;
+          }
+          if (page.length === 0) {
+            // No older events exist; flip the latch so we don't
+            // re-fire on every subsequent scroll nudge.
+            setReachedTranscriptStart(true);
+            return;
+          }
+          // Stitch the new page with the first TAIL_DEDUPE_OVERLAP
+          // (=2) events of the currently-loaded page so the
+          // dedupe seam collapses any user_message + agent-echo
+          // pair that straddles the boundary. The server returns
+          // raw events (no server-side dedupe for paginated reads),
+          // so this concatenation + dedupe is what makes the
+          // paginated timeline byte-equivalent to the
+          // full-transcript endpoint.
+          const TAIL_DEDUPE_OVERLAP = 2;
+          const overlap = events.slice(0, TAIL_DEDUPE_OVERLAP);
+          const concatenated = [...page, ...overlap];
+          const deduped = sharedDedupeUserMessageEvents(concatenated);
+          const newPage = deduped.slice(0, Math.max(0, deduped.length - overlap.length));
+          if (newPage.length === 0) {
+            // The new page entirely overlapped and was collapsed
+            // by dedupe — treat as "no older events".
+            setReachedTranscriptStart(true);
+            return;
+          }
+          setEvents((prev) => [...newPage, ...prev]);
+          // Restore the user's reading position: the same
+          // scrollTop now points further down because of the
+          // prepended page. Use rAF so React has flushed the
+          // prepend into the DOM before we measure.
+          requestAnimationFrame(() => {
+            const after = scrollContainerRef.current;
+            if (!after) return;
+            const heightDelta = after.scrollHeight - previousScrollHeight;
+            after.scrollTop = after.scrollTop + heightDelta;
+          });
+        })
+        .catch(() => {
+          // Swallow — the user can scroll again to retry. Don't
+          // set reachedTranscriptStart; the failure is recoverable.
+        })
+        .finally(() => {
+          if (myGeneration === sessionGenerationRef.current) {
+            setLoadingEarlier(false);
+          }
+        });
+    }
   };
+  // Bumped on every session change. In-flight "load earlier" fetches
+  // snapshot the current generation when they start; a late-arriving
+  // page whose generation no longer matches is discarded so we don't
+  // paint events for the wrong session.
+  const sessionGenerationRef = useRef(0);
+  useEffect(() => {
+    sessionGenerationRef.current += 1;
+  }, [sessionId]);
 
   // Poll git diff for the Changes tab
   useEffect(() => {
@@ -6808,6 +6946,17 @@ export function SessionView({
 
               {/* Event timeline */}
               <div className="space-y-4">
+                {loadingEarlier && (
+                  <div
+                    className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground/80"
+                    role="status"
+                    aria-live="polite"
+                    data-testid="session-loading-earlier-indicator"
+                  >
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Loading earlier…</span>
+                  </div>
+                )}
                 {eventRenderItems.map((renderItem) => {
                   if (renderItem.kind === "working_group") {
                     const groupEvents = renderItem.events;
