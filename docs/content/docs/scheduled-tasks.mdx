@@ -1,0 +1,90 @@
+---
+title: Scheduled tasks
+description: Continue a session later, keep it working toward a goal, or watch a command for changes.
+---
+
+Controller can continue an existing session without starting a new conversation.
+Each follow-up runs after the current turn ends and keeps the session's full
+history. Use `self` from inside a running agent session; it resolves to that
+session's ID.
+
+## Continue after a delay
+
+Use `wake` when you know when to check again:
+
+```bash
+controller sessions wake self "Check the CI status again" --delay 30s
+```
+
+The message is queued until the delay passes, then Controller starts the next
+turn on a scheduler tick. Durations include `30s`, `5m`, `1h`, and `2d`. You can
+use `--run-at <iso>` for a specific time instead. The message is a positional
+argument, so put it in quotes when it contains spaces.
+
+## Keep working toward a goal
+
+Use `goal` when the session should continue until a condition is met:
+
+```bash
+controller sessions goal set self \
+  --condition "all required CI checks on PR #123 are SUCCESS" \
+  --max-turns 5
+```
+
+After each turn, Controller evaluates the condition. If it is met, the goal
+clears. Otherwise, Controller queues another turn when the session's queue is
+empty. `--max-turns` limits the evaluations; `--expires-at <iso>` sets an
+absolute deadline. Use `controller sessions goal show self` to inspect the
+goal or `controller sessions goal clear self` to stop it.
+
+## Watch a command
+
+Use `monitor` to run a command in the background while the agent continues:
+
+```bash
+controller sessions monitor start self \
+  --description "CI checks" \
+  --command "gh pr checks 123 --watch" \
+  --timeout-ms 600000
+```
+
+Each stdout line is added to the session event log. The default timeout is
+five minutes, with a maximum of one hour. Add `--persistent` to keep the
+monitor running for the session's lifetime instead of using a timeout. A
+monitor can also use `--on-line <regex>` to queue a follow-up when a matching
+line appears. Inspect active monitors with `controller sessions monitor list
+self` and stop one with `controller sessions monitor stop <monitorId>`.
+
+## Example: stay with a PR until CI passes
+
+After opening a PR, attach a goal and queue the first check:
+
+```bash
+gh pr create --fill
+controller sessions goal set self \
+  --condition "all required CI checks on PR #123 are SUCCESS" \
+  --max-turns 5
+controller sessions wake self \
+  "Check gh pr checks 123. If all checks pass, finish. If one fails, read its log, fix it, and push again." \
+  --delay 30s
+```
+
+When the delayed turn runs, the agent checks CI and handles any failure. At
+the end of each turn, Controller evaluates the goal. It clears the goal when
+the checks pass, or queues another turn while the goal remains active, up to
+the turn limit. For a command that announces a final status, a monitor with
+`--on-line` can queue the follow-up as soon as that line appears.
+
+## Where to inspect state
+
+On macOS, Controller's default state directory is
+`~/Library/Application Support/Controller` (or `CONTROLLER_HOME` if set):
+
+- Delayed wakes live in `queues/<sessionId>.json` with a `runAt` time.
+- Goals live in `goals/<sessionId>.json`.
+- Monitor output lives in the session event log. Active monitor processes are
+  held in memory and do not survive a server restart.
+
+There are no `wakes.json`, `goals.json`, or `monitors.json` files in the current
+implementation. The agent's in-session explanation of these commands lives in
+[`server/lib/agent-preamble.ts`](https://github.com/germanescobar/controller/blob/main/server/lib/agent-preamble.ts).
