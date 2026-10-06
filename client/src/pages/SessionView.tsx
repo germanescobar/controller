@@ -1434,7 +1434,8 @@ function WorkingBlock({
  */
 function toolApprovalResponseLabel(
   decision: ToolApprovalDecision | undefined,
-  reason: string | undefined
+  reason: string | undefined,
+  ruleName?: unknown
 ): string {
   if (decision === "deny") {
     if (reason === "eof") return "Denied (process ended)";
@@ -1442,8 +1443,11 @@ function toolApprovalResponseLabel(
     if (reason === "error") return "Denied (approval error)";
     return "Denied";
   }
-  if (decision === "always_allow") return "Approved (always allow)";
-  return "Approved";
+  if (decision === "always_allow") {
+    const name = typeof ruleName === "string" ? ruleName.trim() : "";
+    return name ? `Allowed for this session — ${name}` : "Allowed for this session";
+  }
+  return "Allowed this once";
 }
 
 const EventBlock = memo(function EventBlock({
@@ -1601,7 +1605,7 @@ const EventBlock = memo(function EventBlock({
   if (event.type === "tool_approval_response") {
     const decision = data.decision as ToolApprovalDecision | undefined;
     const reason = data.reason as string | undefined;
-    const label = toolApprovalResponseLabel(decision, reason);
+    const label = toolApprovalResponseLabel(decision, reason, data.ruleName);
     return (
       <div className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
         <div className="h-px flex-1 bg-border" />
@@ -2502,7 +2506,7 @@ function ToolApprovalBlock({
                 disabled={disabled}
                 onClick={() => onDecision?.("always_allow")}
               >
-                Always allow
+                Allow for this session
               </Button>
             ) : null}
             <Button
@@ -2516,6 +2520,11 @@ function ToolApprovalBlock({
           </>
         )}
       </div>
+      {!isPlanApproval && supportsAlwaysAllow ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Allow for this session = same conversation. Won&apos;t ask again for similar commands here. Closed conversations forget it.
+        </p>
+      ) : null}
     </div>
   );
 }
