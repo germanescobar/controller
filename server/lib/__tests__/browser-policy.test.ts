@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,8 +8,12 @@ import {
   validateBrowserFilePath,
   validateBrowserUrl,
 } from "../browser-policy.js";
+import { validatePreviewUrl } from "../../../electron/preview-url-policy.js";
 
-const PROJECT_ROOT = "/tmp/example-project";
+const PROJECT_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-project-"));
+fs.mkdirSync(path.join(PROJECT_ROOT, "dist"));
+fs.writeFileSync(path.join(PROJECT_ROOT, "dist/index.html"), "ok");
+after(() => fs.rmSync(PROJECT_ROOT, { recursive: true, force: true }));
 
 test("allows localhost addresses and normalizes the scheme", () => {
   const result = validateBrowserUrl("localhost:5173", PROJECT_ROOT);
@@ -28,7 +32,7 @@ test("allows project-relative file paths inside the worktree", () => {
   assert.equal(result.allowed, true);
   assert.equal(
     result.url,
-    pathToFileURL(path.join(PROJECT_ROOT, "dist/index.html")).toString()
+    pathToFileURL(fs.realpathSync(path.join(PROJECT_ROOT, "dist/index.html"))).toString()
   );
 });
 
@@ -41,6 +45,98 @@ test("rejects file paths outside the worktree", () => {
 test("rejects file URLs when no worktree is known", () => {
   const result = validateBrowserUrl("/tmp/example-project/index.html");
   assert.equal(result.allowed, false);
+});
+
+test("both preview URL checks reject a symlink outside the worktree", async () => {
+  const inside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-outside-"));
+  const target = path.join(outside, "secret.txt");
+  const link = path.join(inside, "link.txt");
+  fs.writeFileSync(target, "shh");
+  fs.symlinkSync(target, link);
+  try {
+    for (const input of [target, link, pathToFileURL(link).toString(), "./link.txt"]) {
+      const server = validateBrowserUrl(input, inside);
+      const main = await validatePreviewUrl(input, inside);
+      assert.equal(server.allowed, false, `server accepted ${input}`);
+      assert.equal(main.allowed, false, `main process accepted ${input}`);
+      assert.match(server.error ?? "", /inside the active project/);
+      assert.match(main.error ?? "", /inside the active project/);
+    }
+  } finally {
+    fs.rmSync(inside, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("both preview URL checks fail closed for unresolved paths", async () => {
+  const inside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-outside-"));
+  const link = path.join(inside, "dangling.txt");
+  fs.symlinkSync(path.join(outside, "future.txt"), link);
+  try {
+    for (const input of [link, "./missing.txt"]) {
+      const server = validateBrowserUrl(input, inside);
+      const main = await validatePreviewUrl(input, inside);
+      assert.equal(server.allowed, false);
+      assert.equal(main.allowed, false);
+      assert.match(server.error ?? "", /could not be resolved/);
+      assert.match(main.error ?? "", /could not be resolved/);
+    }
+    assert.equal(validateBrowserUrl(link, path.join(inside, "missing-root")).allowed, false);
+    assert.equal((await validatePreviewUrl(link, path.join(inside, "missing-root"))).allowed, false);
+  } finally {
+    fs.rmSync(inside, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("both preview URL checks return the canonical target, not a mutable symlink", async () => {
+  const inside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-outside-"));
+  const target = path.join(inside, "safe.txt");
+  const link = path.join(inside, "link.txt");
+  const secret = path.join(outside, "secret.txt");
+  fs.writeFileSync(target, "ok");
+  fs.writeFileSync(secret, "shh");
+  fs.symlinkSync(target, link);
+  try {
+    const input = `${pathToFileURL(link)}?mode=preview#section`;
+    const expected = `${pathToFileURL(fs.realpathSync(target))}?mode=preview#section`;
+    assert.equal(validateBrowserUrl(input, inside).url, expected);
+    assert.equal((await validatePreviewUrl(input, inside)).url, expected);
+
+    fs.unlinkSync(link);
+    fs.symlinkSync(secret, link);
+    assert.equal(validateBrowserUrl(input, inside).allowed, false);
+    assert.equal((await validatePreviewUrl(input, inside)).allowed, false);
+    assert.equal(validateBrowserUrl(expected, inside).allowed, true);
+    assert.equal((await validatePreviewUrl(expected, inside)).allowed, true);
+  } finally {
+    fs.rmSync(inside, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("main-process preview policy keeps inside paths and localhost URLs working", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const file = path.join(root, "index.html");
+  fs.writeFileSync(file, "ok");
+  try {
+    const expectedUrl = pathToFileURL(fs.realpathSync(file)).toString();
+    for (const input of [file, expectedUrl, "./index.html"]) {
+      assert.deepEqual(await validatePreviewUrl(input, root), {
+        allowed: true,
+        url: expectedUrl,
+      });
+    }
+    assert.deepEqual(await validatePreviewUrl("localhost:5173", root), {
+      allowed: true,
+      url: "http://localhost:5173/",
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("rejects unsupported schemes", () => {

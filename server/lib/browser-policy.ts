@@ -70,15 +70,15 @@ function isPathInside(parent: string, child: string): boolean {
  * the entire chain so both sides of the comparison refer to the same
  * canonical location.
  *
- * Errors are swallowed and the input is returned unchanged so the
- * caller still sees the user-typed path in the error message; a
- * subsequent `statSync` will surface a clean "does not exist" / "not a
- * file" reason instead.
+ * File uploads retain their existing fallback on error. Preview URLs
+ * pass `throwOnError` because an unresolved file path must never pass
+ * the boundary check.
  */
-function canonicalizeForBoundary(input: string): string {
+function canonicalizeForBoundary(input: string, throwOnError = false): string {
   try {
     return fs.realpathSync(input);
-  } catch {
+  } catch (error) {
+    if (throwOnError) throw error;
     return input;
   }
 }
@@ -242,13 +242,24 @@ export function validateBrowserUrl(
     } catch {
       return { allowed: false, error: "Invalid file URL" };
     }
-    if (!isPathInside(projectRoot, filePath)) {
+    let canonicalRoot: string;
+    let canonicalFilePath: string;
+    try {
+      canonicalRoot = canonicalizeForBoundary(projectRoot, true);
+      canonicalFilePath = canonicalizeForBoundary(filePath, true);
+    } catch {
+      return { allowed: false, error: "File preview path could not be resolved" };
+    }
+    if (!isPathInside(canonicalRoot, canonicalFilePath)) {
       return {
         allowed: false,
         error: "File previews must stay inside the active project",
       };
     }
-    return { allowed: true, url: url.toString() };
+    const canonicalUrl = pathToFileURL(canonicalFilePath);
+    canonicalUrl.search = url.search;
+    canonicalUrl.hash = url.hash;
+    return { allowed: true, url: canonicalUrl.toString() };
   }
 
   return {
