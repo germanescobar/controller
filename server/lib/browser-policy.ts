@@ -242,7 +242,10 @@ export function validateBrowserUrl(
     } catch {
       return { allowed: false, error: "Invalid file URL" };
     }
-    if (!isPathInside(projectRoot, filePath)) {
+    if (!isPathInside(
+      canonicalizeForBoundary(projectRoot),
+      canonicalizeForBoundary(filePath)
+    )) {
       return {
         allowed: false,
         error: "File previews must stay inside the active project",

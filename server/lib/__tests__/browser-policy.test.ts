@@ -8,6 +8,7 @@ import {
   validateBrowserFilePath,
   validateBrowserUrl,
 } from "../browser-policy.js";
+import { validatePreviewUrl } from "../../../electron/preview-url-policy.js";
 
 const PROJECT_ROOT = "/tmp/example-project";
 
@@ -41,6 +42,49 @@ test("rejects file paths outside the worktree", () => {
 test("rejects file URLs when no worktree is known", () => {
   const result = validateBrowserUrl("/tmp/example-project/index.html");
   assert.equal(result.allowed, false);
+});
+
+test("both preview URL checks reject a symlink outside the worktree", async () => {
+  const inside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-outside-"));
+  const target = path.join(outside, "secret.txt");
+  const link = path.join(inside, "link.txt");
+  fs.writeFileSync(target, "shh");
+  fs.symlinkSync(target, link);
+  try {
+    for (const input of [target, link, pathToFileURL(link).toString(), "./link.txt"]) {
+      const server = validateBrowserUrl(input, inside);
+      const main = await validatePreviewUrl(input, inside);
+      assert.equal(server.allowed, false, `server accepted ${input}`);
+      assert.equal(main.allowed, false, `main process accepted ${input}`);
+      assert.match(server.error ?? "", /inside the active project/);
+      assert.match(main.error ?? "", /inside the active project/);
+    }
+  } finally {
+    fs.rmSync(inside, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("main-process preview policy keeps inside paths and localhost URLs working", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-inside-"));
+  const file = path.join(root, "index.html");
+  fs.writeFileSync(file, "ok");
+  try {
+    const expectedUrl = pathToFileURL(file).toString();
+    for (const input of [file, expectedUrl, "./index.html"]) {
+      assert.deepEqual(await validatePreviewUrl(input, root), {
+        allowed: true,
+        url: expectedUrl,
+      });
+    }
+    assert.deepEqual(await validatePreviewUrl("localhost:5173", root), {
+      allowed: true,
+      url: "http://localhost:5173/",
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("rejects unsupported schemes", () => {
