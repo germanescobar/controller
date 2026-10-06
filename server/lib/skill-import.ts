@@ -29,7 +29,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { isManagedSkillDir } from "./managed-skills.js";
-import { parseSkillFile, type SkillMetadata, type SkillScope } from "./skills.js";
+import {
+  codexBinarySiblingSystemDirs,
+  parseSkillFile,
+  type SkillMetadata,
+  type SkillScope,
+} from "./skills.js";
 import { getProjects } from "./projects.js";
 import {
   listUnifiedSkills,
@@ -129,7 +134,7 @@ function defaultEnv(): SkillImportEnv {
 interface ProviderScanConfig {
   providerId: string;
   userDirs(): string[];
-  systemDirs?(): string[];
+  systemDirs?(): Promise<string[]> | string[];
   /** Repo-relative dir names. Multiple are scanned so legacy layouts work. */
   repoDirNames(): string[];
 }
@@ -147,7 +152,10 @@ function providerConfigs(env: SkillImportEnv): ProviderScanConfig[] {
     {
       providerId: "codex",
       userDirs: () => [path.join(env.codexHome(), "skills")],
-      systemDirs: () => [path.join(env.codexHome(), "skills", ".system")],
+      systemDirs: async () => [
+        path.join(env.codexHome(), "skills", ".system"),
+        ...(await codexBinarySiblingSystemDirs()),
+      ],
       repoDirNames: () => [".codex/skills"],
     },
     {
@@ -239,7 +247,7 @@ export async function discoverImportableSkills(
       }
     }
     if (config.systemDirs) {
-      for (const base of config.systemDirs()) {
+      for (const base of await config.systemDirs()) {
         for (const dir of await listImportableSkillDirs(base)) {
           const skill = await readMetadataFromDir(
             dir,

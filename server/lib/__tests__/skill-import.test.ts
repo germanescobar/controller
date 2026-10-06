@@ -5,6 +5,8 @@ import {
   rmSync,
   writeFileSync,
   mkdirSync,
+  chmodSync,
+  realpathSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +16,7 @@ import {
   type SkillImportEnv,
 } from "../skill-import.js";
 import type { Project } from "../projects.js";
+import { clearCommandResolverCache } from "../command-resolver.js";
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -121,6 +124,47 @@ test("discoverImportableSkills tags codex system skills correctly", async () => 
     assert.equal(skills[0].scope, "system");
     assert.equal(skills[0].providerId, "codex");
   } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("discoverImportableSkills finds Codex binary-sibling and home system skills", async () => {
+  const home = makeTempDir("import-codex-binary-system-");
+  const originalPath = process.env.PATH;
+  try {
+    const binDir = path.join(home, "package", "bin");
+    mkdirSync(binDir, { recursive: true });
+    const binary = path.join(binDir, "codex");
+    writeFileSync(binary, "#!/bin/sh\n");
+    chmodSync(binary, 0o755);
+    process.env.PATH = binDir;
+    clearCommandResolverCache();
+
+    const bundledPath = writeSkillFile(
+      path.join(home, "package", "skills", ".system"),
+      "binary-bundled",
+      { name: "binary-bundled", description: "Binary bundled skill" },
+      "bundled body"
+    );
+    const homePath = writeSkillFile(
+      path.join(home, ".codex", "skills", ".system"),
+      "home-bundled",
+      { name: "home-bundled", description: "Home bundled skill" },
+      "home body"
+    );
+
+    const skills = await discoverImportableSkills(makeEnv(home));
+    const byName = Object.fromEntries(skills.map((skill) => [skill.name, skill]));
+    assert.equal(skills.length, 2);
+    assert.equal(realpathSync(byName["binary-bundled"].sourcePath), realpathSync(bundledPath));
+    assert.equal(byName["home-bundled"].sourcePath, homePath);
+    assert.equal(byName["binary-bundled"].providerId, "codex");
+    assert.equal(byName["binary-bundled"].scope, "system");
+    assert.equal(byName["home-bundled"].scope, "system");
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    clearCommandResolverCache();
     rmSync(home, { recursive: true, force: true });
   }
 });

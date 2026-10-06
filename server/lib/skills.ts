@@ -321,7 +321,7 @@ function codexSystemSkillsHome(): string {
  * be located or none of the candidates are present, the user/system
  * paths above still cover the common case.
  */
-async function codexBinarySiblingSystemDirs(): Promise<string[]> {
+export async function codexBinarySiblingSystemDirs(): Promise<string[]> {
   const binary = resolveCommand("codex");
   if (!binary) return [];
   // `realpath` collapses symlinks (e.g. Homebrew shims), so the probe
