@@ -10,6 +10,7 @@
     "controller-mode",
     "controller-scripts",
     "worktrees",
+    "scheduled-tasks",
     "integrations",
     "skills",
     "sidebar",
