@@ -179,9 +179,13 @@ const USAGE = `Usage:
   server resolves the owning project from the session file, so the agent's
   natural usage is just \`wake <self>\`.
 
-  controller sessions goal set <sessionId> --condition <text> [--max-turns <n>] [--expires-at <iso>]
-  controller sessions goal clear <sessionId>
-  controller sessions goal show <sessionId>
+  controller sessions goal set <sessionId|self> --condition <text> [--max-turns <n>] [--expires-at <iso>]
+  controller sessions goal clear <sessionId|self>
+  controller sessions goal show <sessionId|self>
+
+  Goal commands take a session id without a project prefix; the server
+  finds the owning project from the session. \`self\` uses the current
+  Controller session id.
 
   \`sessions goal\` attaches a condition-driven completion target to the
   session (issue #339). After every turn, the server's GoalEvaluator
@@ -1175,33 +1179,20 @@ export function parseSessions(argv) {
 // --- sessions goal surface (issue #339) ---
 
 /*
- * `sessions goal <set|clear|show> <sessionId> ...` — same shape as
- * `wake`: <project> is optional and resolved by the server from the
+ * `sessions goal <set|clear|show> <sessionId|self> ...` takes no project
+ * prefix. The per-session routes resolve the owning project from the
  * session file (issue #339). The three subcommands map to three HTTP
  * verbs on the per-session goal endpoint:
  *   - set   → PUT  { action: "set",   condition, maxTurns?, expiresAt? }
  *   - clear → PUT  { action: "clear" }
  *   - show  → GET
  *
- * The positional parsing re-reads from `rest` (not `args`) because the
- * outer `<project>` strip above eats the first non-flag token — if
- * `<project>` is supplied, the session id would land at `args[0]`, but
- * when it's omitted the session id IS `rest[0]`. Reading from `rest`
- * works for both shapes; the unused `project` value is preserved for
- * the route layer's resolver.
+ * `rest[0]` is always the session id. Reject extra positionals so a
+ * project prefix cannot silently become the session id.
  */
 export function parseGoal(argv) {
   const [command, ...rest] = argv;
   if (!command) fail("sessions goal requires a subcommand: set, clear, show");
-  // `<project>` is the optional first positional. Match `sessions wake`:
-  // if the next token starts with `--`, the user didn't supply a
-  // project and the run path falls back to cwd via `resolveProjectId`.
-  let project = "";
-  let args = rest;
-  if (rest[0] !== undefined && !rest[0].startsWith("--")) {
-    project = rest[0];
-    args = rest.slice(1);
-  }
   switch (command) {
     case "set": {
       // Issue #375: route the session id through `resolveParentFlag` so
@@ -1218,6 +1209,13 @@ export function parseGoal(argv) {
         ["--condition", "--max-turns", "--expires-at"],
         "sessions goal set"
       );
+      const extra = positionalArgs(
+        goalArgs,
+        ["--condition", "--max-turns", "--expires-at"]
+      )[0];
+      if (extra) {
+        fail(`sessions goal set: unexpected positional argument "${extra}"`);
+      }
       const condition = flagValue(goalArgs, "--condition");
       if (!condition || !condition.trim()) {
         fail("sessions goal set requires --condition <text>");
@@ -1233,7 +1231,6 @@ export function parseGoal(argv) {
       }
       const expiresAt = flagValue(goalArgs, "--expires-at");
       return {
-        project,
         action: "set",
         sessionId,
         body: {
@@ -1250,8 +1247,10 @@ export function parseGoal(argv) {
         fail("sessions goal clear requires a sessionId");
       }
       const sessionId = resolveParentFlag(rest[0], "sessions goal clear");
+      if (rest[1]) {
+        fail(`sessions goal clear: unexpected positional argument "${rest[1]}"`);
+      }
       return {
-        project,
         action: "clear",
         sessionId,
         body: { action: "clear" },
@@ -1263,7 +1262,10 @@ export function parseGoal(argv) {
         fail("sessions goal show requires a sessionId");
       }
       const sessionId = resolveParentFlag(rest[0], "sessions goal show");
-      return { project, action: "show", sessionId };
+      if (rest[1]) {
+        fail(`sessions goal show: unexpected positional argument "${rest[1]}"`);
+      }
+      return { action: "show", sessionId };
     }
     default:
       fail(`Unknown sessions goal command: ${command}\n${USAGE}`);

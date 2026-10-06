@@ -1819,6 +1819,7 @@ test("parseGoal set builds a goal payload with --condition and --max-turns", asy
   ]);
   assert.equal(parsed.action, "set");
   assert.equal(parsed.sessionId, "sess-abc");
+  assert.equal(Object.hasOwn(parsed, "project"), false);
   assert.equal(parsed.body.action, "set");
   assert.equal(parsed.body.condition, "all CI checks pass");
   assert.equal(parsed.body.maxTurns, 5);
@@ -1886,6 +1887,7 @@ test("parseGoal clear builds an action=clear payload", async () => {
   const parsed = cli.parseGoal(["clear", "sess-abc"]);
   assert.equal(parsed.action, "clear");
   assert.equal(parsed.sessionId, "sess-abc");
+  assert.equal(Object.hasOwn(parsed, "project"), false);
   assert.equal(parsed.body.action, "clear");
 });
 
@@ -1894,6 +1896,33 @@ test("parseGoal show reads via GET on the per-session goal endpoint", async () =
   const parsed = cli.parseGoal(["show", "sess-abc"]);
   assert.equal(parsed.action, "show");
   assert.equal(parsed.sessionId, "sess-abc");
+  assert.equal(Object.hasOwn(parsed, "project"), false);
+});
+
+test("parseGoal rejects a project prefix on set, clear, and show", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write;
+  let stderrText = "";
+  process.exit = () => { throw new Error("__exit__"); };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    for (const [command, args] of [
+      ["set", ["MyProject", "sess-abc", "--condition", "ci"]],
+      ["clear", ["MyProject", "sess-abc"]],
+      ["show", ["MyProject", "sess-abc"]],
+    ]) {
+      stderrText = "";
+      assert.throws(() => cli.parseGoal([command, ...args]), /__exit__/);
+      assert.match(stderrText, new RegExp(`sessions goal ${command}: unexpected positional argument "sess-abc"`));
+    }
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
 });
 
 test("runGoal set PUTs the goal payload and prints the condition", async () => {
