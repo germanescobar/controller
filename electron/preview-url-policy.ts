@@ -41,10 +41,14 @@ function isPathInside(parent: string, child: string): boolean {
 }
 
 /** Resolve symlinks for the main-process URL and file-read boundary checks. */
-export async function canonicalizeForBoundary(input: string): Promise<string> {
+export async function canonicalizeForBoundary(
+  input: string,
+  throwOnError = false
+): Promise<string> {
   try {
     return await fs.realpath(input);
-  } catch {
+  } catch (error) {
+    if (throwOnError) throw error;
     return input;
   }
 }
@@ -75,13 +79,21 @@ export async function validatePreviewUrl(
     } catch {
       return { allowed: false, error: "Invalid file URL" };
     }
-    if (!isPathInside(
-      await canonicalizeForBoundary(projectRoot),
-      await canonicalizeForBoundary(filePath)
-    )) {
+    let canonicalRoot: string;
+    let canonicalFilePath: string;
+    try {
+      canonicalRoot = await canonicalizeForBoundary(projectRoot, true);
+      canonicalFilePath = await canonicalizeForBoundary(filePath, true);
+    } catch {
+      return { allowed: false, error: "File preview path could not be resolved" };
+    }
+    if (!isPathInside(canonicalRoot, canonicalFilePath)) {
       return { allowed: false, error: "File previews must stay inside the active project" };
     }
-    return { allowed: true, url: url.toString() };
+    const canonicalUrl = pathToFileURL(canonicalFilePath);
+    canonicalUrl.search = url.search;
+    canonicalUrl.hash = url.hash;
+    return { allowed: true, url: canonicalUrl.toString() };
   }
 
   return { allowed: false, error: "Only web URLs and project file previews are allowed" };
