@@ -12,7 +12,7 @@
     "dev:server": "node scripts/dev-server-with-port-bump.mjs",
     "dev:client": "vite",
     "dev:electron": "npm run build:electron-runtime && concurrently -k \"npm run dev:server\" \"npm run dev:client\" \"node electron/wait-and-launch.mjs\"",
-    "build": "vite build && tsc -p server/tsconfig.json && node cli/copy-cli.mjs && npm run build:electron-runtime",
+    "build": "vite build && tsc -b shared && tsc -p server/tsconfig.json && node cli/copy-cli.mjs && npm run build:electron-runtime",
     "build:electron-runtime": "tsc -p electron/tsconfig.json && npm run build:electron-assets",
     "build:electron-assets": "node electron/copy-assets.mjs",
     "package:electron": "npm run build && electron-builder --dir && node electron/resign-mac.mjs",
