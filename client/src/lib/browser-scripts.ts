@@ -106,10 +106,35 @@ const RESOLVE_BODY = `
     }
     function flatten(root){
       var out = [];
-      var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
-      var n;
-      while ((n = walker.nextNode())) out.push(n);
+      function visit(node){
+        if (node.nodeType === 1) {
+          out.push(node);
+          if (node.shadowRoot) visit(node.shadowRoot);
+        }
+        var children = node.children || [];
+        for (var i = 0; i < children.length; i++) visit(children[i]);
+      }
+      visit(root);
       return out;
+    }
+    function deepQuery(selector){
+      var parts = selector.split(/\\s*>>>\\s*/);
+      var scope = document;
+      for (var i = 0; i < parts.length; i++) {
+        if (!parts[i]) return null;
+        var match = scope.querySelector(parts[i]);
+        if (!match && i === 0) {
+          var nodes = flatten(document.body);
+          for (var j = 0; j < nodes.length && !match; j++) {
+            if (nodes[j].shadowRoot) match = nodes[j].shadowRoot.querySelector(parts[i]);
+          }
+        }
+        if (!match) return null;
+        if (i === parts.length - 1) return match;
+        scope = match.shadowRoot;
+        if (!scope) return null;
+      }
+      return null;
     }
     function implicitRole(el){
       switch (el.tagName) {
@@ -129,7 +154,7 @@ const RESOLVE_BODY = `
         case 'NAV': return 'navigation';
         case 'SELECT': return 'combobox';
         case 'TEXTAREA': return 'textbox';
-        default: return null;
+        default: return el.isContentEditable || el.hasAttribute('contenteditable') ? 'textbox' : null;
       }
     }
     function byText(query){
@@ -195,7 +220,7 @@ const RESOLVE_BODY = `
           if (lab && (lab.textContent || '').trim().toLowerCase() === needle) return el;
         }
         if (el.tagName === 'LABEL' && (el.textContent || '').trim().toLowerCase() === needle) {
-          var control = el.htmlFor ? document.getElementById(el.htmlFor) : el.querySelector('input,textarea,select');
+          var control = el.htmlFor ? document.getElementById(el.htmlFor) : el.querySelector('input,textarea,select,[contenteditable]');
           if (control && visible(control)) return control;
         }
       }
@@ -241,10 +266,10 @@ const RESOLVE_BODY = `
         var id = raw.slice(4);
         var sel = refs && refs[id];
         if (!sel) return { ok: false, engine: 'ref', error: 'unknown ref' };
-        var re = document.querySelector(sel);
+        var re = deepQuery(sel);
         return re ? { ok: true, engine: 'ref', element: re } : { ok: false, engine: 'ref', error: 'stale ref' };
       }
-      var ce = document.querySelector(raw);
+      var ce = deepQuery(raw);
       return ce ? { ok: true, engine: 'css', element: ce } : { ok: false, engine: 'css', error: 'no element matches' };
     }
 `;
@@ -476,13 +501,46 @@ export function buildTypeScript(b: ScriptBindings): string {
     var r = resolve(selector, refs);
     if (!r.ok) return { ok: false, engine: r.engine, error: r.error };
     var el = r.element;
+    if (/^role=textbox\\s*$/i.test(selector)) {
+      var textboxes = flatten(document.body).filter(function(node){
+        return visible(node) && (node.getAttribute('role') || implicitRole(node)) === 'textbox';
+      });
+      if (textboxes.length > 1) return { ok: false, engine: r.engine, error: 'ambiguous textbox; use a name or ref' };
+    }
+    function editable(node){
+      if (!node || node.disabled || node.readOnly) return false;
+      if (node.isContentEditable || node.getAttribute('contenteditable') === 'true' || node.getAttribute('contenteditable') === '') return true;
+      if (node.tagName === 'TEXTAREA') return true;
+      if (node.tagName !== 'INPUT') return false;
+      return /^(text|search|url|tel|email|password|number)$/i.test(node.getAttribute('type') || 'text');
+    }
+    if (!editable(el)) {
+      var candidates = flatten(el).filter(function(node){ return node !== el && editable(node); });
+      if (candidates.length !== 1) return { ok: false, engine: r.engine, error: 'target is not a unique editable field' };
+      el = candidates[0];
+    }
     el.focus();
-    var proto = (typeof HTMLTextAreaElement !== 'undefined' && el instanceof HTMLTextAreaElement)
-      ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
-    if (setter && setter.set) setter.set.call(el, value); else el.value = value;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (el.isContentEditable || el.hasAttribute('contenteditable')) {
+      // Chromium's editing command follows the same input pipeline as a
+      // keyboard edit, which Polymer/Lit editors listen to. Replace the
+      // entire field, matching the input/textarea behavior below.
+      var selection = window.getSelection();
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      if (!document.execCommand || !document.execCommand('insertText', false, value)) {
+        el.textContent = value;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     if (submit && el.form) {
       if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
     }
@@ -542,16 +600,19 @@ export const SNAPSHOT_BODY = `
       return el.tagName.toLowerCase();
     }
     function uniqueSelector(el){
+      var owner = el.getRootNode ? el.getRootNode() : document;
+      var scope = owner && owner.querySelector ? owner : document;
+      var prefix = owner && owner.host ? uniqueSelector(owner.host) + ' >>> ' : '';
       // An id is unique by definition. Short-circuit so refs are stable as
       // long as the page keeps the id, even if the DOM around it changes.
-      if (el.id) return '#' + cssEscape(el.id);
+      if (el.id) return prefix + '#' + cssEscape(el.id);
       // Try the cheap heuristic first. Accept it only when it actually
       // resolves to this element — querySelectorAll(base).length === 1 is
       // not enough, because the lone match could be a sibling with the
       // same attributes.
       var base = cheapSelector(el);
-      var cheapMatch = document.querySelector(base);
-      if (cheapMatch === el) return base;
+      var cheapMatch = scope.querySelector(base);
+      if (cheapMatch === el) return prefix + base;
       // Build a positional path up the tree. Anchor on the nearest id'd
       // ancestor when we hit one — that keeps the selector short and
       // stable against DOM changes outside the id'd subtree. If the
@@ -568,7 +629,7 @@ export const SNAPSHOT_BODY = `
         cur = cur.parentElement;
       }
       var sel = path.join(' > ');
-      if (document.querySelector(sel) === el) return sel;
+      if (scope.querySelector(sel) === el) return prefix + sel;
       // Last-resort chain from the source element to the document root.
       // We stop when c has no parentElement — that is the documentElement,
       // which we still want to include in the chain (it carries the
@@ -580,7 +641,7 @@ export const SNAPSHOT_BODY = `
         if (!c.parentElement) break;
         c = c.parentElement;
       }
-      return fullPath.join(' > ');
+      return prefix + fullPath.join(' > ');
     }
     function implicitRole(el){
       switch (el.tagName) {
@@ -600,7 +661,7 @@ export const SNAPSHOT_BODY = `
         case 'NAV': return 'navigation';
         case 'SELECT': return 'combobox';
         case 'TEXTAREA': return 'textbox';
-        default: return null;
+        default: return el.isContentEditable || el.hasAttribute('contenteditable') ? 'textbox' : null;
       }
     }
     function accessibleName(el){
@@ -621,18 +682,57 @@ export const SNAPSHOT_BODY = `
     }
     function visible(el){
       if (!el || el.nodeType !== 1) return false;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
       var style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return false;
       var rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       return true;
     }
-    function collectInteractive(root){
-      return Array.prototype.slice.call(
-        root.querySelectorAll('a,button,input,textarea,select,[role="button"]')
-      );
+    function composedChildren(el){
+      var children = [];
+      if (el.shadowRoot) children = children.concat(Array.from(el.shadowRoot.children));
+      return children.concat(Array.from(el.children || []));
     }
-    var root = sel ? document.querySelector(sel) : document.body;
+    function allElements(root){
+      var out = [];
+      function visit(el){
+        if (!el || el.nodeType !== 1 || !visible(el)) return;
+        out.push(el);
+        composedChildren(el).forEach(visit);
+      }
+      visit(root);
+      return out;
+    }
+    function collectInteractive(root){
+      return allElements(root).filter(function(el){
+        var tag = el.tagName;
+        var role = el.getAttribute('role');
+        return tag === 'A' || tag === 'BUTTON' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+          || el.isContentEditable || el.hasAttribute('contenteditable')
+          || role === 'button' || role === 'textbox' || role === 'dialog' || role === 'menu'
+          || role === 'menuitem' || role === 'option' || role === 'combobox';
+      });
+    }
+    function deepQuery(selector){
+      var parts = selector.split(/\\s*>>>\\s*/);
+      var scope = document;
+      for (var i = 0; i < parts.length; i++) {
+        var match = scope.querySelector(parts[i]);
+        if (!match && i === 0) {
+          var nodes = allElements(document.body);
+          for (var j = 0; j < nodes.length && !match; j++) {
+            if (nodes[j].shadowRoot) match = nodes[j].shadowRoot.querySelector(parts[i]);
+          }
+        }
+        if (!match) return null;
+        if (i === parts.length - 1) return match;
+        scope = match.shadowRoot;
+        if (!scope) return null;
+      }
+      return null;
+    }
+    var root = sel ? deepQuery(sel) : document.body;
     if (!root) return { found: false };
     var refs = Object.create(null);
     var counter = 0;
@@ -654,7 +754,7 @@ export const SNAPSHOT_BODY = `
         // so a hidden dialog in the snapshot would let an agent
         // trigger a control the user cannot see. Issue #170 review.
         if (!visible(el)) return;
-        var children = Array.from(el.children);
+        var children = composedChildren(el);
         var interactive = collectInteractive(el).length > 0;
         var hasText = (el.textContent || '').trim().length > 0;
         if (!interactive && !hasText) {
@@ -674,15 +774,51 @@ export const SNAPSHOT_BODY = `
       return { found: true, url: location.href, title: document.title, text: lines.join('\\n'), refs: refs, refCount: counter };
     }
     // Default: visible text + a flat list of interactive elements (with refs).
-    var text = (root.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 8000);
-    var nodes = collectInteractive(root).slice(0, 80);
+    var textParts = [];
+    function gatherText(el){
+      if (!visible(el)) return;
+      if (el.childNodes) {
+        Array.from(el.childNodes).forEach(function(node){
+          if (node.nodeType === 3 && node.textContent.trim()) textParts.push(node.textContent.trim());
+        });
+      } else if (!composedChildren(el).length && (el.innerText || el.textContent || '').trim()) {
+        textParts.push((el.innerText || el.textContent).trim());
+      }
+      composedChildren(el).forEach(gatherText);
+    }
+    gatherText(root);
+    // Upload forms often append their active modal at the end of a large
+    // page. Give its text and controls priority over the page-wide caps.
+    var overlays = allElements(root).filter(function(el){
+      var role = el.getAttribute('role');
+      return role === 'dialog' || role === 'alertdialog' || role === 'menu'
+        || (el.tagName === 'DIALOG' && el.open)
+        || (el.hasAttribute('popover') && el.matches && el.matches(':popover-open'));
+    });
+    var overlayText = [];
+    overlays.forEach(function(overlay){
+      var before = textParts;
+      textParts = [];
+      gatherText(overlay);
+      overlayText.push(textParts.join('\\n'));
+      textParts = before;
+    });
+    var text = (overlayText.join('\\n') + '\\n' + textParts.join('\\n'))
+      .replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 8000);
+    var seen = new Set();
+    var nodes = [];
+    overlays.forEach(function(overlay){
+      collectInteractive(overlay).forEach(function(el){ if (!seen.has(el)) { seen.add(el); nodes.push(el); } });
+    });
+    collectInteractive(root).forEach(function(el){ if (!seen.has(el)) { seen.add(el); nodes.push(el); } });
+    nodes = nodes.slice(0, 80);
     var interactiveLines = [];
     nodes.forEach(function(el){
       if (!visible(el)) return;
       var s = uniqueSelector(el);
       if (!s) return;
       var id = record(el);
-      var label = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 60);
+      var label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || el.value || '').trim().slice(0, 60);
       interactiveLines.push('- ' + el.tagName.toLowerCase() + ' ' + s + (label ? ' — ' + label : '') + ' [ref=' + id + ']');
     });
     var full = text + (interactiveLines.length ? '\\n\\nInteractive elements:\\n' + interactiveLines.join('\\n') : '');
