@@ -151,8 +151,11 @@ const RESOLVE_BODY = `
           if (t === 'checkbox') return 'checkbox';
           if (t === 'radio') return 'radio';
           if (t === 'range') return 'slider';
+          if (el.hasAttribute('list') && /^(text|search|tel|url|email)$/.test(t)) return 'combobox';
           if (t === 'search') return 'searchbox';
-          return 'textbox';
+          if (t === 'number') return 'spinbutton';
+          if (t === 'text' || t === 'email' || t === 'tel' || t === 'url') return 'textbox';
+          return null;
         }
         case 'NAV': return 'navigation';
         case 'SELECT': return 'combobox';
@@ -662,8 +665,11 @@ export const SNAPSHOT_BODY = `
           if (t === 'checkbox') return 'checkbox';
           if (t === 'radio') return 'radio';
           if (t === 'range') return 'slider';
+          if (el.hasAttribute('list') && /^(text|search|tel|url|email)$/.test(t)) return 'combobox';
           if (t === 'search') return 'searchbox';
-          return 'textbox';
+          if (t === 'number') return 'spinbutton';
+          if (t === 'text' || t === 'email' || t === 'tel' || t === 'url') return 'textbox';
+          return null;
         }
         case 'NAV': return 'navigation';
         case 'SELECT': return 'combobox';
@@ -789,9 +795,18 @@ export const SNAPSHOT_BODY = `
       return { found: true, url: location.href, title: document.title, text: lines.join('\\n'), refs: refs, refCount: counter };
     }
     // Default: visible text + a flat list of interactive elements (with refs).
+    // Collect overlay text separately so it can lead the snapshot without
+    // appearing again in the page-wide text pass.
+    var overlays = allElements(root).filter(function(el){
+      var role = el.getAttribute('role');
+      return role === 'dialog' || role === 'alertdialog' || role === 'menu'
+        || (el.tagName === 'DIALOG' && el.open)
+        || (el.hasAttribute('popover') && el.matches && el.matches(':popover-open'));
+    });
+    var overlaySet = new Set(overlays);
     var textParts = [];
-    function gatherText(el){
-      if (hiddenSubtree(el)) return;
+    function gatherText(el, includedOverlay){
+      if (hiddenSubtree(el) || (overlaySet.has(el) && el !== includedOverlay)) return;
       if (visible(el)) {
         if (el.childNodes) {
           Array.from(el.childNodes).forEach(function(node){
@@ -801,22 +816,16 @@ export const SNAPSHOT_BODY = `
           textParts.push((el.innerText || el.textContent).trim());
         }
       }
-      composedChildren(el).forEach(gatherText);
+      composedChildren(el).forEach(function(child){ gatherText(child, includedOverlay); });
     }
-    gatherText(root);
+    gatherText(root, null);
     // Upload forms often append their active modal at the end of a large
     // page. Give its text and controls priority over the page-wide caps.
-    var overlays = allElements(root).filter(function(el){
-      var role = el.getAttribute('role');
-      return role === 'dialog' || role === 'alertdialog' || role === 'menu'
-        || (el.tagName === 'DIALOG' && el.open)
-        || (el.hasAttribute('popover') && el.matches && el.matches(':popover-open'));
-    });
     var overlayText = [];
     overlays.forEach(function(overlay){
       var before = textParts;
       textParts = [];
-      gatherText(overlay);
+      gatherText(overlay, overlay);
       overlayText.push(textParts.join('\\n'));
       textParts = before;
     });

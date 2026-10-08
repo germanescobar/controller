@@ -549,6 +549,34 @@ test("nested rich-text content does not make a single editor ambiguous", () => {
   assert.ok(!Object.values(snapshot.refs).includes("#paragraph"));
 });
 
+for (const type of ["date", "number", "file", "password"]) {
+  test(`role=textbox ignores input[type=${type}] beside a text field`, () => {
+    const textField = makeEl("input", { id: "text", attributes: new Map([["type", "text"]]) });
+    const otherField = makeEl("input", { id: "other", attributes: new Map([["type", type]]) });
+    const body = elApi(makeEl("body", { children: [textField, otherField] })).toBody() as Record<string, unknown>;
+    const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+      selector: "role=textbox", refs: {}, text: "hello",
+    }), body);
+    assert.equal(result.ok, true, result.error);
+    const text = (body.querySelector as (selector: string) => { value: string })("#text");
+    assert.equal(text.value, "hello");
+  });
+}
+
+test("role=textbox ignores a text input backed by a datalist", () => {
+  const textField = makeEl("input", { id: "text", attributes: new Map([["type", "text"]]) });
+  const combobox = makeEl("input", {
+    id: "choices", attributes: new Map([["type", "text"], ["list", "suggestions"]]),
+  });
+  const body = elApi(makeEl("body", { children: [textField, combobox] })).toBody() as Record<string, unknown>;
+  const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+    selector: "role=textbox", refs: {}, text: "hello",
+  }), body);
+  assert.equal(result.ok, true, result.error);
+  const text = (body.querySelector as (selector: string) => { value: string })("#text");
+  assert.equal(text.value, "hello");
+});
+
 for (const [type, value] of [
   ["date", "2026-10-08"],
   ["time", "13:45"],
@@ -659,6 +687,29 @@ test("default snapshot prioritizes a late dialog after many page controls", () =
   );
   assert.match(result.text, /#confirm-schedule/);
   assert.ok(Object.values(result.refs).includes("#confirm-schedule"));
+});
+
+test("default snapshot includes prioritized overlay text only once", () => {
+  const overlayText = makeEl("span", { textContent: "Overlay copy" });
+  const dialog = makeEl("div", {
+    id: "dialog", attributes: new Map([["role", "dialog"]]), children: [overlayText],
+  });
+  const pageText = makeEl("p", { textContent: "Page context" });
+  const body = elApi(makeEl("body", { children: [dialog, pageText] })).toBody();
+  const result = runScript<{ text: string }>(buildSnapshotScript(undefined, "default"), body);
+  assert.equal(result.text.split("Overlay copy").length - 1, 1);
+  assert.match(result.text, /Page context/);
+});
+
+test("long overlay text leaves room for page context in the snapshot", () => {
+  const overlayText = makeEl("span", { textContent: "O".repeat(4500) });
+  const dialog = makeEl("div", {
+    id: "dialog", attributes: new Map([["role", "dialog"]]), children: [overlayText],
+  });
+  const pageText = makeEl("p", { textContent: "Page context after dialog" });
+  const body = elApi(makeEl("body", { children: [dialog, pageText] })).toBody();
+  const result = runScript<{ text: string }>(buildSnapshotScript(undefined, "default"), body);
+  assert.match(result.text, /Page context after dialog/);
 });
 
 test("snapshot traverses visible controls inside boxless containers", () => {
