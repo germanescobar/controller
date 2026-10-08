@@ -649,11 +649,16 @@ export function Sidebar({
   //
   // Invariants:
   //
-  //   - `currentToken > 0`  ⇔  a `loadAll` is in flight. The token is the
-  //     monotonic id of that in-flight call.
-  //   - `lastSuccessToken`  =  the token of the most recent *successful*
-  //     `loadAll`. It only advances on success; a failed `loadAll` does
-  //     not bump it.
+  //   - `inFlightTokens`    =  the set of tokens for every `loadAll`
+  //     currently in flight. Empty ⇔ no loadAll in flight. A
+  //     single-token "current token" was insufficient because two
+  //     loadAlls can overlap (e.g. rapid project selection or
+  //     React StrictMode's development effect replay) and the first
+  //     to finish would otherwise clear the slot out from under the
+  //     second.
+  //   - `lastSuccessToken`  =  max over all successful `loadAll`
+  //     tokens (a failed loadAll does not bump it; an older successful
+  //     loadAll completing after a newer one does not regress it).
   //   - `version`           =  monotonic counter bumped on every
   //     transition. The drain effect depends on it so the drain re-fires
   //     after any loadAll transition.
@@ -661,7 +666,8 @@ export function Sidebar({
   // The targeted refresh's deferral rule (single comparison, no chained
   // gates):
   //
-  //     tokenAtStart := currentToken (0 if no loadAll in flight at start)
+  //     tokenAtStart := max token in `inFlightTokens` at fetch start
+  //                    (0 if no loadAll in flight at start)
   //     after fetch resolves:
   //       safe to apply ⇔ lastSuccessToken ≥ tokenAtStart
   //
@@ -681,10 +687,10 @@ export function Sidebar({
   // place.
   // ---------------------------------------------------------------------------
   const loadAllStateRef = useRef<{
-    currentToken: number;
+    inFlightTokens: Set<number>;
     lastSuccessToken: number;
     version: number;
-  }>({ currentToken: 0, lastSuccessToken: 0, version: 0 });
+  }>({ inFlightTokens: new Set(), lastSuccessToken: 0, version: 0 });
   const [loadAllVersion, setLoadAllVersion] = useState(0);
   const bumpLoadAllState = useCallback((updater: () => void) => {
     updater();
@@ -692,12 +698,29 @@ export function Sidebar({
     setLoadAllVersion(loadAllStateRef.current.version);
   }, []);
 
+  // Snapshot the loadAll state into a single comparison token. The
+  // targeted refresh uses this as `tokenAtStart`; the deferral
+  // rule is then `lastSuccessToken >= tokenAtStart`. Returns 0
+  // when no loadAll is in flight, which the rule treats as
+  // "always apply once the fetch returns" (every successful
+  // loadAll is at least token 1).
+  const snapshotLoadAllToken = (
+    state: { inFlightTokens: Set<number> }
+  ): number => {
+    if (state.inFlightTokens.size === 0) return 0;
+    let max = 0;
+    for (const t of state.inFlightTokens) {
+      if (t > max) max = t;
+    }
+    return max;
+  };
+
   const loadAll = useCallback(async () => {
-    // Allocate a fresh token, claim the in-flight slot, bump version so
+    // Allocate a fresh token, claim an in-flight slot, bump version so
     // the drain effect re-runs.
     const myToken = loadAllStateRef.current.version + 1;
     bumpLoadAllState(() => {
-      loadAllStateRef.current.currentToken = myToken;
+      loadAllStateRef.current.inFlightTokens.add(myToken);
     });
     let succeeded = false;
     try {
@@ -737,16 +760,20 @@ export function Sidebar({
       await refreshActiveSessions();
       succeeded = true;
     } finally {
-      // Release the in-flight slot. If we succeeded, advance
-      // `lastSuccessToken` so any targeted refresh whose snapshot
-      // predates this run can finally apply. If we failed, leave
-      // `lastSuccessToken` where it was so the next loadAll is the
-      // authority. Either way bump `version` so the drain fires.
+      // Release this run's in-flight slot. With concurrent loadAlls
+      // the slot set is the source of truth — we only remove our
+      // own token, not the whole set. `lastSuccessToken` advances
+      // via max (not assignment) so a stale older loadAll
+      // completing after a newer one does not regress the
+      // authoritative marker.
       bumpLoadAllState(() => {
+        loadAllStateRef.current.inFlightTokens.delete(myToken);
         if (succeeded) {
-          loadAllStateRef.current.lastSuccessToken = myToken;
+          loadAllStateRef.current.lastSuccessToken = Math.max(
+            loadAllStateRef.current.lastSuccessToken,
+            myToken,
+          );
         }
-        loadAllStateRef.current.currentToken = 0;
       });
     }
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
@@ -770,7 +797,7 @@ export function Sidebar({
    */
   const refreshWorktreeSessions = useCallback(
     async (projectId: string, worktreeId: string): Promise<void> => {
-      const tokenAtStart = loadAllStateRef.current.currentToken;
+      const tokenAtStart = snapshotLoadAllToken(loadAllStateRef.current);
       let sessions: SessionSummary[];
       try {
         sessions = await fetchSessions(projectId, worktreeId);
@@ -840,7 +867,7 @@ export function Sidebar({
    */
   const refreshProjectWorktrees = useCallback(
     async (projectId: string): Promise<void> => {
-      const tokenAtStart = loadAllStateRef.current.currentToken;
+      const tokenAtStart = snapshotLoadAllToken(loadAllStateRef.current);
       let worktrees: Worktree[];
       try {
         worktrees = await fetchWorktrees(projectId);
@@ -911,15 +938,35 @@ export function Sidebar({
   // collapse into one and skip half the work.
   const pendingSessionScopesRef = useRef<Set<string>>(new Set());
   const pendingProjectScopesRef = useRef<Set<string>>(new Set());
+  // The drain is defined later in the file, so we keep a ref to its
+  // latest instance. The queue helpers schedule a microtask drain
+  // after adding to the set so a scope that arrives after a loadAll
+  // transition has already fired its drain still gets a chance to
+  // apply: a plain ref mutation doesn't trigger React effects.
+  const drainPendingRefreshesRef = useRef<() => void>(() => {});
+  const drainScheduledRef = useRef<boolean>(false);
+  const scheduleDrain = useCallback(() => {
+    if (drainScheduledRef.current) return;
+    drainScheduledRef.current = true;
+    queueMicrotask(() => {
+      drainScheduledRef.current = false;
+      drainPendingRefreshesRef.current();
+    });
+  }, []);
   const queueSessionRefresh = useCallback(
     (projectId: string, worktreeId: string) => {
       pendingSessionScopesRef.current.add(`${projectId}\u0000${worktreeId}`);
+      scheduleDrain();
     },
-    [],
+    [scheduleDrain],
   );
-  const queueProjectWorktreesRefresh = useCallback((projectId: string) => {
-    pendingProjectScopesRef.current.add(projectId);
-  }, []);
+  const queueProjectWorktreesRefresh = useCallback(
+    (projectId: string) => {
+      pendingProjectScopesRef.current.add(projectId);
+      scheduleDrain();
+    },
+    [scheduleDrain],
+  );
 
   /**
    * Replay every queued targeted refresh that has a now-loaded
@@ -947,7 +994,7 @@ export function Sidebar({
     }
     const canEvictMissingProject =
       loadAllStateRef.current.lastSuccessToken > 0 &&
-      loadAllStateRef.current.currentToken === 0;
+      loadAllStateRef.current.inFlightTokens.size === 0;
     const knownProjectIds = new Set(
       projectDataRef.current.map((p) => p.id),
     );
@@ -986,6 +1033,15 @@ export function Sidebar({
       refreshProjectWorktrees(projectId).catch(() => {});
     });
   }, [refreshWorktreeSessions, refreshProjectWorktrees]);
+
+  // Keep the queue-helpers' ref mirror current so they can
+  // schedule a microtask drain after adding to the set. The
+  // microtask is the only way to fire a drain from inside the
+  // queue helper without coupling the helpers' definition to
+  // the drain's order in the file (forward reference).
+  useEffect(() => {
+    drainPendingRefreshesRef.current = drainPendingRefreshes;
+  }, [drainPendingRefreshes]);
 
   useEffect(() => {
     loadAll().catch(() => {});
@@ -1051,27 +1107,17 @@ export function Sidebar({
    * loadAll state machine transitions: scope deferrals that were
    * waiting on a loadAll outcome get replayed against the fresh
    * snapshot.
+   *
+   * The lifecycle dispatch lives in the consume-once effect above.
+   * An earlier draft of this refactor had a second unguarded effect
+   * here that re-dispatched the same payload on every callback-dep
+   * change, bypassing `lastConsumedRefreshesCounterRef` and
+   * resurrecting the original request-storm problem the consume-once
+   * check was meant to prevent.
    */
   useEffect(() => {
     drainPendingRefreshes();
   }, [projectData, loadAllVersion, drainPendingRefreshes]);
-  useEffect(() => {
-    if (!pendingProjectRefreshes) return;
-    pendingProjectRefreshes.sessions.forEach((scope) => {
-      refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
-        () => {},
-      );
-    });
-    pendingProjectRefreshes.worktrees.forEach((projectId) => {
-      refreshProjectWorktrees(projectId).catch(() => {});
-    });
-    drainPendingRefreshes();
-  }, [
-    pendingProjectRefreshes,
-    refreshWorktreeSessions,
-    refreshProjectWorktrees,
-    drainPendingRefreshes,
-  ]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
