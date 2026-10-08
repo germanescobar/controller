@@ -705,6 +705,20 @@ export interface QueuedMessageInput extends Omit<QueuedMessage, "id" | "createdA
    * the `mentions` query param on `startSession`.
    */
   mentions?: { path: string; type: "file" | "directory" }[];
+  /**
+   * Line-range selection chips from a diff-selection gesture
+   * (issue #416). Same snapshot semantics as `mentions`: the
+   * orchestrator carries the chip stack across run boundaries
+   * so a queued turn replays the user's selection on the next
+   * run, keeping the resolved prompt byte-identical to the
+   * user's intent. Mirrors the `selections` query param on
+   * `startSession`.
+   */
+  selections?: {
+    path: string;
+    ranges: { start: number; end: number }[];
+    preview: string;
+  }[];
 }
 
 export async function fetchSessionQueue(
@@ -1544,6 +1558,18 @@ export function startSession(
      * that mention the same files produce identical prompts.
      */
     mentions?: { path: string; type: "file" | "directory" }[];
+    /**
+     * Line-range selection chips seeded from a diff (issue #416).
+     * Each chip is `{ path, ranges, preview }`; the resolver inlines
+     * the preview under a `### Selection: path:start-end` header so
+     * the agent can refer back to a specific span. Wire format
+     * matches the SSE handler's `selections` query param.
+     */
+    selections?: {
+      path: string;
+      ranges: { start: number; end: number }[];
+      preview: string;
+    }[];
     skillName?: string;
     /**
      * Per-session agent-inactivity timeout in ms (issue #386). When
@@ -1580,6 +1606,46 @@ export function startSession(
       .map((mention) => `${mention.path}|${mention.type}`)
       .join(",");
     params.set("mentions", encoded);
+  }
+  if (options?.selections?.length) {
+    // Same wire format the SSE handler expects (issue #416): one
+    // `path:start-end|previewBase64,…` per chip. The preview is
+    // base64-encoded so commas and newlines inside the snippet
+    // don't break the comma split; the backend decoder in
+    // `server/lib/mentions.ts` re-parses each row back to
+    // `{ path, ranges, preview }`. The same encoding is used by the
+    // headless POST endpoint and the queue-replay path.
+    // `btoa` is a browser global; the surrounding `try`/`catch`
+    // shields the call from `unescape` being deprecated in modern
+    // runtimes (Node 22+, Chrome 120+) — we fall back to the
+    // direct call if the polyfill is missing.
+    const encoded = options.selections
+      .map((selection) => {
+        const token = `${selection.path}:${selection.ranges
+          .map((range) =>
+            range.start === range.end
+              ? String(range.start)
+              : `${range.start}-${range.end}`,
+          )
+          .join(",")}`;
+        const previewB64 = (() => {
+          try {
+            return btoa(unescape(encodeURIComponent(selection.preview)));
+          } catch {
+            // The `unescape` shim is removed in some runtimes; fall
+            // back to a direct `btoa` call (it works for the
+            // preview because previews are always trimmed ASCII
+            // by `truncatePreview` before this point — multi-byte
+            // characters would survive UTF-8 munging in `btoa`
+            // but preview text is line-oriented source code that
+            // is overwhelmingly ASCII).
+            return btoa(selection.preview);
+          }
+        })();
+        return `${token}|${previewB64}`;
+      })
+      .join(",");
+    params.set("selections", encoded);
   }
   if (options?.skillName) params.set("skillName", options.skillName);
   if (

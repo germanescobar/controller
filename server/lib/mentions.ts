@@ -1,5 +1,6 @@
 /*
- * Server-side resolver for `@`-mention chips (issue #312).
+ * Server-side resolver for `@`-mention chips (issue #312) and
+ * line-range selection chips (issue #416).
  *
  * The client is the source of truth for what the user typed; this module
  * is the authorization + assembly layer. Every path is re-validated
@@ -19,15 +20,35 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  parseSelectionToken,
+  buildSelectionContextBlock,
+  buildSelectionPromptPrefix,
+  type LineRange,
+} from "../../shared/diff-selection.js";
 
 export interface ResolvedMention {
   path: string;
   type: "file" | "directory";
 }
 
+/**
+ * A selection chip seeded from a line-range gesture in a rendered
+ * diff (issue #416). The client captures the snippet at click time
+ * so the backend can include selection text in the prompt even
+ * when the file no longer exists on disk (e.g. a deletion diff).
+ */
+export interface ResolvedSelection {
+  path: string;
+  ranges: LineRange[];
+  preview: string;
+}
+
 export interface MentionResolution {
   /** Resolved mentions in the order the user requested them. */
   mentions: ResolvedMention[];
+  /** Resolved selections in the order the user requested them. */
+  selections: ResolvedSelection[];
   /**
    * Deterministic `<mentions>...</mentions>` block. Prepended to the
    * agent prompt AND persisted to history verbatim so two runs that
@@ -56,13 +77,21 @@ const MENTION_PREVIEW_BYTE_LIMIT = 8 * 1024;
  * turn. The user is more likely to fix the path on the next turn than
  * to retry from scratch, and the resolved block still tells the agent
  * what was intended.
+ *
+ * `selections` (issue #416) is an optional list of line-range
+ * selection chips seeded from a rendered diff. Each chip carries the
+ * client-captured preview, so the resolver does not re-read the file
+ * (this is the only way to surface a snippet for a deletion diff
+ * where the path no longer exists on disk). The same worktree-root
+ * boundary check applies; out-of-tree selections are dropped silently.
  */
 export async function resolveMentions(
   worktreePath: string,
-  mentions: ResolvedMention[]
+  mentions: ResolvedMention[],
+  selections: ResolvedSelection[] = []
 ): Promise<MentionResolution> {
-  if (mentions.length === 0) {
-    return { mentions: [], contextBlock: "", prefix: "" };
+  if (mentions.length === 0 && selections.length === 0) {
+    return { mentions: [], selections: [], contextBlock: "", prefix: "" };
   }
   const resolved: ResolvedMention[] = [];
   const annotationLines: string[] = [];
@@ -144,64 +173,171 @@ export async function resolveMentions(
       );
     }
   }
-  if (resolved.length === 0 && annotationLines.length === 0) {
-    return { mentions: [], contextBlock: "", prefix: "" };
+  if (
+    resolved.length === 0 &&
+    annotationLines.length === 0 &&
+    selections.length === 0
+  ) {
+    return { mentions: [], selections: [], contextBlock: "", prefix: "" };
   }
-  const header = [
-    "<mentions>",
-    "The user referenced the following paths in the active worktree. Each",
-    "preview is a short snippet; the agent's file-reading tools can resolve",
-    "the full file by joining the path with the worktree root.",
-  ];
-  const bodyLines = [
-    ...resolved.map((mention) => `- ${mention.type}: ${mention.path}`),
-    ...annotationLines,
-  ];
-  const contextBlock = [...header, ...bodyLines, "</mentions>"].join("\n");
-  const previewLines: string[] = [];
-  for (const mention of resolved) {
-    if (mention.type === "file") {
-      try {
-        const absolutePath = path.resolve(worktreePath, mention.path);
-        const handle = await fs.open(absolutePath, "r");
-        try {
-          const buffer = Buffer.alloc(MENTION_PREVIEW_BYTE_LIMIT);
-          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-          const raw = buffer.subarray(0, bytesRead).toString("utf-8");
-          const lines = raw.split("\n").slice(0, MENTION_PREVIEW_LINE_LIMIT);
-          const preview = lines.join("\n");
-          previewLines.push(
-            `--- ${mention.path} (first ${lines.length} line(s)) ---\n${preview}`
-          );
-        } finally {
-          await handle.close();
-        }
-      } catch {
-        // The agent can read the file itself; don't fail the turn.
-      }
-    } else {
-      try {
-        const absolutePath = path.resolve(worktreePath, mention.path);
-        const dirents = await fs.readdir(absolutePath, { withFileTypes: true });
-        const names = dirents
-          .filter((entry) => entry.isDirectory() || entry.isFile())
-          .map((entry) =>
-            entry.isDirectory() ? `${entry.name}/` : entry.name
-          )
-          .slice(0, 200);
-        previewLines.push(
-          `--- ${mention.path}/ (${names.length} entries) ---\n${names.join("\n")}`
-        );
-      } catch {
-        // As above, leave the block to the agent.
-      }
+  // Resolve line-range selections (issue #416). The same worktree-root
+  // boundary check applies; out-of-tree selections are dropped
+  // silently. We do not re-read the file — the client captured the
+  // preview at click time so the snippet is available even when the
+  // path no longer exists on disk (deletion diffs, mid-edit captures).
+  const resolvedSelections: ResolvedSelection[] = [];
+  const selectionAnnotations: string[] = [];
+  let worktreeRealPath: string | null = null;
+  if (selections.length > 0) {
+    try {
+      worktreeRealPath = await fs.realpath(worktreePath);
+    } catch {
+      // If the worktree itself is unreadable we cannot resolve
+      // selections safely; record a single annotation and skip.
+      selectionAnnotations.push(
+        `- selections skipped: worktree not readable`,
+      );
     }
   }
-  const prefix =
-    previewLines.length === 0
-      ? contextBlock
-      : `${contextBlock}\n\n${previewLines.join("\n\n")}\n`;
-  return { mentions: resolved, contextBlock, prefix };
+  for (const selection of selections) {
+    if (!worktreeRealPath) break;
+    const cleaned = selection.path.replace(/^\.\/+/, "").replace(/\/+$/, "");
+    if (!cleaned) continue;
+    if (cleaned.length > 4096) {
+      selectionAnnotations.push(
+        `- ${cleaned} (skipped: path too long)`,
+      );
+      continue;
+    }
+    if (/[\0\u0000-\u001f\\]/.test(cleaned)) {
+      selectionAnnotations.push(
+        `- ${selection.path} (skipped: invalid path)`,
+      );
+      continue;
+    }
+    const absolutePath = path.isAbsolute(cleaned)
+      ? cleaned
+      : path.resolve(worktreePath, cleaned);
+    try {
+      const targetRealPath = await fs.realpath(absolutePath);
+      const relativeToWorktree = path.relative(
+        worktreeRealPath,
+        targetRealPath
+      );
+      const isInsideWorktree =
+        relativeToWorktree === "" ||
+        (!relativeToWorktree.startsWith("..") &&
+          !path.isAbsolute(relativeToWorktree));
+      if (!isInsideWorktree) {
+        selectionAnnotations.push(
+          `- ${selection.path} (skipped: outside worktree)`,
+        );
+        continue;
+      }
+      resolvedSelections.push({
+        path: relativeToWorktree || cleaned,
+        ranges: selection.ranges,
+        preview: selection.preview,
+      });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        selectionAnnotations.push(
+          `- ${selection.path} (skipped: not found)`,
+        );
+        continue;
+      }
+      selectionAnnotations.push(
+        `- ${selection.path} (skipped: ${
+          err instanceof Error ? err.message : String(err)
+        })`,
+      );
+    }
+  }
+  // Assemble the `<mentions>` block first (existing behavior) then
+  // append a sibling `<selections>` block when selections are
+  // present. Keeping the two blocks separate keeps the wire format
+  // additive — old transcripts without a `<selections>` block keep
+  // re-parsing correctly.
+  const blocks: string[] = [];
+  const prefixBlocks: string[] = [];
+  if (resolved.length > 0 || annotationLines.length > 0) {
+    const header = [
+      "<mentions>",
+      "The user referenced the following paths in the active worktree. Each",
+      "preview is a short snippet; the agent's file-reading tools can resolve",
+      "the full file by joining the path with the worktree root.",
+    ];
+    const bodyLines = [
+      ...resolved.map((mention) => `- ${mention.type}: ${mention.path}`),
+      ...annotationLines,
+    ];
+    blocks.push([...header, ...bodyLines, "</mentions>"].join("\n"));
+    const previewLines: string[] = [];
+    for (const mention of resolved) {
+      if (mention.type === "file") {
+        try {
+          const absolutePath = path.resolve(worktreePath, mention.path);
+          const handle = await fs.open(absolutePath, "r");
+          try {
+            const buffer = Buffer.alloc(MENTION_PREVIEW_BYTE_LIMIT);
+            const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+            const raw = buffer.subarray(0, bytesRead).toString("utf-8");
+            const lines = raw.split("\n").slice(0, MENTION_PREVIEW_LINE_LIMIT);
+            const preview = lines.join("\n");
+            previewLines.push(
+              `--- ${mention.path} (first ${lines.length} line(s)) ---\n${preview}`
+            );
+          } finally {
+            await handle.close();
+          }
+        } catch {
+          // The agent can read the file itself; don't fail the turn.
+        }
+      } else {
+        try {
+          const absolutePath = path.resolve(worktreePath, mention.path);
+          const dirents = await fs.readdir(absolutePath, { withFileTypes: true });
+          const names = dirents
+            .filter((entry) => entry.isDirectory() || entry.isFile())
+            .map((entry) =>
+              entry.isDirectory() ? `${entry.name}/` : entry.name
+            )
+            .slice(0, 200);
+          previewLines.push(
+            `--- ${mention.path}/ (${names.length} entries) ---\n${names.join("\n")}`
+          );
+        } catch {
+          // As above, leave the block to the agent.
+        }
+      }
+    }
+    if (previewLines.length > 0) {
+      prefixBlocks.push(`${blocks[blocks.length - 1]}\n\n${previewLines.join("\n\n")}\n`);
+    } else {
+      prefixBlocks.push(blocks[blocks.length - 1]);
+    }
+  }
+  if (resolvedSelections.length > 0 || selectionAnnotations.length > 0) {
+    const selectionsBlock = buildSelectionContextBlock(
+      resolvedSelections,
+    );
+    if (selectionsBlock) blocks.push(selectionsBlock);
+    if (selectionAnnotations.length > 0) {
+      const annotated = selectionAnnotations.map((line) => `  ${line}`).join("\n");
+      blocks.push(`<selection-annotations>\n${annotated}\n</selection-annotations>`);
+    }
+    const selectionsPrefix = buildSelectionPromptPrefix(resolvedSelections);
+    if (selectionsPrefix) prefixBlocks.push(selectionsPrefix);
+  }
+  const contextBlock = blocks.join("\n\n");
+  const prefix = prefixBlocks.join("\n\n");
+  return {
+    mentions: resolved,
+    selections: resolvedSelections,
+    contextBlock,
+    prefix,
+  };
 }
 
 /**
@@ -226,4 +362,38 @@ export function parseMentionsQuery(
       return { path: pathValue.trim(), type };
     })
     .filter((value): value is ResolvedMention => value !== null);
+}
+
+/**
+ * Parse the `selections` query param (issue #416). The wire format is
+ * one `path:start-end|previewBase64,path:start-end|previewBase64,…`
+ * per chip. The preview is base64-encoded so commas and newlines
+ * inside the snippet don't break the comma split. Empty / malformed
+ * rows are dropped silently; the composer is the source of truth and
+ * a bad row should never fail the whole turn.
+ */
+export function parseSelectionsQuery(
+  raw: string | string[] | undefined
+): ResolvedSelection[] {
+  if (typeof raw !== "string" || !raw) return [];
+  return raw
+    .split(",")
+    .map((entry) => {
+      const lastPipe = entry.lastIndexOf("|");
+      if (lastPipe === -1) return null;
+      const token = entry.slice(0, lastPipe);
+      const previewB64 = entry.slice(lastPipe + 1);
+      const parsed = parseSelectionToken(token);
+      if (!parsed) return null;
+      let preview = "";
+      if (previewB64) {
+        try {
+          preview = Buffer.from(previewB64, "base64").toString("utf-8");
+        } catch {
+          preview = "";
+        }
+      }
+      return { path: parsed.path, ranges: parsed.ranges, preview };
+    })
+    .filter((value): value is ResolvedSelection => value !== null);
 }

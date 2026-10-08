@@ -35,6 +35,19 @@ export interface QueuedMessage {
    */
   mentions?: { path: string; type: "file" | "directory" }[];
   /**
+   * Line-range selection chips from the diff-selection gesture
+   * (issue #416). Same snapshot semantics as `mentions`: the queue
+   * carries the chip stack across run boundaries so a turn that
+   * was queued mid-edit can replay the user's selection on the
+   * next run, keeping the resolved prompt byte-identical to the
+   * user's intent. Each chip is `{ path, ranges, preview }`.
+   */
+  selections?: {
+    path: string;
+    ranges: { start: number; end: number }[];
+    preview: string;
+  }[];
+  /**
    * Optional ISO timestamp for deferred wakeups (issue #339). When set, the
    * message is not dequeued for the agent until the wall clock passes it —
    * the wakes consumer (registered on the shared wakeup loop in
