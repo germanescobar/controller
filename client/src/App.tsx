@@ -363,8 +363,16 @@ function AppBody() {
   // an event lands. The events themselves are "the data on disk
   // changed" — debounce a burst (e.g. session-add + first user_message
   // + a title pin) into a single refetch so the sidebar doesn't
-  // thrash.
-  const [eventsRefreshKey, setEventsRefreshKey] = useState(0);
+  // thrash. The sidebar consumes `lastProjectEvent` and does a
+  // *targeted* refetch (one worktree's sessions, or one project's
+  // worktrees) instead of re-walking every worktree on every event —
+  // with many worktrees the old N+1 walk saturated the server with
+  // parallel `GET /sessions?worktreeId=…` requests.
+  const [lastProjectEvent, setLastProjectEvent] = useState<{
+    event: ProjectEvent;
+    counter: number;
+  } | null>(null);
+  const eventsCounterRef = useRef(0);
   const eventsDebounceRef = useRef<number | null>(null);
   const scheduleEventsRefetch = useCallback((event: ProjectEvent) => {
     if (eventsDebounceRef.current !== null) {
@@ -374,7 +382,7 @@ function AppBody() {
       eventsDebounceRef.current = null;
       // Project-lifecycle events change the sidebar's project list;
       // the rest live under an active project so the sidebar's
-      // `loadAll` picks them up. Bumping one key drives both.
+      // targeted refetch picks them up. Bumping one key drives both.
       if (
         event.type === "project_added" ||
         event.type === "project_updated" ||
@@ -382,7 +390,8 @@ function AppBody() {
       ) {
         loadProjects();
       }
-      setEventsRefreshKey((key) => key + 1);
+      eventsCounterRef.current += 1;
+      setLastProjectEvent({ event, counter: eventsCounterRef.current });
       // Issue #384: refresh the cached session-relationships
       // (parent + children) so a child session that just spawned
       // or finished in another tab is reflected in the floating
@@ -753,7 +762,7 @@ function AppBody() {
           onFocusQueueChange={handleFocusQueueChange}
           focusQueue={focusQueue}
           focusRefreshKey={focusRefreshKey}
-          eventsRefreshKey={eventsRefreshKey}
+          lastProjectEvent={lastProjectEvent}
         />
       </div>
 

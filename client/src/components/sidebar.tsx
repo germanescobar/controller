@@ -32,6 +32,7 @@ import {
   fetchWorktreeSetupLog,
   runWorktreeSetup,
   type Project,
+  type ProjectEvent,
   type SessionSummary,
   type Worktree,
   type WorktreeSetupEvent,
@@ -97,11 +98,20 @@ interface SidebarProps {
   focusQueue?: FocusQueueItem[];
   onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
   focusRefreshKey?: number;
-  // Bumped by the App's project-event subscription when an out-of-band
-  // lifecycle change lands (worktree added/removed, session added,
-  // focus state changed, etc.). Triggers a fresh `loadAll` so the
-  // sidebar reflects the new state without polling. See issue #210.
-  eventsRefreshKey?: number;
+  // The most recent project lifecycle event received from the SSE
+  // stream owned by App.tsx. The sidebar inspects the event to do a
+  // *targeted* refresh (one worktree's sessions, or one project's
+  // worktrees) instead of re-walking every worktree in every project
+  // on every event. With many worktrees the old "always reload
+  // everything" behavior saturated the server with parallel
+  // `GET /sessions?worktreeId=…` requests — see the latency spike
+  // captured in the screenshot that motivated this change.
+  //
+  // We pass a `{ event, counter }` pair so the effect can detect new
+  // events even when the same event shape lands twice in a row.
+  // `counter` increments monotonically; `event` is the most recent
+  // payload the parent has seen. `null` before the first event.
+  lastProjectEvent?: { event: ProjectEvent; counter: number } | null;
 }
 
 interface WorktreeWithSessions extends Worktree {
@@ -391,7 +401,7 @@ export function Sidebar({
   focusQueue: focusQueueProp,
   onFocusQueueChange,
   focusRefreshKey,
-  eventsRefreshKey,
+  lastProjectEvent,
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
@@ -647,9 +657,158 @@ export function Sidebar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
 
+  /**
+   * Refresh a single worktree's session list. Used by the targeted
+   * event handler below so a `session_added` / `session_removed` /
+   * `session_updated` event only re-fetches the affected worktree's
+   * sessions instead of every worktree in every project. Falls back
+   * to `loadAll` if the project isn't loaded yet (e.g. the event
+   * raced the initial mount).
+   */
+  const refreshWorktreeSessions = useCallback(
+    async (projectId: string, worktreeId: string): Promise<void> => {
+      let sessions: SessionSummary[];
+      try {
+        sessions = await fetchSessions(projectId, worktreeId);
+      } catch {
+        return;
+      }
+      const filtered = sessions.filter((s) => !archivedIds.has(s.id));
+      setProjectData((prev) =>
+        prev.map((p) => {
+          if (p.id !== projectId) return p;
+          // If the worktree has been removed by another concurrent
+          // refresh while this fetch was in flight, drop the
+          // incoming list rather than resurrecting the node.
+          if (!p.worktrees.some((w) => w.id === worktreeId)) return p;
+          return {
+            ...p,
+            worktrees: p.worktrees.map((w) =>
+              w.id === worktreeId
+                ? { ...w, sessions: filtered }
+                : w,
+            ),
+          };
+        }),
+      );
+      // Refresh runtimes alongside the targeted refetch so a session
+      // that just spawned or finished picks up its active/awaiting
+      // flags without waiting for the next 2s poll.
+      refreshActiveSessions().catch(() => {});
+    },
+    [archivedIds, refreshActiveSessions],
+  );
+
+  // Latest `projectData` mirror, kept in a ref so the targeted
+  // refresh callbacks can read the current state at call time
+  // without taking `projectData` as a dependency (which would
+  // re-trigger the event effect on every state update). The ref
+  // is updated synchronously after every render.
+  const projectDataRef = useRef<ProjectWithWorktrees[]>(projectData);
+  useEffect(() => {
+    projectDataRef.current = projectData;
+  }, [projectData]);
+
+  /**
+   * Refresh a single project's worktree list. Used when a
+   * `worktree_added` / `worktree_removed` / `worktree_updated` event
+   * lands. Preserves each surviving worktree's `isExpanded` and
+   * `sessions` so the user doesn't lose their expansion state on
+   * every refresh, and so we only pay the sessions cost for worktrees
+   * the event actually changed.
+   */
+  const refreshProjectWorktrees = useCallback(
+    async (projectId: string): Promise<void> => {
+      let worktrees: Worktree[];
+      try {
+        worktrees = await fetchWorktrees(projectId);
+      } catch {
+        return;
+      }
+      const existingProject = projectDataRef.current.find(
+        (p) => p.id === projectId,
+      );
+      if (!existingProject) return;
+      const existingIds = new Set(
+        existingProject.worktrees.map((w) => w.id),
+      );
+      const newWorktreeIds = worktrees
+        .filter((w) => !existingIds.has(w.id))
+        .map((w) => w.id);
+      setProjectData((prev) => {
+        if (!prev.some((p) => p.id === projectId)) return prev;
+        return prev.map((p) => {
+          if (p.id !== projectId) return p;
+          const existingById = new Map(p.worktrees.map((w) => [w.id, w]));
+          const merged = worktrees.map((wt) => {
+            const existing = existingById.get(wt.id);
+            const isActiveWt =
+              wt.id === activeWorktreeId ||
+              (!activeWorktreeId && wt.isMain && projectId === activeProjectId);
+            return {
+              ...wt,
+              sessions: existing?.sessions ?? [],
+              isExpanded: existing?.isExpanded ?? isActiveWt,
+            } satisfies WorktreeWithSessions;
+          });
+          return { ...p, worktrees: merged };
+        });
+      });
+      // New worktrees won't have session lists yet — fetch them so
+      // the sidebar can render a fresh tree. Removed worktrees drop
+      // out naturally because we trust the server's worktree list.
+      await Promise.all(
+        newWorktreeIds.map((wtId) =>
+          refreshWorktreeSessions(projectId, wtId).catch(() => {}),
+        ),
+      );
+    },
+    [activeProjectId, activeWorktreeId, refreshWorktreeSessions],
+  );
+
   useEffect(() => {
     loadAll().catch(() => {});
-  }, [loadAll, focusRefreshKey, eventsRefreshKey]);
+  }, [loadAll, focusRefreshKey]);
+
+  /**
+   * Targeted refresh on lifecycle events. The old behavior re-ran
+   * `loadAll` for *every* event, which under many worktrees saturated
+   * the server with parallel `GET /sessions?worktreeId=…` requests
+   * (each request walks a worktree's session directory and parses
+   * every JSON file). With 15+ worktrees the N+1 walk dominated the
+   * 50ms debounce window and the UI was stuck on `(pending)` rows.
+   *
+   * This effect dispatches on the event type:
+   *   - `session_*`  → re-fetch only that worktree's sessions
+   *   - `worktree_*` → re-fetch only that project's worktrees
+   *   - `project_*`  → no-op here; App already refreshed the project
+   *                    list and `loadAll`'s `projects` dep re-runs
+   *                    the full walk.
+   */
+  useEffect(() => {
+    if (!lastProjectEvent) return;
+    const { event } = lastProjectEvent;
+    switch (event.type) {
+      case "session_added":
+      case "session_removed":
+      case "session_updated":
+        refreshWorktreeSessions(event.projectId, event.worktreeId).catch(
+          () => {},
+        );
+        return;
+      case "worktree_added":
+      case "worktree_removed":
+      case "worktree_updated":
+        refreshProjectWorktrees(event.projectId).catch(() => {});
+        return;
+      case "project_added":
+      case "project_updated":
+      case "project_removed":
+        // App.tsx already refreshes the projects list; the `projects`
+        // prop changing re-runs `loadAll` via the effect above.
+        return;
+    }
+  }, [lastProjectEvent, refreshWorktreeSessions, refreshProjectWorktrees]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
