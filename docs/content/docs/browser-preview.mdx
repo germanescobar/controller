@@ -20,11 +20,17 @@ work instead of guessing.
 Through the preview browser the agent can:
 
 - Open a URL.
-- Click elements and type into inputs.
-- Read the rendered DOM to confirm what's actually on the page.
+- Click elements and type into inputs or contenteditable editors.
+- Read the rendered DOM, including visible dialogs and menus in open shadow roots.
 
 Ask the agent to "open the app and check the new settings panel" and it drives
 the preview browser to do exactly that.
+
+Snapshots give editable fields and overlay controls `ref=eN` selectors. Use
+those refs to target a field on a complex page. CSS selectors can cross an open
+shadow root with `>>>`, for example `studio-editor >>> #textbox`. An ambiguous
+`role=textbox` typing target returns an error so the agent can choose a named
+field or ref instead.
 
 ## Local HTTPS dev servers
 

@@ -22,6 +22,8 @@ interface MockElement {
   nodeType: number;
   id?: string;
   children: MockElement[];
+  shadowChildren?: MockElement[];
+  shadowHost?: MockElement;
   parent: MockElement | null;
   attributes: Map<string, string>;
   textContent: string;
@@ -38,6 +40,7 @@ function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
     tagName: tag.toUpperCase(),
     nodeType: 1,
     children: [],
+    shadowChildren: init.shadowChildren,
     parent: null,
     attributes: new Map(),
     textContent: init.textContent ?? "",
@@ -55,6 +58,7 @@ function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
     el.children.push(child);
     child.parent = el;
   }
+  for (const child of init.shadowChildren ?? []) child.shadowHost = el;
   // `init.attributes` is typed as `Map<string, string>`, but a plain
   // object is also accepted for ergonomic test code. Branch on the
   // shape so a `Map` (used by the set-files tests to thread both
@@ -75,6 +79,7 @@ function elApi(root: MockElement) {
   function visit(node: MockElement) {
     liveNodes.push(node);
     for (const c of node.children) visit(c);
+    for (const c of node.shadowChildren ?? []) visit(c);
   }
   visit(root);
 
@@ -93,6 +98,23 @@ function elApi(root: MockElement) {
 
   const selfAndDescendants = descendantsSet(root);
   const nodeIndex = new Map<MockElement, unknown>();
+  const shadowIndex = new Map<MockElement, unknown>();
+  function shadowNode(host: MockElement): unknown {
+    let shadow = shadowIndex.get(host);
+    if (shadow) return shadow;
+    const placeholder: Record<string, unknown> = {};
+    shadowIndex.set(host, placeholder);
+    const container = makeEl("shadow-root", { children: host.shadowChildren ?? [] });
+    Object.assign(placeholder, {
+      host: indexFor(host),
+      children: (host.shadowChildren ?? []).map(indexFor),
+      querySelector: (sel: string) => {
+        const match = matchAll(container, sel)[0];
+        return match ? indexFor(match) : null;
+      },
+    });
+    return placeholder;
+  }
   function indexFor(el: MockElement): unknown {
     let n = nodeIndex.get(el);
     if (n) return n;
@@ -103,7 +125,7 @@ function elApi(root: MockElement) {
     const placeholder: Record<string, unknown> = {};
     nodeIndex.set(el, placeholder);
     n = toNode(el);
-    Object.assign(placeholder, n);
+    Object.defineProperties(placeholder, Object.getOwnPropertyDescriptors(n as object));
     return placeholder;
   }
 
@@ -124,6 +146,15 @@ function elApi(root: MockElement) {
       type: el.attributes.get("type") ?? "",
       id: el.id,
       children: childNodes,
+      shadowRoot: el.shadowChildren ? shadowNode(el) : null,
+      getRootNode: () => {
+        let cur: MockElement | null = el;
+        while (cur) {
+          if (cur.shadowHost) return shadowNode(cur.shadowHost);
+          cur = cur.parent;
+        }
+        return toBody();
+      },
       parentElement: parentNode,
       // Array-like so the size check + iteration in `forEach` work.
       // We do not implement the full HTMLCollection contract — only what the
@@ -162,8 +193,16 @@ function elApi(root: MockElement) {
       focus: () => undefined,
       dispatchEvent: () => true,
       scrollIntoView: () => undefined,
-      textContent: el.textContent,
+      get textContent() { return el.textContent; },
+      set textContent(value: string) { el.textContent = value; },
       innerText: el.innerText,
+      get isContentEditable() {
+        const own = el.attributes.get("contenteditable");
+        if (own !== undefined) return own === "" || own.toLowerCase() === "true";
+        if (el.parent) return (indexFor(el.parent) as { isContentEditable: boolean }).isContentEditable;
+        if (el.shadowHost) return (indexFor(el.shadowHost) as { isContentEditable: boolean }).isContentEditable;
+        return false;
+      },
       disabled: el.disabled,
       style: el.style,
       form: null,
@@ -288,6 +327,7 @@ function runScript<T>(script: string, body: unknown): T {
       getComputedStyle: (el: { style: { display: string; visibility: string } }) =>
         el.style,
       CSS: undefined,
+      getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
     },
     location: { href: "about:blank" },
     NodeFilter: { SHOW_ELEMENT: 1 },
@@ -339,6 +379,7 @@ function runScript<T>(script: string, body: unknown): T {
       (this as Record<string, unknown>).bubbles = init.bubbles === true;
       (this as Record<string, unknown>).cancelable = init.cancelable === true;
     } as unknown as typeof Event,
+    InputEvent: function InputEventShim() {} as unknown as typeof InputEvent,
     HTMLInputElement: {
       prototype: {
         // buildSetFilesScript reads HTMLInputElement.prototype.files in the
@@ -460,6 +501,101 @@ test("buildTypeScript sets the value on a matched input", () => {
   assert.ok(typeof result.ok === "boolean");
 });
 
+test("typing into a shadow-root contenteditable targets the editor, not the search box", () => {
+  const search = makeEl("input", { id: "search", attributes: new Map([["type", "text"]]) });
+  const editor = makeEl("div", { id: "textbox", attributes: new Map([["contenteditable", "true"]]) });
+  const host = makeEl("studio-editor", { id: "metadata", shadowChildren: [editor] });
+  const root = makeEl("body", { children: [search, host] });
+  const body = elApi(root).toBody() as Record<string, unknown>;
+  body.createRange = () => ({ selectNodeContents() {} });
+  body.execCommand = () => false;
+  const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+    selector: "#metadata >>> #textbox", refs: {}, text: "Video title",
+  }), body);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(editor.textContent, "Video title");
+  assert.equal(search.textContent, "");
+});
+
+test("an unqualified textbox selector refuses to guess between search and editor", () => {
+  const search = makeEl("input", { id: "search", attributes: new Map([["type", "text"]]) });
+  const editor = makeEl("div", { id: "textbox", attributes: new Map([["contenteditable", "true"]]) });
+  const host = makeEl("studio-editor", { shadowChildren: [editor] });
+  const body = elApi(makeEl("body", { children: [search, host] })).toBody();
+  const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+    selector: "role=textbox", refs: {}, text: "Video title",
+  }), body);
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /ambiguous textbox/);
+});
+
+test("nested rich-text content does not make a single editor ambiguous", () => {
+  const paragraph = makeEl("p", { id: "paragraph", textContent: "Draft" });
+  const editor = makeEl("div", {
+    id: "editor", attributes: new Map([["contenteditable", "true"]]), children: [paragraph],
+  });
+  const body = elApi(makeEl("body", { children: [editor] })).toBody() as Record<string, unknown>;
+  body.createRange = () => ({ selectNodeContents() {} });
+  body.execCommand = () => false;
+  const typed = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+    selector: "role=textbox", refs: {}, text: "Revised",
+  }), body);
+  assert.equal(typed.ok, true, typed.error);
+  assert.equal(editor.textContent, "Revised");
+  const snapshot = runScript<{ refs: Record<string, string> }>(
+    buildSnapshotScript(undefined, "default"), body
+  );
+  assert.ok(Object.values(snapshot.refs).includes("#editor"));
+  assert.ok(!Object.values(snapshot.refs).includes("#paragraph"));
+});
+
+for (const type of ["date", "number", "file", "password"]) {
+  test(`role=textbox ignores input[type=${type}] beside a text field`, () => {
+    const textField = makeEl("input", { id: "text", attributes: new Map([["type", "text"]]) });
+    const otherField = makeEl("input", { id: "other", attributes: new Map([["type", type]]) });
+    const body = elApi(makeEl("body", { children: [textField, otherField] })).toBody() as Record<string, unknown>;
+    const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+      selector: "role=textbox", refs: {}, text: "hello",
+    }), body);
+    assert.equal(result.ok, true, result.error);
+    const text = (body.querySelector as (selector: string) => { value: string })("#text");
+    assert.equal(text.value, "hello");
+  });
+}
+
+test("role=textbox ignores a text input backed by a datalist", () => {
+  const textField = makeEl("input", { id: "text", attributes: new Map([["type", "text"]]) });
+  const combobox = makeEl("input", {
+    id: "choices", attributes: new Map([["type", "text"], ["list", "suggestions"]]),
+  });
+  const body = elApi(makeEl("body", { children: [textField, combobox] })).toBody() as Record<string, unknown>;
+  const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+    selector: "role=textbox", refs: {}, text: "hello",
+  }), body);
+  assert.equal(result.ok, true, result.error);
+  const text = (body.querySelector as (selector: string) => { value: string })("#text");
+  assert.equal(text.value, "hello");
+});
+
+for (const [type, value] of [
+  ["date", "2026-10-08"],
+  ["time", "13:45"],
+  ["month", "2026-10"],
+  ["week", "2026-W41"],
+  ["datetime-local", "2026-10-08T13:45"],
+]) {
+  test(`buildTypeScript fills input[type=${type}]`, () => {
+    const input = makeEl("input", { id: "field", attributes: new Map([["type", type]]) });
+    const body = elApi(makeEl("body", { children: [input] })).toBody() as Record<string, unknown>;
+    const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+      selector: "#field", refs: {}, text: value,
+    }), body);
+    assert.equal(result.ok, true, result.error);
+    const field = (body.querySelector as (selector: string) => { value: string })("#field");
+    assert.equal(field.value, value);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // buildSnapshotScript
 // ---------------------------------------------------------------------------
@@ -513,6 +649,86 @@ test("buildSnapshotScript reports found=false when the selector does not match",
   const script = buildSnapshotScript("#missing", "default");
   const result = runScript<{ found: boolean }>(script, toBody());
   assert.equal(result.found, false);
+});
+
+test("snapshot reads and references a dialog inside an open shadow root", () => {
+  const schedule = makeEl("button", { id: "schedule", textContent: "Schedule" });
+  const dialog = makeEl("div", {
+    id: "dialog", textContent: "Schedule your video",
+    attributes: new Map([["role", "dialog"]]), children: [schedule],
+  });
+  const host = makeEl("studio-overlay", { id: "overlay", shadowChildren: [dialog] });
+  const body = elApi(makeEl("body", { children: [host] })).toBody();
+  const result = runScript<{ text: string; refs: Record<string, string> }>(
+    buildSnapshotScript(undefined, "default"), body
+  );
+  assert.match(result.text, /Schedule your video/);
+  assert.match(result.text, /Schedule/);
+  assert.ok(Object.values(result.refs).includes("#overlay >>> #dialog"));
+  assert.ok(Object.values(result.refs).includes("#overlay >>> #schedule"));
+  const scheduleRef = Object.entries(result.refs).find(([, selector]) => selector === "#overlay >>> #schedule")?.[0];
+  assert.ok(scheduleRef);
+  const click = runScript<{ ok: boolean }>(buildClickScript({
+    selector: `ref=${scheduleRef}`, refs: result.refs,
+  }), body);
+  assert.equal(click.ok, true);
+  const a11y = runScript<{ text: string }>(buildSnapshotScript(undefined, "a11y"), body);
+  assert.match(a11y.text, /dialog/);
+  assert.match(a11y.text, /button/);
+});
+
+test("default snapshot prioritizes a late dialog after many page controls", () => {
+  const pageButtons = Array.from({ length: 85 }, (_, i) => makeEl("button", { id: `page-${i}` }));
+  const confirm = makeEl("button", { id: "confirm-schedule", textContent: "Schedule" });
+  const dialog = makeEl("div", { id: "schedule-dialog", attributes: new Map([["role", "dialog"]]), children: [confirm] });
+  const body = elApi(makeEl("body", { children: [...pageButtons, dialog] })).toBody();
+  const result = runScript<{ text: string; refs: Record<string, string> }>(
+    buildSnapshotScript(undefined, "default"), body
+  );
+  assert.match(result.text, /#confirm-schedule/);
+  assert.ok(Object.values(result.refs).includes("#confirm-schedule"));
+});
+
+test("default snapshot includes prioritized overlay text only once", () => {
+  const overlayText = makeEl("span", { textContent: "Overlay copy" });
+  const dialog = makeEl("div", {
+    id: "dialog", attributes: new Map([["role", "dialog"]]), children: [overlayText],
+  });
+  const pageText = makeEl("p", { textContent: "Page context" });
+  const body = elApi(makeEl("body", { children: [dialog, pageText] })).toBody();
+  const result = runScript<{ text: string }>(buildSnapshotScript(undefined, "default"), body);
+  assert.equal(result.text.split("Overlay copy").length - 1, 1);
+  assert.match(result.text, /Page context/);
+});
+
+test("long overlay text leaves room for page context in the snapshot", () => {
+  const overlayText = makeEl("span", { textContent: "O".repeat(4500) });
+  const dialog = makeEl("div", {
+    id: "dialog", attributes: new Map([["role", "dialog"]]), children: [overlayText],
+  });
+  const pageText = makeEl("p", { textContent: "Page context after dialog" });
+  const body = elApi(makeEl("body", { children: [dialog, pageText] })).toBody();
+  const result = runScript<{ text: string }>(buildSnapshotScript(undefined, "default"), body);
+  assert.match(result.text, /Page context after dialog/);
+});
+
+test("snapshot traverses visible controls inside boxless containers", () => {
+  const button = makeEl("button", { id: "confirm", textContent: "Confirm" });
+  const dialog = makeEl("div", {
+    id: "dialog", attributes: new Map([["role", "dialog"]]), children: [button],
+  });
+  const boxless = makeEl("div", {
+    id: "boxless", rect: { width: 0, height: 0 },
+    style: { display: "contents", visibility: "visible" }, children: [dialog],
+  });
+  const body = elApi(makeEl("body", { children: [boxless] })).toBody();
+  const snapshot = runScript<{ text: string; refs: Record<string, string> }>(
+    buildSnapshotScript(undefined, "default"), body
+  );
+  assert.match(snapshot.text, /Confirm/);
+  assert.ok(Object.values(snapshot.refs).includes("#confirm"));
+  const a11y = runScript<{ text: string }>(buildSnapshotScript(undefined, "a11y"), body);
+  assert.match(a11y.text, /Confirm/);
 });
 
 // ---------------------------------------------------------------------------
