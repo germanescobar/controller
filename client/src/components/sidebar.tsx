@@ -624,42 +624,79 @@ export function Sidebar({
     );
   }, []);
 
+  // Latest `projectData` mirror, kept in a ref so the targeted
+  // refresh callbacks can read the current state at call time
+  // without taking `projectData` as a dependency (which would
+  // re-trigger the event effect on every state update). The ref
+  // is updated synchronously after every render.
+  const projectDataRef = useRef<ProjectWithWorktrees[]>(projectData);
+  useEffect(() => {
+    projectDataRef.current = projectData;
+  }, [projectData]);
+
+  // Monotonic counter bumped at the top of every `loadAll`. The
+  // targeted refreshes snapshot this token before their fetch and
+  // re-check it after the fetch resolves; if a newer `loadAll` has
+  // started in the meantime, the targeted data is stale (the
+  // upcoming `setProjectData(next)` from that load will paint the
+  // freshest snapshot anyway) and we keep the scope queued so the
+  // next drain re-runs the targeted refresh against the new state.
+  const loadAllTokenRef = useRef(0);
+
+  // Counter of `loadAll` calls currently in flight. The targeted
+  // refresh snapshots this at fetch start; if the count is still
+  // > 0 at fetch end, an older `loadAll` is racing us and its
+  // unconditional `setProjectData(next)` would clobber our fresher
+  // result, so we queue the scope for replay (the loadAll drains
+  // on completion). When the count drops to 0, no loadAll is
+  // racing and it's safe to apply the targeted update directly.
+  const inFlightLoadAllsRef = useRef(0);
+
   const loadAll = useCallback(async () => {
-    const next = await Promise.all(
-      projects.map(async (project) => {
-        const worktrees = await fetchWorktrees(project.id);
-        const wtWithSessions = await Promise.all(
-          worktrees.map(async (wt) => {
-            const sessions = await fetchSessions(project.id, wt.id);
-            const existingProject = projectData.find(
-              (p) => p.id === project.id,
-            );
-            const existingWt = existingProject?.worktrees.find(
-              (w) => w.id === wt.id,
-            );
-            const isActiveWt =
-              wt.id === activeWorktreeId ||
-              (!activeWorktreeId &&
-                wt.isMain &&
-                project.id === activeProjectId);
-            return {
-              ...wt,
-              sessions: sessions.filter((s) => !archivedIds.has(s.id)),
-              isExpanded: existingWt?.isExpanded ?? isActiveWt,
-            } satisfies WorktreeWithSessions;
-          }),
-        );
-        const existing = projectData.find((p) => p.id === project.id);
-        return {
-          ...project,
-          worktrees: wtWithSessions,
-          isExpanded: existing?.isExpanded ?? project.id === activeProjectId,
-        } satisfies ProjectWithWorktrees;
-      }),
-    );
-    setProjectData(next);
-    await refreshActiveSessions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadAllTokenRef.current += 1;
+    inFlightLoadAllsRef.current += 1;
+    try {
+      const next = await Promise.all(
+        projects.map(async (project) => {
+          const worktrees = await fetchWorktrees(project.id);
+          const wtWithSessions = await Promise.all(
+            worktrees.map(async (wt) => {
+              const sessions = await fetchSessions(project.id, wt.id);
+              const existingProject = projectData.find(
+                (p) => p.id === project.id,
+              );
+              const existingWt = existingProject?.worktrees.find(
+                (w) => w.id === wt.id,
+              );
+              const isActiveWt =
+                wt.id === activeWorktreeId ||
+                (!activeWorktreeId &&
+                  wt.isMain &&
+                  project.id === activeProjectId);
+              return {
+                ...wt,
+                sessions: sessions.filter((s) => !archivedIds.has(s.id)),
+                isExpanded: existingWt?.isExpanded ?? isActiveWt,
+              } satisfies WorktreeWithSessions;
+            }),
+          );
+          const existing = projectData.find((p) => p.id === project.id);
+          return {
+            ...project,
+            worktrees: wtWithSessions,
+            isExpanded: existing?.isExpanded ?? project.id === activeProjectId,
+          } satisfies ProjectWithWorktrees;
+        }),
+      );
+      setProjectData(next);
+      await refreshActiveSessions();
+    } finally {
+      inFlightLoadAllsRef.current -= 1;
+    }
+    // The drain runs in the `projectData`-deps effect after React
+    // commits the new state, which is when the ref mirror is also
+    // updated. Calling it here would be a no-op (the ref still
+    // holds the pre-loadAll snapshot) so we rely on the effect.
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
 
   /**
@@ -675,13 +712,46 @@ export function Sidebar({
    * effect below re-runs the targeted refresh every time
    * `projectData` changes, so the queued scope lands as soon as the
    * project/worktree appears in state.
+   *
+   * If a newer `loadAll` started while the fetch was in flight, the
+   * fetched data is stale (the loadAll's `setProjectData` will paint
+   * the freshest snapshot) and the scope is queued so the drain
+   * re-runs once the new state is in place. Without this, a
+   * successful targeted update could be silently overwritten by a
+   * stale full-load.
    */
   const refreshWorktreeSessions = useCallback(
     async (projectId: string, worktreeId: string): Promise<void> => {
+      const tokenAtStart = loadAllTokenRef.current;
+      const loadAllsAtStart = inFlightLoadAllsRef.current;
       let sessions: SessionSummary[];
       try {
         sessions = await fetchSessions(projectId, worktreeId);
       } catch {
+        return;
+      }
+      if (loadAllTokenRef.current !== tokenAtStart) {
+        // A newer `loadAll` started while we were fetching — the
+        // upcoming full-load will paint the freshest data, so
+        // skip the targeted write and queue the scope for a
+        // post-load drain.
+        queueSessionRefresh(projectId, worktreeId);
+        return;
+      }
+      if (inFlightLoadAllsRef.current > loadAllsAtStart) {
+        // Hmm — token unchanged but more loadAlls in flight than
+        // when we started. Shouldn't happen in practice (a newer
+        // loadAll would have bumped the token), but be defensive.
+        queueSessionRefresh(projectId, worktreeId);
+        return;
+      }
+      if (inFlightLoadAllsRef.current > 0) {
+        // An older `loadAll` is still in flight. Its
+        // unconditional `setProjectData(next)` will land after our
+        // write and overwrite our fresher data with its older
+        // snapshot. Queue the scope and let the in-flight loadAll
+        // drain on completion.
+        queueSessionRefresh(projectId, worktreeId);
         return;
       }
       const filtered = sessions.filter((s) => !archivedIds.has(s.id));
@@ -724,16 +794,6 @@ export function Sidebar({
     [archivedIds, refreshActiveSessions],
   );
 
-  // Latest `projectData` mirror, kept in a ref so the targeted
-  // refresh callbacks can read the current state at call time
-  // without taking `projectData` as a dependency (which would
-  // re-trigger the event effect on every state update). The ref
-  // is updated synchronously after every render.
-  const projectDataRef = useRef<ProjectWithWorktrees[]>(projectData);
-  useEffect(() => {
-    projectDataRef.current = projectData;
-  }, [projectData]);
-
   /**
    * Refresh a single project's worktree list. Used when a
    * `worktree_added` / `worktree_removed` / `worktree_updated` event
@@ -748,10 +808,28 @@ export function Sidebar({
    */
   const refreshProjectWorktrees = useCallback(
     async (projectId: string): Promise<void> => {
+      const tokenAtStart = loadAllTokenRef.current;
+      const loadAllsAtStart = inFlightLoadAllsRef.current;
       let worktrees: Worktree[];
       try {
         worktrees = await fetchWorktrees(projectId);
       } catch {
+        return;
+      }
+      if (loadAllTokenRef.current !== tokenAtStart) {
+        // A newer `loadAll` started while we were fetching; the
+        // upcoming full-load will paint the freshest data.
+        queueProjectWorktreesRefresh(projectId);
+        return;
+      }
+      if (inFlightLoadAllsRef.current > loadAllsAtStart) {
+        queueProjectWorktreesRefresh(projectId);
+        return;
+      }
+      if (inFlightLoadAllsRef.current > 0) {
+        // An older `loadAll` is still in flight; its
+        // `setProjectData` would clobber our write.
+        queueProjectWorktreesRefresh(projectId);
         return;
       }
       const existingProject = projectDataRef.current.find(
