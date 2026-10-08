@@ -136,6 +136,9 @@ const RESOLVE_BODY = `
       }
       return null;
     }
+    function isEditingHost(el){
+      return el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable);
+    }
     function implicitRole(el){
       switch (el.tagName) {
         case 'A': return el.hasAttribute('href') ? 'link' : null;
@@ -154,7 +157,7 @@ const RESOLVE_BODY = `
         case 'NAV': return 'navigation';
         case 'SELECT': return 'combobox';
         case 'TEXTAREA': return 'textbox';
-        default: return el.isContentEditable || el.hasAttribute('contenteditable') ? 'textbox' : null;
+        default: return isEditingHost(el) ? 'textbox' : null;
       }
     }
     function byText(query){
@@ -509,10 +512,11 @@ export function buildTypeScript(b: ScriptBindings): string {
     }
     function editable(node){
       if (!node || node.disabled || node.readOnly) return false;
-      if (node.isContentEditable || node.getAttribute('contenteditable') === 'true' || node.getAttribute('contenteditable') === '') return true;
       if (node.tagName === 'TEXTAREA') return true;
-      if (node.tagName !== 'INPUT') return false;
-      return /^(text|search|url|tel|email|password|number)$/i.test(node.getAttribute('type') || 'text');
+      if (node.tagName === 'INPUT') {
+        return /^(text|search|url|tel|email|password|number|date|time|month|week|datetime-local)$/i.test(node.getAttribute('type') || 'text');
+      }
+      return isEditingHost(node);
     }
     if (!editable(el)) {
       var candidates = flatten(el).filter(function(node){ return node !== el && editable(node); });
@@ -520,7 +524,7 @@ export function buildTypeScript(b: ScriptBindings): string {
       el = candidates[0];
     }
     el.focus();
-    if (el.isContentEditable || el.hasAttribute('contenteditable')) {
+    if (isEditingHost(el)) {
       // Chromium's editing command follows the same input pipeline as a
       // keyboard edit, which Polymer/Lit editors listen to. Replace the
       // entire field, matching the input/textarea behavior below.
@@ -643,6 +647,9 @@ export const SNAPSHOT_BODY = `
       }
       return prefix + fullPath.join(' > ');
     }
+    function isEditingHost(el){
+      return el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable);
+    }
     function implicitRole(el){
       switch (el.tagName) {
         case 'A': return el.hasAttribute('href') ? 'link' : null;
@@ -661,7 +668,7 @@ export const SNAPSHOT_BODY = `
         case 'NAV': return 'navigation';
         case 'SELECT': return 'combobox';
         case 'TEXTAREA': return 'textbox';
-        default: return el.isContentEditable || el.hasAttribute('contenteditable') ? 'textbox' : null;
+        default: return isEditingHost(el) ? 'textbox' : null;
       }
     }
     function accessibleName(el){
@@ -680,11 +687,16 @@ export const SNAPSHOT_BODY = `
       var text = (el.innerText || el.textContent || '').trim();
       return text.length > 80 ? text.slice(0, 80).trim() + '…' : text;
     }
+    function hiddenSubtree(el){
+      if (!el || el.nodeType !== 1) return true;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return true;
+      return window.getComputedStyle(el).display === 'none';
+    }
     function visible(el){
       if (!el || el.nodeType !== 1) return false;
-      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+      if (hiddenSubtree(el)) return false;
       var style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (style.visibility === 'hidden') return false;
       var rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       return true;
@@ -697,8 +709,8 @@ export const SNAPSHOT_BODY = `
     function allElements(root){
       var out = [];
       function visit(el){
-        if (!el || el.nodeType !== 1 || !visible(el)) return;
-        out.push(el);
+        if (hiddenSubtree(el)) return;
+        if (visible(el)) out.push(el);
         composedChildren(el).forEach(visit);
       }
       visit(root);
@@ -709,7 +721,7 @@ export const SNAPSHOT_BODY = `
         var tag = el.tagName;
         var role = el.getAttribute('role');
         return tag === 'A' || tag === 'BUTTON' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-          || el.isContentEditable || el.hasAttribute('contenteditable')
+          || isEditingHost(el)
           || role === 'button' || role === 'textbox' || role === 'dialog' || role === 'menu'
           || role === 'menuitem' || role === 'option' || role === 'combobox';
       });
@@ -747,14 +759,17 @@ export const SNAPSHOT_BODY = `
       function walk(el, depth, lines){
         if (!el || el.nodeType !== 1) return;
         // Skip pure-presentation subtrees.
-        if (el.getAttribute('aria-hidden') === 'true') return;
+        if (hiddenSubtree(el)) return;
         // Skip hidden controls entirely. ref= resolves the stored
         // selector later and clicks it programmatically; clicks on
         // display:none / visibility:hidden elements still dispatch,
         // so a hidden dialog in the snapshot would let an agent
         // trigger a control the user cannot see. Issue #170 review.
-        if (!visible(el)) return;
         var children = composedChildren(el);
+        if (!visible(el)) {
+          children.forEach(function(c){ walk(c, depth, lines); });
+          return;
+        }
         var interactive = collectInteractive(el).length > 0;
         var hasText = (el.textContent || '').trim().length > 0;
         if (!interactive && !hasText) {
@@ -776,13 +791,15 @@ export const SNAPSHOT_BODY = `
     // Default: visible text + a flat list of interactive elements (with refs).
     var textParts = [];
     function gatherText(el){
-      if (!visible(el)) return;
-      if (el.childNodes) {
-        Array.from(el.childNodes).forEach(function(node){
-          if (node.nodeType === 3 && node.textContent.trim()) textParts.push(node.textContent.trim());
-        });
-      } else if (!composedChildren(el).length && (el.innerText || el.textContent || '').trim()) {
-        textParts.push((el.innerText || el.textContent).trim());
+      if (hiddenSubtree(el)) return;
+      if (visible(el)) {
+        if (el.childNodes) {
+          Array.from(el.childNodes).forEach(function(node){
+            if (node.nodeType === 3 && node.textContent.trim()) textParts.push(node.textContent.trim());
+          });
+        } else if (!composedChildren(el).length && (el.innerText || el.textContent || '').trim()) {
+          textParts.push((el.innerText || el.textContent).trim());
+        }
       }
       composedChildren(el).forEach(gatherText);
     }

@@ -196,7 +196,13 @@ function elApi(root: MockElement) {
       get textContent() { return el.textContent; },
       set textContent(value: string) { el.textContent = value; },
       innerText: el.innerText,
-      isContentEditable: el.attributes.has("contenteditable"),
+      get isContentEditable() {
+        const own = el.attributes.get("contenteditable");
+        if (own !== undefined) return own === "" || own.toLowerCase() === "true";
+        if (el.parent) return (indexFor(el.parent) as { isContentEditable: boolean }).isContentEditable;
+        if (el.shadowHost) return (indexFor(el.shadowHost) as { isContentEditable: boolean }).isContentEditable;
+        return false;
+      },
       disabled: el.disabled,
       style: el.style,
       form: null,
@@ -523,6 +529,45 @@ test("an unqualified textbox selector refuses to guess between search and editor
   assert.match(result.error ?? "", /ambiguous textbox/);
 });
 
+test("nested rich-text content does not make a single editor ambiguous", () => {
+  const paragraph = makeEl("p", { id: "paragraph", textContent: "Draft" });
+  const editor = makeEl("div", {
+    id: "editor", attributes: new Map([["contenteditable", "true"]]), children: [paragraph],
+  });
+  const body = elApi(makeEl("body", { children: [editor] })).toBody() as Record<string, unknown>;
+  body.createRange = () => ({ selectNodeContents() {} });
+  body.execCommand = () => false;
+  const typed = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+    selector: "role=textbox", refs: {}, text: "Revised",
+  }), body);
+  assert.equal(typed.ok, true, typed.error);
+  assert.equal(editor.textContent, "Revised");
+  const snapshot = runScript<{ refs: Record<string, string> }>(
+    buildSnapshotScript(undefined, "default"), body
+  );
+  assert.ok(Object.values(snapshot.refs).includes("#editor"));
+  assert.ok(!Object.values(snapshot.refs).includes("#paragraph"));
+});
+
+for (const [type, value] of [
+  ["date", "2026-10-08"],
+  ["time", "13:45"],
+  ["month", "2026-10"],
+  ["week", "2026-W41"],
+  ["datetime-local", "2026-10-08T13:45"],
+]) {
+  test(`buildTypeScript fills input[type=${type}]`, () => {
+    const input = makeEl("input", { id: "field", attributes: new Map([["type", type]]) });
+    const body = elApi(makeEl("body", { children: [input] })).toBody() as Record<string, unknown>;
+    const result = runScript<{ ok: boolean; error?: string }>(buildTypeScript({
+      selector: "#field", refs: {}, text: value,
+    }), body);
+    assert.equal(result.ok, true, result.error);
+    const field = (body.querySelector as (selector: string) => { value: string })("#field");
+    assert.equal(field.value, value);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // buildSnapshotScript
 // ---------------------------------------------------------------------------
@@ -614,6 +659,25 @@ test("default snapshot prioritizes a late dialog after many page controls", () =
   );
   assert.match(result.text, /#confirm-schedule/);
   assert.ok(Object.values(result.refs).includes("#confirm-schedule"));
+});
+
+test("snapshot traverses visible controls inside boxless containers", () => {
+  const button = makeEl("button", { id: "confirm", textContent: "Confirm" });
+  const dialog = makeEl("div", {
+    id: "dialog", attributes: new Map([["role", "dialog"]]), children: [button],
+  });
+  const boxless = makeEl("div", {
+    id: "boxless", rect: { width: 0, height: 0 },
+    style: { display: "contents", visibility: "visible" }, children: [dialog],
+  });
+  const body = elApi(makeEl("body", { children: [boxless] })).toBody();
+  const snapshot = runScript<{ text: string; refs: Record<string, string> }>(
+    buildSnapshotScript(undefined, "default"), body
+  );
+  assert.match(snapshot.text, /Confirm/);
+  assert.ok(Object.values(snapshot.refs).includes("#confirm"));
+  const a11y = runScript<{ text: string }>(buildSnapshotScript(undefined, "a11y"), body);
+  assert.match(a11y.text, /Confirm/);
 });
 
 // ---------------------------------------------------------------------------
