@@ -32,7 +32,6 @@ import {
   fetchWorktreeSetupLog,
   runWorktreeSetup,
   type Project,
-  type ProjectEvent,
   type SessionSummary,
   type Worktree,
   type WorktreeSetupEvent,
@@ -98,20 +97,26 @@ interface SidebarProps {
   focusQueue?: FocusQueueItem[];
   onFocusQueueChange?: (queue: FocusQueueItem[]) => void;
   focusRefreshKey?: number;
-  // The most recent project lifecycle event received from the SSE
-  // stream owned by App.tsx. The sidebar inspects the event to do a
-  // *targeted* refresh (one worktree's sessions, or one project's
-  // worktrees) instead of re-walking every worktree in every project
-  // on every event. With many worktrees the old "always reload
-  // everything" behavior saturated the server with parallel
-  // `GET /sessions?worktreeId=…` requests — see the latency spike
-  // captured in the screenshot that motivated this change.
+  // The scopes that need re-fetching, accumulated by App.tsx across
+  // the 50 ms debounce window. The sidebar fans out into one
+  // targeted refresh per scope instead of re-walking every worktree
+  // in every project on every event. With many worktrees the old
+  // "always reload everything" behavior saturated the server with
+  // parallel `GET /sessions?worktreeId=…` requests.
   //
-  // We pass a `{ event, counter }` pair so the effect can detect new
-  // events even when the same event shape lands twice in a row.
-  // `counter` increments monotonically; `event` is the most recent
-  // payload the parent has seen. `null` before the first event.
-  lastProjectEvent?: { event: ProjectEvent; counter: number } | null;
+  // Publishing every scope (not just the last event) matters because
+  // a burst that lands within the debounce window can touch multiple
+  // distinct targets — e.g. a focus pin in worktree A and a session
+  // update in worktree B. Publishing only the last event would drop
+  // A's update; the accumulated list preserves it. `counter` is
+  // monotonic so the sidebar effect re-fires on identical payloads.
+  // `null` before the first event.
+  pendingProjectRefreshes?: {
+    counter: number;
+    sessions: Array<{ projectId: string; worktreeId: string }>;
+    worktrees: string[];
+    hasProjectEvent: boolean;
+  } | null;
 }
 
 interface WorktreeWithSessions extends Worktree {
@@ -401,7 +406,7 @@ export function Sidebar({
   focusQueue: focusQueueProp,
   onFocusQueueChange,
   focusRefreshKey,
-  lastProjectEvent,
+  pendingProjectRefreshes,
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
@@ -661,9 +666,15 @@ export function Sidebar({
    * Refresh a single worktree's session list. Used by the targeted
    * event handler below so a `session_added` / `session_removed` /
    * `session_updated` event only re-fetches the affected worktree's
-   * sessions instead of every worktree in every project. Falls back
-   * to `loadAll` if the project isn't loaded yet (e.g. the event
-   * raced the initial mount).
+   * sessions instead of every worktree in every project.
+   *
+   * If the project or worktree isn't loaded yet (the initial
+   * `loadAll` is still in flight, or a `worktree_added` for the same
+   * worktree has not been processed yet) the fetched data is dropped
+   * on the floor and the scope is queued for replay. The drain
+   * effect below re-runs the targeted refresh every time
+   * `projectData` changes, so the queued scope lands as soon as the
+   * project/worktree appears in state.
    */
   const refreshWorktreeSessions = useCallback(
     async (projectId: string, worktreeId: string): Promise<void> => {
@@ -674,12 +685,25 @@ export function Sidebar({
         return;
       }
       const filtered = sessions.filter((s) => !archivedIds.has(s.id));
-      setProjectData((prev) =>
-        prev.map((p) => {
+      // Read the latest state via the ref to decide whether the
+      // scope is ready to apply. The ref is updated synchronously
+      // after every render, so this reflects the freshest snapshot
+      // we have *before* the awaited fetch — close enough for the
+      // decision; the setProjectData updater below re-checks the
+      // same condition on the live `prev` to avoid races.
+      const project = projectDataRef.current.find(
+        (p) => p.id === projectId,
+      );
+      if (!project || !project.worktrees.some((w) => w.id === worktreeId)) {
+        queueSessionRefresh(projectId, worktreeId);
+        return;
+      }
+      setProjectData((prev) => {
+        if (!prev.some((p) => p.id === projectId)) {
+          return prev;
+        }
+        return prev.map((p) => {
           if (p.id !== projectId) return p;
-          // If the worktree has been removed by another concurrent
-          // refresh while this fetch was in flight, drop the
-          // incoming list rather than resurrecting the node.
           if (!p.worktrees.some((w) => w.id === worktreeId)) return p;
           return {
             ...p,
@@ -689,11 +713,12 @@ export function Sidebar({
                 : w,
             ),
           };
-        }),
-      );
-      // Refresh runtimes alongside the targeted refetch so a session
-      // that just spawned or finished picks up its active/awaiting
-      // flags without waiting for the next 2s poll.
+        });
+      });
+      // Refresh runtimes alongside the targeted refetch so a
+      // session that just spawned or finished picks up its
+      // active/awaiting flags without waiting for the next 2s
+      // poll.
       refreshActiveSessions().catch(() => {});
     },
     [archivedIds, refreshActiveSessions],
@@ -716,6 +741,10 @@ export function Sidebar({
    * `sessions` so the user doesn't lose their expansion state on
    * every refresh, and so we only pay the sessions cost for worktrees
    * the event actually changed.
+   *
+   * If the project is not yet loaded (initial `loadAll` still in
+   * flight), queues the scope for replay. The drain effect below
+   * re-runs the targeted refresh once `projectData` catches up.
    */
   const refreshProjectWorktrees = useCallback(
     async (projectId: string): Promise<void> => {
@@ -728,7 +757,10 @@ export function Sidebar({
       const existingProject = projectDataRef.current.find(
         (p) => p.id === projectId,
       );
-      if (!existingProject) return;
+      if (!existingProject) {
+        queueProjectWorktreesRefresh(projectId);
+        return;
+      }
       const existingIds = new Set(
         existingProject.worktrees.map((w) => w.id),
       );
@@ -763,8 +795,89 @@ export function Sidebar({
         ),
       );
     },
-    [activeProjectId, activeWorktreeId, refreshWorktreeSessions],
+    [
+      activeProjectId,
+      activeWorktreeId,
+      refreshWorktreeSessions,
+    ],
   );
+
+  // Queued scopes that arrived before their project/worktree was in
+  // `projectData`. The targeted refresh drops the data and records
+  // the scope here; the drain replays every entry once `projectData`
+  // updates (typically because the initial `loadAll` resolved, or a
+  // prior worktree refresh added the parent node).
+  //
+  // Two parallel sets keyed by the same string key: one for session
+  // scopes (`projectId\u0000worktreeId`) and one for worktree scopes
+  // (`projectId`). Keeping them separate means a queued session
+  // refresh and a queued worktree refresh don't accidentally
+  // collapse into one and skip half the work.
+  const pendingSessionScopesRef = useRef<Set<string>>(new Set());
+  const pendingProjectScopesRef = useRef<Set<string>>(new Set());
+  const queueSessionRefresh = useCallback(
+    (projectId: string, worktreeId: string) => {
+      pendingSessionScopesRef.current.add(`${projectId}\u0000${worktreeId}`);
+    },
+    [],
+  );
+  const queueProjectWorktreesRefresh = useCallback((projectId: string) => {
+    pendingProjectScopesRef.current.add(projectId);
+  }, []);
+
+  /**
+   * Replay every queued targeted refresh that has a now-loaded
+   * target. Safe to call at any time — entries whose target is
+   * still missing stay in the set and will be retried by the
+   * next call. Called both by the effect on `projectData` changes
+   * (so a successful `loadAll` replays everything that arrived
+   * during the initial mount) and directly from the targeted
+   * refresh path when a project-add races the initial load.
+   *
+   * Scopes whose project has been removed (e.g. `project_removed`
+   * landed and `loadAll` rebuilt `projectData` without it) are
+   * evicted so the set doesn't grow unbounded for projects that
+   * are gone for good.
+   */
+  const drainPendingRefreshes = useCallback(() => {
+    if (
+      pendingSessionScopesRef.current.size === 0 &&
+      pendingProjectScopesRef.current.size === 0
+    ) {
+      return;
+    }
+    const sessions = Array.from(pendingSessionScopesRef.current);
+    const projects = Array.from(pendingProjectScopesRef.current);
+    const knownProjectIds = new Set(
+      projectDataRef.current.map((p) => p.id),
+    );
+    sessions.forEach((key) => {
+      const idx = key.indexOf("\u0000");
+      const projectId = key.slice(0, idx);
+      const worktreeId = key.slice(idx + 1);
+      if (!knownProjectIds.has(projectId)) {
+        // Project is gone; drop the scope so it doesn't accumulate.
+        pendingSessionScopesRef.current.delete(key);
+        return;
+      }
+      const project = projectDataRef.current.find(
+        (p) => p.id === projectId,
+      );
+      if (!project || !project.worktrees.some((w) => w.id === worktreeId)) {
+        return; // not yet loaded
+      }
+      pendingSessionScopesRef.current.delete(key);
+      refreshWorktreeSessions(projectId, worktreeId).catch(() => {});
+    });
+    projects.forEach((projectId) => {
+      if (!knownProjectIds.has(projectId)) {
+        pendingProjectScopesRef.current.delete(projectId);
+        return;
+      }
+      pendingProjectScopesRef.current.delete(projectId);
+      refreshProjectWorktrees(projectId).catch(() => {});
+    });
+  }, [refreshWorktreeSessions, refreshProjectWorktrees]);
 
   useEffect(() => {
     loadAll().catch(() => {});
@@ -778,37 +891,46 @@ export function Sidebar({
    * every JSON file). With 15+ worktrees the N+1 walk dominated the
    * 50ms debounce window and the UI was stuck on `(pending)` rows.
    *
-   * This effect dispatches on the event type:
-   *   - `session_*`  → re-fetch only that worktree's sessions
-   *   - `worktree_*` → re-fetch only that project's worktrees
-   *   - `project_*`  → no-op here; App already refreshed the project
-   *                    list and `loadAll`'s `projects` dep re-runs
-   *                    the full walk.
+   * App.tsx accumulates every scope touched during the debounce
+   * window into `pendingProjectRefreshes`, so this effect can fan
+   * out into one targeted refresh per scope:
+   *   - `sessions`  → re-fetch each affected worktree's sessions
+   *   - `worktrees` → re-fetch each affected project's worktree list
+   *   - `hasProjectEvent` → no-op here; App already refreshed the
+   *                         projects list and `loadAll`'s `projects`
+   *                         dep re-runs the full walk.
+   *
+   * After the targeted refreshes, we drain any queued scopes from
+   * earlier bursts that arrived before their project/worktree was
+   * loaded.
    */
   useEffect(() => {
-    if (!lastProjectEvent) return;
-    const { event } = lastProjectEvent;
-    switch (event.type) {
-      case "session_added":
-      case "session_removed":
-      case "session_updated":
-        refreshWorktreeSessions(event.projectId, event.worktreeId).catch(
-          () => {},
-        );
-        return;
-      case "worktree_added":
-      case "worktree_removed":
-      case "worktree_updated":
-        refreshProjectWorktrees(event.projectId).catch(() => {});
-        return;
-      case "project_added":
-      case "project_updated":
-      case "project_removed":
-        // App.tsx already refreshes the projects list; the `projects`
-        // prop changing re-runs `loadAll` via the effect above.
-        return;
-    }
-  }, [lastProjectEvent, refreshWorktreeSessions, refreshProjectWorktrees]);
+    if (!pendingProjectRefreshes) return;
+    pendingProjectRefreshes.sessions.forEach((scope) => {
+      refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
+        () => {},
+      );
+    });
+    pendingProjectRefreshes.worktrees.forEach((projectId) => {
+      refreshProjectWorktrees(projectId).catch(() => {});
+    });
+    drainPendingRefreshes();
+  }, [
+    pendingProjectRefreshes,
+    refreshWorktreeSessions,
+    refreshProjectWorktrees,
+    drainPendingRefreshes,
+  ]);
+
+  /**
+   * Drain queued targeted refreshes after every `projectData` update.
+   * This catches the case where the initial `loadAll` was in flight
+   * when an event arrived, so the targeted refresh had to queue
+   * the scope; once `loadAll` lands, this replays it.
+   */
+  useEffect(() => {
+    drainPendingRefreshes();
+  }, [projectData, drainPendingRefreshes]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;

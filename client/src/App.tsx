@@ -363,18 +363,62 @@ function AppBody() {
   // an event lands. The events themselves are "the data on disk
   // changed" — debounce a burst (e.g. session-add + first user_message
   // + a title pin) into a single refetch so the sidebar doesn't
-  // thrash. The sidebar consumes `lastProjectEvent` and does a
+  // thrash. The sidebar consumes `pendingProjectRefreshes` and does a
   // *targeted* refetch (one worktree's sessions, or one project's
   // worktrees) instead of re-walking every worktree on every event —
   // with many worktrees the old N+1 walk saturated the server with
   // parallel `GET /sessions?worktreeId=…` requests.
-  const [lastProjectEvent, setLastProjectEvent] = useState<{
-    event: ProjectEvent;
+  //
+  // We accumulate every scope touched during the debounce window into
+  // a single payload rather than publishing only the final event.
+  // The old full-reload behaviour made coalescing safe because every
+  // worktree got walked anyway, but a targeted handler that only sees
+  // the last event would silently drop earlier targets in the burst
+  // (e.g. session_added in worktree A and session_added in worktree B
+  // 20 ms apart would refresh only B). Tracking every scope costs
+  // O(K) per burst (K = distinct targets in the window, typically 1)
+  // and preserves the targeted-refresh benefit.
+  type SessionScope = { projectId: string; worktreeId: string };
+  type RefreshScopes = {
     counter: number;
-  } | null>(null);
+    sessions: SessionScope[];
+    worktrees: string[];
+    hasProjectEvent: boolean;
+  };
+  const [pendingProjectRefreshes, setPendingProjectRefreshes] =
+    useState<RefreshScopes | null>(null);
   const eventsCounterRef = useRef(0);
+  const pendingSessionsRef = useRef<Map<string, SessionScope>>(new Map());
+  const pendingWorktreesRef = useRef<Set<string>>(new Set());
+  const pendingProjectsRef = useRef<boolean>(false);
   const eventsDebounceRef = useRef<number | null>(null);
+  const sessionScopeKey = (s: SessionScope) =>
+    `${s.projectId}\u0000${s.worktreeId}`;
   const scheduleEventsRefetch = useCallback((event: ProjectEvent) => {
+    // Record this event's scope into the pending sets *before*
+    // scheduling the debounced flush, so a burst that arrives within
+    // the 50 ms window accumulates every target rather than just the
+    // last one.
+    switch (event.type) {
+      case "session_added":
+      case "session_removed":
+      case "session_updated":
+        pendingSessionsRef.current.set(
+          sessionScopeKey({ projectId: event.projectId, worktreeId: event.worktreeId }),
+          { projectId: event.projectId, worktreeId: event.worktreeId },
+        );
+        break;
+      case "worktree_added":
+      case "worktree_removed":
+      case "worktree_updated":
+        pendingWorktreesRef.current.add(event.projectId);
+        break;
+      case "project_added":
+      case "project_updated":
+      case "project_removed":
+        pendingProjectsRef.current = true;
+        break;
+    }
     if (eventsDebounceRef.current !== null) {
       window.clearTimeout(eventsDebounceRef.current);
     }
@@ -382,16 +426,27 @@ function AppBody() {
       eventsDebounceRef.current = null;
       // Project-lifecycle events change the sidebar's project list;
       // the rest live under an active project so the sidebar's
-      // targeted refetch picks them up. Bumping one key drives both.
-      if (
-        event.type === "project_added" ||
-        event.type === "project_updated" ||
-        event.type === "project_removed"
-      ) {
+      // targeted refetch picks them up. Refreshing the projects list
+      // triggers `loadAll` via its `projects` dep.
+      if (pendingProjectsRef.current) {
         loadProjects();
       }
+      const sessions = Array.from(pendingSessionsRef.current.values());
+      const worktrees = Array.from(pendingWorktreesRef.current);
+      const hasProjectEvent = pendingProjectsRef.current;
+      pendingSessionsRef.current = new Map();
+      pendingWorktreesRef.current = new Set();
+      pendingProjectsRef.current = false;
+      if (sessions.length === 0 && worktrees.length === 0 && !hasProjectEvent) {
+        return;
+      }
       eventsCounterRef.current += 1;
-      setLastProjectEvent({ event, counter: eventsCounterRef.current });
+      setPendingProjectRefreshes({
+        counter: eventsCounterRef.current,
+        sessions,
+        worktrees,
+        hasProjectEvent,
+      });
       // Issue #384: refresh the cached session-relationships
       // (parent + children) so a child session that just spawned
       // or finished in another tab is reflected in the floating
@@ -762,7 +817,7 @@ function AppBody() {
           onFocusQueueChange={handleFocusQueueChange}
           focusQueue={focusQueue}
           focusRefreshKey={focusRefreshKey}
-          lastProjectEvent={lastProjectEvent}
+          pendingProjectRefreshes={pendingProjectRefreshes}
         />
       </div>
 
