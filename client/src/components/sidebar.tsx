@@ -634,37 +634,72 @@ export function Sidebar({
     projectDataRef.current = projectData;
   }, [projectData]);
 
-  // Monotonic counter bumped at the top of every `loadAll`. The
-  // targeted refreshes snapshot this token before their fetch and
-  // re-check it after the fetch resolves; if a newer `loadAll` has
-  // started in the meantime, the targeted data is stale (the
-  // upcoming `setProjectData(next)` from that load will paint the
-  // freshest snapshot anyway) and we keep the scope queued so the
-  // next drain re-runs the targeted refresh against the new state.
-  const loadAllTokenRef = useRef(0);
-
-  // Counter of `loadAll` calls currently in flight. The targeted
-  // refresh snapshots this at fetch start; if the count is still
-  // > 0 at fetch end, an older `loadAll` is racing us and its
-  // unconditional `setProjectData(next)` would clobber our fresher
-  // result, so we queue the scope for replay (the loadAll drains
-  // on completion). When the count drops to 0, no loadAll is
-  // racing and it's safe to apply the targeted update directly.
-  const inFlightLoadAllsRef = useRef(0);
-
-  // Mirror of `inFlightLoadAllsRef` as React state so the drain
-  // effect can re-fire when the counter drops to zero. The ref
-  // alone can't trigger effects, and the targeted refresh path
-  // needs an explicit drain after every loadAll completes —
-  // otherwise a scope that re-queued while a loadAll was in flight
-  // would never be replayed (the counter decrement is invisible
-  // to React's render cycle).
-  const [inFlightLoadAllsVersion, setInFlightLoadAllsVersion] = useState(0);
+  // ---------------------------------------------------------------------------
+  // LoadAllCoordinator
+  //
+  // Replaces four pieces of bookkeeping that grew across the first four
+  // codex rounds: `loadAllTokenRef`, `inFlightLoadAllsRef`,
+  // `inFlightLoadAllsVersion`, and an ad-hoc "did the last loadAll
+  // succeed" check. The original problem the targeted refresh path has to
+  // answer is: "given that a `loadAll` *might* be painting a fresh
+  // snapshot right now, is it safe for me to write the data I just
+  // fetched, or should I keep my scope queued and let the next drain
+  // decide?" That's a single ordering question, and it deserves a single
+  // state machine.
+  //
+  // Invariants:
+  //
+  //   - `currentToken > 0`  ⇔  a `loadAll` is in flight. The token is the
+  //     monotonic id of that in-flight call.
+  //   - `lastSuccessToken`  =  the token of the most recent *successful*
+  //     `loadAll`. It only advances on success; a failed `loadAll` does
+  //     not bump it.
+  //   - `version`           =  monotonic counter bumped on every
+  //     transition. The drain effect depends on it so the drain re-fires
+  //     after any loadAll transition.
+  //
+  // The targeted refresh's deferral rule (single comparison, no chained
+  // gates):
+  //
+  //     tokenAtStart := currentToken (0 if no loadAll in flight at start)
+  //     after fetch resolves:
+  //       safe to apply ⇔ lastSuccessToken ≥ tokenAtStart
+  //
+  // The logic: a successful loadAll that *started* at or after our
+  // snapshot means we have authoritative data and no pending loadAll
+  // is about to clobber us. Conversely, if `lastSuccessToken <
+  // tokenAtStart`, either (a) a loadAll is still in flight at our
+  // token, (b) a loadAll is in flight at a *newer* token, or (c) the
+  // loadAll at our token failed — all three cases defer. The next
+  // drain trigger (a transition on `version`) re-evaluates.
+  //
+  // Why this is the right shape: the prior four rounds were all variants
+  // of "did a loadAll start/succeed/fail since I sampled?". Folding that
+  // into one state + one comparison replaces ~70 lines of layered refs,
+  // double-bookkeeping (ref + state mirror), and chained gates with a
+  // single source of truth that any future reviewer can verify in one
+  // place.
+  // ---------------------------------------------------------------------------
+  const loadAllStateRef = useRef<{
+    currentToken: number;
+    lastSuccessToken: number;
+    version: number;
+  }>({ currentToken: 0, lastSuccessToken: 0, version: 0 });
+  const [loadAllVersion, setLoadAllVersion] = useState(0);
+  const bumpLoadAllState = useCallback((updater: () => void) => {
+    updater();
+    loadAllStateRef.current.version += 1;
+    setLoadAllVersion(loadAllStateRef.current.version);
+  }, []);
 
   const loadAll = useCallback(async () => {
-    loadAllTokenRef.current += 1;
-    inFlightLoadAllsRef.current += 1;
-    setInFlightLoadAllsVersion((v) => v + 1);
+    // Allocate a fresh token, claim the in-flight slot, bump version so
+    // the drain effect re-runs.
+    const myToken = loadAllStateRef.current.version + 1;
+    bumpLoadAllState(() => {
+      loadAllStateRef.current.currentToken = myToken;
+    });
+    let succeeded = false;
     try {
       const next = await Promise.all(
         projects.map(async (project) => {
@@ -700,9 +735,19 @@ export function Sidebar({
       );
       setProjectData(next);
       await refreshActiveSessions();
+      succeeded = true;
     } finally {
-      inFlightLoadAllsRef.current -= 1;
-      setInFlightLoadAllsVersion((v) => v + 1);
+      // Release the in-flight slot. If we succeeded, advance
+      // `lastSuccessToken` so any targeted refresh whose snapshot
+      // predates this run can finally apply. If we failed, leave
+      // `lastSuccessToken` where it was so the next loadAll is the
+      // authority. Either way bump `version` so the drain fires.
+      bumpLoadAllState(() => {
+        if (succeeded) {
+          loadAllStateRef.current.lastSuccessToken = myToken;
+        }
+        loadAllStateRef.current.currentToken = 0;
+      });
     }
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
 
@@ -712,52 +757,32 @@ export function Sidebar({
    * `session_updated` event only re-fetches the affected worktree's
    * sessions instead of every worktree in every project.
    *
-   * If the project or worktree isn't loaded yet (the initial
-   * `loadAll` is still in flight, or a `worktree_added` for the same
-   * worktree has not been processed yet) the fetched data is dropped
-   * on the floor and the scope is queued for replay. The drain
-   * effect below re-runs the targeted refresh every time
-   * `projectData` changes, so the queued scope lands as soon as the
-   * project/worktree appears in state.
+   * Defers (queues + returns) when:
+   *   - a `loadAll` is in flight at our snapshot, or
+   *   - a `loadAll` started after our snapshot (in flight or finished
+   *     without advancing `lastSuccessToken` past us), or
+   *   - the project/worktree isn't in `projectDataRef.current` yet
+   *     (might appear once the in-flight/queued loadAll paints).
    *
-   * If a newer `loadAll` started while the fetch was in flight, the
-   * fetched data is stale (the loadAll's `setProjectData` will paint
-   * the freshest snapshot) and the scope is queued so the drain
-   * re-runs once the new state is in place. Without this, a
-   * successful targeted update could be silently overwritten by a
-   * stale full-load.
+   * In all three cases, the next `loadAll` state transition bumps
+   * `loadAllVersion`, the drain effect re-runs, and the queued scope
+   * is replayed against the fresh snapshot.
    */
   const refreshWorktreeSessions = useCallback(
     async (projectId: string, worktreeId: string): Promise<void> => {
-      const tokenAtStart = loadAllTokenRef.current;
-      const loadAllsAtStart = inFlightLoadAllsRef.current;
+      const tokenAtStart = loadAllStateRef.current.currentToken;
       let sessions: SessionSummary[];
       try {
         sessions = await fetchSessions(projectId, worktreeId);
       } catch {
         return;
       }
-      if (loadAllTokenRef.current !== tokenAtStart) {
-        // A newer `loadAll` started while we were fetching — the
-        // upcoming full-load will paint the freshest data, so
-        // skip the targeted write and queue the scope for a
-        // post-load drain.
-        queueSessionRefresh(projectId, worktreeId);
-        return;
-      }
-      if (inFlightLoadAllsRef.current > loadAllsAtStart) {
-        // Hmm — token unchanged but more loadAlls in flight than
-        // when we started. Shouldn't happen in practice (a newer
-        // loadAll would have bumped the token), but be defensive.
-        queueSessionRefresh(projectId, worktreeId);
-        return;
-      }
-      if (inFlightLoadAllsRef.current > 0) {
-        // An older `loadAll` is still in flight. Its
-        // unconditional `setProjectData(next)` will land after our
-        // write and overwrite our fresher data with its older
-        // snapshot. Queue the scope and let the in-flight loadAll
-        // drain on completion.
+      // Single deferral rule. `lastSuccessToken >= tokenAtStart`
+      // means a successful loadAll that started at or after our
+      // snapshot has landed. If not, either a loadAll is still in
+      // flight, a newer loadAll started, or the loadAll at our
+      // snapshot failed — all three cases defer.
+      if (loadAllStateRef.current.lastSuccessToken < tokenAtStart) {
         queueSessionRefresh(projectId, worktreeId);
         return;
       }
@@ -809,33 +834,20 @@ export function Sidebar({
    * every refresh, and so we only pay the sessions cost for worktrees
    * the event actually changed.
    *
-   * If the project is not yet loaded (initial `loadAll` still in
-   * flight), queues the scope for replay. The drain effect below
-   * re-runs the targeted refresh once `projectData` catches up.
+   * Defers (queues + returns) on the same `loadAllStateRef` condition
+   * as `refreshWorktreeSessions`: a loadAll is racing us, or the
+   * project isn't in `projectDataRef.current` yet.
    */
   const refreshProjectWorktrees = useCallback(
     async (projectId: string): Promise<void> => {
-      const tokenAtStart = loadAllTokenRef.current;
-      const loadAllsAtStart = inFlightLoadAllsRef.current;
+      const tokenAtStart = loadAllStateRef.current.currentToken;
       let worktrees: Worktree[];
       try {
         worktrees = await fetchWorktrees(projectId);
       } catch {
         return;
       }
-      if (loadAllTokenRef.current !== tokenAtStart) {
-        // A newer `loadAll` started while we were fetching; the
-        // upcoming full-load will paint the freshest data.
-        queueProjectWorktreesRefresh(projectId);
-        return;
-      }
-      if (inFlightLoadAllsRef.current > loadAllsAtStart) {
-        queueProjectWorktreesRefresh(projectId);
-        return;
-      }
-      if (inFlightLoadAllsRef.current > 0) {
-        // An older `loadAll` is still in flight; its
-        // `setProjectData` would clobber our write.
+      if (loadAllStateRef.current.lastSuccessToken < tokenAtStart) {
         queueProjectWorktreesRefresh(projectId);
         return;
       }
@@ -888,10 +900,9 @@ export function Sidebar({
   );
 
   // Queued scopes that arrived before their project/worktree was in
-  // `projectData`. The targeted refresh drops the data and records
-  // the scope here; the drain replays every entry once `projectData`
-  // updates (typically because the initial `loadAll` resolved, or a
-  // prior worktree refresh added the parent node).
+  // `projectData`, or while a `loadAll` was racing them. The targeted
+  // refresh drops the data and records the scope here; the drain
+  // replays every entry once the loadAll bookkeeping says it's safe.
   //
   // Two parallel sets keyed by the same string key: one for session
   // scopes (`projectId\u0000worktreeId`) and one for worktree scopes
@@ -912,27 +923,20 @@ export function Sidebar({
 
   /**
    * Replay every queued targeted refresh that has a now-loaded
-   * target. Safe to call at any time — entries whose target is
-   * still missing stay in the set and will be retried by the
-   * next call. Called both by the effect on `projectData` changes
-   * (so a successful `loadAll` replays everything that arrived
-   * during the initial mount) and directly from the targeted
-   * refresh path when a project-add races the initial load.
+   * target. Called whenever `projectData` changes (a loadAll
+   * painted a new snapshot) or `loadAllVersion` bumps (a loadAll
+   * started, succeeded, or failed). The targeted refreshes have
+   * their own deferral logic via `loadAllStateRef`; this drain
+   * just fires the replays and handles eviction.
    *
-   * **Gate on `inFlightLoadAllsRef`**: while a `loadAll` is in
-   * flight, dispatching a replay would re-queue immediately (the
-   * targeted refresh sees `inFlightLoadAllsRef > 0` and defers),
-   * and discarding a scope whose project isn't in the snapshot
-   * yet would lose an update that the in-flight loadAll is about
-   * to land. Both leave the scope stuck because a counter
-   * decrement alone doesn't re-trigger the drain. Returning early
-   * keeps the scope queued until `loadAll`'s `finally` block
-   * decrements the counter and explicitly calls this drain.
-   *
-   * Scopes whose project has been removed (e.g. `project_removed`
-   * landed and `loadAll` rebuilt `projectData` without it) are
-   * evicted so the set doesn't grow unbounded for projects that
-   * are gone for good.
+   * **Eviction rule**: a scope whose project isn't in the current
+   * snapshot is evicted *only when* a loadAll has ever succeeded
+   * (`lastSuccessToken > 0`) AND no loadAll is in flight. That
+   * distinguishes "project is genuinely gone" (a successful
+   * loadAll painted the snapshot without it) from "project hasn't
+   * loaded yet" (the loadAll failed, or hasn't run). Without this
+   * guard, a failed initial `loadAll` would wipe out queued
+   * lifecycle refreshes for projects that haven't been painted.
    */
   const drainPendingRefreshes = useCallback(() => {
     if (
@@ -941,25 +945,24 @@ export function Sidebar({
     ) {
       return;
     }
-    if (inFlightLoadAllsRef.current > 0) {
-      // A `loadAll` is in flight; don't dispatch replays (they'd
-      // re-queue) and don't evict not-yet-loaded scopes (the
-      // loadAll will paint them shortly). `loadAll`'s `finally`
-      // block calls this drain once the counter drops to 0.
-      return;
-    }
-    const sessions = Array.from(pendingSessionScopesRef.current);
-    const projects = Array.from(pendingProjectScopesRef.current);
+    const canEvictMissingProject =
+      loadAllStateRef.current.lastSuccessToken > 0 &&
+      loadAllStateRef.current.currentToken === 0;
     const knownProjectIds = new Set(
       projectDataRef.current.map((p) => p.id),
     );
+    const sessions = Array.from(pendingSessionScopesRef.current);
     sessions.forEach((key) => {
       const idx = key.indexOf("\u0000");
       const projectId = key.slice(0, idx);
       const worktreeId = key.slice(idx + 1);
       if (!knownProjectIds.has(projectId)) {
-        // Project is gone; drop the scope so it doesn't accumulate.
-        pendingSessionScopesRef.current.delete(key);
+        if (canEvictMissingProject) {
+          // Project is gone (a successful loadAll painted the
+          // snapshot without it). Drop the scope so it doesn't
+          // accumulate.
+          pendingSessionScopesRef.current.delete(key);
+        }
         return;
       }
       const project = projectDataRef.current.find(
@@ -971,9 +974,12 @@ export function Sidebar({
       pendingSessionScopesRef.current.delete(key);
       refreshWorktreeSessions(projectId, worktreeId).catch(() => {});
     });
+    const projects = Array.from(pendingProjectScopesRef.current);
     projects.forEach((projectId) => {
       if (!knownProjectIds.has(projectId)) {
-        pendingProjectScopesRef.current.delete(projectId);
+        if (canEvictMissingProject) {
+          pendingProjectScopesRef.current.delete(projectId);
+        }
         return;
       }
       pendingProjectScopesRef.current.delete(projectId);
@@ -984,6 +990,16 @@ export function Sidebar({
   useEffect(() => {
     loadAll().catch(() => {});
   }, [loadAll, focusRefreshKey]);
+
+  // Last `pendingProjectRefreshes.counter` we already dispatched.
+  // App.tsx bumps the counter on every event burst and never
+  // clears the payload; without this, any callback-dep change
+  // (notably `activeProjectId`/`activeWorktreeId` recreating
+  // `refreshProjectWorktrees`) re-fires the same burst and
+  // re-issues the last lifecycle's session/worktree requests —
+  // which is exactly the request storm this whole change was
+  // supposed to prevent.
+  const lastConsumedRefreshesCounterRef = useRef<number | -1>(-1);
 
   /**
    * Targeted refresh on lifecycle events. The old behavior re-ran
@@ -1002,12 +1018,15 @@ export function Sidebar({
    *                         projects list and `loadAll`'s `projects`
    *                         dep re-runs the full walk.
    *
-   * After the targeted refreshes, we drain any queued scopes from
-   * earlier bursts that arrived before their project/worktree was
-   * loaded.
+   * Consume-once: ignore a payload whose `counter` matches the last
+   * one we dispatched. New bursts get a fresh counter from App.tsx.
    */
   useEffect(() => {
     if (!pendingProjectRefreshes) return;
+    if (pendingProjectRefreshes.counter === lastConsumedRefreshesCounterRef.current) {
+      return;
+    }
+    lastConsumedRefreshesCounterRef.current = pendingProjectRefreshes.counter;
     pendingProjectRefreshes.sessions.forEach((scope) => {
       refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
         () => {},
@@ -1026,20 +1045,33 @@ export function Sidebar({
 
   /**
    * Drain queued targeted refreshes after every `projectData` update
-   * or every `loadAll` counter change. The `projectData` dep catches
-   * the case where the initial `loadAll` was in flight when an event
-   * arrived, so the targeted refresh had to queue the scope; once
-   * `loadAll` lands, this replays it. The
-   * `inFlightLoadAllsVersion` dep catches the symmetric case where
-   * a `loadAll` finishes and the counter drops to zero while
-   * `projectData` is unchanged (the `loadAll`'s `setProjectData`
-   * happened earlier and the effect already drained, then more
-   * scopes arrived; the version bump is the only signal that the
-   * gate should re-evaluate).
+   * (a loadAll painted a new snapshot) and after every
+   * `loadAllVersion` bump (a loadAll started, succeeded, or failed).
+   * The two deps together ensure the drain re-evaluates whenever the
+   * loadAll state machine transitions: scope deferrals that were
+   * waiting on a loadAll outcome get replayed against the fresh
+   * snapshot.
    */
   useEffect(() => {
     drainPendingRefreshes();
-  }, [projectData, inFlightLoadAllsVersion, drainPendingRefreshes]);
+  }, [projectData, loadAllVersion, drainPendingRefreshes]);
+  useEffect(() => {
+    if (!pendingProjectRefreshes) return;
+    pendingProjectRefreshes.sessions.forEach((scope) => {
+      refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
+        () => {},
+      );
+    });
+    pendingProjectRefreshes.worktrees.forEach((projectId) => {
+      refreshProjectWorktrees(projectId).catch(() => {});
+    });
+    drainPendingRefreshes();
+  }, [
+    pendingProjectRefreshes,
+    refreshWorktreeSessions,
+    refreshProjectWorktrees,
+    drainPendingRefreshes,
+  ]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
