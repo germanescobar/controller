@@ -652,9 +652,19 @@ export function Sidebar({
   // racing and it's safe to apply the targeted update directly.
   const inFlightLoadAllsRef = useRef(0);
 
+  // Mirror of `inFlightLoadAllsRef` as React state so the drain
+  // effect can re-fire when the counter drops to zero. The ref
+  // alone can't trigger effects, and the targeted refresh path
+  // needs an explicit drain after every loadAll completes —
+  // otherwise a scope that re-queued while a loadAll was in flight
+  // would never be replayed (the counter decrement is invisible
+  // to React's render cycle).
+  const [inFlightLoadAllsVersion, setInFlightLoadAllsVersion] = useState(0);
+
   const loadAll = useCallback(async () => {
     loadAllTokenRef.current += 1;
     inFlightLoadAllsRef.current += 1;
+    setInFlightLoadAllsVersion((v) => v + 1);
     try {
       const next = await Promise.all(
         projects.map(async (project) => {
@@ -692,11 +702,8 @@ export function Sidebar({
       await refreshActiveSessions();
     } finally {
       inFlightLoadAllsRef.current -= 1;
+      setInFlightLoadAllsVersion((v) => v + 1);
     }
-    // The drain runs in the `projectData`-deps effect after React
-    // commits the new state, which is when the ref mirror is also
-    // updated. Calling it here would be a no-op (the ref still
-    // holds the pre-loadAll snapshot) so we rely on the effect.
   }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
 
   /**
@@ -912,6 +919,16 @@ export function Sidebar({
    * during the initial mount) and directly from the targeted
    * refresh path when a project-add races the initial load.
    *
+   * **Gate on `inFlightLoadAllsRef`**: while a `loadAll` is in
+   * flight, dispatching a replay would re-queue immediately (the
+   * targeted refresh sees `inFlightLoadAllsRef > 0` and defers),
+   * and discarding a scope whose project isn't in the snapshot
+   * yet would lose an update that the in-flight loadAll is about
+   * to land. Both leave the scope stuck because a counter
+   * decrement alone doesn't re-trigger the drain. Returning early
+   * keeps the scope queued until `loadAll`'s `finally` block
+   * decrements the counter and explicitly calls this drain.
+   *
    * Scopes whose project has been removed (e.g. `project_removed`
    * landed and `loadAll` rebuilt `projectData` without it) are
    * evicted so the set doesn't grow unbounded for projects that
@@ -922,6 +939,13 @@ export function Sidebar({
       pendingSessionScopesRef.current.size === 0 &&
       pendingProjectScopesRef.current.size === 0
     ) {
+      return;
+    }
+    if (inFlightLoadAllsRef.current > 0) {
+      // A `loadAll` is in flight; don't dispatch replays (they'd
+      // re-queue) and don't evict not-yet-loaded scopes (the
+      // loadAll will paint them shortly). `loadAll`'s `finally`
+      // block calls this drain once the counter drops to 0.
       return;
     }
     const sessions = Array.from(pendingSessionScopesRef.current);
@@ -1001,14 +1025,21 @@ export function Sidebar({
   ]);
 
   /**
-   * Drain queued targeted refreshes after every `projectData` update.
-   * This catches the case where the initial `loadAll` was in flight
-   * when an event arrived, so the targeted refresh had to queue
-   * the scope; once `loadAll` lands, this replays it.
+   * Drain queued targeted refreshes after every `projectData` update
+   * or every `loadAll` counter change. The `projectData` dep catches
+   * the case where the initial `loadAll` was in flight when an event
+   * arrived, so the targeted refresh had to queue the scope; once
+   * `loadAll` lands, this replays it. The
+   * `inFlightLoadAllsVersion` dep catches the symmetric case where
+   * a `loadAll` finishes and the counter drops to zero while
+   * `projectData` is unchanged (the `loadAll`'s `setProjectData`
+   * happened earlier and the effect already drained, then more
+   * scopes arrived; the version bump is the only signal that the
+   * gate should re-evaluate).
    */
   useEffect(() => {
     drainPendingRefreshes();
-  }, [projectData, drainPendingRefreshes]);
+  }, [projectData, inFlightLoadAllsVersion, drainPendingRefreshes]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
