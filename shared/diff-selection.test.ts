@@ -9,6 +9,9 @@ import {
   buildSelectionContextBlock,
   buildSelectionPromptPrefix,
   truncatePreview,
+  encodeSelectionsWire,
+  SELECTION_PREVIEW_BYTE_LIMIT,
+  SELECTIONS_WIRE_CHAR_LIMIT,
   type LineRange,
   type SelectionMention,
 } from "./diff-selection.ts";
@@ -247,4 +250,80 @@ test("truncatePreview caps the byte count to SELECTION_PREVIEW_BYTE_LIMIT", () =
   const preview = "x".repeat(8 * 1024);
   const truncated = truncatePreview(preview);
   assert.ok(truncated.length <= 4 * 1024);
+});
+
+// --- encodeSelectionsWire --------------------------------------------------
+
+const b64 = (text: string) => Buffer.from(text, "utf-8").toString("base64");
+
+test("encodeSelectionsWire URI-encodes the token so multi-range commas survive the entry split", () => {
+  const encoded = encodeSelectionsWire(
+    [
+      {
+        path: "a.ts",
+        ranges: [
+          { start: 42, end: 42 },
+          { start: 57, end: 57 },
+          { start: 61, end: 65 },
+        ],
+        preview: "x",
+      },
+    ],
+    b64,
+  );
+  assert.equal(encoded, `${encodeURIComponent("a.ts:42,57,61-65")}|${b64("x")}`);
+  // No raw comma may leak out of the token — the decoder splits
+  // entries on commas.
+  assert.ok(!encoded.includes(","), "token commas must be percent-encoded");
+});
+
+test("encodeSelectionsWire drops previews once the wire budget is exhausted", () => {
+  const bigPreview = "a".repeat(SELECTION_PREVIEW_BYTE_LIMIT);
+  const selections: SelectionMention[] = [
+    { path: "a.ts", ranges: [{ start: 1, end: 1 }], preview: bigPreview },
+    { path: "b.ts", ranges: [{ start: 2, end: 2 }], preview: bigPreview },
+  ];
+  const encoded = encodeSelectionsWire(selections, b64);
+  assert.ok(encoded.length <= SELECTIONS_WIRE_CHAR_LIMIT);
+  const entries = encoded.split(",");
+  assert.equal(entries.length, 2);
+  // The first chip keeps its preview; the second is over budget, so
+  // its preview is dropped but the token (the anchor) still rides.
+  assert.ok(entries[0].endsWith(b64(bigPreview)));
+  assert.equal(entries[1], `${encodeURIComponent("b.ts:2")}|`);
+});
+
+// --- parseSelectionBlock: annotations --------------------------------------
+
+test("parseSelectionBlock consumes a trailing selection-annotations block", () => {
+  const raw = [
+    "<selections>",
+    "The user anchored this message to specific line ranges in the",
+    "active worktree. Resolve each path with the worktree root as the",
+    "base directory.",
+    "- src/index.ts:42-58",
+    "</selections>",
+    "",
+    "<selection-annotations>",
+    "  - /etc/passwd (skipped: outside worktree)",
+    "</selection-annotations>",
+    "",
+    "the user payload",
+  ].join("\n");
+  const { selections, text } = parseSelectionBlock(raw);
+  assert.equal(selections.length, 1);
+  assert.equal(text, "the user payload");
+});
+
+test("parseSelectionBlock consumes an annotations-only block", () => {
+  const raw = [
+    "<selection-annotations>",
+    "  - gone.ts (skipped: outside worktree)",
+    "</selection-annotations>",
+    "",
+    "the user payload",
+  ].join("\n");
+  const { selections, text } = parseSelectionBlock(raw);
+  assert.equal(selections.length, 0);
+  assert.equal(text, "the user payload");
 });

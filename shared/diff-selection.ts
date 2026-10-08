@@ -190,20 +190,35 @@ export function parseSelectionBlock(rawText: string): {
   selections: { path: string; ranges: LineRange[] }[];
   text: string;
 } {
-  const match = /^[ \t]*<selections>\n([\s\S]*?)\n[ \t]*<\/selections>[ \t]*\n?/.exec(
-    rawText,
-  );
-  if (!match) return { selections: [], text: rawText };
+  let text = rawText;
   const selections: { path: string; ranges: LineRange[] }[] = [];
-  for (const line of match[1].split("\n")) {
-    const entry = /^[ \t]*-[ \t]+([^\n]+?)[ \t]*$/.exec(line);
-    if (!entry) continue;
-    const parsed = parseSelectionToken(entry[1]);
-    if (!parsed) continue;
-    selections.push(parsed);
+  const match = /^[ \t]*<selections>\n([\s\S]*?)\n[ \t]*<\/selections>[ \t]*\n?/.exec(
+    text,
+  );
+  if (match) {
+    for (const line of match[1].split("\n")) {
+      const entry = /^[ \t]*-[ \t]+([^\n]+?)[ \t]*$/.exec(line);
+      if (!entry) continue;
+      const parsed = parseSelectionToken(entry[1]);
+      if (!parsed) continue;
+      selections.push(parsed);
+    }
+    text = text.slice(match[0].length).replace(/^\n+/, "");
   }
-  const rest = rawText.slice(match[0].length).replace(/^\n+/, "");
-  return { selections, text: rest };
+  // The resolver emits a sibling `<selection-annotations>` block when
+  // a chip was skipped (out-of-tree path, unreadable worktree). It is
+  // diagnostic output for the agent, not user prose — consume it here
+  // so the bubble never renders raw XML. It can appear with or
+  // without a preceding `<selections>` block (annotations-only when
+  // every chip was skipped).
+  const annotations =
+    /^[ \t]*<selection-annotations>\n[\s\S]*?\n[ \t]*<\/selection-annotations>[ \t]*\n?/.exec(
+      text,
+    );
+  if (annotations) {
+    text = text.slice(annotations[0].length).replace(/^\n+/, "");
+  }
+  return { selections, text };
 }
 
 /**
@@ -256,6 +271,52 @@ export function buildSelectionPromptPrefix(selections: SelectionMention[]): stri
   }
   if (bodies.length === 0) return block;
   return `${block}\n\n${bodies.join("\n\n")}\n`;
+}
+
+/**
+ * Cap on the total encoded `selections` wire value. Selection
+ * previews ride the SSE GET query string (unlike @-mention previews,
+ * which the server reads from disk), so an uncapped chip stack can
+ * push the request URL past Node's default 16 KB header limit and
+ * fail the whole turn with a 431. Within the cap, previews are kept;
+ * past it, previews are dropped (the token still rides) and chips
+ * that don't even fit as bare tokens are dropped entirely.
+ */
+export const SELECTIONS_WIRE_CHAR_LIMIT = 8 * 1024;
+
+/**
+ * Encode a chip stack as the `selections` wire value:
+ * `encodeURIComponent(token)|previewBase64` entries joined by commas.
+ * The token is URI-encoded because it can itself contain commas
+ * (multi-range chips like `a.ts:42,57,61-65`, or a path with a
+ * comma) and the decoder splits entries on commas; base64 output
+ * never contains a comma or pipe, so the preview needs no further
+ * escaping. `encodeBase64` is injected because the client (TextEncoder
+ * + btoa) and the server (Buffer) spell UTF-8-safe base64 differently.
+ *
+ * The inverse is `parseSelectionsQuery` in `server/lib/mentions.ts`.
+ */
+export function encodeSelectionsWire(
+  selections: SelectionMention[],
+  encodeBase64: (text: string) => string,
+): string {
+  const entries: string[] = [];
+  let total = 0;
+  for (const selection of selections) {
+    const token = formatSelectionToken(selection.path, selection.ranges);
+    if (!token) continue;
+    const encodedToken = encodeURIComponent(token);
+    let entry = `${encodedToken}|${encodeBase64(truncatePreview(selection.preview))}`;
+    if (total + entry.length + 1 > SELECTIONS_WIRE_CHAR_LIMIT) {
+      // Over budget with the preview — keep the token so the agent
+      // still sees the anchor, drop the snippet.
+      entry = `${encodedToken}|`;
+      if (total + entry.length + 1 > SELECTIONS_WIRE_CHAR_LIMIT) continue;
+    }
+    entries.push(entry);
+    total += entry.length + 1;
+  }
+  return entries.join(",");
 }
 
 /**

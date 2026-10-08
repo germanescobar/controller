@@ -6,6 +6,7 @@ import type {
   PrResponse,
 } from "../../shared/controller.ts";
 import { shouldExcludeDirectory } from "./lib/file-excludes.ts";
+import { encodeSelectionsWire } from "../../shared/diff-selection.ts";
 
 export type {
   PrAuthor,
@@ -1608,44 +1609,21 @@ export function startSession(
     params.set("mentions", encoded);
   }
   if (options?.selections?.length) {
-    // Same wire format the SSE handler expects (issue #416): one
-    // `path:start-end|previewBase64,…` per chip. The preview is
-    // base64-encoded so commas and newlines inside the snippet
-    // don't break the comma split; the backend decoder in
-    // `server/lib/mentions.ts` re-parses each row back to
-    // `{ path, ranges, preview }`. The same encoding is used by the
-    // headless POST endpoint and the queue-replay path.
-    // `btoa` is a browser global; the surrounding `try`/`catch`
-    // shields the call from `unescape` being deprecated in modern
-    // runtimes (Node 22+, Chrome 120+) — we fall back to the
-    // direct call if the polyfill is missing.
-    const encoded = options.selections
-      .map((selection) => {
-        const token = `${selection.path}:${selection.ranges
-          .map((range) =>
-            range.start === range.end
-              ? String(range.start)
-              : `${range.start}-${range.end}`,
-          )
-          .join(",")}`;
-        const previewB64 = (() => {
-          try {
-            return btoa(unescape(encodeURIComponent(selection.preview)));
-          } catch {
-            // The `unescape` shim is removed in some runtimes; fall
-            // back to a direct `btoa` call (it works for the
-            // preview because previews are always trimmed ASCII
-            // by `truncatePreview` before this point — multi-byte
-            // characters would survive UTF-8 munging in `btoa`
-            // but preview text is line-oriented source code that
-            // is overwhelmingly ASCII).
-            return btoa(selection.preview);
-          }
-        })();
-        return `${token}|${previewB64}`;
-      })
-      .join(",");
-    params.set("selections", encoded);
+    // Wire format shared with the headless POST endpoint and the
+    // queue-replay path (issue #416): `encodeSelectionsWire` emits
+    // `encodeURIComponent(token)|previewBase64` entries joined by
+    // commas, so a multi-range token (`a.ts:42,57,61-65`) survives
+    // the decoder's comma split. The preview is UTF-8-encoded via
+    // TextEncoder before `btoa` because `btoa` alone throws on
+    // non-Latin-1 input.
+    const encoded = encodeSelectionsWire(options.selections, (text) => {
+      let binary = "";
+      for (const byte of new TextEncoder().encode(text)) {
+        binary += String.fromCharCode(byte);
+      }
+      return btoa(binary);
+    });
+    if (encoded) params.set("selections", encoded);
   }
   if (options?.skillName) params.set("skillName", options.skillName);
   if (

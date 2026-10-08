@@ -76,6 +76,7 @@ import {
   parseSelectionsQuery,
   type ResolvedSelection,
 } from "../lib/mentions.js";
+import { encodeSelectionsWire } from "../../shared/diff-selection.js";
 import {
   consumePendingApproval,
   getSessionRuntime,
@@ -1165,24 +1166,14 @@ export function makeHeadlessSessionStartRequest(
       .join(",");
   }
   if (body.selections?.length) {
-    // Same wire format the SSE client uses (issue #416): each chip
-    // is `path:start-end|previewBase64`. The preview is base64
-    // so a comma in the snippet doesn't break the comma split.
-    query.selections = body.selections
-      .map((selection) => {
-        const token = `${selection.path}:${selection.ranges
-          .map((range) =>
-            range.start === range.end
-              ? String(range.start)
-              : `${range.start}-${range.end}`,
-          )
-          .join(",")}`;
-        const previewB64 = Buffer.from(selection.preview, "utf-8").toString(
-          "base64",
-        );
-        return `${token}|${previewB64}`;
-      })
-      .join(",");
+    // Same wire format the SSE client uses (issue #416):
+    // `encodeSelectionsWire` emits `encodeURIComponent(token)|previewBase64`
+    // entries joined by commas, so multi-range tokens survive the
+    // decoder's comma split. `parseSelectionsQuery` is the single
+    // parser for both endpoints.
+    query.selections = encodeSelectionsWire(body.selections, (text) =>
+      Buffer.from(text, "utf-8").toString("base64"),
+    );
   }
   if (body.reasoningEffort) query.reasoningEffort = body.reasoningEffort;
   if (body.serviceTier) query.serviceTier = body.serviceTier;
@@ -2553,21 +2544,9 @@ function makeHeadlessStreamRequest(
   // resolved selection block in the prompt aligned with what the
   // user originally typed. Same wire format as the SSE client.
   if (message.selections?.length) {
-    query.selections = message.selections
-      .map((selection) => {
-        const token = `${selection.path}:${selection.ranges
-          .map((range) =>
-            range.start === range.end
-              ? String(range.start)
-              : `${range.start}-${range.end}`,
-          )
-          .join(",")}`;
-        const previewB64 = Buffer.from(selection.preview, "utf-8").toString(
-          "base64",
-        );
-        return `${token}|${previewB64}`;
-      })
-      .join(",");
+    query.selections = encodeSelectionsWire(message.selections, (text) =>
+      Buffer.from(text, "utf-8").toString("base64"),
+    );
   }
   return {
     params: { projectId },

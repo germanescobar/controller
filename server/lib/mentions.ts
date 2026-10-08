@@ -242,9 +242,29 @@ export async function resolveMentions(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "ENOTDIR") {
-        selectionAnnotations.push(
-          `- ${selection.path} (skipped: not found)`,
+        // The path no longer exists on disk — the normal case for a
+        // selection made on a deletion diff. This is exactly what the
+        // client-captured preview is for, so keep the chip. The
+        // worktree boundary is still enforced: we realpath the
+        // deepest *existing* ancestor (so a symlinked parent can't
+        // smuggle the path outside) and check containment of the
+        // re-joined path. `absolutePath` came through `path.resolve`,
+        // so it carries no `..` segments.
+        const contained = await resolveMissingPathWithinWorktree(
+          worktreeRealPath,
+          absolutePath,
         );
+        if (contained) {
+          resolvedSelections.push({
+            path: contained,
+            ranges: selection.ranges,
+            preview: selection.preview,
+          });
+        } else {
+          selectionAnnotations.push(
+            `- ${selection.path} (skipped: outside worktree)`,
+          );
+        }
         continue;
       }
       selectionAnnotations.push(
@@ -365,12 +385,55 @@ export function parseMentionsQuery(
 }
 
 /**
+ * Walk up from a non-existent `absolutePath` to the deepest ancestor
+ * that still exists on disk, realpath that ancestor (the same symlink
+ * hardening the existing-path branch gets from realpathing the target
+ * itself), re-join the missing segments, and return the
+ * worktree-relative path when the result stays inside the worktree —
+ * `null` otherwise. This keeps deletion-diff selections alive: the
+ * file is gone, but the chip's client-captured preview is still valid
+ * and the boundary check must not depend on the leaf existing.
+ * `absolutePath` must already be normalized (`path.resolve`), so it
+ * carries no `..` segments the re-join could resurrect.
+ */
+async function resolveMissingPathWithinWorktree(
+  worktreeRealPath: string,
+  absolutePath: string
+): Promise<string | null> {
+  let ancestor = path.dirname(absolutePath);
+  const missing: string[] = [path.basename(absolutePath)];
+  for (;;) {
+    try {
+      const ancestorRealPath = await fs.realpath(ancestor);
+      const candidate = path.join(ancestorRealPath, ...missing);
+      const relativeToWorktree = path.relative(worktreeRealPath, candidate);
+      const isInsideWorktree =
+        relativeToWorktree !== "" &&
+        !relativeToWorktree.startsWith("..") &&
+        !path.isAbsolute(relativeToWorktree);
+      return isInsideWorktree ? relativeToWorktree : null;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return null;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return null;
+      missing.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+/**
  * Parse the `selections` query param (issue #416). The wire format is
- * one `path:start-end|previewBase64,path:start-end|previewBase64,…`
- * per chip. The preview is base64-encoded so commas and newlines
+ * one `encodedToken|previewBase64` entry per chip, joined by commas,
+ * where `encodedToken` is `encodeURIComponent("path:start-end[,…]")`.
+ * The token is URI-encoded because it can itself contain commas
+ * (multi-range chips like `a.ts:42,57,61-65`, or a path with a
+ * comma); the preview is base64-encoded so commas and newlines
  * inside the snippet don't break the comma split. Empty / malformed
  * rows are dropped silently; the composer is the source of truth and
- * a bad row should never fail the whole turn.
+ * a bad row should never fail the whole turn. The encoder is
+ * `encodeSelectionsWire` in `shared/diff-selection.ts`.
  */
 export function parseSelectionsQuery(
   raw: string | string[] | undefined
@@ -381,7 +444,12 @@ export function parseSelectionsQuery(
     .map((entry) => {
       const lastPipe = entry.lastIndexOf("|");
       if (lastPipe === -1) return null;
-      const token = entry.slice(0, lastPipe);
+      let token: string;
+      try {
+        token = decodeURIComponent(entry.slice(0, lastPipe));
+      } catch {
+        return null;
+      }
       const previewB64 = entry.slice(lastPipe + 1);
       const parsed = parseSelectionToken(token);
       if (!parsed) return null;

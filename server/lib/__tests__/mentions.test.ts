@@ -8,6 +8,7 @@ import {
   parseMentionsQuery,
   parseSelectionsQuery,
 } from "../mentions.ts";
+import { encodeSelectionsWire } from "../../../shared/diff-selection.ts";
 
 /*
  * Server-side resolver for `@`-mention chips (issue #312). The resolver
@@ -449,4 +450,75 @@ test("parseSelectionsQuery drops malformed rows silently", () => {
   );
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].path, "src/index.ts");
+});
+
+test("parseSelectionsQuery round-trips a multi-range chip through encodeSelectionsWire", () => {
+  const selections = [
+    {
+      path: "a.ts",
+      ranges: [
+        { start: 42, end: 42 },
+        { start: 57, end: 57 },
+        { start: 61, end: 65 },
+      ],
+      preview: "const π = 3;\nmore, text | with separators",
+    },
+    {
+      path: "dir,with,commas/b.ts",
+      ranges: [{ start: 1, end: 2 }],
+      preview: "",
+    },
+  ];
+  const wire = encodeSelectionsWire(selections, (text) =>
+    Buffer.from(text, "utf-8").toString("base64"),
+  );
+  const parsed = parseSelectionsQuery(wire);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].path, "a.ts");
+  assert.deepEqual(parsed[0].ranges, [
+    { start: 42, end: 42 },
+    { start: 57, end: 57 },
+    { start: 61, end: 65 },
+  ]);
+  assert.equal(parsed[0].preview, selections[0].preview);
+  assert.equal(parsed[1].path, "dir,with,commas/b.ts");
+  assert.deepEqual(parsed[1].ranges, [{ start: 1, end: 2 }]);
+});
+
+test("resolveMentions keeps a selection whose file no longer exists (deletion diff)", async () => {
+  await withWorktree(async (worktreePath) => {
+    // No file is created: this is the deletion-diff case the
+    // client-captured preview exists for. The boundary check walks
+    // up to the deepest existing ancestor (here, the worktree root)
+    // instead of requiring the leaf to exist.
+    const result = await resolveMentions(worktreePath, [], [
+      {
+        path: "src/deleted.ts",
+        ranges: [{ start: 3, end: 5 }],
+        preview: "the old content",
+      },
+    ]);
+    assert.equal(result.selections.length, 1);
+    assert.equal(result.selections[0].path, "src/deleted.ts");
+    assert.match(result.contextBlock, /- src\/deleted\.ts:3-5/);
+    assert.match(result.prefix, /the old content/);
+    assert.ok(
+      !result.contextBlock.includes("skipped"),
+      "deleted-file selection must not be annotated as skipped",
+    );
+  });
+});
+
+test("resolveMentions still drops a missing path that escapes the worktree", async () => {
+  await withWorktree(async (worktreePath) => {
+    const result = await resolveMentions(worktreePath, [], [
+      {
+        path: path.join(os.tmpdir(), "mentions-nonexistent", "gone.ts"),
+        ranges: [{ start: 1, end: 1 }],
+        preview: "x",
+      },
+    ]);
+    assert.equal(result.selections.length, 0);
+    assert.match(result.contextBlock, /\(skipped: outside worktree\)/);
+  });
 });
