@@ -328,6 +328,71 @@ function SessionProviderIcon({
   return <MessageSquare className={className} />;
 }
 
+export interface PendingRefreshDrainPlan {
+  // Session scopes (`projectId\u0000worktreeId`) to remove from the
+  // queue and replay now.
+  dispatchSessions: Array<{ key: string; projectId: string; worktreeId: string }>;
+  // Project ids whose worktree list should be removed from the queue
+  // and replayed now.
+  dispatchProjects: string[];
+  // Scopes to drop without replaying (their project is gone).
+  evictSessions: string[];
+  evictProjects: string[];
+}
+
+/**
+ * Decide what the sidebar's queued-refresh drain should do. Pure so
+ * the ordering rules can be unit-tested without a DOM.
+ *
+ * While any `loadAll` is in flight the plan is empty: a replay would
+ * only see the same in-flight load, defer, re-queue and re-drain on
+ * the next microtask — a request loop that lasts as long as the
+ * load. The `loadAll` state transition at completion re-runs the
+ * drain, so nothing queued here is lost.
+ *
+ * A scope whose project is missing from the snapshot is evicted only
+ * once a `loadAll` has succeeded, so a failed or not-yet-run initial
+ * load doesn't discard refreshes for projects that haven't painted.
+ */
+export function planPendingRefreshDrain(input: {
+  inFlightLoadAlls: number;
+  lastSuccessToken: number;
+  pendingSessionKeys: Iterable<string>;
+  pendingProjectIds: Iterable<string>;
+  projects: Array<{ id: string; worktrees: Array<{ id: string }> }>;
+}): PendingRefreshDrainPlan {
+  const plan: PendingRefreshDrainPlan = {
+    dispatchSessions: [],
+    dispatchProjects: [],
+    evictSessions: [],
+    evictProjects: [],
+  };
+  if (input.inFlightLoadAlls > 0) return plan;
+  const canEvictMissingProject = input.lastSuccessToken > 0;
+  const projectsById = new Map(input.projects.map((p) => [p.id, p]));
+  for (const key of input.pendingSessionKeys) {
+    const idx = key.indexOf("\u0000");
+    const projectId = key.slice(0, idx);
+    const worktreeId = key.slice(idx + 1);
+    const project = projectsById.get(projectId);
+    if (!project) {
+      if (canEvictMissingProject) plan.evictSessions.push(key);
+      continue;
+    }
+    // Worktree not loaded yet: keep it queued.
+    if (!project.worktrees.some((w) => w.id === worktreeId)) continue;
+    plan.dispatchSessions.push({ key, projectId, worktreeId });
+  }
+  for (const projectId of input.pendingProjectIds) {
+    if (!projectsById.has(projectId)) {
+      if (canEvictMissingProject) plan.evictProjects.push(projectId);
+      continue;
+    }
+    plan.dispatchProjects.push(projectId);
+  }
+  return plan;
+}
+
 function worktreeVisibilityKey(projectId: string, worktreeId: string): string {
   return `${projectId}:${worktreeId}`;
 }
@@ -785,15 +850,18 @@ export function Sidebar({
    * sessions instead of every worktree in every project.
    *
    * Defers (queues + returns) when:
-   *   - a `loadAll` is in flight at our snapshot, or
-   *   - a `loadAll` started after our snapshot (in flight or finished
-   *     without advancing `lastSuccessToken` past us), or
+   *   - a `loadAll` was in flight when the fetch started and no
+   *     `loadAll` at least that new has succeeded since (it is still
+   *     running, or it failed), or
    *   - the project/worktree isn't in `projectDataRef.current` yet
    *     (might appear once the in-flight/queued loadAll paints).
    *
-   * In all three cases, the next `loadAll` state transition bumps
-   * `loadAllVersion`, the drain effect re-runs, and the queued scope
-   * is replayed against the fresh snapshot.
+   * A `loadAll` that starts *after* the fetch began doesn't defer it:
+   * that load issues its own requests later, so whichever write lands
+   * last is at least as fresh as the event that triggered us.
+   *
+   * Queued scopes are replayed by the drain once no `loadAll` is in
+   * flight (see `planPendingRefreshDrain`).
    */
   const refreshWorktreeSessions = useCallback(
     async (projectId: string, worktreeId: string): Promise<void> => {
@@ -971,19 +1039,11 @@ export function Sidebar({
   /**
    * Replay every queued targeted refresh that has a now-loaded
    * target. Called whenever `projectData` changes (a loadAll
-   * painted a new snapshot) or `loadAllVersion` bumps (a loadAll
-   * started, succeeded, or failed). The targeted refreshes have
-   * their own deferral logic via `loadAllStateRef`; this drain
-   * just fires the replays and handles eviction.
-   *
-   * **Eviction rule**: a scope whose project isn't in the current
-   * snapshot is evicted *only when* a loadAll has ever succeeded
-   * (`lastSuccessToken > 0`) AND no loadAll is in flight. That
-   * distinguishes "project is genuinely gone" (a successful
-   * loadAll painted the snapshot without it) from "project hasn't
-   * loaded yet" (the loadAll failed, or hasn't run). Without this
-   * guard, a failed initial `loadAll` would wipe out queued
-   * lifecycle refreshes for projects that haven't been painted.
+   * painted a new snapshot), `loadAllVersion` bumps (a loadAll
+   * started, succeeded, or failed), or a scope is queued. The
+   * decision rules — hold everything while a loadAll is in flight,
+   * evict only after a successful load — live in
+   * `planPendingRefreshDrain`; this just applies the plan.
    */
   const drainPendingRefreshes = useCallback(() => {
     if (
@@ -992,43 +1052,24 @@ export function Sidebar({
     ) {
       return;
     }
-    const canEvictMissingProject =
-      loadAllStateRef.current.lastSuccessToken > 0 &&
-      loadAllStateRef.current.inFlightTokens.size === 0;
-    const knownProjectIds = new Set(
-      projectDataRef.current.map((p) => p.id),
+    const plan = planPendingRefreshDrain({
+      inFlightLoadAlls: loadAllStateRef.current.inFlightTokens.size,
+      lastSuccessToken: loadAllStateRef.current.lastSuccessToken,
+      pendingSessionKeys: pendingSessionScopesRef.current,
+      pendingProjectIds: pendingProjectScopesRef.current,
+      projects: projectDataRef.current,
+    });
+    plan.evictSessions.forEach((key) =>
+      pendingSessionScopesRef.current.delete(key),
     );
-    const sessions = Array.from(pendingSessionScopesRef.current);
-    sessions.forEach((key) => {
-      const idx = key.indexOf("\u0000");
-      const projectId = key.slice(0, idx);
-      const worktreeId = key.slice(idx + 1);
-      if (!knownProjectIds.has(projectId)) {
-        if (canEvictMissingProject) {
-          // Project is gone (a successful loadAll painted the
-          // snapshot without it). Drop the scope so it doesn't
-          // accumulate.
-          pendingSessionScopesRef.current.delete(key);
-        }
-        return;
-      }
-      const project = projectDataRef.current.find(
-        (p) => p.id === projectId,
-      );
-      if (!project || !project.worktrees.some((w) => w.id === worktreeId)) {
-        return; // not yet loaded
-      }
+    plan.evictProjects.forEach((projectId) =>
+      pendingProjectScopesRef.current.delete(projectId),
+    );
+    plan.dispatchSessions.forEach(({ key, projectId, worktreeId }) => {
       pendingSessionScopesRef.current.delete(key);
       refreshWorktreeSessions(projectId, worktreeId).catch(() => {});
     });
-    const projects = Array.from(pendingProjectScopesRef.current);
-    projects.forEach((projectId) => {
-      if (!knownProjectIds.has(projectId)) {
-        if (canEvictMissingProject) {
-          pendingProjectScopesRef.current.delete(projectId);
-        }
-        return;
-      }
+    plan.dispatchProjects.forEach((projectId) => {
       pendingProjectScopesRef.current.delete(projectId);
       refreshProjectWorktrees(projectId).catch(() => {});
     });
@@ -1055,7 +1096,7 @@ export function Sidebar({
   // re-issues the last lifecycle's session/worktree requests —
   // which is exactly the request storm this whole change was
   // supposed to prevent.
-  const lastConsumedRefreshesCounterRef = useRef<number | -1>(-1);
+  const lastConsumedRefreshesCounterRef = useRef<number>(-1);
 
   /**
    * Targeted refresh on lifecycle events. The old behavior re-ran
