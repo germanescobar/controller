@@ -125,13 +125,29 @@ if (port !== requested) {
   console.log(`[dev:server] Using API port ${port}.`);
 }
 
+/*
+ * When `npm run dev` runs inside a Controller agent or terminal, it inherits
+ * the app's CONTROLLER_SERVER_URL / CONTROLLER_SESSION_ID. Drop them so they
+ * can't leak into the dev server, and mark it as a dev instance so it keeps
+ * its CLI install and runtime file under `<CONTROLLER_HOME>/dev/` instead of
+ * overwriting the running app's (see `isDevInstance` in
+ * server/lib/controller-cli.ts). CONTROLLER_HOME itself is kept: the dev
+ * server intentionally shares the app's state files.
+ */
+function devServerBaseEnv() {
+  const env = { ...process.env, CONTROLLER_DEV_INSTANCE: "1" };
+  delete env.CONTROLLER_SERVER_URL;
+  delete env.CONTROLLER_SESSION_ID;
+  return env;
+}
+
 const child = spawn(
   "npx",
   ["tsx", "watch", "--env-file-if-exists=.env.local", "server/index.ts"],
   {
     stdio: "inherit",
     env: {
-      ...process.env,
+      ...devServerBaseEnv(),
       PORT: String(port),
       API_PORT: String(port),
       VITE_API_PORT: String(port),
