@@ -10,6 +10,7 @@ import {
   controllerCliBinDir,
   controllerCliInstalledPath,
   controllerCliShellPath,
+  installControllerCli,
   removeLegacyControllerSymlinks,
   resetBoundServerPort,
   serverPort,
@@ -400,6 +401,61 @@ test("writeControllerRuntimeFile overwrites a previously-wrong port", async () =
     else process.env.CONTROLLER_HOME = previousHome;
     await fs.rm(tempHome, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Dev instances (`npm run dev` started from inside Controller)
+//
+// A dev server shares the app's CONTROLLER_HOME for state, but must keep its
+// CLI install and runtime file under `<home>/dev/` so it never overwrites the
+// running app's `bin/controller` or points `controller-runtime.json` at a dev
+// port that dies when the dev server stops.
+// ---------------------------------------------------------------------------
+
+async function withCliHome(devInstance: boolean, fn: (home: string) => Promise<void>) {
+  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "controller-cli-dev-"));
+  const previousHome = process.env.CONTROLLER_HOME;
+  const previousDev = process.env.CONTROLLER_DEV_INSTANCE;
+  process.env.CONTROLLER_HOME = tempHome;
+  if (devInstance) process.env.CONTROLLER_DEV_INSTANCE = "1";
+  else delete process.env.CONTROLLER_DEV_INSTANCE;
+  try {
+    await fn(tempHome);
+  } finally {
+    if (previousHome === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = previousHome;
+    if (previousDev === undefined) delete process.env.CONTROLLER_DEV_INSTANCE;
+    else process.env.CONTROLLER_DEV_INSTANCE = previousDev;
+    await fs.rm(tempHome, { recursive: true, force: true });
+  }
+}
+
+test("a dev instance installs the CLI and runtime file under <home>/dev", async () => {
+  await withCliHome(true, async (home) => {
+    assert.equal(controllerCliInstalledPath(), path.join(home, "dev", "bin", "controller"));
+    await installControllerCli();
+    await writeControllerRuntimeFile(3102);
+    await fs.access(path.join(home, "dev", "bin", "controller"));
+    const written = JSON.parse(
+      await fs.readFile(path.join(home, "dev", "controller-runtime.json"), "utf-8"),
+    );
+    assert.deepEqual(written, { serverUrl: "http://localhost:3102" });
+    // The app's install and runtime file are untouched.
+    await assert.rejects(fs.access(path.join(home, "bin", "controller")));
+    await assert.rejects(fs.access(path.join(home, "controller-runtime.json")));
+    // State stays shared: CONTROLLER_HOME is not redirected.
+    assert.equal(controllerAgentEnv().CONTROLLER_HOME, home);
+  });
+});
+
+test("the app instance keeps the CLI and runtime file at the home root", async () => {
+  await withCliHome(false, async (home) => {
+    await installControllerCli();
+    await writeControllerRuntimeFile(4500);
+    await fs.access(path.join(home, "bin", "controller"));
+    await fs.access(path.join(home, "controller-runtime.json"));
+    await assert.rejects(fs.access(path.join(home, "dev")));
+  });
 });
 
 // ---------------------------------------------------------------------------

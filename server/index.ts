@@ -62,6 +62,7 @@ import { ensureMemoryDirs } from "./lib/memory.js";
 import {
   installControllerCli,
   controllerCliInstalledPath,
+  isDevInstance,
   setBoundServerPort,
   writeControllerRuntimeFile,
 } from "./lib/controller-cli.js";
@@ -288,11 +289,20 @@ async function start(): Promise<void> {
   // server is `import()`-ed from the Electron main process in production,
   // so `import("electron")` here resolves to the real module (issue #280).
   await installDefaultBrowserOpener();
+  // A dev instance (`npm run dev` from a checkout) shares the app's state but
+  // must not touch anything the running app owns: the agents' global skills
+  // homes, the CLI install, or the background loops (see `isDevInstance`).
+  const devInstance = isDevInstance();
   // Sync managed skills (browser, controller-scripts, etc.) into each agent's
   // user skills home so they are available across Anita, Codex, and Claude.
-  await installManagedSkills().catch((error: unknown) => {
-    console.error("Failed to install managed skills:", error);
-  });
+  // Skipped on dev instances: the skills homes are global, and the bodies
+  // embed this server's CLI path, so the app's agents would be pointed at the
+  // dev server's CLI (and lose it when the dev server stops).
+  if (!devInstance) {
+    await installManagedSkills().catch((error: unknown) => {
+      console.error("Failed to install managed skills:", error);
+    });
+  }
   // Ensure the Controller-owned memory directory exists (issue #350).
   // The global scope gets an empty directory on first start so the
   // agent's preamble can show `(empty)` placeholders; project scopes
@@ -335,6 +345,14 @@ async function start(): Promise<void> {
     });
     console.log(`Server running on http://localhost:${boundPort}`);
   });
+
+  // The background loops below act on shared state (schedules, wakes, goals).
+  // Running them on a dev instance too would fire every due item twice — once
+  // per server — so only the app runs them.
+  if (devInstance) {
+    console.log("Dev instance: skipping managed skills and background loops (schedules, wakes, goals).");
+    return;
+  }
 
   // Start the shared wakeup loop (issue #243) and register the schedules
   // consumer. The consumer scans every project for due schedules each tick
