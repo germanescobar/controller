@@ -70,7 +70,13 @@ import {
   extractSkillInvocation,
   getSkillProvider,
 } from "../lib/skills.js";
-import { resolveMentions, parseMentionsQuery } from "../lib/mentions.js";
+import {
+  resolveMentions,
+  parseMentionsQuery,
+  parseSelectionsQuery,
+  type ResolvedSelection,
+} from "../lib/mentions.js";
+import { encodeSelectionsWire } from "../../shared/diff-selection.js";
 import {
   consumePendingApproval,
   getSessionRuntime,
@@ -740,6 +746,17 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     skillName?: string;
     attachmentIds?: string[];
     mentions?: { path?: unknown; type?: unknown }[];
+    // Line-range selection chips (issue #416). Same shape as the
+    // client-side `SelectionMention`: path, list of contiguous
+    // ranges, and the client-captured preview snippet. The headless
+    // endpoint forwards the array through to the SSE handler so the
+    // `resolveMentions` resolver can inline the snippet under a
+    // `### Selection: path:start-end` header.
+    selections?: {
+      path?: unknown;
+      ranges?: unknown;
+      preview?: unknown;
+    }[];
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
     resumeSessionId?: string;
@@ -804,6 +821,28 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
                 typeof (entry as { path?: unknown }).path === "string" &&
                 ((entry as { type?: unknown }).type === "file" ||
                   (entry as { type?: unknown }).type === "directory"),
+            )
+          : undefined,
+        // Line-range selection chips (issue #416). Each row is
+        // validated to its real shape: `path` is a string, `ranges`
+        // is a list of `{ start: number; end: number }`, `preview`
+        // is a string. Bad rows are dropped silently — the
+        // orchestrator is the source of truth and a malformed
+        // entry should not fail the whole enqueue.
+        selections: Array.isArray(body.selections)
+          ? body.selections.filter(
+              (entry): entry is ResolvedSelection =>
+                Boolean(entry) &&
+                typeof (entry as { path?: unknown }).path === "string" &&
+                Array.isArray((entry as { ranges?: unknown }).ranges) &&
+                ((entry as { ranges: unknown[] }).ranges).every(
+                  (range) =>
+                    Boolean(range) &&
+                    typeof (range as { start?: unknown }).start ===
+                      "number" &&
+                    typeof (range as { end?: unknown }).end === "number",
+                ) &&
+                typeof (entry as { preview?: unknown }).preview === "string",
             )
           : undefined,
         reasoningEffort: body.reasoningEffort,
@@ -1086,6 +1125,12 @@ export function makeHeadlessSessionStartRequest(
     skillName?: string;
     attachmentIds: string[];
     mentions?: { path: string; type: "file" | "directory" }[];
+    // Line-range selection chips (issue #416). Forwarded as a query
+    // string in the same `path:start-end|previewBase64,…` shape the
+    // SSE client uses; `parseSelectionsQuery` is the single parser
+    // for both endpoints. Bad rows are dropped silently — a
+    // malformed selection should not fail the whole enqueue.
+    selections?: ResolvedSelection[];
     reasoningEffort?: string;
     serviceTier?: "fast" | "flex";
     resumeSessionId?: string;
@@ -1119,6 +1164,16 @@ export function makeHeadlessSessionStartRequest(
     query.mentions = body.mentions
       .map((mention) => `${mention.path}|${mention.type}`)
       .join(",");
+  }
+  if (body.selections?.length) {
+    // Same wire format the SSE client uses (issue #416):
+    // `encodeSelectionsWire` emits `encodeURIComponent(token)|previewBase64`
+    // entries joined by commas, so multi-range tokens survive the
+    // decoder's comma split. `parseSelectionsQuery` is the single
+    // parser for both endpoints.
+    query.selections = encodeSelectionsWire(body.selections, (text) =>
+      Buffer.from(text, "utf-8").toString("base64"),
+    );
   }
   if (body.reasoningEffort) query.reasoningEffort = body.reasoningEffort;
   if (body.serviceTier) query.serviceTier = body.serviceTier;
@@ -1457,6 +1512,14 @@ export async function handleSessionStream(
   // the source of truth, and a malformed entry shouldn't fail the
   // whole turn.
   const mentionRequests = parseMentionsQuery(req.query.mentions as string | undefined);
+  // `selections` is the line-range selection chip stack (issue #416).
+  // The format is `path:start-end|previewBase64,…`. The preview is
+  // base64-encoded so commas and newlines inside the snippet don't
+  // break the comma split. `parseSelectionsQuery` drops malformed
+  // rows silently for the same reason as `parseMentionsQuery`.
+  const selectionRequests = parseSelectionsQuery(
+    req.query.selections as string | undefined
+  );
   const skillName = (req.query.skillName as string | undefined)?.trim() || undefined;
   // Optional parent session id (issue #353). Only set on the
   // create-new-session branch — `persistSessionStart` honors it when
@@ -1508,9 +1571,15 @@ export async function handleSessionStream(
   // history — that round-trip is what makes session replays
   // deterministic. The prefix carries the inlined preview; the context
   // block is the deterministic listing the bubble re-renders on reload.
+  // `selectionRequests` (issue #416) is the optional list of
+  // line-range selection chips seeded from a rendered diff. The
+  // resolver inlines each chip's client-captured snippet under a
+  // `### Selection: path:start-end` header so the agent can refer
+  // back to a specific span by name.
   const mentionResolution = await resolveMentions(
     worktree.path,
     mentionRequests,
+    selectionRequests,
   );
   const skillResolution = await resolveSkillActivation(
     skillName,
@@ -2469,6 +2538,15 @@ function makeHeadlessStreamRequest(
     query.mentions = message.mentions
       .map((mention) => `${mention.path}|${mention.type}`)
       .join(",");
+  }
+  // The queue snapshot also stores the user's line-range selection
+  // chip stack (issue #416); replaying it on the next turn keeps the
+  // resolved selection block in the prompt aligned with what the
+  // user originally typed. Same wire format as the SSE client.
+  if (message.selections?.length) {
+    query.selections = encodeSelectionsWire(message.selections, (text) =>
+      Buffer.from(text, "utf-8").toString("base64"),
+    );
   }
   return {
     params: { projectId },
@@ -4090,6 +4168,30 @@ function parseQueuedMessageInput(body: unknown): QueuedMessageInput | null {
             (entry as { type?: unknown }).type === "directory"),
       )
     : undefined;
+  // Validate `selections` (issue #416). Same shape as the SSE/POST
+  // path's `selections`: an array of `{ path, ranges, preview }`.
+  // Bad rows are dropped silently for the same reason — a malformed
+  // chip should never fail the whole enqueue. Empty / missing is
+  // valid (a message with no selections is just a regular message).
+  const selections = Array.isArray(raw.selections)
+    ? raw.selections.filter(
+        (entry): entry is {
+          path: string;
+          ranges: { start: number; end: number }[];
+          preview: string;
+        } =>
+          Boolean(entry) &&
+          typeof (entry as { path?: unknown }).path === "string" &&
+          Array.isArray((entry as { ranges?: unknown }).ranges) &&
+          ((entry as { ranges: unknown[] }).ranges).every(
+            (range) =>
+              Boolean(range) &&
+              typeof (range as { start?: unknown }).start === "number" &&
+              typeof (range as { end?: unknown }).end === "number",
+          ) &&
+          typeof (entry as { preview?: unknown }).preview === "string",
+      )
+    : undefined;
 
   return {
     text,
@@ -4102,6 +4204,7 @@ function parseQueuedMessageInput(body: unknown): QueuedMessageInput | null {
     attachmentIds,
     skillName: typeof raw.skillName === "string" ? raw.skillName : undefined,
     mentions: mentions && mentions.length > 0 ? mentions : undefined,
+    selections: selections && selections.length > 0 ? selections : undefined,
     // Deferred-wakeup (issue #339): an optional ISO timestamp that
     // tells the wakes consumer to hold the message until the wall clock
     // passes it. Empty / malformed input is dropped silently — a queued
