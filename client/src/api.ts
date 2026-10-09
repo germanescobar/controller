@@ -1791,6 +1791,34 @@ export async function fetchSourceFile(
   return res.json();
 }
 
+export interface SavedSourceFile extends SourceFile {
+  savedAt: string;
+}
+
+/*
+ * Save the contents of a file inside the active worktree. Mirrors
+ * `fetchSourceFile` on the server side — the same path-safety rules
+ * apply (realpath against the project + worktree roots). The Files
+ * tab uses this from the in-experience editor; see
+ * `SourceViewerPanel` in `client/src/pages/SessionView.tsx`.
+ */
+export async function saveSourceFile(
+  projectId: string,
+  filePath: string,
+  content: string,
+  worktreeId?: string
+): Promise<SavedSourceFile> {
+  const params = new URLSearchParams({ path: filePath });
+  const query = withWorktree(worktreeId, params);
+  const res = await fetch(`${BASE}/projects/${projectId}/source${query}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  await throwIfNotOk(res, "Failed to save source file");
+  return res.json();
+}
+
 export async function fetchSourceDirectory(
   projectId: string,
   dirPath?: string,

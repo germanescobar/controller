@@ -1,25 +1,6 @@
 import { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
 import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import diff from "highlight.js/lib/languages/diff";
-import go from "highlight.js/lib/languages/go";
-import graphql from "highlight.js/lib/languages/graphql";
-import ini from "highlight.js/lib/languages/ini";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import plaintext from "highlight.js/lib/languages/plaintext";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import scss from "highlight.js/lib/languages/scss";
-import sql from "highlight.js/lib/languages/sql";
-import swift from "highlight.js/lib/languages/swift";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit, SKIP } from "unist-util-visit";
@@ -58,6 +39,7 @@ import { isControllerAvailable } from "@/lib/controller";
 import { formatChord, matchesEvent, parseChord } from "@/lib/shortcut-match";
 import { useFilePanelShortcuts } from "@/lib/useFilePanelShortcuts";
 import { FileFinderDialog } from "@/components/FileFinderDialog";
+import { SourceEditor } from "@/components/SourceEditor";
 import {
   usePreviewPane,
   useActivePreviewPane,
@@ -839,25 +821,6 @@ function extractPreviewUrls(text: string): string[] {
 function usePreviewActions(): PreviewActions {
   return useContext(PreviewContext);
 }
-
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("diff", diff);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("graphql", graphql);
-hljs.registerLanguage("ini", ini);
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("plaintext", plaintext);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("scss", scss);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("swift", swift);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("yaml", yaml);
 
 function parseLocalCodeReference(href: string | undefined): SourceReference | null {
   if (!href) return null;
@@ -2590,66 +2553,42 @@ function CancelledBlock({ reason }: { reason: string }) {
   );
 }
 
-function getSourceLanguage(filePath: string): string {
-  const basename = filePath.split("/").pop()?.toLowerCase() ?? "";
-  const extension = filePath.split(".").pop()?.toLowerCase();
-
-  if (basename === ".env" || basename.endsWith(".env")) return "ini";
-  if (basename === "dockerfile") return "bash";
-  if (extension === "ts" || extension === "tsx") return "typescript";
-  if (extension === "js" || extension === "jsx" || extension === "mjs" || extension === "cjs") return "javascript";
-  if (extension === "css") return "css";
-  if (extension === "scss" || extension === "sass") return "scss";
-  if (extension === "html" || extension === "htm" || extension === "xml" || extension === "svg") return "xml";
-  if (extension === "json") return "json";
-  if (extension === "graphql" || extension === "gql") return "graphql";
-  if (extension === "md" || extension === "mdx") return "markdown";
-  if (extension === "sh" || extension === "bash" || extension === "zsh") return "bash";
-  if (extension === "py") return "python";
-  if (extension === "rs") return "rust";
-  if (extension === "go") return "go";
-  if (extension === "swift") return "swift";
-  if (extension === "sql") return "sql";
-  if (extension === "yml" || extension === "yaml") return "yaml";
-  if (extension === "ini" || extension === "toml") return "ini";
-  if (extension === "diff" || extension === "patch") return "diff";
-  return "plaintext";
-}
-
 function SourceViewerPanel({
   projectId,
   preview,
   worktreeId,
   onOpenFile,
+  onPreviewSaved,
+  onDirtyChange,
 }: {
   projectId: string;
   preview: SourceFilePreview | null;
   worktreeId?: string;
   onOpenFile: (path: string) => void;
+  onPreviewSaved?: (saved: { path: string; relativePath: string; content: string; savedAt: string }) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const selectedLineRef = useRef<HTMLDivElement | null>(null);
   const selectedLine = preview?.line;
-  const highlightedCode = preview
-    ? hljs.highlight(preview.file.content, {
-        language: getSourceLanguage(preview.file.path),
-        ignoreIllegals: true,
-      }).value
-    : "";
-  const highlightedLines = highlightedCode.split("\n");
+  const [editedPreview, setEditedPreview] = useState<SourceFilePreview | null>(null);
+
+  // The CodeMirror buffer is the source of truth for the on-screen
+  // content. We swap `preview` for `editedPreview` after a successful
+  // save so the dirty flag clears and the new mtime is reflected in
+  // any UI that reads from it (the file-tree selection, the tab
+  // label, etc.). We keep `preview` for everything else so the
+  // upstream "open this file" path stays a single source of truth.
+  const displayedPreview = editedPreview ?? preview;
 
   useEffect(() => {
-    if (!preview || !selectedLine) return;
-    window.setTimeout(() => {
-      selectedLineRef.current?.scrollIntoView({ block: "center" });
-    }, 0);
-  }, [preview, selectedLine]);
+    setEditedPreview(null);
+  }, [preview?.file.path, preview?.file.content]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex min-h-0 flex-1">
         <div className="w-56 shrink-0 overflow-y-auto border-r border-border bg-muted/10 py-2">
           <FileTree
-            activePath={preview?.file.path}
+            activePath={displayedPreview?.file.path}
             onOpenFile={onOpenFile}
             projectId={projectId}
             worktreeId={worktreeId}
@@ -2659,9 +2598,9 @@ function SourceViewerPanel({
           <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
             <FileCode className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
-              {preview ? (
+              {displayedPreview ? (
                 <>
-                  {preview.file.relativePath}
+                  {displayedPreview.file.relativePath}
                   {selectedLine ? <span className="text-muted-foreground">:{selectedLine}</span> : null}
                 </>
               ) : (
@@ -2669,32 +2608,31 @@ function SourceViewerPanel({
               )}
             </div>
           </div>
-          {preview ? (
-            <div className="flex-1 overflow-auto py-3">
-              <div className="min-w-max font-mono text-xs leading-5">
-                {highlightedLines.map((line, index) => {
-                  const lineNumber = index + 1;
-                  const highlighted = lineNumber === selectedLine;
-                  return (
-                    <div
-                      key={lineNumber}
-                      ref={highlighted ? selectedLineRef : undefined}
-                      className={`flex ${
-                        highlighted ? "bg-amber-500/15" : "hover:bg-muted/20"
-                      }`}
-                    >
-                      <span className="w-14 shrink-0 select-none border-r border-border/60 pr-3 text-right text-muted-foreground/50">
-                        {lineNumber}
-                      </span>
-                      <span
-                        className="whitespace-pre px-3"
-                        dangerouslySetInnerHTML={{ __html: line || " " }}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+          {displayedPreview ? (
+            <SourceEditor
+              file={displayedPreview.file}
+              projectId={projectId}
+              worktreeId={worktreeId}
+              initialLine={selectedLine}
+              onDirtyChange={onDirtyChange}
+              onSaved={(saved) => {
+                // Refresh the parent cache so the file-tree active
+                // marker and the Files tab title both reflect the
+                // saved content + mtime. We construct a new
+                // SourceFilePreview rather than mutating the existing
+                // one because React's referential identity is what
+                // the source-of-truth `useEffect` above keys off.
+                setEditedPreview({
+                  file: {
+                    path: saved.path,
+                    relativePath: saved.relativePath,
+                    content: saved.content,
+                  },
+                  line: selectedLine,
+                });
+                onPreviewSaved?.(saved);
+              }}
+            />
           ) : (
             <div className="flex flex-1 items-center justify-center px-4 text-center text-sm text-muted-foreground">
               Choose a file from the tree.
@@ -3390,6 +3328,27 @@ export function SessionView({
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
+  // True while the SourceEditor (Files tab) has unsaved edits.
+  // Drives two guards: a `beforeunload` warning when closing the
+  // app, and a confirm() prompt when the user navigates away from
+  // the Files tab / opens a different file (issue #313 follow-up).
+  const [sourceEditorDirty, setSourceEditorDirty] = useState(false);
+  // Browser-level guard: when the SourceEditor is dirty, warn on
+  // tab close / window unload. The handler is registered only
+  // while dirty so it doesn't intercept every navigation; modern
+  // browsers ignore the prompt text and show their own "Leave
+  // site?" chrome, but the `returnValue` assignment is what
+  // triggers it.
+  useEffect(() => {
+    if (!sourceEditorDirty) return;
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [sourceEditorDirty]);
   // Element the app-level preview pool overlays the live `<webview>` onto. Set
   // by `PreviewPanel` only while the Preview tab is visible (issue #158).
   const [previewPlaceholder, setPreviewPlaceholder] = useState<HTMLDivElement | null>(null);
@@ -6229,6 +6188,26 @@ export function SessionView({
     setTimeout(() => setCopiedId(null), 2000);
   }, []);
 
+  // Confirm prompt shown when navigating away from the Files tab
+  // (or opening a different file) while the SourceEditor has
+  // unsaved edits. Returns true when it's safe to proceed. We
+  // keep the message in a `useMemo` so all the call sites agree
+  // on the wording. The native `window.confirm` is intentional —
+  // it's a blocking prompt that doesn't require a dialog
+  // component, matches what the rest of the app uses for
+  // destructive actions (e.g. deleting a worktree), and lets us
+  // sidestep the focus-stealing problems of a custom modal in
+  // an Electron app.
+  const leaveFilesWarning = useMemo(
+    () =>
+      "You have unsaved changes in this file. Discard them and continue?",
+    []
+  );
+  const confirmLeaveFilesIfDirty = useCallback((): boolean => {
+    if (!sourceEditorDirty) return true;
+    return window.confirm(leaveFilesWarning);
+  }, [sourceEditorDirty, leaveFilesWarning]);
+
   const openSourcePath = useCallback((path: string, line?: number, errorLabel = path) => {
     fetchSourceFile(projectId, path, worktreeId)
       .then((file) => {
@@ -6255,9 +6234,53 @@ export function SessionView({
       });
   }, [projectId, worktreeId]);
 
+  // Open a different source file. Gates on the dirty-check so the
+  // user gets a chance to save first. The agent still keeps
+  // `sourcePreview` as its source of truth — we only need to
+  // route the call through here so the unsaved-edits prompt
+  // actually runs.
+  const requestOpenSourcePath = useCallback(
+    (path: string, line?: number, errorLabel = path) => {
+      if (!confirmLeaveFilesIfDirty()) return;
+      openSourcePath(path, line, errorLabel);
+    },
+    [confirmLeaveFilesIfDirty, openSourcePath]
+  );
+
+  // Tab-switch helper. Going to / staying on the Files tab is
+  // always allowed; leaving Files while the editor is dirty
+  // prompts the user. Returns true if the navigation should
+  // proceed so the caller can fold it into chained state
+  // updates without re-prompting.
+  const requestRightTab = useCallback(
+    (
+      next: RightPanelTab,
+      options: { alsoClosePanel?: boolean } = {}
+    ): boolean => {
+      const isOnFiles = rightTab === "files";
+      const isStayingOnFiles = next === "files";
+      if (isOnFiles && !isStayingOnFiles && !confirmLeaveFilesIfDirty()) {
+        return false;
+      }
+      setRightTab(next);
+      if (next === "terminal") {
+        if (options.alsoClosePanel) {
+          setTerminalOpen(false);
+        }
+        if (mobilePanel !== "agent") setMobilePanel("terminal");
+      } else {
+        setTerminalOpen(true);
+        setMobilePanel(next);
+      }
+      return true;
+    },
+    [rightTab, confirmLeaveFilesIfDirty, mobilePanel]
+  );
+
   const openSourceReference = useCallback((reference: OpenSourceReferenceOptions) => {
+    if (rightTab === "files" && sourceEditorDirty && !confirmLeaveFilesIfDirty()) return;
     openSourcePath(reference.path, reference.line, reference.label);
-  }, [openSourcePath]);
+  }, [openSourcePath, rightTab, sourceEditorDirty, confirmLeaveFilesIfDirty]);
 
   // Files-panel keyboard shortcuts (issue #313):
   //   - Toggle: open the right panel on the `files` tab if it isn't
@@ -6285,6 +6308,7 @@ export function SessionView({
   const handleFilesPanelToggle = useCallback(() => {
     if (filesPanelVisible) {
       setTerminalOpen(false);
+      if (!confirmLeaveFilesIfDirty()) return;
       setRightTab("terminal");
       setMobilePanel("agent");
       return;
@@ -6292,7 +6316,7 @@ export function SessionView({
     setTerminalOpen(true);
     setRightTab("files");
     setMobilePanel("files");
-  }, [filesPanelVisible]);
+  }, [filesPanelVisible, confirmLeaveFilesIfDirty]);
 
   const handleFilesPanelSearch = useCallback(() => {
     // Open the file finder as a modal overlay; leave the right
@@ -6319,10 +6343,11 @@ export function SessionView({
 
   // Bring the Preview tab forward when an agent opens a URL on this pane.
   const surfacePreview = useCallback(() => {
+    if (rightTab === "files" && !confirmLeaveFilesIfDirty()) return;
     setTerminalOpen(true);
     setRightTab("preview");
     setMobilePanel("preview");
-  }, []);
+  }, [rightTab, confirmLeaveFilesIfDirty]);
 
   useActivePreviewPane({
     key: browserKey,
@@ -6780,6 +6805,7 @@ export function SessionView({
           <div className="flex items-center gap-1 md:hidden">
             <button
               onClick={() => {
+                if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
                 setMobilePanel("agent");
                 // On mobile, returning to Agent means the right
                 // panel is hidden — clear `terminalOpen` so the
@@ -6801,7 +6827,11 @@ export function SessionView({
               Agent
             </button>
             <button
-              onClick={() => { setMobilePanel("terminal"); setRightTab("terminal"); }}
+              onClick={() => {
+                if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
+                setMobilePanel("terminal");
+                setRightTab("terminal");
+              }}
               className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                 mobilePanel === "terminal"
                   ? "bg-accent text-foreground"
@@ -6813,7 +6843,11 @@ export function SessionView({
             </button>
             {(gitDiffFiles.length > 0 || branchDiffFiles.length > 0) && (
               <button
-                onClick={() => { setMobilePanel("changes"); setRightTab("changes"); }}
+                onClick={() => {
+                  if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
+                  setMobilePanel("changes");
+                  setRightTab("changes");
+                }}
                 className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                   mobilePanel === "changes"
                     ? "bg-accent text-foreground"
@@ -6825,7 +6859,7 @@ export function SessionView({
               </button>
             )}
             <button
-              onClick={() => { setMobilePanel("files"); setRightTab("files"); }}
+              onClick={() => requestRightTab("files")}
               className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                 mobilePanel === "files"
                   ? "bg-accent text-foreground"
@@ -6837,7 +6871,7 @@ export function SessionView({
             </button>
             {pullRequest && (
               <button
-                onClick={() => { setMobilePanel("pr"); setRightTab("pr"); }}
+                onClick={() => requestRightTab("pr")}
                 className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                   mobilePanel === "pr"
                     ? "bg-accent text-foreground"
@@ -6850,7 +6884,7 @@ export function SessionView({
             )}
             {previewAvailable && (
               <button
-                onClick={() => { setMobilePanel("preview"); setRightTab("preview"); setTerminalOpen(true); }}
+                onClick={() => requestRightTab("preview")}
                 className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                   mobilePanel === "preview"
                     ? "bg-accent text-foreground"
@@ -6955,7 +6989,7 @@ export function SessionView({
         projectId={projectId}
         worktreeId={worktreeId}
         recent={recentFilePaths}
-        onSelect={openSourcePath}
+        onSelect={requestOpenSourcePath}
         bindings={shortcutBindings ?? null}
       />
 
@@ -8149,7 +8183,7 @@ export function SessionView({
             {/* Tab bar — desktop only; mobile uses the header tabs */}
             <div className="hidden md:flex h-9 shrink-0 items-center border-b border-border bg-[#1c1c1e] px-2 gap-1">
               <button
-                onClick={() => { setRightTab("terminal"); if (mobilePanel !== "agent") setMobilePanel("terminal"); }}
+                onClick={() => requestRightTab("terminal")}
                 className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                   rightTab === "terminal"
                     ? "bg-accent/30 text-foreground"
@@ -8161,7 +8195,7 @@ export function SessionView({
               </button>
               {hasChanges && (
                 <button
-                  onClick={() => { setRightTab("changes"); if (mobilePanel !== "agent") setMobilePanel("changes"); }}
+                  onClick={() => requestRightTab("changes")}
                   className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "changes"
                       ? "bg-accent/30 text-foreground"
@@ -8178,7 +8212,7 @@ export function SessionView({
                 </button>
               )}
               <button
-                onClick={() => { setRightTab("files"); if (mobilePanel !== "agent") setMobilePanel("files"); }}
+                onClick={() => requestRightTab("files")}
                 className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                   rightTab === "files"
                     ? "bg-accent/30 text-foreground"
@@ -8196,7 +8230,7 @@ export function SessionView({
               </button>
               {pullRequest && (
                 <button
-                  onClick={() => { setRightTab("pr"); if (mobilePanel !== "agent") setMobilePanel("pr"); }}
+                  onClick={() => requestRightTab("pr")}
                   className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "pr"
                       ? "bg-accent/30 text-foreground"
@@ -8213,7 +8247,7 @@ export function SessionView({
               )}
               {previewAvailable && (
                 <button
-                  onClick={() => { setRightTab("preview"); if (mobilePanel !== "agent") setMobilePanel("preview"); }}
+                  onClick={() => requestRightTab("preview")}
                   className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "preview"
                       ? "bg-accent/30 text-foreground"
@@ -8329,7 +8363,29 @@ export function SessionView({
               {rightTab === "files" && (
                 <div className="absolute inset-0 overflow-hidden bg-background">
                   <SourceViewerPanel
-                    onOpenFile={(path) => openSourcePath(path)}
+                    onOpenFile={(path) => requestOpenSourcePath(path)}
+                    onDirtyChange={setSourceEditorDirty}
+                    onPreviewSaved={(saved) => {
+                      // Keep the parent's `sourcePreview` cache
+                      // in sync with the editor's saved content
+                      // so the Files tab title and the file-tree
+                      // active marker reflect the new bytes.
+                      // We also bump the recent-files list with
+                      // the saved relative path so it surfaces
+                      // at the top of the fuzzy finder.
+                      setSourcePreview((current) =>
+                        current
+                          ? {
+                              ...current,
+                              file: {
+                                path: saved.path,
+                                relativePath: saved.relativePath,
+                                content: saved.content,
+                              },
+                            }
+                          : current,
+                      );
+                    }}
                     preview={sourcePreview}
                     projectId={projectId}
                     worktreeId={worktreeId}
