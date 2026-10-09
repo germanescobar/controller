@@ -16,9 +16,10 @@
  *     user navigates between sessions.
  *   - `bumpRelationshipsRefresh()` from `App.tsx` whenever the
  *     project event stream (or a focus/title/archived mutation)
- *     bumps `eventsRefreshKey` / `focusRefreshKey`. This is the
- *     issue's "live without polling" guarantee: a child spawned or
- *     finished in another tab shows up here on the next event.
+ *     publishes a new `pendingProjectRefreshes` payload or bumps
+ *     `focusRefreshKey`. This is the issue's "live without
+ *     polling" guarantee: a child spawned or finished in another
+ *     tab shows up here on the next event.
  *
  * The store is intentionally small and write-through: a successful
  * fetch replaces the entire `Record<sessionId, SessionRelationships | null>`
@@ -53,8 +54,9 @@ function setEntry(sessionId: string, value: SessionRelationships | null): void {
 
 /**
  * Schedule a re-fetch for every cached session id. Called from
- * `App.tsx` whenever the project-event stream bumps `eventsRefreshKey`
- * or the focus-queue mutation handlers bump `focusRefreshKey`.
+ * `App.tsx` whenever the project-event stream publishes a new
+ * `pendingProjectRefreshes` payload or the focus-queue mutation
+ * handlers bump `focusRefreshKey`.
  */
 export function bumpRelationshipsRefresh(): void {
   refreshCounter += 1;
