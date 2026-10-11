@@ -448,6 +448,23 @@ test("a dev instance installs the CLI and runtime file under <home>/dev", async 
   });
 });
 
+test("a dev instance puts its CLI bin first on PATH and drops the app's", async () => {
+  await withCliHome(true, async (home) => {
+    const appBin = path.join(home, "bin");
+    const savedPath = process.env.PATH;
+    process.env.PATH = ["/usr/bin", appBin, "/opt/homebrew/bin"].join(":");
+    try {
+      assert.deepEqual(controllerAgentEnv().PATH.split(":"), [
+        path.join(home, "dev", "bin"),
+        "/usr/bin",
+        "/opt/homebrew/bin",
+      ]);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+});
+
 test("the app instance keeps the CLI and runtime file at the home root", async () => {
   await withCliHome(false, async (home) => {
     await installControllerCli();

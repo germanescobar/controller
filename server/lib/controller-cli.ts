@@ -44,8 +44,10 @@ function cliSourceDir(): string {
 
 /**
  * True when this server is a development instance started from a checkout
- * (`npm run dev`) rather than the Controller app. Set by
- * `scripts/dev-server-with-port-bump.mjs`.
+ * (`npm run dev`) next to a running Controller app. Set by
+ * `scripts/dev-server-with-port-bump.mjs` only when the dev server was
+ * started from inside a live app (see `scripts/dev-instance-env.mjs`); a
+ * standalone `npm run dev` is a regular instance.
  *
  * A dev instance shares the app's `CONTROLLER_HOME` (projects, worktrees,
  * sessions), but must not touch the app's CLI install or runtime file:
@@ -287,7 +289,20 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
  */
 export function controllerAgentEnv(options?: { sessionId?: string }): Record<string, string> {
   const basePath = process.env.PATH ?? "";
-  const mergedPath = mergePathEntries(basePath, controllerCliBinDir());
+  // A dev instance usually inherits a PATH that already holds the app's
+  // `<home>/bin` (it was started from an app agent or terminal). Put the dev
+  // bin first and drop the app's, so a bare `controller` runs the branch's
+  // CLI instead of the app's. The app instance keeps the append-if-missing
+  // behavior.
+  const mergedPath = isDevInstance()
+    ? mergePathEntries(
+        controllerCliBinDir(),
+        basePath
+          .split(":")
+          .filter((entry) => entry.trim() !== path.join(orchestratorHome(), "bin"))
+          .join(":")
+      )
+    : mergePathEntries(basePath, controllerCliBinDir());
   const env: Record<string, string> = {
     CONTROLLER_SERVER_URL: serverUrl(),
     CONTROLLER_HOME: orchestratorHome(),

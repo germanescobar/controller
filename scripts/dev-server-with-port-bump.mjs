@@ -24,6 +24,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import { devServerBaseEnv } from "./dev-instance-env.mjs";
 
 const DEV_API_BASE_PORT = 3102;
 const MAX_PORT_SEARCH_OFFSET = 100;
@@ -125,20 +126,11 @@ if (port !== requested) {
   console.log(`[dev:server] Using API port ${port}.`);
 }
 
-/*
- * When `npm run dev` runs inside a Controller agent or terminal, it inherits
- * the app's CONTROLLER_SERVER_URL / CONTROLLER_SESSION_ID. Drop them so they
- * can't leak into the dev server, and mark it as a dev instance so it keeps
- * its CLI install and runtime file under `<CONTROLLER_HOME>/dev/` instead of
- * overwriting the running app's (see `isDevInstance` in
- * server/lib/controller-cli.ts). CONTROLLER_HOME itself is kept: the dev
- * server intentionally shares the app's state files.
- */
-function devServerBaseEnv() {
-  const env = { ...process.env, CONTROLLER_DEV_INSTANCE: "1" };
-  delete env.CONTROLLER_SERVER_URL;
-  delete env.CONTROLLER_SESSION_ID;
-  return env;
+const baseEnv = await devServerBaseEnv();
+if (baseEnv.CONTROLLER_DEV_INSTANCE === "1") {
+  console.log(
+    "[dev:server] Started from a running Controller app: dev instance (CLI under <CONTROLLER_HOME>/dev, no skills install, no background loops)."
+  );
 }
 
 const child = spawn(
@@ -147,7 +139,7 @@ const child = spawn(
   {
     stdio: "inherit",
     env: {
-      ...devServerBaseEnv(),
+      ...baseEnv,
       PORT: String(port),
       API_PORT: String(port),
       VITE_API_PORT: String(port),
