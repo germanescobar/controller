@@ -42,9 +42,38 @@ function cliSourceDir(): string {
     .replace(/app\.asar(?!\.unpacked)/, "app.asar.unpacked");
 }
 
+/**
+ * True when this server is a development instance started from a checkout
+ * (`npm run dev`) next to a running Controller app. Set by
+ * `scripts/dev-server-with-port-bump.mjs` only when the dev server was
+ * started from inside a live app (see `scripts/dev-instance-env.mjs`); a
+ * standalone `npm run dev` is a regular instance.
+ *
+ * A dev instance shares the app's `CONTROLLER_HOME` (projects, worktrees,
+ * sessions), but must not touch the app's CLI install or runtime file:
+ * overwriting `bin/controller` swaps in the branch-under-development's CLI,
+ * and overwriting `controller-runtime.json` points every env-less CLI
+ * caller at the dev server — and at a dead port once it stops.
+ */
+export function isDevInstance(): boolean {
+  return process.env.CONTROLLER_DEV_INSTANCE === "1";
+}
+
+/**
+ * Root that holds the CLI install (`bin/`) and the runtime file. The app
+ * uses the Controller home itself; a dev instance gets a `dev/` subdir so
+ * its CLI and URL never clobber the app's. The CLI resolves the runtime
+ * file as a sibling of its own `bin/` dir first, so agents spawned by the
+ * dev server (whose preamble points at `dev/bin/controller`) reach the dev
+ * server even when their env is sanitized.
+ */
+function controllerCliRoot(): string {
+  return isDevInstance() ? path.join(orchestratorHome(), "dev") : orchestratorHome();
+}
+
 /** Stable absolute path the unified CLI is installed to. */
 export function controllerCliInstalledPath(): string {
-  return path.join(orchestratorHome(), "bin", "controller");
+  return path.join(controllerCliRoot(), "bin", "controller");
 }
 
 /**
@@ -87,7 +116,7 @@ export function controllerCliBinDir(): string {
 }
 
 function controllerRuntimeFile(): string {
-  return path.join(orchestratorHome(), "controller-runtime.json");
+  return path.join(controllerCliRoot(), "controller-runtime.json");
 }
 
 /**
@@ -164,7 +193,7 @@ export async function writeControllerRuntimeFile(port: number): Promise<void> {
  * callback overwrites it with the authoritative port.
  */
 export async function installControllerCli(): Promise<void> {
-  const binDir = path.join(orchestratorHome(), "bin");
+  const binDir = path.dirname(controllerCliInstalledPath());
   await fs.mkdir(binDir, { recursive: true });
 
   for (const name of ["controller", "controller-browser"]) {
@@ -260,7 +289,20 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
  */
 export function controllerAgentEnv(options?: { sessionId?: string }): Record<string, string> {
   const basePath = process.env.PATH ?? "";
-  const mergedPath = mergePathEntries(basePath, controllerCliBinDir());
+  // A dev instance usually inherits a PATH that already holds the app's
+  // `<home>/bin` (it was started from an app agent or terminal). Put the dev
+  // bin first and drop the app's, so a bare `controller` runs the branch's
+  // CLI instead of the app's. The app instance keeps the append-if-missing
+  // behavior.
+  const mergedPath = isDevInstance()
+    ? mergePathEntries(
+        controllerCliBinDir(),
+        basePath
+          .split(":")
+          .filter((entry) => entry.trim() !== path.join(orchestratorHome(), "bin"))
+          .join(":")
+      )
+    : mergePathEntries(basePath, controllerCliBinDir());
   const env: Record<string, string> = {
     CONTROLLER_SERVER_URL: serverUrl(),
     CONTROLLER_HOME: orchestratorHome(),

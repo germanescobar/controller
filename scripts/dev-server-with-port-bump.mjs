@@ -24,6 +24,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
+import { devServerBaseEnv } from "./dev-instance-env.mjs";
 
 const DEV_API_BASE_PORT = 3102;
 const MAX_PORT_SEARCH_OFFSET = 100;
@@ -125,13 +126,20 @@ if (port !== requested) {
   console.log(`[dev:server] Using API port ${port}.`);
 }
 
+const baseEnv = await devServerBaseEnv();
+if (baseEnv.CONTROLLER_DEV_INSTANCE === "1") {
+  console.log(
+    "[dev:server] Started from a running Controller app: dev instance (CLI under <CONTROLLER_HOME>/dev, no skills install, no background loops)."
+  );
+}
+
 const child = spawn(
   "npx",
   ["tsx", "watch", "--env-file-if-exists=.env.local", "server/index.ts"],
   {
     stdio: "inherit",
     env: {
-      ...process.env,
+      ...baseEnv,
       PORT: String(port),
       API_PORT: String(port),
       VITE_API_PORT: String(port),
