@@ -1268,6 +1268,74 @@ function SelectableDiffView({
     []
   );
 
+  // Drag-to-select: when the user holds the primary mouse button
+  // and drags across the line gutter, every line under the cursor
+  // is added to the current range. The drag is anchored to the
+  // line the user pressed on (so the final range is contiguous
+  // and predictable); releasing the button ends the drag. This is
+  // the same gesture the user already knows from GitHub PR review
+  // and from text editors — the line numbers are tiny in a narrow
+  // scrollable sidebar, so a forgiving drag area beats pixel-
+  // precise clicks on a 36px-wide gutter.
+  const dragStateRef = useRef<{
+    filePath: string;
+    startLine: number;
+  } | null>(null);
+  const onLinePointerDown = useCallback(
+    (filePath: string, line: number, event: React.PointerEvent) => {
+      if (line < 1) return;
+      if (event.button !== 0) return; // primary button only
+      // Skip the drag handler when the press lands on the gutter
+      // buttons — those have their own modifier-aware onClick
+      // (shift/cmd-click) and the pointer event would just produce
+      // a duplicate state update.
+      const target = event.target as HTMLElement;
+      if (target.closest("button")) return;
+      event.preventDefault();
+      // Capture the pointer so a drag that leaves the gutter still
+      // routes to the same handler (otherwise the user would have
+      // to keep the cursor pinned to a 9px column to extend the
+      // range).
+      target.setPointerCapture?.(event.pointerId);
+      dragStateRef.current = { filePath, startLine: line };
+      setSelectionByFile((prev) => {
+        const current = prev[filePath] ?? [];
+        const next = current.length > 0
+          ? current.slice(0, -1).concat({
+              start: Math.min(current[current.length - 1].start, line),
+              end: Math.max(current[current.length - 1].end, line),
+            })
+          : [{ start: line, end: line }];
+        return { ...prev, [filePath]: next };
+      });
+      setToolbarFile(filePath);
+    },
+    []
+  );
+  const onLinePointerEnter = useCallback(
+    (filePath: string, line: number) => {
+      const drag = dragStateRef.current;
+      if (!drag || drag.filePath !== filePath) return;
+      if (line < 1) return;
+      setSelectionByFile((prev) => {
+        const current = prev[filePath] ?? [];
+        if (current.length === 0) {
+          return { ...prev, [filePath]: [{ start: line, end: line }] };
+        }
+        const last = current[current.length - 1];
+        const next = current.slice(0, -1).concat({
+          start: Math.min(last.start, line),
+          end: Math.max(last.end, line),
+        });
+        return { ...prev, [filePath]: next };
+      });
+    },
+    []
+  );
+  const onLinePointerUp = useCallback(() => {
+    dragStateRef.current = null;
+  }, []);
+
   const clearFileSelection = useCallback((filePath: string) => {
     setSelectionByFile((prev) => {
       if (!(filePath in prev)) return prev;
@@ -1437,7 +1505,34 @@ function SelectableDiffView({
                       <div
                         key={j}
                         data-line-number={lineNumber}
-                        className={`flex min-w-0 relative ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset" : ""}`}
+                        onPointerDown={(e) =>
+                          lineNumber !== undefined &&
+                          onLinePointerDown(file.path, lineNumber, e)
+                        }
+                        onPointerEnter={() =>
+                          lineNumber !== undefined &&
+                          onLinePointerEnter(file.path, lineNumber)
+                        }
+                        onPointerUp={onLinePointerUp}
+                        onClick={(e) => {
+                          // Click on the line text (anywhere except
+                          // the gutter buttons) starts a new
+                          // selection. The buttons still have their
+                          // own onClick for modifier-aware selection
+                          // (shift/cmd); this is the fallback for
+                          // the much more common case of clicking
+                          // the code itself.
+                          if (lineNumber === undefined) return;
+                          const target = e.target as HTMLElement;
+                          if (target.closest("button")) return;
+                          onLineNumberClick(file.path, lineNumber, e);
+                        }}
+                        title={
+                          lineNumber === undefined
+                            ? undefined
+                            : `Click to select line ${lineNumber}; drag to select a range`
+                        }
+                        className={`flex min-w-0 relative cursor-pointer ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset" : ""}`}
                       >
                         <button
                           type="button"
