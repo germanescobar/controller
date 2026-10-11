@@ -1223,14 +1223,15 @@ function SelectableDiffView({
   const [selectionByFile, setSelectionByFile] = useState<
     Record<string, LineRange[]>
   >({});
-  // `toolbarFile` and `toolbarLine` are the anchor for the floating
-  // toolbar. We anchor to the first line of the last range in the
-  // active file, so a "Comment" button appears next to the user's
-  // click even when the range spans many lines.
-  const [toolbarFile, setToolbarFile] = useState<{
-    filePath: string;
-    line: number;
-  } | null>(null);
+  // `toolbarFile` is the file path the user is currently gesturing
+  // in. We track the file (not the line) because the toolbar is
+  // rendered at the top of the file's diff block, sticky to the
+  // scroll container, so it stays visible even when the user
+  // scrolls away from the clicked line. This is the same
+  // pattern GitHub PR review and Cursor use for the "Add to chat"
+  // / "Comment" affordance: always reachable regardless of scroll
+  // position.
+  const [toolbarFile, setToolbarFile] = useState<string | null>(null);
 
   const onLineNumberClick = useCallback(
     (filePath: string, line: number, event: React.MouseEvent) => {
@@ -1262,7 +1263,7 @@ function SelectableDiffView({
         }
         return { ...prev, [filePath]: next };
       });
-      setToolbarFile({ filePath, line });
+      setToolbarFile(filePath);
     },
     []
   );
@@ -1274,9 +1275,7 @@ function SelectableDiffView({
       delete next[filePath];
       return next;
     });
-    setToolbarFile((current) =>
-      current?.filePath === filePath ? null : current,
-    );
+    setToolbarFile((current) => (current === filePath ? null : current));
   }, []);
 
   const buildSelectionForFile = useCallback(
@@ -1335,8 +1334,7 @@ function SelectableDiffView({
       {files.map((file, i) => {
         const processed = processLinesWithNumbers(file.lines);
         const fileRanges = selectionByFile[file.path] ?? [];
-        const showToolbar =
-          toolbarFile?.filePath === file.path && fileRanges.length > 0;
+        const showToolbar = toolbarFile === file.path && fileRanges.length > 0;
         return (
           <div key={i}>
             {files.length > 1 && (
@@ -1349,110 +1347,135 @@ function SelectableDiffView({
                 Binary or metadata-only change
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                {processed.map((line, j) => {
-                  if (line.kind === "hunk") {
+              <>
+                {/*
+                 * Sticky selection toolbar (issue #416). Renders at
+                 * the top of the file's diff block, sticky to the
+                 * scroll container, so the user can always reach
+                 * "Comment" regardless of where the clicked line
+                 * scrolled to. The toolbar only appears when a
+                 * selection is active in this file. The label on
+                 * the left shows the current range so the user can
+                 * see what they've selected without scrolling back
+                 * to it.
+                 */}
+                {showToolbar && (
+                  <div
+                    data-testid="diff-selection-toolbar"
+                    className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-popover/95 px-2 py-1 backdrop-blur"
+                  >
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {fileRanges
+                        .map((range) =>
+                          range.start === range.end
+                            ? `L${range.start}`
+                            : `L${range.start}-${range.end}`,
+                        )
+                        .join(", ")}
+                      {fileRanges.length > 1 && " (multi-range)"}
+                    </span>
+                    <span className="ml-auto flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onComment(file.path)}
+                        data-testid="diff-selection-comment"
+                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-popover-foreground hover:bg-accent"
+                      >
+                        <MessageSquare className="h-3 w-3" />
+                        Comment
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => clearFileSelection(file.path)}
+                        aria-label="Clear selection"
+                        className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  </div>
+                )}
+                <div className="overflow-x-auto">
+                  {processed.map((line, j) => {
+                    if (line.kind === "hunk") {
+                      return (
+                        <div
+                          key={j}
+                          className="flex bg-blue-950/20 border-y border-blue-900/20 first:border-t-0"
+                        >
+                          <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
+                          <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
+                          <span className="px-3 py-0.5 font-mono text-[10px] text-blue-400/50 whitespace-pre">
+                            {line.text}
+                          </span>
+                        </div>
+                      );
+                    }
+                    const isAdd = line.kind === "add";
+                    const isDel = line.kind === "del";
+                    // For non-contiguous ranges, the chip is per-line
+                    // in the union — a line is "selected" when it
+                    // falls inside any active range. For deleted
+                    // lines we use the old line number; for added
+                    // lines we use the new one. Context lines share
+                    // the new number (which is what the user sees in
+                    // the right gutter anyway).
+                    const lineNumber =
+                      line.kind === "add"
+                        ? line.newLine
+                        : line.kind === "del"
+                          ? line.oldLine
+                          : line.newLine;
+                    const isSelected =
+                      lineNumber !== undefined &&
+                      fileRanges.some(
+                        (range) =>
+                          lineNumber >= range.start &&
+                          lineNumber <= range.end,
+                      );
                     return (
                       <div
                         key={j}
-                        className="flex bg-blue-950/20 border-y border-blue-900/20 first:border-t-0"
+                        data-line-number={lineNumber}
+                        className={`flex min-w-0 relative ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset" : ""}`}
                       >
-                        <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
-                        <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
-                        <span className="px-3 py-0.5 font-mono text-[10px] text-blue-400/50 whitespace-pre">
+                        <button
+                          type="button"
+                          onClick={(e) =>
+                            lineNumber !== undefined &&
+                            onLineNumberClick(file.path, lineNumber, e)
+                          }
+                          className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
+                          aria-label={`Select line ${lineNumber}`}
+                        >
+                          {line.oldLine ?? ""}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) =>
+                            lineNumber !== undefined &&
+                            onLineNumberClick(file.path, lineNumber, e)
+                          }
+                          className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
+                          aria-label={`Select line ${lineNumber}`}
+                        >
+                          {line.newLine ?? ""}
+                        </button>
+                        <span
+                          className={`pl-2 pr-1 py-0.5 shrink-0 select-none font-mono text-[11px] ${isAdd ? "text-green-400/70" : isDel ? "text-red-400/70" : "text-muted-foreground/30"}`}
+                        >
+                          {isAdd ? "+" : isDel ? "−" : " "}
+                        </span>
+                        <span
+                          className={`py-0.5 pr-3 whitespace-pre font-mono text-[11px] flex-1 min-w-0 ${isAdd ? "text-green-300/90" : isDel ? "text-red-300/90" : "text-muted-foreground/70"}`}
+                        >
                           {line.text}
                         </span>
                       </div>
                     );
-                  }
-                  const isAdd = line.kind === "add";
-                  const isDel = line.kind === "del";
-                  // For non-contiguous ranges, the chip is per-line
-                  // in the union — a line is "selected" when it
-                  // falls inside any active range. For deleted
-                  // lines we use the old line number; for added
-                  // lines we use the new one. Context lines share
-                  // the new number (which is what the user sees in
-                  // the right gutter anyway).
-                  const lineNumber =
-                    line.kind === "add"
-                      ? line.newLine
-                      : line.kind === "del"
-                        ? line.oldLine
-                        : line.newLine;
-                  const isSelected =
-                    lineNumber !== undefined &&
-                    fileRanges.some(
-                      (range) =>
-                        lineNumber >= range.start && lineNumber <= range.end,
-                    );
-                  return (
-                    <div
-                      key={j}
-                      data-line-number={lineNumber}
-                      className={`flex min-w-0 relative ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset" : ""}`}
-                    >
-                      <button
-                        type="button"
-                        onClick={(e) =>
-                          lineNumber !== undefined &&
-                          onLineNumberClick(file.path, lineNumber, e)
-                        }
-                        className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
-                        aria-label={`Select line ${lineNumber}`}
-                      >
-                        {line.oldLine ?? ""}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) =>
-                          lineNumber !== undefined &&
-                          onLineNumberClick(file.path, lineNumber, e)
-                        }
-                        className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
-                        aria-label={`Select line ${lineNumber}`}
-                      >
-                        {line.newLine ?? ""}
-                      </button>
-                      <span
-                        className={`pl-2 pr-1 py-0.5 shrink-0 select-none font-mono text-[11px] ${isAdd ? "text-green-400/70" : isDel ? "text-red-400/70" : "text-muted-foreground/30"}`}
-                      >
-                        {isAdd ? "+" : isDel ? "−" : " "}
-                      </span>
-                      <span
-                        className={`py-0.5 pr-3 whitespace-pre font-mono text-[11px] flex-1 min-w-0 ${isAdd ? "text-green-300/90" : isDel ? "text-red-300/90" : "text-muted-foreground/70"}`}
-                      >
-                        {line.text}
-                      </span>
-                      {showToolbar &&
-                        lineNumber === toolbarFile?.line && (
-                          <div
-                            className="absolute right-2 top-1/2 -translate-y-1/2 z-10 flex items-center gap-1 rounded-md border border-border bg-popover px-1 py-0.5 shadow-md"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => onComment(file.path)}
-                              data-testid="diff-selection-comment"
-                              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-popover-foreground hover:bg-accent"
-                            >
-                              <MessageSquare className="h-3 w-3" />
-                              Comment
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => clearFileSelection(file.path)}
-                              aria-label="Clear selection"
-                              className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </div>
-                        )}
-                    </div>
-                  );
-                })}
-              </div>
+                  })}
+                </div>
+              </>
             )}
           </div>
         );
