@@ -70,6 +70,36 @@ test("project catch-up retries when a newer lifecycle event arrives during the f
   ]);
 });
 
+test("project catch-up rejects a snapshot overlapped by an older full load", async () => {
+  const worktree = { id: "w", projectId: "b" } as Worktree;
+  const oldResponse = Promise.withResolvers<SessionSummary[]>();
+  let fullLoadVersion = 2;
+  const staleCatchUp = fetchStableProjectSessionSnapshot(
+    "b",
+    () => 0,
+    () => fullLoadVersion !== 2,
+    async () => [worktree],
+    async () => oldResponse.promise,
+  );
+
+  await Promise.resolve();
+  fullLoadVersion = 3; // A full load starts before the catch-up resolves.
+  oldResponse.resolve([{ id: "stale" }] as SessionSummary[]);
+  assert.equal(await staleCatchUp, null);
+
+  fullLoadVersion = 4; // Once the full load settles, catch-up runs again.
+  const freshCatchUp = await fetchStableProjectSessionSnapshot(
+    "b",
+    () => 0,
+    () => fullLoadVersion !== 4,
+    async () => [worktree],
+    async () => [{ id: "current" }] as SessionSummary[],
+  );
+  assert.deepEqual(freshCatchUp?.[0].sessions.map((session) => session.id), [
+    "current",
+  ]);
+});
+
 test("project catch-up replaces missed changes and preserves expansion choices", () => {
   const worktree = (id: string) => ({ id, projectId: "b" }) as Worktree;
   const session = (id: string) => ({ id }) as SessionSummary;

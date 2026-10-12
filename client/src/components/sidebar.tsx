@@ -1113,24 +1113,36 @@ export function Sidebar({
   // to another project, reconcile its entire subtree once so changes
   // made while it was inactive appear without reloading every project.
   const previousActiveProjectIdRef = useRef(activeProjectId);
+  const [catchUpProjectId, setCatchUpProjectId] = useState<string | null>(null);
   const projectEventGenerationRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     if (previousActiveProjectIdRef.current === activeProjectId) return;
     previousActiveProjectIdRef.current = activeProjectId;
-    if (!activeProjectId) return;
-    const projectId = activeProjectId;
+    setCatchUpProjectId(activeProjectId);
+  }, [activeProjectId]);
+  useEffect(() => {
+    if (!catchUpProjectId || loadAllStateRef.current.inFlightTokens.size > 0) {
+      return;
+    }
+    const projectId = catchUpProjectId;
+    const fullLoadVersion = loadAllStateRef.current.version;
     let cancelled = false;
+    const invalidated = () =>
+      cancelled ||
+      activeLocationRef.current.activeProjectId !== projectId ||
+      loadAllStateRef.current.version !== fullLoadVersion;
     fetchStableProjectSessionSnapshot(
       projectId,
       () => projectEventGenerationRef.current.get(projectId) ?? 0,
-      () => cancelled,
+      invalidated,
       fetchWorktrees,
       fetchSessions,
     )
       .then((snapshot) => {
-        if (cancelled || !snapshot) return;
+        if (invalidated() || !snapshot) return;
         setProjectData((prev) =>
           prev.map((project) => {
+            if (invalidated()) return project;
             if (project.id !== projectId) return project;
             const { activeProjectId, activeWorktreeId } =
               activeLocationRef.current;
@@ -1155,7 +1167,7 @@ export function Sidebar({
     return () => {
       cancelled = true;
     };
-  }, [activeProjectId, refreshActiveSessions]);
+  }, [catchUpProjectId, loadAllVersion, refreshActiveSessions]);
 
   // Last `pendingProjectRefreshes.counter` we already dispatched.
   // App.tsx bumps the counter on every event burst and never
