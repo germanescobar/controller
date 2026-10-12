@@ -39,7 +39,8 @@ test("serializes full and targeted writes, merging scopes received during a run"
   await full;
   await tick();
   assert.deepEqual(calls, ["full", JSON.stringify({
-    projects: ["p"], sessions: [{ projectId: "p", worktreeId: "w" }],
+    projects: ["p"], catchUpProjects: [],
+    sessions: [{ projectId: "p", worktreeId: "w" }],
   })]);
   second.resolve();
   await tick();
@@ -79,4 +80,53 @@ test("failed refresh does not stop later queued work", async () => {
   await assert.rejects(full, /failed/);
   await tick();
   assert.deepEqual(calls, ["full", "targets"]);
+});
+
+test("replays scopes covered by a queued full reload if it fails", async () => {
+  const gate = deferred();
+  const calls: SidebarRefreshScopes[] = [];
+  const queue = new SidebarRefreshQueue(async () => {
+    await gate.promise;
+    throw new Error("full failed");
+  }, async (scopes) => { calls.push(scopes); });
+  queue.enqueueProject("p");
+  queue.enqueueSession("p", "w");
+  const full = queue.enqueueFull();
+  queue.enqueueCatchUpProject("q");
+  gate.resolve();
+  await assert.rejects(full, /full failed/);
+  await tick();
+  assert.deepEqual(calls, [{
+    projects: ["p"], catchUpProjects: ["q"],
+    sessions: [{ projectId: "p", worktreeId: "w" }],
+  }]);
+});
+
+test("a full reload queued during another run retains its own covered scopes", async () => {
+  const gate = deferred();
+  const calls: SidebarRefreshScopes[] = [];
+  let runs = 0;
+  const queue = new SidebarRefreshQueue(async () => {
+    if (++runs === 1) await gate.promise;
+    else throw new Error("second failed");
+  }, async (scopes) => { calls.push(scopes); });
+  const first = queue.enqueueFull();
+  await tick();
+  queue.enqueueProject("p");
+  const second = queue.enqueueFull();
+  gate.resolve();
+  await first;
+  await assert.rejects(second, /second failed/);
+  await tick();
+  assert.deepEqual(calls, [{ projects: ["p"], catchUpProjects: [], sessions: [] }]);
+});
+
+test("active-project catch-up scope merges without broadening ordinary project refreshes", async () => {
+  const calls: SidebarRefreshScopes[] = [];
+  const queue = new SidebarRefreshQueue(async () => {}, async (scopes) => { calls.push(scopes); });
+  queue.enqueueProject("p");
+  queue.enqueueCatchUpProject("p");
+  queue.enqueueCatchUpProject("p");
+  await tick();
+  assert.deepEqual(calls, [{ projects: ["p"], catchUpProjects: ["p"], sessions: [] }]);
 });
