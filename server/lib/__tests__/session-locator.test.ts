@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -18,12 +19,15 @@ import path from "node:path";
 
 import { locateSessionById, locateSessionPath } from "../session-locator.js";
 import { projectStoreDir } from "../paths.js";
+import { getProjectWorktrees, invalidateWorktreeCache } from "../worktrees.js";
+import { _setJsonRegistryFs } from "../json-registry.js";
 
 function withTempHome(run: (home: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "session-locator-test-"));
   const original = process.env.CONTROLLER_HOME;
   process.env.CONTROLLER_HOME = dir;
   return run(dir).finally(() => {
+    invalidateWorktreeCache();
     if (original === undefined) delete process.env.CONTROLLER_HOME;
     else process.env.CONTROLLER_HOME = original;
     rmSync(dir, { recursive: true, force: true });
@@ -60,6 +64,89 @@ async function writeFileProjectRegistry(
 test("locateSessionById returns null when no project is registered", async () => {
   await withTempHome(async () => {
     assert.equal(await locateSessionById("missing"), null);
+  });
+});
+
+test("locator reuses the registry snapshot and sees a rewritten registry", async () => {
+  await withTempHome(async (home) => {
+    const mainPath = path.join(home, "main");
+    const featurePath = path.join(home, "feature");
+    await plantProject(home, "proj-1", "demo", mainPath);
+    mkdirSync(path.join(projectStoreDir(featurePath), "sessions"), { recursive: true });
+    writeFileSync(
+      path.join(projectStoreDir(featurePath), "sessions", "s1.json"),
+      JSON.stringify({ id: "s1", worktreeId: "feature" })
+    );
+    const registryFile = path.join(home, "worktrees.json");
+    const main = {
+      id: "main", projectId: "proj-1", name: "main", path: mainPath,
+      isMain: true, createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    writeFileSync(registryFile, JSON.stringify([main]));
+    let registryReads = 0;
+    const previous = _setJsonRegistryFs({
+      readFile: async (file, encoding) => {
+        if (file === registryFile) registryReads++;
+        return fs.readFile(file, encoding);
+      },
+      open: fs.open,
+      writeFile: fs.writeFile,
+      rename: fs.rename,
+      mkdir: fs.mkdir,
+    });
+    try {
+      assert.equal(await locateSessionById("s1"), null);
+      assert.equal(await locateSessionById("s1"), null);
+      assert.equal(registryReads, 1, "same registry version should be parsed once");
+      invalidateWorktreeCache();
+      assert.equal(await locateSessionById("s1"), null);
+      assert.equal(registryReads, 2, "explicit invalidation forces a fresh parse");
+
+      writeFileSync(registryFile, JSON.stringify([main, {
+        id: "feature", projectId: "proj-1", name: "feature", path: featurePath,
+        isMain: false, createdAt: "2026-01-01T00:00:00.000Z",
+      }]));
+      assert.equal((await locateSessionById("s1"))?.worktreePath, featurePath);
+      assert.equal(registryReads, 3, "a registry rewrite must invalidate the cache");
+    } finally {
+      _setJsonRegistryFs(previous);
+    }
+  });
+});
+
+test("worktree cache evicts entries after 64 project lookups", async () => {
+  await withTempHome(async (home) => {
+    const projects = Array.from({ length: 65 }, (_, i) => ({
+      id: `proj-${i}`, name: `project ${i}`, path: path.join(home, `project-${i}`),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+    await writeFileProjectRegistry(home, projects);
+    const registryFile = path.join(home, "worktrees.json");
+    writeFileSync(registryFile, JSON.stringify(projects.map((project) => ({
+      id: project.id, projectId: project.id, name: "main", path: project.path,
+      isMain: true, createdAt: project.createdAt,
+    }))));
+    let registryReads = 0;
+    const previous = _setJsonRegistryFs({
+      readFile: async (file, encoding) => {
+        if (file === registryFile) registryReads++;
+        return fs.readFile(file, encoding);
+      },
+      open: fs.open,
+      writeFile: fs.writeFile,
+      rename: fs.rename,
+      mkdir: fs.mkdir,
+    });
+    try {
+      for (const project of projects) await getProjectWorktrees(project.id);
+      assert.equal(registryReads, 65);
+      await getProjectWorktrees(projects[64].id);
+      assert.equal(registryReads, 65, "most recent entry stays cached");
+      await getProjectWorktrees(projects[0].id);
+      assert.equal(registryReads, 66, "oldest entry was evicted");
+    } finally {
+      _setJsonRegistryFs(previous);
+    }
   });
 });
 
