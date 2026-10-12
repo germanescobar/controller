@@ -66,6 +66,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
 import { DOCS_URL } from "@/lib/links";
+import {
+  fetchProjectSessionSnapshot,
+  mergeProjectSessionSnapshot,
+} from "@/lib/sidebar-project-catch-up";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -475,6 +479,10 @@ export function Sidebar({
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
+  const archivedIdsRef = useRef(archivedIds);
+  useEffect(() => {
+    archivedIdsRef.current = archivedIds;
+  }, [archivedIds]);
   const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(
     new Set(),
   );
@@ -1100,6 +1108,47 @@ export function Sidebar({
   useEffect(() => {
     loadAll().catch(() => {});
   }, [loadAll, focusRefreshKey]);
+
+  // The event stream only follows the active project. When returning
+  // to another project, reconcile its entire subtree once so changes
+  // made while it was inactive appear without reloading every project.
+  const previousActiveProjectIdRef = useRef(activeProjectId);
+  useEffect(() => {
+    if (previousActiveProjectIdRef.current === activeProjectId) return;
+    previousActiveProjectIdRef.current = activeProjectId;
+    if (!activeProjectId) return;
+    const projectId = activeProjectId;
+    let cancelled = false;
+    fetchProjectSessionSnapshot(projectId, fetchWorktrees, fetchSessions)
+      .then((snapshot) => {
+        if (cancelled) return;
+        setProjectData((prev) =>
+          prev.map((project) => {
+            if (project.id !== projectId) return project;
+            const { activeProjectId, activeWorktreeId } =
+              activeLocationRef.current;
+            return {
+              ...project,
+              worktrees: mergeProjectSessionSnapshot(
+                project.worktrees,
+                snapshot,
+                archivedIdsRef.current,
+                (worktree) =>
+                  worktree.id === activeWorktreeId ||
+                  (!activeWorktreeId &&
+                    worktree.isMain &&
+                    projectId === activeProjectId),
+              ),
+            };
+          }),
+        );
+        refreshActiveSessions().catch(() => {});
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId, refreshActiveSessions]);
 
   // Last `pendingProjectRefreshes.counter` we already dispatched.
   // App.tsx bumps the counter on every event burst and never
