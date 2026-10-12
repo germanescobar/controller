@@ -230,10 +230,19 @@ export function SourceEditor({
         },
       ]),
       EditorView.lineWrapping,
-      // A subtle hint that the file is dirty without burning a
-      // border around the entire editor. The Save button in the
-      // header bar carries the same signal — keep them in sync.
+      // The CodeMirror `<CodeMirror theme="dark" />` prop only
+      // retunes the syntax-highlight palette. To make the
+      // surrounding chrome (gutter, line numbers, active-line
+      // band, selection, scrollbar, caret) match, we layer a
+      // matching dark theme on top. Colors are chosen to read as
+      // a "VS Code Dark+" style surface: muted gutter, soft
+      // selection, slightly-lifted active line.
       EditorView.theme({
+        "&": {
+          backgroundColor: "#1e1e1e",
+          color: "#d4d4d4",
+          height: "100%",
+        },
         "&.cm-focused": {
           outline: "none",
         },
@@ -244,11 +253,30 @@ export function SourceEditor({
         },
         ".cm-content": {
           padding: "8px 0",
+          caretColor: "#d4d4d4",
         },
         ".cm-line": {
           padding: "0 12px",
         },
-      }),
+        ".cm-gutters": {
+          backgroundColor: "#1e1e1e",
+          color: "#858585",
+          border: "none",
+        },
+        ".cm-activeLine": {
+          backgroundColor: "#2a2d2e",
+        },
+        ".cm-activeLineGutter": {
+          backgroundColor: "#2a2d2e",
+          color: "#c6c6c6",
+        },
+        ".cm-selectionBackground, ::selection": {
+          backgroundColor: "#264f78",
+        },
+        "&.cm-focused .cm-selectionBackground": {
+          backgroundColor: "#264f78",
+        },
+      }, { dark: true }),
       ...(lang ? [lang] : []),
     ];
   }, [file.path, save]);
@@ -300,7 +328,16 @@ export function SourceEditor({
           }}
           extensions={extensions}
           onChange={(value) => setDraft(value)}
-          theme="light"
+          // Dark syntax palette (the surrounding Files-tab chrome
+          // stays light on purpose — see the follow-up plan in the
+          // PR description for a full dark-mode pass). Switching
+          // the theme to "dark" only retunes the highlight.js
+          // colors, so we also paint the editor's chrome via the
+          // `EditorView.theme` extension above (gutter, selection,
+          // scrollbar, caret) to match — otherwise the code area
+          // goes dark while the gutter stays light, which looks
+          // worse than either pure light or pure dark.
+          theme="dark"
           height="100%"
           className="h-full min-h-0"
         />
