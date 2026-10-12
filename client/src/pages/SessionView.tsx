@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
+import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
 import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
 import hljs from "highlight.js/lib/core";
@@ -135,6 +135,14 @@ import {
   parseMentionBlock,
   type FileMention,
 } from "../lib/file-picker.ts";
+import {
+  formatSelectionToken,
+  parseSelectionBlock,
+  normalizeRanges,
+  truncatePreview,
+  type LineRange,
+  type SelectionMention,
+} from "../../../shared/diff-selection.ts";
 import { modelProviderLabel } from "../lib/model-labels.ts";
 import {
   buildComposerDraftKey,
@@ -709,7 +717,55 @@ function parseFullGitDiff(diff: string): DiffFile[] {
   return files;
 }
 
+/** A contiguous range of rendered row indices in a diff (issue #416). */
+interface RowRange {
+  start: number;
+  end: number;
+}
+
+function rowLineNumber(line: ProcessedLine): number | undefined {
+  if (line.kind === "hunk") return undefined;
+  return line.kind === "del" ? line.oldLine : line.newLine;
+}
+
+function isRowSelected(ranges: RowRange[], row: number): boolean {
+  return ranges.some((range) => row >= range.start && row <= range.end);
+}
+
+/**
+ * Map selected rows to the line ranges carried by the chip token.
+ * Each selected row contributes its own line number; the result is
+ * sorted and merged by `normalizeRanges`.
+ */
+function rowsToLineRanges(
+  processed: ProcessedLine[],
+  rowRanges: RowRange[]
+): LineRange[] | null {
+  const lineRanges: LineRange[] = [];
+  processed.forEach((line, j) => {
+    const n = rowLineNumber(line);
+    if (n !== undefined && isRowSelected(rowRanges, j)) {
+      lineRanges.push({ start: n, end: n });
+    }
+  });
+  return normalizeRanges(lineRanges);
+}
+
 const ProjectRootContext = createContext<string | undefined>(undefined);
+
+/**
+ * Selection-add callback context (issue #416). Provided by
+ * `SessionView` and consumed by every diff renderer in the
+ * transcript (`DiffBlock` inside a tool call card, `RunDiffCard`
+ * after a turn, the `SelectableDiffView` rendered through both).
+ * Using a context avoids threading the same prop through four
+ * layers of memoized components — the call sites are deep in the
+ * event-timeline tree and every additional prop would invalidate
+ * the memo for the wrong reason.
+ */
+const SelectionAddContext = createContext<
+  ((selection: SelectionMention) => void) | undefined
+>(undefined);
 
 interface SourceReference {
   path: string;
@@ -936,7 +992,42 @@ function processLinesWithNumbers(lines: DiffLine[]): ProcessedLine[] {
   return result;
 }
 
-function DiffBlock({ files }: { files: DiffFile[] }) {
+/**
+ * Whether a diff's line numbers are real file coordinates (issue
+ * #416). A selection chip anchors the agent to `path:start-end`, so
+ * the numbers must match the file. Unified diffs with numeric
+ * `@@ -a,b +c,d @@` headers qualify, and so do whole-file additions
+ * (numbering from 1 is correct). A `str_replace` snippet or an
+ * `apply_patch` hunk with a bare `@@` header has no offset — its
+ * rows would number from 1 regardless of where the edit landed — so
+ * those render read-only.
+ */
+function hasReliableLineNumbers(files: DiffFile[]): boolean {
+  return files.every((file) => {
+    if (file.lines.length === 0) return true;
+    if (file.op === "add" && file.lines.every((line) => line.kind === "add")) {
+      return true;
+    }
+    const first = file.lines[0];
+    if (!(first.kind === "ctx" && first.text.startsWith("@@"))) return false;
+    return file.lines.every(
+      (line) =>
+        !(line.kind === "ctx" && line.text.startsWith("@@")) ||
+        /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line.text)
+    );
+  });
+}
+
+function DiffBlock({
+  files,
+}: {
+  files: DiffFile[];
+}) {
+  // The selection-add callback comes from `SelectionAddContext`
+  // (issue #416) — wiring the context once at the top of the
+  // timeline avoids prop-drilling through `WorkingChildEvent`,
+  // `ToolCallRow`, and the working-block tree.
+  const onSelectionAdd = useContext(SelectionAddContext);
   const [expanded, setExpanded] = useState(false);
   const projectRoot = useContext(ProjectRootContext);
   const { added, deleted } = summarizeDiffFiles(files);
@@ -964,7 +1055,12 @@ function DiffBlock({ files }: { files: DiffFile[] }) {
           <span className="text-red-400/90">-{deleted}</span>
         </span>
       </button>
-      {expanded && <DiffView files={files} />}
+      {expanded &&
+        (onSelectionAdd && hasReliableLineNumbers(files) ? (
+          <SelectableDiffView files={files} onSelectionAdd={onSelectionAdd} />
+        ) : (
+          <DiffView files={files} />
+        ))}
     </div>
   );
 }
@@ -1028,7 +1124,17 @@ function DiffView({ files }: { files: DiffFile[] }) {
   );
 }
 
-const RunDiffCard = memo(function RunDiffCard({ data }: { data: Record<string, unknown> }) {
+const RunDiffCard = memo(function RunDiffCard({
+  data,
+}: {
+  data: Record<string, unknown>;
+}) {
+  // The selection-add callback comes from `SelectionAddContext`
+  // (issue #416). The run-summary card appears after every turn,
+  // so it's the primary selection source — the user reviews the
+  // agent's edit, clicks the lines that need follow-up, and the
+  // chip drops into the composer.
+  const onSelectionAdd = useContext(SelectionAddContext);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const projectRoot = useContext(ProjectRootContext);
   const diff = typeof data.diff === "string" ? data.diff : "";
@@ -1081,7 +1187,14 @@ const RunDiffCard = memo(function RunDiffCard({ data }: { data: Record<string, u
   );
 });
 
-function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
+function RunDiffFileRow({
+  file,
+  label,
+}: {
+  file: DiffFile;
+  label: string;
+}) {
+  const onSelectionAdd = useContext(SelectionAddContext);
   const [expanded, setExpanded] = useState(false);
   const fileSummary = summarizeDiffFiles([file]);
 
@@ -1106,9 +1219,391 @@ function RunDiffFileRow({ file, label }: { file: DiffFile; label: string }) {
       </button>
       {expanded && (
         <div className="max-h-96 overflow-y-auto border-t border-border/30">
-          <DiffView files={[file]} />
+          {onSelectionAdd ? (
+            <SelectableDiffView
+              files={[file]}
+              onSelectionAdd={onSelectionAdd}
+            />
+          ) : (
+            <DiffView files={[file]} />
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/*
+ * Selectable diff view (issue #416).
+ *
+ * Wraps the per-file rendered diff with line-number click handlers,
+ * a per-file selection state, and a floating toolbar that turns the
+ * current selection into a mention chip. Used in:
+ *
+ *   - `DiffBlock` (the agent's per-tool-call diff in the transcript)
+ *   - `RunDiffFileRow` (the per-run summary card after a turn)
+ *   - `ChangesPanel` (the right-sidebar local/branch diff view)
+ *
+ * The component owns the selection state; the parent owns the chip
+ * stack. The "Add to Chat" action fires `onSelectionAdd` with a fresh
+ * `SelectionMention` so the composer can append a chip without the
+ * diff component knowing about the composer at all. Adding the chip
+ * clears the selection in the diff: the chip in the composer is now
+ * the record of it, and the user doesn't have to clear it by hand.
+ *
+ * Pointer semantics match the issue's UX spec:
+ *
+ *   - click anywhere on a line selects that line;
+ *   - click-and-drag selects every line between the press and the
+ *     release (contiguous range);
+ *   - shift-click extends the last range to the clicked line;
+ *   - cmd/ctrl-click (or drag) adds a non-contiguous range to the
+ *     existing selection (the new range joins the per-file range list).
+ */
+function SelectableDiffView({
+  files,
+  onSelectionAdd: onSelectionAddProp,
+}: {
+  files: DiffFile[];
+  onSelectionAdd?: (selection: SelectionMention) => void;
+}) {
+  // Fall back to the context-provided callback when no prop is
+  // supplied (issue #416). The context is what wires selection
+  // through the deeply nested event timeline; the prop is what the
+  // sidebar's `ChangesPanel` uses (it has direct access to the
+  // composer's `addSelection`).
+  const contextOnSelectionAdd = useContext(SelectionAddContext);
+  const onSelectionAdd =
+    onSelectionAddProp ?? contextOnSelectionAdd ?? (() => undefined);
+  const projectRoot = useContext(ProjectRootContext);
+  // `selectionByFile` holds the current gesture. Each file's
+  // selection is a list of contiguous ranges of *rendered row
+  // indices* (into `processLinesWithNumbers(file.lines)`), not line
+  // numbers: in a replacement hunk a deleted old line 10 and an
+  // added new line 10 share a number, and keying on the number
+  // would select both. Line numbers are derived from the selected
+  // rows only when the chip is built. "Add to Chat" turns the union
+  // of the ranges into a chip and clears the selection.
+  const [selectionByFile, setSelectionByFile] = useState<
+    Record<string, RowRange[]>
+  >({});
+  const processedByPath = useMemo(() => {
+    const map = new Map<string, ProcessedLine[]>();
+    for (const file of files) {
+      map.set(file.path, processLinesWithNumbers(file.lines));
+    }
+    return map;
+  }, [files]);
+  // `toolbarFile` is the file path the user last gestured in. The
+  // "Add to Chat" toolbar renders inline, right below the last line
+  // of that file's most recent range, so the action sits next to
+  // the selection (same pattern as GitHub PR review).
+  const [toolbarFile, setToolbarFile] = useState<string | null>(null);
+  const selectionRef = useRef(selectionByFile);
+  selectionRef.current = selectionByFile;
+
+  // Click-and-drag selection. Pressing a line starts a gesture
+  // anchored to that line; while the button is held, entering
+  // another line of the same file rewrites the gesture's range to
+  // span anchor..line. Releasing anywhere ends the gesture (a
+  // window-level listener, so releasing outside the diff works).
+  // We deliberately do NOT use pointer capture: a captured pointer
+  // routes every subsequent event to the pressed row, so the other
+  // rows would never see `pointerenter` and the drag would stall on
+  // the first line.
+  const dragStateRef = useRef<{ filePath: string; anchor: number } | null>(
+    null
+  );
+  const [dragging, setDragging] = useState(false);
+
+  const startGesture = useCallback(
+    (
+      filePath: string,
+      row: number,
+      modifiers: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }
+    ) => {
+      if (row < 0) return;
+      // Computed eagerly (not inside a state updater) so the drag
+      // anchor is set synchronously, before the next pointer event.
+      const current = selectionRef.current[filePath] ?? [];
+      let next: RowRange[];
+      let anchor = row;
+      if (modifiers.shiftKey && current.length > 0) {
+        // Extend the last range to include the new row; the far
+        // end of that range becomes the drag anchor.
+        const last = current[current.length - 1];
+        anchor = row >= last.start ? last.start : last.end;
+        next = current.slice(0, -1).concat({
+          start: Math.min(anchor, row),
+          end: Math.max(anchor, row),
+        });
+      } else if (modifiers.metaKey || modifiers.ctrlKey) {
+        // Cmd/Ctrl adds a new (non-contiguous) range. The line
+        // ranges are normalized on-chip, so ranges added in random
+        // order still produce a stable, sorted, merged token.
+        next = [...current, { start: row, end: row }];
+      } else {
+        // Plain press replaces the file's selection.
+        next = [{ start: row, end: row }];
+      }
+      dragStateRef.current = { filePath, anchor };
+      setSelectionByFile((prev) => ({ ...prev, [filePath]: next }));
+      setToolbarFile(filePath);
+    },
+    []
+  );
+
+  const onLinePointerDown = useCallback(
+    (filePath: string, row: number, event: React.PointerEvent) => {
+      if (event.button !== 0) return; // primary button only
+      // Prevent the browser's native text selection from fighting
+      // the line selection while dragging.
+      event.preventDefault();
+      setDragging(true);
+      startGesture(filePath, row, event);
+    },
+    [startGesture]
+  );
+
+  const onLinePointerEnter = useCallback(
+    (filePath: string, row: number) => {
+      const drag = dragStateRef.current;
+      if (!drag || drag.filePath !== filePath) return;
+      if (row < 0) return;
+      setSelectionByFile((prev) => {
+        const current = prev[filePath] ?? [];
+        const range = {
+          start: Math.min(drag.anchor, row),
+          end: Math.max(drag.anchor, row),
+        };
+        return { ...prev, [filePath]: current.slice(0, -1).concat(range) };
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!dragging) return;
+    const end = () => {
+      dragStateRef.current = null;
+      setDragging(false);
+    };
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+  }, [dragging]);
+
+  // Keyboard activation of the gutter buttons (Enter/Space). Mouse
+  // clicks are already handled by `onLinePointerDown`; a keyboard
+  // "click" has `detail === 0`, which is how we tell them apart.
+  const onGutterKeyboardClick = useCallback(
+    (filePath: string, row: number, event: React.MouseEvent) => {
+      if (event.detail !== 0) return;
+      startGesture(filePath, row, event);
+      dragStateRef.current = null;
+    },
+    [startGesture]
+  );
+
+  const clearFileSelection = useCallback((filePath: string) => {
+    setSelectionByFile((prev) => {
+      if (!(filePath in prev)) return prev;
+      const next = { ...prev };
+      delete next[filePath];
+      return next;
+    });
+    setToolbarFile((current) => (current === filePath ? null : current));
+  }, []);
+
+  const buildSelectionForFile = useCallback(
+    (filePath: string, rowRanges: RowRange[]): SelectionMention | null => {
+      const processed = processedByPath.get(filePath);
+      if (!processed) return null;
+      const ranges = rowsToLineRanges(processed, rowRanges);
+      if (!ranges) return null;
+      // Capture the snippet client-side. The preview is the joined
+      // text of exactly the selected rows, in display order, so the
+      // backend can include selection text in the prompt even when
+      // the file no longer exists on disk (deletion diffs). Line
+      // text is whatever the diff renderer showed, not the
+      // post-edit source — a chip captured on a deletion diff
+      // intentionally records the snippet that "used to exist".
+      const selectedLines = processed
+        .filter((line, j) => line.kind !== "hunk" && isRowSelected(rowRanges, j))
+        .map((line) => line.text);
+      const preview = truncatePreview(selectedLines.join("\n"));
+      return { path: filePath, ranges, preview };
+    },
+    [processedByPath]
+  );
+
+  const onAddToChat = useCallback(
+    (filePath: string) => {
+      const ranges = selectionByFile[filePath];
+      if (!ranges) return;
+      const selection = buildSelectionForFile(filePath, ranges);
+      if (!selection) return;
+      onSelectionAdd(selection);
+      clearFileSelection(filePath);
+    },
+    [selectionByFile, buildSelectionForFile, onSelectionAdd, clearFileSelection]
+  );
+
+  return (
+    <div className="border-t border-border/30 divide-y divide-border/20">
+      {files.map((file, i) => {
+        const processed =
+          processedByPath.get(file.path) ?? processLinesWithNumbers(file.lines);
+        const fileRanges = selectionByFile[file.path] ?? [];
+        const showToolbar =
+          !dragging && toolbarFile === file.path && fileRanges.length > 0;
+        // Anchor the toolbar under the last row of the most recent
+        // range (ranges are row indices, so this is just its end).
+        const lastRange = fileRanges[fileRanges.length - 1];
+        const toolbarIndex = showToolbar && lastRange ? lastRange.end : -1;
+        const toolbarLineRanges = showToolbar
+          ? rowsToLineRanges(processed, fileRanges)
+          : null;
+        return (
+          <div key={i}>
+            {files.length > 1 && (
+              <div className="px-3 py-1 bg-muted/10 font-mono text-[10px] text-muted-foreground/50 border-b border-border/20">
+                {relativizePath(file.path, projectRoot)}
+              </div>
+            )}
+            {file.lines.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground/60">
+                Binary or metadata-only change
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  {processed.map((line, j) => {
+                    if (line.kind === "hunk") {
+                      return (
+                        <div
+                          key={j}
+                          className="flex bg-blue-950/20 border-y border-blue-900/20 first:border-t-0"
+                        >
+                          <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
+                          <span className="w-9 shrink-0 border-r border-border/20 bg-background/10" />
+                          <span className="px-3 py-0.5 font-mono text-[10px] text-blue-400/50 whitespace-pre">
+                            {line.text}
+                          </span>
+                        </div>
+                      );
+                    }
+                    const isAdd = line.kind === "add";
+                    const isDel = line.kind === "del";
+                    // Deleted rows are numbered by the old file, added
+                    // and context rows by the new one (what the user sees
+                    // in the right gutter). Selection itself is by row, so
+                    // an old and a new line sharing a number stay distinct.
+                    const lineNumber = rowLineNumber(line);
+                    const isSelected = isRowSelected(fileRanges, j);
+                    return (
+                      <Fragment key={j}>
+                      <div
+                        data-line-number={lineNumber}
+                        onPointerDown={(e) =>
+                          lineNumber !== undefined &&
+                          onLinePointerDown(file.path, j, e)
+                        }
+                        onPointerEnter={() =>
+                          lineNumber !== undefined &&
+                          onLinePointerEnter(file.path, j)
+                        }
+                        title={
+                          lineNumber === undefined
+                            ? undefined
+                            : `Click to select line ${lineNumber}; drag to select a range`
+                        }
+                        className={`flex min-w-0 relative cursor-pointer select-none hover:bg-primary/10 ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset bg-primary/15" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={(e) =>
+                            lineNumber !== undefined &&
+                            onGutterKeyboardClick(file.path, j, e)
+                          }
+                          className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
+                          aria-label={`Select line ${lineNumber}`}
+                        >
+                          {line.oldLine ?? ""}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) =>
+                            lineNumber !== undefined &&
+                            onGutterKeyboardClick(file.path, j, e)
+                          }
+                          className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
+                          aria-label={`Select line ${lineNumber}`}
+                        >
+                          {line.newLine ?? ""}
+                        </button>
+                        <span
+                          className={`pl-2 pr-1 py-0.5 shrink-0 select-none font-mono text-[11px] ${isAdd ? "text-green-400/70" : isDel ? "text-red-400/70" : "text-muted-foreground/30"}`}
+                        >
+                          {isAdd ? "+" : isDel ? "−" : " "}
+                        </span>
+                        <span
+                          className={`py-0.5 pr-3 whitespace-pre font-mono text-[11px] flex-1 min-w-0 ${isAdd ? "text-green-300/90" : isDel ? "text-red-300/90" : "text-muted-foreground/70"}`}
+                        >
+                          {line.text}
+                        </span>
+                      </div>
+                      {j === toolbarIndex && (
+                        // Contextual "Add to Chat" toolbar (issue #416),
+                        // rendered inline under the selection. `sticky
+                        // left-0` keeps it in view when the diff is
+                        // scrolled horizontally.
+                        <div
+                          data-testid="diff-selection-toolbar"
+                          className="sticky left-0 w-fit py-1 pl-[4.5rem]"
+                        >
+                          <div className="flex items-center gap-2 rounded-md border border-border bg-popover px-2 py-1 shadow-md">
+                            <span className="font-mono text-[10px] text-muted-foreground">
+                              {(toolbarLineRanges ?? [])
+                                .map((range) =>
+                                  range.start === range.end
+                                    ? `L${range.start}`
+                                    : `L${range.start}-${range.end}`,
+                                )
+                                .join(", ")}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => onAddToChat(file.path)}
+                              data-testid="diff-selection-comment"
+                              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-popover-foreground hover:bg-accent"
+                            >
+                              <MessageSquare className="h-3 w-3" />
+                              Add to Chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => clearFileSelection(file.path)}
+                              aria-label="Clear selection"
+                              className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      </Fragment>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1493,7 +1988,14 @@ const EventBlock = memo(function EventBlock({
     // stripping the mention block the skill marker would leak into
     // the visible text. Parse the mention block first, then the
     // skill markers.
-    const { mentions, text: withoutMentions } = parseMentionBlock(rawText);
+    //
+    // The same ordering applies to the `<selections>...</selections>`
+    // block (issue #416) — selections come after mentions in the
+    // persisted history, and the bubble re-renders the chip strip
+    // from this block so the user sees the same chips on reload
+    // that they saw in the composer.
+    const { mentions, text: afterMentions } = parseMentionBlock(rawText);
+    const { selections, text: withoutMentions } = parseSelectionBlock(afterMentions);
     const { skillNames, text: visibleText } = parseSkillMarkers(withoutMentions);
     return (
       <div className="flex justify-end">
@@ -1529,6 +2031,30 @@ const EventBlock = memo(function EventBlock({
                     <span className="font-mono">@{mention.path}</span>
                   </span>
                 ))}
+              </div>
+            )}
+            {selections.length > 0 && (
+              <div
+                className="mb-1.5 flex flex-wrap justify-end gap-1"
+                data-testid="bubble-selections"
+              >
+                {selections.map((selection, index) => {
+                  const token = formatSelectionToken(
+                    selection.path,
+                    selection.ranges,
+                  );
+                  const label = token ?? selection.path;
+                  return (
+                    <span
+                      key={`${label}-${index}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-foreground"
+                      title={label}
+                    >
+                      <Diff className="h-3 w-3 text-primary" />
+                      <span className="font-mono">{label}</span>
+                    </span>
+                  );
+                })}
               </div>
             )}
             <CollapsibleUserMessage text={visibleText} />
@@ -1571,6 +2097,8 @@ const EventBlock = memo(function EventBlock({
   }
 
   if (event.type === "run_diff") {
+    // `RunDiffCard` reads the selection-add callback from
+    // `SelectionAddContext` (issue #416).
     return <RunDiffCard data={data} />;
   }
 
@@ -2007,6 +2535,10 @@ const ToolCallRow = memo(function ToolCallRow({
   }
 
   if (hasDiff) {
+    // `DiffBlock` reads the selection-add callback from context
+    // (issue #416) — see `SelectionAddContext`. This avoids
+    // prop-drilling through `WorkingChildEvent`,
+    // `WorkingChildStreamItem`, and the event-timeline tree.
     return <DiffBlock files={diffFiles} />;
   }
 
@@ -3255,8 +3787,16 @@ export function SessionView({
   const [steerInProgress, setSteerInProgress] = useState(false);
   const steerInProgressRef = useRef(false);
   // Carries the steer text across the stop -> stream-close -> resume hop
-  // for emulated (Claude/Anita) steering.
-  const pendingSteerRef = useRef<string | null>(null);
+  // for emulated (Claude/Anita) steering, together with the mention and
+  // selection chips snapshotted when the user pressed steer. The resume
+  // runs in a completion handler that closed over the chip state from
+  // when the original run started, so reading `activeMentions` /
+  // `activeSelections` there would replay stale chips (issue #416).
+  const pendingSteerRef = useRef<{
+    text: string;
+    mentions: FileMention[];
+    selections: SelectionMention[];
+  } | null>(null);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -3446,6 +3986,17 @@ export function SessionView({
   // deterministic `<mentions>` block the backend builds is persisted to
   // history so session replays are reproducible.
   const [activeMentions, setActiveMentions] = useState<FileMention[]>([]);
+  // Line-range selection chips (issue #416): the user clicks lines in
+  // a rendered diff and the gesture becomes a chip carrying the path,
+  // the range, and a client-captured preview. The chip stack is
+  // independent of `activeMentions` because the two have different
+  // wire shapes (`path:start-end` vs `path`) and different preview
+  // pipelines; merging them would have meant a single backend
+  // resolver that branches on shape, which is harder to reason about
+  // than two resolvers that produce two adjacent blocks.
+  const [activeSelections, setActiveSelections] = useState<SelectionMention[]>(
+    []
+  );
   const [mentionPopoverOpen, setMentionPopoverOpen] = useState(false);
   const [mentionHighlightIndex, setMentionHighlightIndex] = useState(0);
   const [mentionCandidates, setMentionCandidates] = useState<
@@ -4411,7 +4962,8 @@ export function SessionView({
             pendingSteerRef.current &&
             sessionId
           ) {
-            const steerText = pendingSteerRef.current;
+            const pendingSteer = pendingSteerRef.current;
+            const steerText = pendingSteer.text;
             pendingSteerRef.current = null;
             steerInProgressRef.current = false;
             setSteerInProgress(false);
@@ -4424,14 +4976,9 @@ export function SessionView({
               undefined,
               undefined,
               { skillName: undefined },
-              // Snapshot the composer's mention stack at the moment
-              // of the emulated steer so the resumed run still
-              // includes the chips the user added before pressing
-              // Enter to steer (issue #312 P2). Without this, the
-              // mention chips would silently drop on the resumed
-              // turn and the agent prompt would be missing the
-              // file context the user already saw in the composer.
-              activeMentions.slice()
+              // Chips snapshotted in `handleSteer` (issues #312, #416).
+              pendingSteer.mentions,
+              pendingSteer.selections
             );
             return;
           }
@@ -5158,6 +5705,35 @@ export function SessionView({
     setActiveMentions([]);
     textareaRef.current?.focus();
   }, []);
+  // Selection chip stack (issue #416). `addSelection` is fired by the
+  // diff's "Comment" toolbar action and by the floating selection
+  // gestures. `removeSelection` is the chip × button. The chips are
+  // identity-deduped on `path:ranges` so the same selection clicked
+  // twice doesn't stack two identical chips.
+  const addSelection = useCallback((selection: SelectionMention) => {
+    const token = formatSelectionToken(selection.path, selection.ranges);
+    if (!token) return;
+    setActiveSelections((prev) => {
+      if (
+        prev.some(
+          (entry) =>
+            formatSelectionToken(entry.path, entry.ranges) === token,
+        )
+      ) {
+        return prev;
+      }
+      return [...prev, selection];
+    });
+    textareaRef.current?.focus();
+  }, []);
+  const removeSelection = useCallback((index: number) => {
+    setActiveSelections((prev) => prev.filter((_, i) => i !== index));
+    textareaRef.current?.focus();
+  }, []);
+  const clearAllSelections = useCallback(() => {
+    setActiveSelections([]);
+    textareaRef.current?.focus();
+  }, []);
 
   // Restore the caret after a chip is applied: `addSkillToStack` updates the
   // textarea value, so the cursor must be repositioned once React re-renders.
@@ -5239,6 +5815,13 @@ export function SessionView({
     // the agent is the deterministic `<mentions>...</mentions>` block
     // — not the original chip list.
     mentions?: FileMention[],
+    // Line-range selection chips from a diff-selection gesture
+    // (issue #416). Same source-of-truth split as `mentions`: the
+    // composer is the chip owner, the backend is the snippet
+    // resolver, and the run is the transport that carries them
+    // together so the chip stack and the resolved prompt never
+    // drift apart.
+    selections?: SelectionMention[],
   ) => {
     if (!sentMessage.trim() || streamingRef.current) return false;
     if (!providerReady) {
@@ -5315,6 +5898,15 @@ export function SessionView({
       // backend re-checks every path against the worktree root
       // before reading, so this is a hint, not an authorization.
       mentions: runOverrides ? mentions : mentions ?? activeMentions,
+      // Selection chips (issue #416) ride the same path as
+      // `mentions`. Continuations (queue replay, emulated steer)
+      // accept selections via an explicit `selections` argument —
+      // the caller snapshots the chip stack at the point of the
+      // action. Fresh sends default to the composer's current
+      // selection stack.
+      selections: runOverrides
+        ? selections
+        : selections ?? activeSelections,
       skillName: runSkillName,
     });
     eventSourceRef.current = es;
@@ -5592,7 +6184,8 @@ export function SessionView({
           pendingSteerRef.current &&
           completedSessionId
         ) {
-          const steerText = pendingSteerRef.current;
+          const pendingSteer = pendingSteerRef.current;
+          const steerText = pendingSteer.text;
           pendingSteerRef.current = null;
           steerInProgressRef.current = false;
           setSteerInProgress(false);
@@ -5605,11 +6198,9 @@ export function SessionView({
             undefined,
             undefined,
             { skillName: undefined },
-            // Snapshot the composer's mention stack at the moment
-            // of the emulated steer (issue #312 P2). See the
-            // matching comment on the other emulated-steer call
-            // site for the rationale.
-            activeMentions.slice()
+            // Chips snapshotted in `handleSteer` (issues #312, #416).
+            pendingSteer.mentions,
+            pendingSteer.selections
           );
           return;
         }
@@ -5792,6 +6383,12 @@ export function SessionView({
     setMessage("");
     setActiveSkills([]);
     setActiveMentions([]);
+    // Drop the selection chip stack at send time too (issue #416).
+    // The source-of-truth selection in the rendered diff is NOT
+    // touched — the user can re-use the same gesture across
+    // multiple messages without re-clicking the lines. The
+    // composer-side chip is consumed by the send.
+    setActiveSelections([]);
     setSkillPopoverOpen(false);
     setMentionPopoverOpen(false);
     clearComposerDraft(composerDraftKey);
@@ -5818,6 +6415,10 @@ export function SessionView({
     // `clearComposer` on the success path, so the snapshot has to be taken
     // before the async `uploadSessionAttachments` call resolves.
     const mentions = activeMentions.slice();
+    // Same snapshot for the selection chip stack (issue #416):
+    // `activeSelections` is reset by `clearComposer` too, so the
+    // snapshot has to be taken at the same point.
+    const selections = activeSelections.slice();
     setAttachmentError(null);
     try {
       const uploadedAttachments = await uploadComposerAttachments();
@@ -5831,6 +6432,7 @@ export function SessionView({
           uploadedAttachments,
           undefined,
           mentions,
+          selections,
         )
       ) {
         clearComposer();
@@ -5873,6 +6475,7 @@ export function SessionView({
     try {
       const uploadedAttachments = await uploadComposerAttachments();
       const mentions = activeMentions.slice();
+      const selections = activeSelections.slice();
       const input: QueuedMessageInput = {
         text: agentMessage,
         visibleText: visibleMessage,
@@ -5889,6 +6492,12 @@ export function SessionView({
         attachmentIds: uploadedAttachments.map((attachment) => attachment.id),
         skillName: activeSkills[0]?.name,
         mentions,
+        // Selection chips (issue #416) ride the same queue
+        // snapshot as `mentions` — the orchestrator carries them
+        // through to the next turn so the resumed run still
+        // includes the chips the user added before pressing
+        // Enter to enqueue.
+        selections,
       };
       const queued = await enqueueSessionMessage(projectId, targetSessionId, input);
       setQueue((prev) => [...prev, queued]);
@@ -6055,6 +6664,15 @@ export function SessionView({
       return;
     }
 
+    // Snapshot the composer chips now: they ride on the resumed run and
+    // leave the composer, same as a normal send. A steer that promoted a
+    // queued message (empty composer) carries no composer chips.
+    const steerMentions = promotedId ? [] : activeMentions.slice();
+    const steerSelections = promotedId ? [] : activeSelections.slice();
+    if (!promotedId) {
+      setActiveMentions([]);
+      setActiveSelections([]);
+    }
     setMessage("");
     clearComposerDraft(composerDraftKey);
     setStreamItems((prev) => [
@@ -6068,7 +6686,11 @@ export function SessionView({
     // steer can't race the stop+resume.
     steerInProgressRef.current = true;
     setSteerInProgress(true);
-    pendingSteerRef.current = steerText;
+    pendingSteerRef.current = {
+      text: steerText,
+      mentions: steerMentions,
+      selections: steerSelections,
+    };
     try {
       await stopSession(projectId, targetSessionId, worktreeId);
     } catch (err) {
@@ -7024,6 +7646,7 @@ export function SessionView({
             className="flex-1 overflow-y-auto min-h-0"
           >
             <ProjectRootContext.Provider value={activeWorktree?.path ?? project?.path}>
+            <SelectionAddContext.Provider value={addSelection}>
             <OpenSourceReferenceContext.Provider value={openSourceReference}>
             <OpenConversationContext.Provider value={onOpenConversation}>
             <PreviewContext.Provider value={previewActions}>
@@ -7192,8 +7815,13 @@ export function SessionView({
                       // first. Doing it the other way round leaves
                       // the skill marker visible as prose and the
                       // skill chip unrendered.
-                      const { mentions, text: withoutMentions } =
+                      const { mentions, text: afterMentions } =
                         parseMentionBlock(rawText);
+                      // Selections (issue #416) come after mentions
+                      // in the persisted history, so parse the
+                      // selection block next.
+                      const { selections, text: withoutMentions } =
+                        parseSelectionBlock(afterMentions);
                       const { skillNames, text: visibleText } =
                         parseSkillMarkers(withoutMentions);
                       return (
@@ -7230,6 +7858,26 @@ export function SessionView({
                                       <span className="font-mono">@{mention.path}</span>
                                     </span>
                                   ))}
+                                </div>
+                              )}
+                              {selections.length > 0 && (
+                                <div className="mb-1.5 flex flex-wrap justify-end gap-1">
+                                  {selections.map((selection, index) => {
+                                    const label = formatSelectionToken(
+                                      selection.path,
+                                      selection.ranges,
+                                    );
+                                    return (
+                                      <span
+                                        key={`${label}-${index}`}
+                                        className="inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-foreground"
+                                        title={label ?? selection.path}
+                                      >
+                                        <Diff className="h-3 w-3 text-primary" />
+                                        <span className="font-mono">{label}</span>
+                                      </span>
+                                    );
+                                  })}
                                 </div>
                               )}
                               <CollapsibleUserMessage text={visibleText} />
@@ -7388,6 +8036,7 @@ export function SessionView({
             </PreviewContext.Provider>
             </OpenConversationContext.Provider>
             </OpenSourceReferenceContext.Provider>
+            </SelectionAddContext.Provider>
             </ProjectRootContext.Provider>
           </div>
 
@@ -7595,6 +8244,70 @@ export function SessionView({
                         <button
                           type="button"
                           onClick={clearAllMentions}
+                          className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          Clear all
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {/*
+                   * Selection chip stack (issue #416). Renders
+                   * alongside the existing `@`-mention strip but
+                   * with a distinct visual treatment so the user
+                   * can tell at a glance which is "file I uploaded"
+                   * vs. "file I referenced by selection". The chip
+                   * is non-editable in the middle: the user can
+                   * backspace around it, click × to remove, or hit
+                   * "Clear all" to wipe the stack. The selection
+                   * itself (in the rendered diff) is intentionally
+                   * NOT cleared — see the comment on
+                   * `clearComposer`.
+                   */}
+                  {showComposerDetails && activeSelections.length > 0 && (
+                    <div
+                      key="composer-selections"
+                      data-testid="composer-selections-strip"
+                      className="mb-2 flex flex-wrap items-center gap-1.5"
+                    >
+                      {activeSelections.map((selection, index) => {
+                        const token = formatSelectionToken(
+                          selection.path,
+                          selection.ranges,
+                        );
+                        const label = token ?? selection.path;
+                        const preview = selection.preview
+                          .split("\n")
+                          .slice(0, 6)
+                          .join("\n");
+                        return (
+                          <span
+                            key={`${label}-${index}`}
+                            data-testid="active-selection-chip"
+                            className="inline-flex max-w-[20rem] items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-1 text-xs font-medium text-foreground"
+                            title={
+                              preview
+                                ? `${label}\n\n${preview}`
+                                : label
+                            }
+                          >
+                            <Diff className="h-3 w-3 text-primary" />
+                            <span className="truncate font-mono">{label}</span>
+                            <button
+                              type="button"
+                              onClick={() => removeSelection(index)}
+                              className="ml-1 flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                              aria-label={`Remove selection ${label}`}
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </span>
+                        );
+                      })}
+                      {activeSelections.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={clearAllSelections}
                           className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                         >
                           Clear all
@@ -8319,11 +9032,19 @@ export function SessionView({
               </div>
               {rightTab === "changes" && (gitDiffFiles.length > 0 || branchDiffFiles.length > 0) && (
                 <div className="absolute inset-0 overflow-auto bg-background">
-                  <ChangesPanel
-                    localFiles={gitDiffFiles}
-                    branchFiles={branchDiffFiles}
-                    projectRoot={activeWorktree?.path ?? project?.path}
-                  />
+                  {/* The sidebar's `ChangesPanel` lives outside the
+                      message-area context, so the same `SelectionAddContext`
+                      (issue #416) is provided here. The composer's
+                      chip stack is the destination for any line-range
+                      selection the user makes in the local/branch diff
+                      view. */}
+                  <SelectionAddContext.Provider value={addSelection}>
+                    <ChangesPanel
+                      localFiles={gitDiffFiles}
+                      branchFiles={branchDiffFiles}
+                      projectRoot={activeWorktree?.path ?? project?.path}
+                    />
+                  </SelectionAddContext.Provider>
                 </div>
               )}
               {rightTab === "files" && (

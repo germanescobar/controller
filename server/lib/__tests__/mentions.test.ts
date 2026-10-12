@@ -6,7 +6,9 @@ import path from "node:path";
 import {
   resolveMentions,
   parseMentionsQuery,
+  parseSelectionsQuery,
 } from "../mentions.ts";
+import { encodeSelectionsWire } from "../../../shared/diff-selection.ts";
 
 /*
  * Server-side resolver for `@`-mention chips (issue #312). The resolver
@@ -39,6 +41,7 @@ test("resolveMentions returns empty block for an empty list", async () => {
   const result = await resolveMentions("/tmp", []);
   assert.deepEqual(result, {
     mentions: [],
+    selections: [],
     contextBlock: "",
     prefix: "",
   });
@@ -322,3 +325,200 @@ async function resolveWorktreeResult(
     { path: mentionPath, type: "file" },
   ]);
 }
+
+// --- selection chip tests (issue #416) -----------------------------------
+
+test("resolveMentions returns empty selection block when no selections are passed", async () => {
+  await withWorktree(async (worktreePath) => {
+    const result = await resolveMentions(worktreePath, []);
+    assert.equal(result.selections.length, 0);
+    assert.equal(result.contextBlock, "");
+    assert.equal(result.prefix, "");
+  });
+});
+
+test("resolveMentions inlines a selection with its client-captured preview", async () => {
+  await withWorktree(async (worktreePath) => {
+    // The path must exist on disk for the worktree-root boundary
+    // check to even consider the selection. The resolver does not
+    // re-read the file — the client-captured preview is what gets
+    // inlined — but the path has to be a real file the worktree
+    // contains.
+    await fs.mkdir(path.join(worktreePath, "src"), { recursive: true });
+    await fs.writeFile(
+      path.join(worktreePath, "src", "index.ts"),
+      "const x = 1;\nconst y = 2;",
+    );
+    const result = await resolveMentions(worktreePath, [], [
+      {
+        path: "src/index.ts",
+        ranges: [{ start: 42, end: 58 }],
+        preview: "const x = 1;\nconst y = 2;",
+      },
+    ]);
+    assert.equal(result.selections.length, 1);
+    assert.equal(result.selections[0].path, "src/index.ts");
+    assert.deepEqual(result.selections[0].ranges, [{ start: 42, end: 58 }]);
+    assert.match(result.contextBlock, /<selections>/);
+    assert.match(result.contextBlock, /- src\/index\.ts:42-58/);
+    assert.match(result.prefix, /### Selection: src\/index\.ts:42-58/);
+    assert.match(result.prefix, /const x = 1;/);
+  });
+});
+
+test("resolveMentions drops selections that point outside the worktree", async () => {
+  await withWorktree(async (worktreePath) => {
+    // Create a file outside the worktree root to make the
+    // "outside worktree" branch reachable without relying on
+    // the file being absent (which would trip the "not found"
+    // branch first).
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "mentions-outside-"),
+    );
+    try {
+      const outsideFile = path.join(outsideDir, "outside.ts");
+      await fs.writeFile(outsideFile, "outside content");
+      const result = await resolveMentions(worktreePath, [], [
+        {
+          path: outsideFile,
+          ranges: [{ start: 1, end: 1 }],
+          preview: "x",
+        },
+      ]);
+      assert.equal(result.selections.length, 0);
+      assert.match(
+        result.contextBlock,
+        /\(skipped: outside worktree\)/,
+      );
+    } finally {
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("resolveMentions combines mentions and selections into one block", async () => {
+  await withWorktree(async (worktreePath) => {
+    // Both the @-mention target and the selection path must exist
+    // on disk for them to be inlined — create them up front.
+    await fs.writeFile(path.join(worktreePath, "package.json"), "{}");
+    await fs.mkdir(path.join(worktreePath, "src"), { recursive: true });
+    await fs.writeFile(path.join(worktreePath, "src", "index.ts"), "x");
+    const result = await resolveMentions(
+      worktreePath,
+      [{ path: "package.json", type: "file" }],
+      [
+        {
+          path: "src/index.ts",
+          ranges: [{ start: 1, end: 2 }],
+          preview: "x",
+        },
+      ],
+    );
+    assert.equal(result.mentions.length, 1);
+    assert.equal(result.selections.length, 1);
+    assert.match(result.contextBlock, /<mentions>/);
+    assert.match(result.contextBlock, /<selections>/);
+    // Selections come after mentions so the block is reproducible.
+    assert.ok(
+      result.contextBlock.indexOf("<mentions>") <
+        result.contextBlock.indexOf("<selections>"),
+      "selections must come after mentions",
+    );
+  });
+});
+
+test("parseSelectionsQuery decodes a base64 preview", () => {
+  const preview = "line 1\nline 2";
+  const previewB64 = Buffer.from(preview, "utf-8").toString("base64");
+  const raw = `src/index.ts:42-58|${previewB64},src/other.ts:1|`;
+  const parsed = parseSelectionsQuery(raw);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].path, "src/index.ts");
+  assert.deepEqual(parsed[0].ranges, [{ start: 42, end: 58 }]);
+  assert.equal(parsed[0].preview, preview);
+  assert.equal(parsed[1].path, "src/other.ts");
+  assert.deepEqual(parsed[1].ranges, [{ start: 1, end: 1 }]);
+  assert.equal(parsed[1].preview, "");
+});
+
+test("parseSelectionsQuery drops malformed rows silently", () => {
+  // "not a token" has no colon+number; "a.ts:notanumber" has a
+  // non-numeric range; both must be dropped, not surfaced as a
+  // turn-failing exception.
+  const parsed = parseSelectionsQuery(
+    "not a token,a.ts:notanumber,src/index.ts:1-2|",
+  );
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].path, "src/index.ts");
+});
+
+test("parseSelectionsQuery round-trips a multi-range chip through encodeSelectionsWire", () => {
+  const selections = [
+    {
+      path: "a.ts",
+      ranges: [
+        { start: 42, end: 42 },
+        { start: 57, end: 57 },
+        { start: 61, end: 65 },
+      ],
+      preview: "const π = 3;\nmore, text | with separators",
+    },
+    {
+      path: "dir,with,commas/b.ts",
+      ranges: [{ start: 1, end: 2 }],
+      preview: "",
+    },
+  ];
+  const wire = encodeSelectionsWire(selections, (text) =>
+    Buffer.from(text, "utf-8").toString("base64"),
+  );
+  const parsed = parseSelectionsQuery(wire);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].path, "a.ts");
+  assert.deepEqual(parsed[0].ranges, [
+    { start: 42, end: 42 },
+    { start: 57, end: 57 },
+    { start: 61, end: 65 },
+  ]);
+  assert.equal(parsed[0].preview, selections[0].preview);
+  assert.equal(parsed[1].path, "dir,with,commas/b.ts");
+  assert.deepEqual(parsed[1].ranges, [{ start: 1, end: 2 }]);
+});
+
+test("resolveMentions keeps a selection whose file no longer exists (deletion diff)", async () => {
+  await withWorktree(async (worktreePath) => {
+    // No file is created: this is the deletion-diff case the
+    // client-captured preview exists for. The boundary check walks
+    // up to the deepest existing ancestor (here, the worktree root)
+    // instead of requiring the leaf to exist.
+    const result = await resolveMentions(worktreePath, [], [
+      {
+        path: "src/deleted.ts",
+        ranges: [{ start: 3, end: 5 }],
+        preview: "the old content",
+      },
+    ]);
+    assert.equal(result.selections.length, 1);
+    assert.equal(result.selections[0].path, "src/deleted.ts");
+    assert.match(result.contextBlock, /- src\/deleted\.ts:3-5/);
+    assert.match(result.prefix, /the old content/);
+    assert.ok(
+      !result.contextBlock.includes("skipped"),
+      "deleted-file selection must not be annotated as skipped",
+    );
+  });
+});
+
+test("resolveMentions still drops a missing path that escapes the worktree", async () => {
+  await withWorktree(async (worktreePath) => {
+    const result = await resolveMentions(worktreePath, [], [
+      {
+        path: path.join(os.tmpdir(), "mentions-nonexistent", "gone.ts"),
+        ranges: [{ start: 1, end: 1 }],
+        preview: "x",
+      },
+    ]);
+    assert.equal(result.selections.length, 0);
+    assert.match(result.contextBlock, /\(skipped: outside worktree\)/);
+  });
+});

@@ -6,6 +6,7 @@ import type {
   PrResponse,
 } from "../../shared/controller.ts";
 import { shouldExcludeDirectory } from "./lib/file-excludes.ts";
+import { encodeSelectionsWire } from "../../shared/diff-selection.ts";
 
 export type {
   PrAuthor,
@@ -705,6 +706,20 @@ export interface QueuedMessageInput extends Omit<QueuedMessage, "id" | "createdA
    * the `mentions` query param on `startSession`.
    */
   mentions?: { path: string; type: "file" | "directory" }[];
+  /**
+   * Line-range selection chips from a diff-selection gesture
+   * (issue #416). Same snapshot semantics as `mentions`: the
+   * orchestrator carries the chip stack across run boundaries
+   * so a queued turn replays the user's selection on the next
+   * run, keeping the resolved prompt byte-identical to the
+   * user's intent. Mirrors the `selections` query param on
+   * `startSession`.
+   */
+  selections?: {
+    path: string;
+    ranges: { start: number; end: number }[];
+    preview: string;
+  }[];
 }
 
 export async function fetchSessionQueue(
@@ -1544,6 +1559,18 @@ export function startSession(
      * that mention the same files produce identical prompts.
      */
     mentions?: { path: string; type: "file" | "directory" }[];
+    /**
+     * Line-range selection chips seeded from a diff (issue #416).
+     * Each chip is `{ path, ranges, preview }`; the resolver inlines
+     * the preview under a `### Selection: path:start-end` header so
+     * the agent can refer back to a specific span. Wire format
+     * matches the SSE handler's `selections` query param.
+     */
+    selections?: {
+      path: string;
+      ranges: { start: number; end: number }[];
+      preview: string;
+    }[];
     skillName?: string;
     /**
      * Per-session agent-inactivity timeout in ms (issue #386). When
@@ -1580,6 +1607,23 @@ export function startSession(
       .map((mention) => `${mention.path}|${mention.type}`)
       .join(",");
     params.set("mentions", encoded);
+  }
+  if (options?.selections?.length) {
+    // Wire format shared with the headless POST endpoint and the
+    // queue-replay path (issue #416): `encodeSelectionsWire` emits
+    // `encodeURIComponent(token)|previewBase64` entries joined by
+    // commas, so a multi-range token (`a.ts:42,57,61-65`) survives
+    // the decoder's comma split. The preview is UTF-8-encoded via
+    // TextEncoder before `btoa` because `btoa` alone throws on
+    // non-Latin-1 input.
+    const encoded = encodeSelectionsWire(options.selections, (text) => {
+      let binary = "";
+      for (const byte of new TextEncoder().encode(text)) {
+        binary += String.fromCharCode(byte);
+      }
+      return btoa(binary);
+    });
+    if (encoded) params.set("selections", encoded);
   }
   if (options?.skillName) params.set("skillName", options.skillName);
   if (
