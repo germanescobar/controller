@@ -698,6 +698,13 @@ export function Sidebar({
   useEffect(() => {
     projectDataRef.current = projectData;
   }, [projectData]);
+  // Navigation only changes the default expansion for newly discovered
+  // projects/worktrees. Keep the latest location available to async
+  // refreshes without making every navigation restart the full load.
+  const activeLocationRef = useRef({ activeProjectId, activeWorktreeId });
+  useEffect(() => {
+    activeLocationRef.current = { activeProjectId, activeWorktreeId };
+  }, [activeProjectId, activeWorktreeId]);
 
   // ---------------------------------------------------------------------------
   // LoadAllCoordinator
@@ -795,12 +802,14 @@ export function Sidebar({
           const wtWithSessions = await Promise.all(
             worktrees.map(async (wt) => {
               const sessions = await fetchSessions(project.id, wt.id);
-              const existingProject = projectData.find(
+              const existingProject = projectDataRef.current.find(
                 (p) => p.id === project.id,
               );
               const existingWt = existingProject?.worktrees.find(
                 (w) => w.id === wt.id,
               );
+              const { activeProjectId, activeWorktreeId } =
+                activeLocationRef.current;
               const isActiveWt =
                 wt.id === activeWorktreeId ||
                 (!activeWorktreeId &&
@@ -813,11 +822,15 @@ export function Sidebar({
               } satisfies WorktreeWithSessions;
             }),
           );
-          const existing = projectData.find((p) => p.id === project.id);
+          const existing = projectDataRef.current.find(
+            (p) => p.id === project.id,
+          );
           return {
             ...project,
             worktrees: wtWithSessions,
-            isExpanded: existing?.isExpanded ?? project.id === activeProjectId,
+            isExpanded:
+              existing?.isExpanded ??
+              project.id === activeLocationRef.current.activeProjectId,
           } satisfies ProjectWithWorktrees;
         }),
       );
@@ -841,7 +854,7 @@ export function Sidebar({
         }
       });
     }
-  }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
+  }, [projects, archivedIds, bumpLoadAllState, refreshActiveSessions]);
 
   /**
    * Refresh a single worktree's session list. Used by the targeted
