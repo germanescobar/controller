@@ -6252,10 +6252,21 @@ export function SessionView({
   // prompts the user. Returns true if the navigation should
   // proceed so the caller can fold it into chained state
   // updates without re-prompting.
+  //
+  // `keepMobile: true` opts out of the `setMobilePanel(next)`
+  // call. Desktop callers (the right-panel tab bar) need this
+  // because the resizable-panel handle and its saved width are
+  // gated on `mobilePanel === "agent"` (lines 8164/8181) — a
+  // desktop tab click must keep `mobilePanel` at "agent" so
+  // the handle keeps rendering. Mobile callers (the header
+  // nav) want the opposite: they expect `mobilePanel` to
+  // follow the chosen tab, so they call without `keepMobile`
+  // and then setMobilePanel(next) themselves. Codex P2 review,
+  // PR #422.
   const requestRightTab = useCallback(
     (
       next: RightPanelTab,
-      options: { alsoClosePanel?: boolean } = {}
+      options: { alsoClosePanel?: boolean; keepMobile?: boolean } = {}
     ): boolean => {
       const isOnFiles = rightTab === "files";
       const isStayingOnFiles = next === "files";
@@ -6267,10 +6278,14 @@ export function SessionView({
         if (options.alsoClosePanel) {
           setTerminalOpen(false);
         }
-        if (mobilePanel !== "agent") setMobilePanel("terminal");
+        if (!options.keepMobile && mobilePanel !== "agent") {
+          setMobilePanel("terminal");
+        }
       } else {
         setTerminalOpen(true);
-        setMobilePanel(next);
+        if (!options.keepMobile) {
+          setMobilePanel(next);
+        }
       }
       return true;
     },
@@ -8183,7 +8198,7 @@ export function SessionView({
             {/* Tab bar — desktop only; mobile uses the header tabs */}
             <div className="hidden md:flex h-9 shrink-0 items-center border-b border-border bg-[#1c1c1e] px-2 gap-1">
               <button
-                onClick={() => requestRightTab("terminal")}
+                onClick={() => requestRightTab("terminal", { keepMobile: true })}
                 className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                   rightTab === "terminal"
                     ? "bg-accent/30 text-foreground"
@@ -8195,7 +8210,7 @@ export function SessionView({
               </button>
               {hasChanges && (
                 <button
-                  onClick={() => requestRightTab("changes")}
+                  onClick={() => requestRightTab("changes", { keepMobile: true })}
                   className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "changes"
                       ? "bg-accent/30 text-foreground"
@@ -8212,7 +8227,7 @@ export function SessionView({
                 </button>
               )}
               <button
-                onClick={() => requestRightTab("files")}
+                onClick={() => requestRightTab("files", { keepMobile: true })}
                 className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                   rightTab === "files"
                     ? "bg-accent/30 text-foreground"
@@ -8230,7 +8245,7 @@ export function SessionView({
               </button>
               {pullRequest && (
                 <button
-                  onClick={() => requestRightTab("pr")}
+                  onClick={() => requestRightTab("pr", { keepMobile: true })}
                   className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "pr"
                       ? "bg-accent/30 text-foreground"
@@ -8247,7 +8262,7 @@ export function SessionView({
               )}
               {previewAvailable && (
                 <button
-                  onClick={() => requestRightTab("preview")}
+                  onClick={() => requestRightTab("preview", { keepMobile: true })}
                   className={`flex min-w-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
                     rightTab === "preview"
                       ? "bg-accent/30 text-foreground"
