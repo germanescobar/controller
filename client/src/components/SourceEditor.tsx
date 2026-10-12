@@ -15,7 +15,7 @@ import { sql } from "@codemirror/lang-sql";
 import { go } from "@codemirror/lang-go";
 import { Check, Loader2, Save, X } from "lucide-react";
 import { toast } from "sonner";
-import { saveSourceFile } from "@/api.ts";
+import { saveSourceFile, SourceFileConflictError, fetchSourceFile } from "@/api.ts";
 import type { SourceFile } from "@/api.ts";
 
 /*
@@ -105,6 +105,18 @@ export function SourceEditor({
   const [draft, setDraft] = useState<string>(file.content);
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  // Revision token captured at open time. Echoed back to the server
+  // on every save so a concurrent external write (an agent rewriting
+  // the file, a teammate pulling a new commit, etc.) is detected
+  // and rejected with 412 instead of being silently clobbered
+  // (Codex P1 review, PR #422). We refresh it whenever the parent
+  // gives us a new `file.mtime` (e.g. after the file is reloaded
+  // via the "changed on disk" toast) so subsequent saves use the
+  // freshest baseline.
+  const baseMtimeRef = useRef<string | undefined>(file.mtime);
+  useEffect(() => {
+    baseMtimeRef.current = file.mtime;
+  }, [file.mtime, file.path]);
 
   // Scroll-to-line support. When the parent opens a file with an
   // `initialLine`, we wait for the editor to mount, then dispatch
@@ -152,13 +164,24 @@ export function SourceEditor({
       return;
     }
     if (file.content !== lastSyncedContentRef.current) {
+      // Capture the previous synced value *before* we overwrite the
+      // ref. Without this, a clean reload of the same file (e.g. the
+      // parent refetching the source after a save) would be misread
+      // as an external write — the ref would already hold the new
+      // content, the draft would still hold the old (matching)
+      // content, and the comparison below would treat the user as
+      // dirty and fire a spurious "changed on disk" toast. Codex P2.
+      const previousSynced = lastSyncedContentRef.current;
       lastSyncedContentRef.current = file.content;
-      // External change to the same file — only overwrite the buffer
-      // when the user hasn't dirtied it. Otherwise we'd silently
-      // throw away in-flight edits.
-      if (draft === lastSyncedContentRef.current) {
+      if (draft === previousSynced) {
+        // The user's buffer matched the previous synced value, so
+        // there's no in-flight edit to preserve. Adopt the new
+        // content cleanly.
         setDraft(file.content);
       } else {
+        // The user has edits we shouldn't silently overwrite. Toast
+        // a "changed on disk" notice with a Reload action; the user
+        // can decide whether to discard their in-flight edits.
         toast.message(`${file.relativePath} changed on disk`, {
           description: "Reload to pick up the new contents (your unsaved edits are kept).",
           action: {
@@ -180,15 +203,107 @@ export function SourceEditor({
   const save = useCallback(async () => {
     if (saving) return;
     if (!dirty) return;
+    // Snapshot the buffer at the moment of submission so we can
+    // tell on resolve whether the user kept typing while the PUT
+    // was in flight. If the buffer drifted, we MUST NOT call
+    // `setDraft(saved.content)` — that would clobber the user's
+    // newer keystrokes with the older snapshot we sent. Codex P1.
+    const submittedDraft = draft;
+    // Capture the mtime at submit time too. The server compares it
+    // to the on-disk mtime to detect a concurrent external write
+    // (Codex P1 review, PR #422). We re-read `baseMtimeRef.current`
+    // at the very last moment in case the parent refreshed the
+    // file prop between the user's click and now.
+    const submittedMtime = baseMtimeRef.current;
     setSaving(true);
     try {
-      const saved = await saveSourceFile(projectId, file.path, draft, worktreeId);
-      lastSyncedContentRef.current = saved.content;
-      setDraft(saved.content);
+      const saved = await saveSourceFile(
+        projectId,
+        file.path,
+        submittedDraft,
+        worktreeId,
+        submittedMtime
+      );
+      // The on-disk file now matches `submittedDraft`; record that
+      // as the new "synced" baseline so the on-disk-change detector
+      // doesn't immediately think the file changed again. We also
+      // adopt the server's `saved.mtime` (or, when the server
+      // didn't echo one, fall back to `submittedMtime`) so the next
+      // save sends a fresh revision token.
+      lastSyncedContentRef.current = submittedDraft;
+      baseMtimeRef.current = saved.mtime ?? submittedMtime;
       setLastSavedAt(saved.savedAt);
       onSaved(saved);
-      toast.success(`Saved ${saved.relativePath}`);
+      // Only adopt `saved.content` if the user hasn't typed since
+      // submission. `saved.content` is byte-equal to `submittedDraft`
+      // (the server writes what we sent and echoes it back), so when
+      // the buffer is still equal to `submittedDraft` the call is a
+      // no-op and the dirty flag clears via the `dirty = draft !==
+      // file.content` derivation once the parent re-renders with the
+      // new `file.content`. When the buffer drifted, we leave it
+      // alone so the user's edits stay on screen and the dirty
+      // indicator stays on (their work is still unsaved, but the
+      // server now holds a known-good earlier baseline they could
+      // fall back to via Discard).
+      if (draft === submittedDraft) {
+        setDraft(saved.content);
+        toast.success(`Saved ${saved.relativePath}`);
+      } else {
+        // Buffer drifted during the save. The user has unsaved
+        // edits on top of a now-saved earlier baseline. Surface
+        // a toast so the save doesn't feel like a silent no-op.
+        toast.message(`Saved older version of ${saved.relativePath}`, {
+          description:
+            "You kept typing while the save was in flight — your newer edits are still unsaved.",
+        });
+      }
     } catch (err) {
+      if (err instanceof SourceFileConflictError) {
+        // The on-disk file moved while we were editing — someone
+        // (an agent, a teammate, a watcher) wrote a new revision.
+        // Offer a Reload action that re-fetches the file; if the
+        // user accepts, the in-flight buffer is replaced with the
+        // freshest bytes and the next save will use a matching
+        // mtime. We deliberately keep the user's buffer on screen
+        // until they decide — silently overwriting their edits
+        // would defeat the point of the conflict signal.
+        toast.error(`${file.relativePath} changed on disk`, {
+          description: err.message,
+          action: {
+            label: "Reload",
+            onClick: async () => {
+              try {
+                const fresh = await fetchSourceFile(
+                  projectId,
+                  file.path,
+                  worktreeId
+                );
+                lastSyncedContentRef.current = fresh.content;
+                baseMtimeRef.current = fresh.mtime;
+                setDraft(fresh.content);
+                // Bubble the new file up to the parent so the
+                // preview cache and the file-tree marker reflect
+                // the reloaded bytes. We reuse the existing
+                // `onSaved` shape — the parent's handler treats it
+                // as "this file's canonical content changed".
+                onSaved({
+                  path: fresh.path,
+                  relativePath: fresh.relativePath,
+                  content: fresh.content,
+                  savedAt: fresh.mtime ?? new Date().toISOString(),
+                });
+              } catch (reloadErr) {
+                const msg =
+                  reloadErr instanceof Error
+                    ? reloadErr.message
+                    : "Failed to reload file";
+                toast.error(msg);
+              }
+            },
+          },
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : "Failed to save file";
       toast.error(message);
     } finally {

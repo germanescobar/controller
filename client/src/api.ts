@@ -89,6 +89,13 @@ export interface SourceFile {
   path: string;
   relativePath: string;
   content: string;
+  // File mtime at the moment the read happened. The Files-tab
+  // editor captures this on open and echoes it back as
+  // `baseMtime` on save so the server can detect a concurrent
+  // external write and reject with 412 (Codex P1 review, PR #422).
+  // Optional so the field stays backwards-compatible with older
+  // clients that hit `GET /source` from before this change.
+  mtime?: string;
 }
 
 export interface SourceDirectoryEntry {
@@ -1801,20 +1808,61 @@ export interface SavedSourceFile extends SourceFile {
  * apply (realpath against the project + worktree roots). The Files
  * tab uses this from the in-experience editor; see
  * `SourceViewerPanel` in `client/src/pages/SessionView.tsx`.
+ *
+ * `baseMtime` is the mtime the client captured at open time. When
+ * supplied, the server compares it to the on-disk mtime and
+ * returns 412 if they disagree (Codex P1 review, PR #422) — that
+ * way a concurrent external write isn't silently clobbered.
+ * Omit it to opt out of the check (back-compat for older callers
+ * and for brand-new files that have no previous revision).
+ *
+ * On 412 the server response includes the *current* on-disk
+ * mtime; we surface that as a `SourceFileConflictError` so the
+ * editor can offer a Reload action with the freshest bytes.
  */
+export class SourceFileConflictError extends Error {
+  readonly currentMtime: string | undefined;
+  constructor(message: string, currentMtime: string | undefined) {
+    super(message);
+    this.name = "SourceFileConflictError";
+    this.currentMtime = currentMtime;
+  }
+}
+
 export async function saveSourceFile(
   projectId: string,
   filePath: string,
   content: string,
-  worktreeId?: string
+  worktreeId?: string,
+  baseMtime?: string
 ): Promise<SavedSourceFile> {
   const params = new URLSearchParams({ path: filePath });
   const query = withWorktree(worktreeId, params);
+  const body: { content: string; baseMtime?: string } = { content };
+  if (baseMtime) body.baseMtime = baseMtime;
   const res = await fetch(`${BASE}/projects/${projectId}/source${query}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(body),
   });
+  if (res.status === 412) {
+    // Don't run the generic `throwIfNotOk` path — we want to
+    // preserve the structured `currentMtime` field for the
+    // editor's Reload action. Fall back to the raw body if the
+    // JSON parse fails so the error message is still useful.
+    const conflictBody = await res
+      .clone()
+      .json()
+      .catch(() => null) as { error?: unknown; currentMtime?: unknown } | null;
+    const message =
+      (typeof conflictBody?.error === "string" && conflictBody.error) ||
+      "File changed on disk";
+    const currentMtime =
+      typeof conflictBody?.currentMtime === "string"
+        ? conflictBody.currentMtime
+        : undefined;
+    throw new SourceFileConflictError(message, currentMtime);
+  }
   await throwIfNotOk(res, "Failed to save source file");
   return res.json();
 }
