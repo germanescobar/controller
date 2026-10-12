@@ -6,7 +6,8 @@
  * superset of the `@`-mention token from #312: a selection chip is
  * `path:start-end` for a contiguous range, `path:42` for a single
  * line, or `path:42,57,61-65` for a non-contiguous multi-range
- * selection. The single-path chip is the only shape the backend ever
+ * selection. Deleted lines carry an `old@` prefix on each range,
+ * while unmarked ranges refer to the new file. The single-path chip is the only shape the backend ever
  * needs to resolve; the multi-range shape is collapsed to the union
  * of ranges when the chip is sent so the agent prompt and persisted
  * history stay byte-identical across re-renders.
@@ -21,11 +22,14 @@
 /**
  * A single contiguous range of line numbers in a file. `start` and
  * `end` are inclusive and one-based to match the line numbers the
- * diff renderer already prints in the gutter.
+ * diff renderer already prints in the gutter. Deleted rows use old
+ * file coordinates; added and context rows use new file coordinates.
  */
 export interface LineRange {
   start: number;
   end: number;
+  /** Deleted lines use old-file coordinates; omitted means new-file coordinates. */
+  side?: "old";
 }
 
 /**
@@ -53,7 +57,8 @@ export const SELECTION_PREVIEW_BYTE_LIMIT = 4 * 1024;
  * Normalize a list of user-selected ranges into the canonical form:
  *  - each range is collapsed to `[min(start,end), max(start,end)]`,
  *  - ranges are sorted by start, and overlapping / adjacent ranges
- *    are merged (so `5-10` and `11-12` collapse to `5-12`).
+ *    are merged within the same file side (so `5-10` and `11-12`
+ *    collapse to `5-12`, while `old@10` and `10` remain distinct).
  * Returns `null` if the input is empty or every range is invalid
  * (non-positive line numbers). This is the function the diff
  * renderer calls before a chip is inserted into the composer; the
@@ -68,14 +73,18 @@ export function normalizeRanges(ranges: LineRange[]): LineRange[] | null {
     const end = Math.floor(range.end);
     if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
     if (start < 1 || end < 1) continue;
-    cleaned.push({ start: Math.min(start, end), end: Math.max(start, end) });
+    const normalized = { start: Math.min(start, end), end: Math.max(start, end) };
+    cleaned.push(range.side === "old" ? { ...normalized, side: "old" } : normalized);
   }
   if (cleaned.length === 0) return null;
-  cleaned.sort((a, b) => a.start - b.start || a.end - b.end);
+  cleaned.sort((a, b) =>
+    (a.side === "old" ? 0 : 1) - (b.side === "old" ? 0 : 1) ||
+    a.start - b.start || a.end - b.end,
+  );
   const merged: LineRange[] = [];
   for (const range of cleaned) {
     const last = merged[merged.length - 1];
-    if (last && range.start <= last.end + 1) {
+    if (last && last.side === range.side && range.start <= last.end + 1) {
       last.end = Math.max(last.end, range.end);
     } else {
       merged.push({ ...range });
@@ -94,12 +103,15 @@ export function normalizeRanges(ranges: LineRange[]): LineRange[] | null {
  *   [{start:42,end:42}]  -> "42"
  *   [{start:42,end:58}]  -> "42-58"
  *   [{start:42,end:58},{start:61,end:65}]  -> "42-58,61-65"
+ *   [{start:42,end:42,side:"old"}]         -> "old@42"
  */
 export function formatRanges(ranges: LineRange[]): string {
   return ranges
-    .map((range) =>
-      range.start === range.end ? String(range.start) : `${range.start}-${range.end}`,
-    )
+    .map((range) => {
+      const numbers = range.start === range.end
+        ? String(range.start) : `${range.start}-${range.end}`;
+      return range.side === "old" ? `old@${numbers}` : numbers;
+    })
     .join(",");
 }
 
@@ -126,11 +138,11 @@ export function formatSelectionToken(path: string, ranges: LineRange[]): string 
  *   ^                  start
  *   ([^:\n]+?)         path (non-greedy, must not contain colon or newline)
  *   :                  colon
- *   (\d+(?:-\d+)?      one range: "42" or "42-58"
- *   (?:,\d+(?:-\d+)?)* zero or more additional ranges
+ *   ((?:old@)?\d+...  one old/new range: "old@42" or "42-58"
+ *   (?:,...)*          zero or more additional ranges
  *   )$
  */
-const SELECTION_TOKEN = /^([^:\n]+?):(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)$/;
+const SELECTION_TOKEN = /^([^:\n]+?):((?:old@)?\d+(?:-\d+)?(?:,(?:old@)?\d+(?:-\d+)?)*)$/;
 
 /**
  * Parse a `path:start-end[,start-end...]` selection token. Returns
@@ -152,17 +164,20 @@ export function parseSelectionToken(token: string): {
   const rawRanges = match[2].split(",");
   const ranges: LineRange[] = [];
   for (const segment of rawRanges) {
-    const dash = segment.indexOf("-");
+    const side = segment.startsWith("old@") ? "old" as const : undefined;
+    const numbers = side ? segment.slice(4) : segment;
+    const dash = numbers.indexOf("-");
     if (dash === -1) {
-      const line = parseInt(segment, 10);
+      const line = parseInt(numbers, 10);
       if (!Number.isFinite(line) || line < 1) return null;
-      ranges.push({ start: line, end: line });
+      ranges.push(side ? { start: line, end: line, side } : { start: line, end: line });
     } else {
-      const start = parseInt(segment.slice(0, dash), 10);
-      const end = parseInt(segment.slice(dash + 1), 10);
+      const start = parseInt(numbers.slice(0, dash), 10);
+      const end = parseInt(numbers.slice(dash + 1), 10);
       if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
       if (start < 1 || end < 1) return null;
-      ranges.push({ start: Math.min(start, end), end: Math.max(start, end) });
+      const range = { start: Math.min(start, end), end: Math.max(start, end) };
+      ranges.push(side ? { ...range, side } : range);
     }
   }
   const normalized = normalizeRanges(ranges);
@@ -240,7 +255,8 @@ export function buildSelectionContextBlock(selections: SelectionMention[]): stri
     "<selections>",
     "The user anchored this message to specific line ranges in the",
     "active worktree. Resolve each path with the worktree root as the",
-    "base directory.",
+    "base directory. Ranges marked old@ refer to deleted lines in the",
+    "old file; unmarked ranges refer to the current/new file.",
   ];
   for (const selection of selections) {
     const token = formatSelectionToken(selection.path, selection.ranges);
@@ -267,7 +283,9 @@ export function buildSelectionPromptPrefix(selections: SelectionMention[]): stri
     if (!token) continue;
     const preview = truncatePreview(selection.preview);
     if (!preview) continue;
-    bodies.push(`### Selection: ${token}\n\`\`\`\n${preview}\n\`\`\``);
+    const longestRun = Math.max(2, ...Array.from(preview.matchAll(/`+/g), (match) => match[0].length));
+    const fence = "`".repeat(longestRun + 1);
+    bodies.push(`### Selection: ${token}\n${fence}\n${preview}\n${fence}`);
   }
   if (bodies.length === 0) return block;
   return `${block}\n\n${bodies.join("\n\n")}\n`;
@@ -326,9 +344,15 @@ export function encodeSelectionsWire(
  */
 export function truncatePreview(preview: string): string {
   const lines = preview.split("\n").slice(0, SELECTION_PREVIEW_LINE_LIMIT);
-  let text = lines.join("\n");
-  if (text.length > SELECTION_PREVIEW_BYTE_LIMIT) {
-    text = text.slice(0, SELECTION_PREVIEW_BYTE_LIMIT);
+  const text = lines.join("\n");
+  const encoder = new TextEncoder();
+  let bytes = 0;
+  let end = 0;
+  for (const character of text) {
+    const size = encoder.encode(character).byteLength;
+    if (bytes + size > SELECTION_PREVIEW_BYTE_LIMIT) break;
+    bytes += size;
+    end += character.length;
   }
-  return text;
+  return end === text.length ? text : text.slice(0, end);
 }

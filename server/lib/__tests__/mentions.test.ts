@@ -485,6 +485,19 @@ test("parseSelectionsQuery round-trips a multi-range chip through encodeSelectio
   assert.deepEqual(parsed[1].ranges, [{ start: 1, end: 2 }]);
 });
 
+test("parseSelectionsQuery retains old-file coordinates in a mixed selection", () => {
+  const wire = encodeSelectionsWire([{
+    path: "a.ts",
+    ranges: [{ start: 10, end: 10, side: "old" }, { start: 10, end: 10 }],
+    preview: "removed\nadded",
+  }], (text) => Buffer.from(text, "utf8").toString("base64"));
+  assert.deepEqual(parseSelectionsQuery(wire), [{
+    path: "a.ts",
+    ranges: [{ start: 10, end: 10, side: "old" }, { start: 10, end: 10 }],
+    preview: "removed\nadded",
+  }]);
+});
+
 test("resolveMentions keeps a selection whose file no longer exists (deletion diff)", async () => {
   await withWorktree(async (worktreePath) => {
     // No file is created: this is the deletion-diff case the

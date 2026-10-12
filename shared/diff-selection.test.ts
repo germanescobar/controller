@@ -66,6 +66,17 @@ test("normalizeRanges keeps disjoint ranges sorted by start", () => {
   );
 });
 
+test("normalizeRanges keeps old and new coordinates separate", () => {
+  assert.deepEqual(normalizeRanges([
+    { start: 10, end: 10 },
+    { start: 10, end: 10, side: "old" },
+    { start: 11, end: 11, side: "old" },
+  ]), [
+    { start: 10, end: 11, side: "old" },
+    { start: 10, end: 10 },
+  ]);
+});
+
 // --- formatRanges / formatSelectionToken -----------------------------------
 
 test("formatRanges renders a single line as just the number", () => {
@@ -122,6 +133,21 @@ test("parseSelectionToken parses a multi-range selection", () => {
     ranges: [
       { start: 42, end: 58 },
       { start: 61, end: 65 },
+    ],
+  });
+});
+
+test("parseSelectionToken distinguishes deleted and current lines at the same number", () => {
+  const token = formatSelectionToken("a.ts", [
+    { start: 10, end: 10 },
+    { start: 10, end: 10, side: "old" },
+  ]);
+  assert.equal(token, "a.ts:old@10,10");
+  assert.deepEqual(parseSelectionToken(token!), {
+    path: "a.ts",
+    ranges: [
+      { start: 10, end: 10, side: "old" },
+      { start: 10, end: 10 },
     ],
   });
 });
@@ -219,6 +245,14 @@ test("buildSelectionContextBlock renders a deterministic listing", () => {
   assert.match(block, /<\/selections>/);
 });
 
+test("buildSelectionContextBlock explains old-file ranges", () => {
+  const block = buildSelectionContextBlock([{
+    path: "a.ts", ranges: [{ start: 10, end: 10, side: "old" }], preview: "removed",
+  }]);
+  assert.match(block, /- a\.ts:old@10/);
+  assert.match(block, /old@ refer to deleted lines/);
+});
+
 test("buildSelectionContextBlock returns empty for an empty list", () => {
   assert.equal(buildSelectionContextBlock([]), "");
 });
@@ -237,6 +271,14 @@ test("buildSelectionPromptPrefix includes a fenced snippet per selection", () =>
   assert.match(prefix, /const x = 1;/);
 });
 
+test("buildSelectionPromptPrefix uses a fence longer than preview backticks", () => {
+  const prefix = buildSelectionPromptPrefix([{
+    path: "a.md", ranges: [{ start: 1, end: 3 }],
+    preview: "before\n```\ninside\n````\nafter",
+  }]);
+  assert.match(prefix, /\n`````\nbefore\n```\ninside\n````\nafter\n`````/);
+});
+
 // --- truncatePreview -------------------------------------------------------
 
 test("truncatePreview caps the line count to SELECTION_PREVIEW_LINE_LIMIT", () => {
@@ -250,6 +292,15 @@ test("truncatePreview caps the byte count to SELECTION_PREVIEW_BYTE_LIMIT", () =
   const preview = "x".repeat(8 * 1024);
   const truncated = truncatePreview(preview);
   assert.ok(truncated.length <= 4 * 1024);
+});
+
+test("truncatePreview counts UTF-8 bytes and preserves surrogate pairs", () => {
+  const truncated = truncatePreview("a".repeat(SELECTION_PREVIEW_BYTE_LIMIT - 3) + "😀suffix");
+  assert.equal(truncated, "a".repeat(SELECTION_PREVIEW_BYTE_LIMIT - 3));
+  assert.ok(Buffer.byteLength(truncated, "utf8") <= SELECTION_PREVIEW_BYTE_LIMIT);
+  const exact = truncatePreview("a".repeat(SELECTION_PREVIEW_BYTE_LIMIT - 4) + "😀suffix");
+  assert.ok(exact.endsWith("😀"));
+  assert.equal(Buffer.byteLength(exact, "utf8"), SELECTION_PREVIEW_BYTE_LIMIT);
 });
 
 // --- encodeSelectionsWire --------------------------------------------------
@@ -275,6 +326,15 @@ test("encodeSelectionsWire URI-encodes the token so multi-range commas survive t
   // No raw comma may leak out of the token — the decoder splits
   // entries on commas.
   assert.ok(!encoded.includes(","), "token commas must be percent-encoded");
+});
+
+test("encodeSelectionsWire preserves old and new sides in a mixed selection", () => {
+  const encoded = encodeSelectionsWire([{
+    path: "a.ts",
+    ranges: [{ start: 10, end: 10, side: "old" }, { start: 10, end: 10 }],
+    preview: "old\nnew",
+  }], b64);
+  assert.equal(encoded, `${encodeURIComponent("a.ts:old@10,10")}|${b64("old\nnew")}`);
 });
 
 test("encodeSelectionsWire drops previews once the wire budget is exhausted", () => {
