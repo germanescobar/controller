@@ -345,6 +345,12 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
       path: targetRealPath,
       relativePath: matchingRoot.relativePath || path.basename(targetRealPath),
       content,
+      // File mtime at the moment the read happened. The client
+      // echoes this back as `?baseMtime=…` on PUT so a concurrent
+      // external write (an agent rewriting the file, a teammate
+      // pushing to a shared checkout) is detected as a 412 instead
+      // of being silently clobbered (Codex P1 review, PR #422).
+      mtime: stat.mtime.toISOString(),
     });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -396,11 +402,29 @@ worktreesRouter.put("/:projectId/source", async (req, res) => {
     return;
   }
 
-  const body = (req.body ?? {}) as { content?: unknown };
+  const body = (req.body ?? {}) as { content?: unknown; baseMtime?: unknown };
   if (typeof body.content !== "string") {
     res.status(400).json({ error: "content must be a string" });
     return;
   }
+  // Optional revision token: the ISO mtime the client captured when
+  // it last read the file. When present and the file already exists
+  // on disk, we compare against the current mtime and reject the
+  // write with 412 if they disagree — protecting against the case
+  // where the user typed for a while, the file was changed by an
+  // agent or another process in the meantime, and a blind PUT
+  // would clobber the external edit (Codex P1 review, PR #422).
+  // Absent baseMtime (older clients, or a brand-new file) means
+  // "skip the check" — we still apply the path-safety gate above.
+  const baseMtimeRaw = body.baseMtime;
+  const baseMtimeParsed =
+    typeof baseMtimeRaw === "string" && baseMtimeRaw.trim()
+      ? new Date(baseMtimeRaw)
+      : null;
+  const baseMtime =
+    baseMtimeParsed && !Number.isNaN(baseMtimeParsed.getTime())
+      ? baseMtimeParsed
+      : null;
 
   const absolutePath = path.isAbsolute(requestedPath)
     ? requestedPath
@@ -470,6 +494,24 @@ worktreesRouter.put("/:projectId/source", async (req, res) => {
     if (existingStat && !existingStat.isFile()) {
       res.status(400).json({ error: "Path does not reference a file" });
       return;
+    }
+
+    // Optimistic concurrency: if the client supplied a `baseMtime`
+    // and the file already exists on disk, the on-disk mtime must
+    // still match — otherwise an external write happened between
+    // the GET and the PUT and a blind write would clobber it. We
+    // don't apply the check for brand-new files (`existingStat`
+    // null) because there's no previous revision to disagree with,
+    // and we don't apply it when the client opted out by omitting
+    // `baseMtime` (back-compat for older callers).
+    if (baseMtime && existingStat) {
+      if (existingStat.mtime.getTime() !== baseMtime.getTime()) {
+        res.status(412).json({
+          error: "File changed on disk since it was opened",
+          currentMtime: existingStat.mtime.toISOString(),
+        });
+        return;
+      }
     }
 
     await fs.writeFile(targetRealPath, body.content, "utf-8");
