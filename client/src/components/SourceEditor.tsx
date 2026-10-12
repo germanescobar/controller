@@ -91,6 +91,8 @@ export interface SourceEditorProps {
   /** Notifies the parent about dirty-state transitions so the Files
    *  tab can intercept tab-switches that would discard unsaved work. */
   onDirtyChange?: (dirty: boolean) => void;
+  /** Called synchronously for each CodeMirror edit, including edits while a parent action awaits. */
+  onDraftEdit?: () => void;
 }
 
 export function SourceEditor({
@@ -100,6 +102,7 @@ export function SourceEditor({
   initialLine,
   onSaved,
   onDirtyChange,
+  onDraftEdit,
 }: SourceEditorProps) {
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -445,7 +448,13 @@ export function SourceEditor({
             closeBrackets: false,
           }}
           extensions={extensions}
-          onChange={(value) => setDraft(value)}
+          onChange={(value) => {
+            onDraftEdit?.();
+            // Publish the dirty flag in the edit event as well. A pending
+            // navigation request can resolve before the effect below runs.
+            onDirtyChange?.(value !== file.content);
+            setDraft(value);
+          }}
           // Dark syntax palette (the surrounding Files-tab chrome
           // stays light on purpose — see the follow-up plan in the
           // PR description for a full dark-mode pass). Switching

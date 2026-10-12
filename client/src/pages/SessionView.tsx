@@ -185,6 +185,7 @@ interface SessionViewProps {
   onDiffSummary?: (summary: { added: number; deleted: number } | null) => void;
   /** Mirrors the Files editor's dirty state for app-level navigation guards. */
   onSourceEditorDirtyChange?: (dirty: boolean) => void;
+  onSourceEditorDraftEdit?: () => void;
   // Fires after the session title is renamed so the parent can refresh
   // other views (sidebar, focus queue) that cache the title separately.
   onTitleChange?: () => void;
@@ -3094,6 +3095,7 @@ function SourceViewerPanel({
   onOpenFile,
   onPreviewSaved,
   onDirtyChange,
+  onDraftEdit,
 }: {
   projectId: string;
   preview: SourceFilePreview | null;
@@ -3101,6 +3103,7 @@ function SourceViewerPanel({
   onOpenFile: (path: string) => void;
   onPreviewSaved?: (saved: { path: string; relativePath: string; content: string; savedAt: string }) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onDraftEdit?: () => void;
 }) {
   const selectedLine = preview?.line;
   const [editedPreview, setEditedPreview] = useState<SourceFilePreview | null>(null);
@@ -3149,6 +3152,7 @@ function SourceViewerPanel({
               worktreeId={worktreeId}
               initialLine={selectedLine}
               onDirtyChange={onDirtyChange}
+              onDraftEdit={onDraftEdit}
               onSaved={(saved) => {
                 // Refresh the parent cache so the file-tree active
                 // marker and the Files tab title both reflect the
@@ -3669,6 +3673,7 @@ export function SessionView({
   onArchive,
   onDiffSummary,
   onSourceEditorDirtyChange,
+  onSourceEditorDraftEdit,
 }: SessionViewProps) {
   // Composer draft persistence (issue #251): rehydrate the textarea and skill
   // chips from localStorage so an in-progress message survives re-mounts and
@@ -9105,6 +9110,7 @@ export function SessionView({
                       setSourceEditorDirty(dirty);
                       onSourceEditorDirtyChange?.(dirty);
                     }}
+                    onDraftEdit={onSourceEditorDraftEdit}
                     onPreviewSaved={(saved) => {
                       // Keep the parent's `sourcePreview` cache
                       // in sync with the editor's saved content

@@ -42,6 +42,7 @@ import {
 } from "./lib/useShortcutBindings.tsx";
 import { FileIndexProvider } from "./lib/useFileIndex.tsx";
 import { pickFirstFocusItem } from "./lib/focus-advance.ts";
+import { confirmNewEditsAfterAwait, editorWillUnmount } from "./lib/dirty-navigation.ts";
 import {
   loadSavedVisitedAt,
   persistVisitedAt,
@@ -208,6 +209,7 @@ function AppBody() {
   // The view to return to when settings is closed (the last non-settings view).
   const preSettingsViewRef = useRef<View>({ page: "empty" });
   const sourceEditorDirtyRef = useRef(false);
+  const sourceEditorRevisionRef = useRef(0);
   const viewRef = useRef(view);
   viewRef.current = view;
 
@@ -225,12 +227,7 @@ function AppBody() {
 
   const setView = (v: View, confirmed = false): boolean => {
     const current = viewRef.current;
-    const editorWillUnmount = current.page === "session" && (
-      v.page !== "session" ||
-      v.projectId !== current.projectId ||
-      v.worktreeId !== current.worktreeId
-    );
-    if (!confirmed && editorWillUnmount && !confirmDiscardSourceEdits()) {
+    if (!confirmed && editorWillUnmount(current, v) && !confirmDiscardSourceEdits()) {
       return false;
     }
     // Entering settings: remember the view we're leaving so closing returns there.
@@ -654,6 +651,8 @@ function AppBody() {
   const confirmArchiveCurrentSession = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
     if (!confirmDiscardSourceEdits()) return;
+    const approvedRevision = sourceEditorRevisionRef.current;
+    const wasDirtyAtApproval = sourceEditorDirtyRef.current;
     const { projectId, worktreeId, sessionId } = activeView;
 
     try {
@@ -670,7 +669,19 @@ function AppBody() {
       );
       setFocusRefreshKey((key) => key + 1);
       loadProjects();
-      setView({ page: "session", projectId, worktreeId }, true);
+      const stillViewingSession = viewRef.current.page === "session" &&
+        viewRef.current.projectId === projectId &&
+        viewRef.current.worktreeId === worktreeId &&
+        viewRef.current.sessionId === sessionId;
+      if (stillViewingSession && confirmNewEditsAfterAwait(
+        approvedRevision,
+        sourceEditorRevisionRef.current,
+        wasDirtyAtApproval,
+        sourceEditorDirtyRef.current,
+        confirmDiscardSourceEdits,
+      )) {
+        setView({ page: "session", projectId, worktreeId }, true);
+      }
       toast.success("Session archived");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to archive session");
@@ -680,6 +691,8 @@ function AppBody() {
   const handleFocusDone = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
     if (!confirmDiscardSourceEdits()) return;
+    const approvedRevision = sourceEditorRevisionRef.current;
+    const wasDirtyAtApproval = sourceEditorDirtyRef.current;
     const projectId = activeView.projectId;
     const worktreeId = currentFocusItem?.worktreeId ?? activeView.worktreeId;
     const sessionId = activeView.sessionId;
@@ -703,7 +716,19 @@ function AppBody() {
         return;
       }
 
-      openFocusItem(nextQueue[0], true);
+      const stillViewingSession = viewRef.current.page === "session" &&
+        viewRef.current.projectId === projectId &&
+        viewRef.current.worktreeId === activeView.worktreeId &&
+        viewRef.current.sessionId === sessionId;
+      if (stillViewingSession && confirmNewEditsAfterAwait(
+        approvedRevision,
+        sourceEditorRevisionRef.current,
+        wasDirtyAtApproval,
+        sourceEditorDirtyRef.current,
+        confirmDiscardSourceEdits,
+      )) {
+        openFocusItem(nextQueue[0], true);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
     }
@@ -819,21 +844,17 @@ function AppBody() {
           onSelectSession={handleSelectSession}
           onNewThread={handleNewThread}
           onNewProject={() => {
-            setView({ page: "new-project" });
-            closeSidebar();
+            if (setView({ page: "new-project" })) closeSidebar();
           }}
           onEditProject={(projectId) => {
-            setView({ page: "edit-project", projectId });
-            closeSidebar();
+            if (setView({ page: "edit-project", projectId })) closeSidebar();
           }}
           onNewWorktree={(projectId) => {
-            setView({ page: "new-worktree", projectId });
-            closeSidebar();
+            if (setView({ page: "new-worktree", projectId })) closeSidebar();
           }}
           onProjectsChanged={loadProjects}
           onSettings={() => {
-            setView({ page: "settings", section: "agents" });
-            closeSidebar();
+            if (setView({ page: "settings", section: "agents" })) closeSidebar();
           }}
           onBeforeRemove={(target) => {
             if (view.page !== "session" || view.projectId !== target.projectId) return true;
@@ -962,6 +983,9 @@ function AppBody() {
             onDiffSummary={setMobileDiffSummary}
             onSourceEditorDirtyChange={(dirty) => {
               sourceEditorDirtyRef.current = dirty;
+            }}
+            onSourceEditorDraftEdit={() => {
+              sourceEditorRevisionRef.current += 1;
             }}
             onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
             focusAdvanceCountdown={
