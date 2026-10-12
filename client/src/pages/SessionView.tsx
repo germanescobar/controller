@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
+import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
 import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
 import hljs from "highlight.js/lib/core";
@@ -995,11 +995,12 @@ function DiffBlock({
           <span className="text-red-400/90">-{deleted}</span>
         </span>
       </button>
-      {expanded && onSelectionAdd ? (
-        <SelectableDiffView files={files} onSelectionAdd={onSelectionAdd} />
-      ) : (
-        <DiffView files={files} />
-      )}
+      {expanded &&
+        (onSelectionAdd ? (
+          <SelectableDiffView files={files} onSelectionAdd={onSelectionAdd} />
+        ) : (
+          <DiffView files={files} />
+        ))}
     </div>
   );
 }
@@ -1184,19 +1185,21 @@ function RunDiffFileRow({
  *   - `ChangesPanel` (the right-sidebar local/branch diff view)
  *
  * The component owns the selection state; the parent owns the chip
- * stack. The "Comment" action fires `onSelectionAdd` with a fresh
+ * stack. The "Add to Chat" action fires `onSelectionAdd` with a fresh
  * `SelectionMention` so the composer can append a chip without the
  * diff component knowing about the composer at all. Clearing the
  * composer draft does not clear the source-of-truth selection in
  * the rendered diff (acceptance criterion): the user can keep
  * re-using the same selection across multiple messages.
  *
- * Click semantics match the issue's UX spec:
+ * Pointer semantics match the issue's UX spec:
  *
- *   - click on a line number selects that line;
- *   - shift-click extends across contiguous lines (range, not set);
- *   - cmd/ctrl-click adds a non-contiguous range to the existing
- *     selection (the new range joins the per-file range list).
+ *   - click anywhere on a line selects that line;
+ *   - click-and-drag selects every line between the press and the
+ *     release (contiguous range);
+ *   - shift-click extends the last range to the clicked line;
+ *   - cmd/ctrl-click (or drag) adds a non-contiguous range to the
+ *     existing selection (the new range joins the per-file range list).
  */
 function SelectableDiffView({
   files,
@@ -1217,101 +1220,83 @@ function SelectableDiffView({
   // `selectionByFile` is the source of truth for the current
   // gesture. Each file's selection is a list of contiguous ranges;
   // the union of those ranges is what becomes a chip when the user
-  // hits "Comment". Resetting the composer draft does not touch
+  // hits "Add to Chat". Resetting the composer draft does not touch
   // this state — the issue is explicit that the source-of-truth
   // selection lives in the rendered diff, not in the composer.
   const [selectionByFile, setSelectionByFile] = useState<
     Record<string, LineRange[]>
   >({});
-  // `toolbarFile` is the file path the user is currently gesturing
-  // in. We track the file (not the line) because the toolbar is
-  // rendered at the top of the file's diff block, sticky to the
-  // scroll container, so it stays visible even when the user
-  // scrolls away from the clicked line. This is the same
-  // pattern GitHub PR review and Cursor use for the "Add to chat"
-  // / "Comment" affordance: always reachable regardless of scroll
-  // position.
+  // `toolbarFile` is the file path the user last gestured in. The
+  // "Add to Chat" toolbar renders inline, right below the last line
+  // of that file's most recent range, so the action sits next to
+  // the selection (same pattern as GitHub PR review).
   const [toolbarFile, setToolbarFile] = useState<string | null>(null);
+  const selectionRef = useRef(selectionByFile);
+  selectionRef.current = selectionByFile;
 
-  const onLineNumberClick = useCallback(
-    (filePath: string, line: number, event: React.MouseEvent) => {
+  // Click-and-drag selection. Pressing a line starts a gesture
+  // anchored to that line; while the button is held, entering
+  // another line of the same file rewrites the gesture's range to
+  // span anchor..line. Releasing anywhere ends the gesture (a
+  // window-level listener, so releasing outside the diff works).
+  // We deliberately do NOT use pointer capture: a captured pointer
+  // routes every subsequent event to the pressed row, so the other
+  // rows would never see `pointerenter` and the drag would stall on
+  // the first line.
+  const dragStateRef = useRef<{ filePath: string; anchor: number } | null>(
+    null
+  );
+  const [dragging, setDragging] = useState(false);
+
+  const startGesture = useCallback(
+    (
+      filePath: string,
+      line: number,
+      modifiers: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }
+    ) => {
       if (line < 1) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setSelectionByFile((prev) => {
-        const current = prev[filePath] ?? [];
-        let next: LineRange[];
-        if (event.shiftKey && current.length > 0) {
-          // Extend the last range to include the new line. Shift is
-          // for "extend a contiguous range" — a single range only.
-          const last = current[current.length - 1];
-          next = current.slice(0, -1).concat({
-            start: Math.min(last.start, line),
-            end: Math.max(last.end, line),
-          });
-        } else if (event.metaKey || event.ctrlKey) {
-          // Cmd/Ctrl adds a new (non-contiguous) range to the file's
-          // selection. The full list is normalized on-chip so a
-          // user who clicks lines in random order still ends up
-          // with a stable, sorted, merged token.
-          next = [...current, { start: line, end: line }];
-        } else {
-          // Plain click replaces the file's selection with a
-          // single-line range. Clearing the gesture on a click
-          // keeps the source-of-truth obvious.
-          next = [{ start: line, end: line }];
-        }
-        return { ...prev, [filePath]: next };
-      });
+      // Computed eagerly (not inside a state updater) so the drag
+      // anchor is set synchronously, before the next pointer event.
+      const current = selectionRef.current[filePath] ?? [];
+      let next: LineRange[];
+      let anchor = line;
+      if (modifiers.shiftKey && current.length > 0) {
+        // Extend the last range to include the new line; the far
+        // end of that range becomes the drag anchor.
+        const last = current[current.length - 1];
+        anchor = line >= last.start ? last.start : last.end;
+        next = current.slice(0, -1).concat({
+          start: Math.min(anchor, line),
+          end: Math.max(anchor, line),
+        });
+      } else if (modifiers.metaKey || modifiers.ctrlKey) {
+        // Cmd/Ctrl adds a new (non-contiguous) range. The full list
+        // is normalized on-chip, so ranges added in random order
+        // still produce a stable, sorted, merged token.
+        next = [...current, { start: line, end: line }];
+      } else {
+        // Plain press replaces the file's selection.
+        next = [{ start: line, end: line }];
+      }
+      dragStateRef.current = { filePath, anchor };
+      setSelectionByFile((prev) => ({ ...prev, [filePath]: next }));
       setToolbarFile(filePath);
     },
     []
   );
 
-  // Drag-to-select: when the user holds the primary mouse button
-  // and drags across the line gutter, every line under the cursor
-  // is added to the current range. The drag is anchored to the
-  // line the user pressed on (so the final range is contiguous
-  // and predictable); releasing the button ends the drag. This is
-  // the same gesture the user already knows from GitHub PR review
-  // and from text editors — the line numbers are tiny in a narrow
-  // scrollable sidebar, so a forgiving drag area beats pixel-
-  // precise clicks on a 36px-wide gutter.
-  const dragStateRef = useRef<{
-    filePath: string;
-    startLine: number;
-  } | null>(null);
   const onLinePointerDown = useCallback(
     (filePath: string, line: number, event: React.PointerEvent) => {
-      if (line < 1) return;
       if (event.button !== 0) return; // primary button only
-      // Skip the drag handler when the press lands on the gutter
-      // buttons — those have their own modifier-aware onClick
-      // (shift/cmd-click) and the pointer event would just produce
-      // a duplicate state update.
-      const target = event.target as HTMLElement;
-      if (target.closest("button")) return;
+      // Prevent the browser's native text selection from fighting
+      // the line selection while dragging.
       event.preventDefault();
-      // Capture the pointer so a drag that leaves the gutter still
-      // routes to the same handler (otherwise the user would have
-      // to keep the cursor pinned to a 9px column to extend the
-      // range).
-      target.setPointerCapture?.(event.pointerId);
-      dragStateRef.current = { filePath, startLine: line };
-      setSelectionByFile((prev) => {
-        const current = prev[filePath] ?? [];
-        const next = current.length > 0
-          ? current.slice(0, -1).concat({
-              start: Math.min(current[current.length - 1].start, line),
-              end: Math.max(current[current.length - 1].end, line),
-            })
-          : [{ start: line, end: line }];
-        return { ...prev, [filePath]: next };
-      });
-      setToolbarFile(filePath);
+      setDragging(true);
+      startGesture(filePath, line, event);
     },
-    []
+    [startGesture]
   );
+
   const onLinePointerEnter = useCallback(
     (filePath: string, line: number) => {
       const drag = dragStateRef.current;
@@ -1319,22 +1304,41 @@ function SelectableDiffView({
       if (line < 1) return;
       setSelectionByFile((prev) => {
         const current = prev[filePath] ?? [];
-        if (current.length === 0) {
-          return { ...prev, [filePath]: [{ start: line, end: line }] };
-        }
-        const last = current[current.length - 1];
-        const next = current.slice(0, -1).concat({
-          start: Math.min(last.start, line),
-          end: Math.max(last.end, line),
-        });
-        return { ...prev, [filePath]: next };
+        const range = {
+          start: Math.min(drag.anchor, line),
+          end: Math.max(drag.anchor, line),
+        };
+        return { ...prev, [filePath]: current.slice(0, -1).concat(range) };
       });
     },
     []
   );
-  const onLinePointerUp = useCallback(() => {
-    dragStateRef.current = null;
-  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const end = () => {
+      dragStateRef.current = null;
+      setDragging(false);
+    };
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+  }, [dragging]);
+
+  // Keyboard activation of the gutter buttons (Enter/Space). Mouse
+  // clicks are already handled by `onLinePointerDown`; a keyboard
+  // "click" has `detail === 0`, which is how we tell them apart.
+  const onGutterKeyboardClick = useCallback(
+    (filePath: string, line: number, event: React.MouseEvent) => {
+      if (event.detail !== 0) return;
+      startGesture(filePath, line, event);
+      dragStateRef.current = null;
+    },
+    [startGesture]
+  );
 
   const clearFileSelection = useCallback((filePath: string) => {
     setSelectionByFile((prev) => {
@@ -1385,7 +1389,7 @@ function SelectableDiffView({
     [files]
   );
 
-  const onComment = useCallback(
+  const onAddToChat = useCallback(
     (filePath: string) => {
       const ranges = selectionByFile[filePath];
       if (!ranges) return;
@@ -1402,7 +1406,23 @@ function SelectableDiffView({
       {files.map((file, i) => {
         const processed = processLinesWithNumbers(file.lines);
         const fileRanges = selectionByFile[file.path] ?? [];
-        const showToolbar = toolbarFile === file.path && fileRanges.length > 0;
+        const showToolbar =
+          !dragging && toolbarFile === file.path && fileRanges.length > 0;
+        // Anchor the toolbar under the last rendered row of the most
+        // recent range. Old/new line numbers can collide (a deleted
+        // line 10 and an added line 10), so we pick the last matching
+        // row index rather than a line number.
+        const lastRange = fileRanges[fileRanges.length - 1];
+        let toolbarIndex = -1;
+        if (showToolbar && lastRange) {
+          processed.forEach((line, j) => {
+            if (line.kind === "hunk") return;
+            const n = line.kind === "del" ? line.oldLine : line.newLine;
+            if (n !== undefined && n >= lastRange.start && n <= lastRange.end) {
+              toolbarIndex = j;
+            }
+          });
+        }
         return (
           <div key={i}>
             {files.length > 1 && (
@@ -1416,53 +1436,6 @@ function SelectableDiffView({
               </div>
             ) : (
               <>
-                {/*
-                 * Sticky selection toolbar (issue #416). Renders at
-                 * the top of the file's diff block, sticky to the
-                 * scroll container, so the user can always reach
-                 * "Comment" regardless of where the clicked line
-                 * scrolled to. The toolbar only appears when a
-                 * selection is active in this file. The label on
-                 * the left shows the current range so the user can
-                 * see what they've selected without scrolling back
-                 * to it.
-                 */}
-                {showToolbar && (
-                  <div
-                    data-testid="diff-selection-toolbar"
-                    className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-popover/95 px-2 py-1 backdrop-blur"
-                  >
-                    <span className="font-mono text-[10px] text-muted-foreground">
-                      {fileRanges
-                        .map((range) =>
-                          range.start === range.end
-                            ? `L${range.start}`
-                            : `L${range.start}-${range.end}`,
-                        )
-                        .join(", ")}
-                      {fileRanges.length > 1 && " (multi-range)"}
-                    </span>
-                    <span className="ml-auto flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onComment(file.path)}
-                        data-testid="diff-selection-comment"
-                        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-popover-foreground hover:bg-accent"
-                      >
-                        <MessageSquare className="h-3 w-3" />
-                        Comment
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => clearFileSelection(file.path)}
-                        aria-label="Clear selection"
-                        className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  </div>
-                )}
                 <div className="overflow-x-auto">
                   {processed.map((line, j) => {
                     if (line.kind === "hunk") {
@@ -1502,8 +1475,8 @@ function SelectableDiffView({
                           lineNumber <= range.end,
                       );
                     return (
+                      <Fragment key={j}>
                       <div
-                        key={j}
                         data-line-number={lineNumber}
                         onPointerDown={(e) =>
                           lineNumber !== undefined &&
@@ -1513,32 +1486,18 @@ function SelectableDiffView({
                           lineNumber !== undefined &&
                           onLinePointerEnter(file.path, lineNumber)
                         }
-                        onPointerUp={onLinePointerUp}
-                        onClick={(e) => {
-                          // Click on the line text (anywhere except
-                          // the gutter buttons) starts a new
-                          // selection. The buttons still have their
-                          // own onClick for modifier-aware selection
-                          // (shift/cmd); this is the fallback for
-                          // the much more common case of clicking
-                          // the code itself.
-                          if (lineNumber === undefined) return;
-                          const target = e.target as HTMLElement;
-                          if (target.closest("button")) return;
-                          onLineNumberClick(file.path, lineNumber, e);
-                        }}
                         title={
                           lineNumber === undefined
                             ? undefined
                             : `Click to select line ${lineNumber}; drag to select a range`
                         }
-                        className={`flex min-w-0 relative cursor-pointer ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset" : ""}`}
+                        className={`flex min-w-0 relative cursor-pointer select-none hover:bg-primary/10 ${isAdd ? "bg-green-950/30" : isDel ? "bg-red-950/30" : ""} ${isSelected ? "ring-1 ring-primary/60 ring-inset bg-primary/15" : ""}`}
                       >
                         <button
                           type="button"
                           onClick={(e) =>
                             lineNumber !== undefined &&
-                            onLineNumberClick(file.path, lineNumber, e)
+                            onGutterKeyboardClick(file.path, lineNumber, e)
                           }
                           className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
                           aria-label={`Select line ${lineNumber}`}
@@ -1549,7 +1508,7 @@ function SelectableDiffView({
                           type="button"
                           onClick={(e) =>
                             lineNumber !== undefined &&
-                            onLineNumberClick(file.path, lineNumber, e)
+                            onGutterKeyboardClick(file.path, lineNumber, e)
                           }
                           className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
                           aria-label={`Select line ${lineNumber}`}
@@ -1567,6 +1526,46 @@ function SelectableDiffView({
                           {line.text}
                         </span>
                       </div>
+                      {j === toolbarIndex && (
+                        // Contextual "Add to Chat" toolbar (issue #416),
+                        // rendered inline under the selection. `sticky
+                        // left-0` keeps it in view when the diff is
+                        // scrolled horizontally.
+                        <div
+                          data-testid="diff-selection-toolbar"
+                          className="sticky left-0 w-fit py-1 pl-[4.5rem]"
+                        >
+                          <div className="flex items-center gap-2 rounded-md border border-border bg-popover px-2 py-1 shadow-md">
+                            <span className="font-mono text-[10px] text-muted-foreground">
+                              {fileRanges
+                                .map((range) =>
+                                  range.start === range.end
+                                    ? `L${range.start}`
+                                    : `L${range.start}-${range.end}`,
+                                )
+                                .join(", ")}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => onAddToChat(file.path)}
+                              data-testid="diff-selection-comment"
+                              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-popover-foreground hover:bg-accent"
+                            >
+                              <MessageSquare className="h-3 w-3" />
+                              Add to Chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => clearFileSelection(file.path)}
+                              aria-label="Clear selection"
+                              className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </div>
