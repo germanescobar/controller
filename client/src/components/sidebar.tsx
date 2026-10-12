@@ -67,7 +67,7 @@ import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
 import { DOCS_URL } from "@/lib/links";
 import {
-  fetchProjectSessionSnapshot,
+  fetchStableProjectSessionSnapshot,
   mergeProjectSessionSnapshot,
 } from "@/lib/sidebar-project-catch-up";
 
@@ -1113,15 +1113,22 @@ export function Sidebar({
   // to another project, reconcile its entire subtree once so changes
   // made while it was inactive appear without reloading every project.
   const previousActiveProjectIdRef = useRef(activeProjectId);
+  const projectEventGenerationRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     if (previousActiveProjectIdRef.current === activeProjectId) return;
     previousActiveProjectIdRef.current = activeProjectId;
     if (!activeProjectId) return;
     const projectId = activeProjectId;
     let cancelled = false;
-    fetchProjectSessionSnapshot(projectId, fetchWorktrees, fetchSessions)
+    fetchStableProjectSessionSnapshot(
+      projectId,
+      () => projectEventGenerationRef.current.get(projectId) ?? 0,
+      () => cancelled,
+      fetchWorktrees,
+      fetchSessions,
+    )
       .then((snapshot) => {
-        if (cancelled) return;
+        if (cancelled || !snapshot) return;
         setProjectData((prev) =>
           prev.map((project) => {
             if (project.id !== projectId) return project;
@@ -1186,6 +1193,18 @@ export function Sidebar({
       return;
     }
     lastConsumedRefreshesCounterRef.current = pendingProjectRefreshes.counter;
+    // A catch-up already in flight must retry if this event refresh
+    // would otherwise be overwritten by its older snapshot.
+    const changedProjects = new Set([
+      ...pendingProjectRefreshes.sessions.map((scope) => scope.projectId),
+      ...pendingProjectRefreshes.worktrees,
+    ]);
+    changedProjects.forEach((projectId) => {
+      projectEventGenerationRef.current.set(
+        projectId,
+        (projectEventGenerationRef.current.get(projectId) ?? 0) + 1,
+      );
+    });
     pendingProjectRefreshes.sessions.forEach((scope) => {
       refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
         () => {},

@@ -15,6 +15,27 @@ export async function fetchProjectSessionSnapshot(
   );
 }
 
+/** Retry when a lifecycle event arrives during the snapshot fetch. */
+export async function fetchStableProjectSessionSnapshot(
+  projectId: string,
+  getGeneration: () => number,
+  isCancelled: () => boolean,
+  getWorktrees: (projectId: string) => Promise<Worktree[]>,
+  getSessions: (projectId: string, worktreeId: string) => Promise<SessionSummary[]>,
+): Promise<Array<{ worktree: Worktree; sessions: SessionSummary[] }> | null> {
+  while (!isCancelled()) {
+    const generation = getGeneration();
+    const snapshot = await fetchProjectSessionSnapshot(
+      projectId,
+      getWorktrees,
+      getSessions,
+    );
+    if (isCancelled()) return null;
+    if (getGeneration() === generation) return snapshot;
+  }
+  return null;
+}
+
 export function mergeProjectSessionSnapshot(
   existing: Array<Worktree & { sessions: SessionSummary[]; isExpanded: boolean }>,
   snapshot: Array<{ worktree: Worktree; sessions: SessionSummary[] }>,
