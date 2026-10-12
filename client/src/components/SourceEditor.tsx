@@ -102,6 +102,9 @@ export function SourceEditor({
   onDirtyChange,
 }: SourceEditorProps) {
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+  useEffect(() => () => onDirtyChangeRef.current?.(false), []);
   const [draft, setDraft] = useState<string>(file.content);
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);

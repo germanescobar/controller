@@ -207,6 +207,13 @@ function AppBody() {
   const advanceTimerRef = useRef<number | null>(null);
   // The view to return to when settings is closed (the last non-settings view).
   const preSettingsViewRef = useRef<View>({ page: "empty" });
+  const sourceEditorDirtyRef = useRef(false);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+
+  const confirmDiscardSourceEdits = () =>
+    !sourceEditorDirtyRef.current ||
+    window.confirm("You have unsaved changes in this file. Discard them and continue?");
 
   useEffect(() => {
     focusQueueRef.current = focusQueue;
@@ -216,11 +223,21 @@ function AppBody() {
     visitedAtRef.current = visitedAt;
   }, [visitedAt]);
 
-  const setView = (v: View) => {
-    // Entering settings: remember the view we're leaving so closing returns there.
-    if (v.page === "settings" && view.page !== "settings") {
-      preSettingsViewRef.current = view;
+  const setView = (v: View, confirmed = false): boolean => {
+    const current = viewRef.current;
+    const editorWillUnmount = current.page === "session" && (
+      v.page !== "session" ||
+      v.projectId !== current.projectId ||
+      v.worktreeId !== current.worktreeId
+    );
+    if (!confirmed && editorWillUnmount && !confirmDiscardSourceEdits()) {
+      return false;
     }
+    // Entering settings: remember the view we're leaving so closing returns there.
+    if (v.page === "settings" && viewRef.current.page !== "settings") {
+      preSettingsViewRef.current = viewRef.current;
+    }
+    viewRef.current = v;
     setViewState(v);
     localStorage.setItem("activeView", JSON.stringify(v));
     // Any user-initiated navigation cancels a scheduled focus
@@ -232,6 +249,7 @@ function AppBody() {
     }
     pendingFocusAdvanceRef.current = null;
     setPendingFocusAdvance((current) => (current ? null : current));
+    return true;
   };
 
   const closeSidebar = () => setSidebarOpen(false);
@@ -260,22 +278,21 @@ function AppBody() {
    * and closing the mobile sidebar if it's open. Hoisted above
    * `commitPendingAdvance` so the countdown can reuse it.
    */
-  const openFocusItem = useCallback((item: FocusQueueItem) => {
-    setActiveProjectId(item.projectId);
-    setView({
+  const openFocusItem = useCallback((item: FocusQueueItem, confirmed = false) => {
+    if (!setView({
       page: "session",
       projectId: item.projectId,
       worktreeId: item.worktreeId,
       sessionId: item.session.id,
-    });
+    }, confirmed)) return false;
+    setActiveProjectId(item.projectId);
     closeSidebar();
+    return true;
   }, []);
 
   /**
-   * Advance past a session in two explicit steps: first mark and
-   * re-sort the current item, then open the new first queue item.
-   * Resolving the destination after the mutation keeps navigation
-   * aligned with exactly what the sidebar displays.
+   * Compute the next focus item from the reordered queue, then
+   * commit the reorder only after navigation passes the editor guard.
    */
   const advancePastFocusItem = useCallback(
     (sessionId: string) => {
@@ -287,24 +304,25 @@ function AppBody() {
 
       if (isPinned) {
         const handledAt = new Date().toISOString();
-        const nextVisitedAt = {
-          ...visitedAtRef.current,
-          [sessionId]: handledAt,
-        };
-        visitedAtRef.current = nextVisitedAt;
-        setVisitedAt(nextVisitedAt);
-
         reordered = markFocusItemHandled(
           currentQueue,
           sessionId,
           handledAt,
         );
-        focusQueueRef.current = reordered;
-        setFocusQueue(reordered);
       }
 
       const next = pickFirstFocusItem(reordered, sessionId);
-      if (next) openFocusItem(next);
+      if (next && !openFocusItem(next)) return;
+      if (isPinned) {
+        const handledAt = reordered.find((item) => item.session.id === sessionId)?.lastVisitedAt;
+        if (handledAt) {
+          const nextVisitedAt = { ...visitedAtRef.current, [sessionId]: handledAt };
+          visitedAtRef.current = nextVisitedAt;
+          setVisitedAt(nextVisitedAt);
+        }
+        focusQueueRef.current = reordered;
+        setFocusQueue(reordered);
+      }
     },
     [openFocusItem],
   );
@@ -470,8 +488,7 @@ function AppBody() {
   }, [activeProjectId, scheduleEventsRefetch]);
 
   const handleSelectProject = (projectId: string) => {
-    setActiveProjectId(projectId);
-    setView({ page: "session", projectId });
+    if (setView({ page: "session", projectId })) setActiveProjectId(projectId);
   };
 
   const handleSelectSession = (
@@ -479,9 +496,10 @@ function AppBody() {
     sessionId: string,
     worktreeId?: string
   ) => {
-    setActiveProjectId(projectId);
-    setView({ page: "session", projectId, worktreeId, sessionId });
-    closeSidebar();
+    if (setView({ page: "session", projectId, worktreeId, sessionId })) {
+      setActiveProjectId(projectId);
+      closeSidebar();
+    }
   };
 
   /**
@@ -517,9 +535,10 @@ function AppBody() {
   );
 
   const handleNewThread = (projectId: string, worktreeId?: string) => {
-    setActiveProjectId(projectId);
-    setView({ page: "session", projectId, worktreeId });
-    closeSidebar();
+    if (setView({ page: "session", projectId, worktreeId })) {
+      setActiveProjectId(projectId);
+      closeSidebar();
+    }
   };
 
   const handleProjectCreated = () => {
@@ -600,7 +619,7 @@ function AppBody() {
       return;
     }
     const sentFromId =
-      currentFocusItem?.session.id ?? activeView.sessionId ?? "";
+      currentFocusItem?.session.id ?? (activeView.page === "session" ? activeView.sessionId : undefined) ?? "";
     advancePastFocusItem(sentFromId);
   };
 
@@ -634,6 +653,7 @@ function AppBody() {
 
   const confirmArchiveCurrentSession = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
+    if (!confirmDiscardSourceEdits()) return;
     const { projectId, worktreeId, sessionId } = activeView;
 
     try {
@@ -650,7 +670,7 @@ function AppBody() {
       );
       setFocusRefreshKey((key) => key + 1);
       loadProjects();
-      setView({ page: "session", projectId, worktreeId });
+      setView({ page: "session", projectId, worktreeId }, true);
       toast.success("Session archived");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to archive session");
@@ -659,6 +679,7 @@ function AppBody() {
 
   const handleFocusDone = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
+    if (!confirmDiscardSourceEdits()) return;
     const projectId = activeView.projectId;
     const worktreeId = currentFocusItem?.worktreeId ?? activeView.worktreeId;
     const sessionId = activeView.sessionId;
@@ -682,7 +703,7 @@ function AppBody() {
         return;
       }
 
-      openFocusItem(nextQueue[0]);
+      openFocusItem(nextQueue[0], true);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
     }
@@ -814,6 +835,12 @@ function AppBody() {
             setView({ page: "settings", section: "agents" });
             closeSidebar();
           }}
+          onBeforeRemove={(target) => {
+            if (view.page !== "session" || view.projectId !== target.projectId) return true;
+            if (target.worktreeId && view.worktreeId !== target.worktreeId) return true;
+            if (target.sessionId && view.sessionId !== target.sessionId) return true;
+            return confirmDiscardSourceEdits();
+          }}
           onFocusQueueChange={handleFocusQueueChange}
           focusQueue={focusQueue}
           focusRefreshKey={focusRefreshKey}
@@ -933,6 +960,9 @@ function AppBody() {
             onTitleChange={() => setFocusRefreshKey((key) => key + 1)}
             onArchive={handleArchiveCurrentSession}
             onDiffSummary={setMobileDiffSummary}
+            onSourceEditorDirtyChange={(dirty) => {
+              sourceEditorDirtyRef.current = dirty;
+            }}
             onFocusAdvanceAfterSend={handleFocusAdvanceAfterSend}
             focusAdvanceCountdown={
               pendingFocusAdvance
