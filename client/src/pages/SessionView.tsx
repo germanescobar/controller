@@ -717,6 +717,40 @@ function parseFullGitDiff(diff: string): DiffFile[] {
   return files;
 }
 
+/** A contiguous range of rendered row indices in a diff (issue #416). */
+interface RowRange {
+  start: number;
+  end: number;
+}
+
+function rowLineNumber(line: ProcessedLine): number | undefined {
+  if (line.kind === "hunk") return undefined;
+  return line.kind === "del" ? line.oldLine : line.newLine;
+}
+
+function isRowSelected(ranges: RowRange[], row: number): boolean {
+  return ranges.some((range) => row >= range.start && row <= range.end);
+}
+
+/**
+ * Map selected rows to the line ranges carried by the chip token.
+ * Each selected row contributes its own line number; the result is
+ * sorted and merged by `normalizeRanges`.
+ */
+function rowsToLineRanges(
+  processed: ProcessedLine[],
+  rowRanges: RowRange[]
+): LineRange[] | null {
+  const lineRanges: LineRange[] = [];
+  processed.forEach((line, j) => {
+    const n = rowLineNumber(line);
+    if (n !== undefined && isRowSelected(rowRanges, j)) {
+      lineRanges.push({ start: n, end: n });
+    }
+  });
+  return normalizeRanges(lineRanges);
+}
+
 const ProjectRootContext = createContext<string | undefined>(undefined);
 
 /**
@@ -958,6 +992,32 @@ function processLinesWithNumbers(lines: DiffLine[]): ProcessedLine[] {
   return result;
 }
 
+/**
+ * Whether a diff's line numbers are real file coordinates (issue
+ * #416). A selection chip anchors the agent to `path:start-end`, so
+ * the numbers must match the file. Unified diffs with numeric
+ * `@@ -a,b +c,d @@` headers qualify, and so do whole-file additions
+ * (numbering from 1 is correct). A `str_replace` snippet or an
+ * `apply_patch` hunk with a bare `@@` header has no offset — its
+ * rows would number from 1 regardless of where the edit landed — so
+ * those render read-only.
+ */
+function hasReliableLineNumbers(files: DiffFile[]): boolean {
+  return files.every((file) => {
+    if (file.lines.length === 0) return true;
+    if (file.op === "add" && file.lines.every((line) => line.kind === "add")) {
+      return true;
+    }
+    const first = file.lines[0];
+    if (!(first.kind === "ctx" && first.text.startsWith("@@"))) return false;
+    return file.lines.every(
+      (line) =>
+        !(line.kind === "ctx" && line.text.startsWith("@@")) ||
+        /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line.text)
+    );
+  });
+}
+
 function DiffBlock({
   files,
 }: {
@@ -996,7 +1056,7 @@ function DiffBlock({
         </span>
       </button>
       {expanded &&
-        (onSelectionAdd ? (
+        (onSelectionAdd && hasReliableLineNumbers(files) ? (
           <SelectableDiffView files={files} onSelectionAdd={onSelectionAdd} />
         ) : (
           <DiffView files={files} />
@@ -1187,10 +1247,9 @@ function RunDiffFileRow({
  * The component owns the selection state; the parent owns the chip
  * stack. The "Add to Chat" action fires `onSelectionAdd` with a fresh
  * `SelectionMention` so the composer can append a chip without the
- * diff component knowing about the composer at all. Clearing the
- * composer draft does not clear the source-of-truth selection in
- * the rendered diff (acceptance criterion): the user can keep
- * re-using the same selection across multiple messages.
+ * diff component knowing about the composer at all. Adding the chip
+ * clears the selection in the diff: the chip in the composer is now
+ * the record of it, and the user doesn't have to clear it by hand.
  *
  * Pointer semantics match the issue's UX spec:
  *
@@ -1217,15 +1276,24 @@ function SelectableDiffView({
   const onSelectionAdd =
     onSelectionAddProp ?? contextOnSelectionAdd ?? (() => undefined);
   const projectRoot = useContext(ProjectRootContext);
-  // `selectionByFile` is the source of truth for the current
-  // gesture. Each file's selection is a list of contiguous ranges;
-  // the union of those ranges is what becomes a chip when the user
-  // hits "Add to Chat". Resetting the composer draft does not touch
-  // this state — the issue is explicit that the source-of-truth
-  // selection lives in the rendered diff, not in the composer.
+  // `selectionByFile` holds the current gesture. Each file's
+  // selection is a list of contiguous ranges of *rendered row
+  // indices* (into `processLinesWithNumbers(file.lines)`), not line
+  // numbers: in a replacement hunk a deleted old line 10 and an
+  // added new line 10 share a number, and keying on the number
+  // would select both. Line numbers are derived from the selected
+  // rows only when the chip is built. "Add to Chat" turns the union
+  // of the ranges into a chip and clears the selection.
   const [selectionByFile, setSelectionByFile] = useState<
-    Record<string, LineRange[]>
+    Record<string, RowRange[]>
   >({});
+  const processedByPath = useMemo(() => {
+    const map = new Map<string, ProcessedLine[]>();
+    for (const file of files) {
+      map.set(file.path, processLinesWithNumbers(file.lines));
+    }
+    return map;
+  }, [files]);
   // `toolbarFile` is the file path the user last gestured in. The
   // "Add to Chat" toolbar renders inline, right below the last line
   // of that file's most recent range, so the action sits next to
@@ -1251,32 +1319,32 @@ function SelectableDiffView({
   const startGesture = useCallback(
     (
       filePath: string,
-      line: number,
+      row: number,
       modifiers: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }
     ) => {
-      if (line < 1) return;
+      if (row < 0) return;
       // Computed eagerly (not inside a state updater) so the drag
       // anchor is set synchronously, before the next pointer event.
       const current = selectionRef.current[filePath] ?? [];
-      let next: LineRange[];
-      let anchor = line;
+      let next: RowRange[];
+      let anchor = row;
       if (modifiers.shiftKey && current.length > 0) {
-        // Extend the last range to include the new line; the far
+        // Extend the last range to include the new row; the far
         // end of that range becomes the drag anchor.
         const last = current[current.length - 1];
-        anchor = line >= last.start ? last.start : last.end;
+        anchor = row >= last.start ? last.start : last.end;
         next = current.slice(0, -1).concat({
-          start: Math.min(anchor, line),
-          end: Math.max(anchor, line),
+          start: Math.min(anchor, row),
+          end: Math.max(anchor, row),
         });
       } else if (modifiers.metaKey || modifiers.ctrlKey) {
-        // Cmd/Ctrl adds a new (non-contiguous) range. The full list
-        // is normalized on-chip, so ranges added in random order
-        // still produce a stable, sorted, merged token.
-        next = [...current, { start: line, end: line }];
+        // Cmd/Ctrl adds a new (non-contiguous) range. The line
+        // ranges are normalized on-chip, so ranges added in random
+        // order still produce a stable, sorted, merged token.
+        next = [...current, { start: row, end: row }];
       } else {
         // Plain press replaces the file's selection.
-        next = [{ start: line, end: line }];
+        next = [{ start: row, end: row }];
       }
       dragStateRef.current = { filePath, anchor };
       setSelectionByFile((prev) => ({ ...prev, [filePath]: next }));
@@ -1286,27 +1354,27 @@ function SelectableDiffView({
   );
 
   const onLinePointerDown = useCallback(
-    (filePath: string, line: number, event: React.PointerEvent) => {
+    (filePath: string, row: number, event: React.PointerEvent) => {
       if (event.button !== 0) return; // primary button only
       // Prevent the browser's native text selection from fighting
       // the line selection while dragging.
       event.preventDefault();
       setDragging(true);
-      startGesture(filePath, line, event);
+      startGesture(filePath, row, event);
     },
     [startGesture]
   );
 
   const onLinePointerEnter = useCallback(
-    (filePath: string, line: number) => {
+    (filePath: string, row: number) => {
       const drag = dragStateRef.current;
       if (!drag || drag.filePath !== filePath) return;
-      if (line < 1) return;
+      if (row < 0) return;
       setSelectionByFile((prev) => {
         const current = prev[filePath] ?? [];
         const range = {
-          start: Math.min(drag.anchor, line),
-          end: Math.max(drag.anchor, line),
+          start: Math.min(drag.anchor, row),
+          end: Math.max(drag.anchor, row),
         };
         return { ...prev, [filePath]: current.slice(0, -1).concat(range) };
       });
@@ -1332,9 +1400,9 @@ function SelectableDiffView({
   // clicks are already handled by `onLinePointerDown`; a keyboard
   // "click" has `detail === 0`, which is how we tell them apart.
   const onGutterKeyboardClick = useCallback(
-    (filePath: string, line: number, event: React.MouseEvent) => {
+    (filePath: string, row: number, event: React.MouseEvent) => {
       if (event.detail !== 0) return;
-      startGesture(filePath, line, event);
+      startGesture(filePath, row, event);
       dragStateRef.current = null;
     },
     [startGesture]
@@ -1351,42 +1419,25 @@ function SelectableDiffView({
   }, []);
 
   const buildSelectionForFile = useCallback(
-    (filePath: string, ranges: LineRange[]): SelectionMention | null => {
-      const normalized = normalizeRanges(ranges);
-      if (!normalized) return null;
-      const file = files.find((entry) => entry.path === filePath);
-      if (!file) return null;
+    (filePath: string, rowRanges: RowRange[]): SelectionMention | null => {
+      const processed = processedByPath.get(filePath);
+      if (!processed) return null;
+      const ranges = rowsToLineRanges(processed, rowRanges);
+      if (!ranges) return null;
       // Capture the snippet client-side. The preview is the joined
-      // text of every selected line, in source order, so the
+      // text of exactly the selected rows, in display order, so the
       // backend can include selection text in the prompt even when
       // the file no longer exists on disk (deletion diffs). Line
       // text is whatever the diff renderer showed, not the
       // post-edit source — a chip captured on a deletion diff
       // intentionally records the snippet that "used to exist".
-      const processed = processLinesWithNumbers(file.lines);
-      const selectedLines: string[] = [];
-      for (const range of normalized) {
-        for (const line of processed) {
-          if (line.kind === "hunk") continue;
-          const lineNumber =
-            line.kind === "add"
-              ? line.newLine
-              : line.kind === "del"
-                ? line.oldLine
-                : line.newLine;
-          if (
-            lineNumber !== undefined &&
-            lineNumber >= range.start &&
-            lineNumber <= range.end
-          ) {
-            selectedLines.push(line.text);
-          }
-        }
-      }
+      const selectedLines = processed
+        .filter((line, j) => line.kind !== "hunk" && isRowSelected(rowRanges, j))
+        .map((line) => line.text);
       const preview = truncatePreview(selectedLines.join("\n"));
-      return { path: filePath, ranges: normalized, preview };
+      return { path: filePath, ranges, preview };
     },
-    [files]
+    [processedByPath]
   );
 
   const onAddToChat = useCallback(
@@ -1404,25 +1455,18 @@ function SelectableDiffView({
   return (
     <div className="border-t border-border/30 divide-y divide-border/20">
       {files.map((file, i) => {
-        const processed = processLinesWithNumbers(file.lines);
+        const processed =
+          processedByPath.get(file.path) ?? processLinesWithNumbers(file.lines);
         const fileRanges = selectionByFile[file.path] ?? [];
         const showToolbar =
           !dragging && toolbarFile === file.path && fileRanges.length > 0;
-        // Anchor the toolbar under the last rendered row of the most
-        // recent range. Old/new line numbers can collide (a deleted
-        // line 10 and an added line 10), so we pick the last matching
-        // row index rather than a line number.
+        // Anchor the toolbar under the last row of the most recent
+        // range (ranges are row indices, so this is just its end).
         const lastRange = fileRanges[fileRanges.length - 1];
-        let toolbarIndex = -1;
-        if (showToolbar && lastRange) {
-          processed.forEach((line, j) => {
-            if (line.kind === "hunk") return;
-            const n = line.kind === "del" ? line.oldLine : line.newLine;
-            if (n !== undefined && n >= lastRange.start && n <= lastRange.end) {
-              toolbarIndex = j;
-            }
-          });
-        }
+        const toolbarIndex = showToolbar && lastRange ? lastRange.end : -1;
+        const toolbarLineRanges = showToolbar
+          ? rowsToLineRanges(processed, fileRanges)
+          : null;
         return (
           <div key={i}>
             {files.length > 1 && (
@@ -1454,37 +1498,23 @@ function SelectableDiffView({
                     }
                     const isAdd = line.kind === "add";
                     const isDel = line.kind === "del";
-                    // For non-contiguous ranges, the chip is per-line
-                    // in the union — a line is "selected" when it
-                    // falls inside any active range. For deleted
-                    // lines we use the old line number; for added
-                    // lines we use the new one. Context lines share
-                    // the new number (which is what the user sees in
-                    // the right gutter anyway).
-                    const lineNumber =
-                      line.kind === "add"
-                        ? line.newLine
-                        : line.kind === "del"
-                          ? line.oldLine
-                          : line.newLine;
-                    const isSelected =
-                      lineNumber !== undefined &&
-                      fileRanges.some(
-                        (range) =>
-                          lineNumber >= range.start &&
-                          lineNumber <= range.end,
-                      );
+                    // Deleted rows are numbered by the old file, added
+                    // and context rows by the new one (what the user sees
+                    // in the right gutter). Selection itself is by row, so
+                    // an old and a new line sharing a number stay distinct.
+                    const lineNumber = rowLineNumber(line);
+                    const isSelected = isRowSelected(fileRanges, j);
                     return (
                       <Fragment key={j}>
                       <div
                         data-line-number={lineNumber}
                         onPointerDown={(e) =>
                           lineNumber !== undefined &&
-                          onLinePointerDown(file.path, lineNumber, e)
+                          onLinePointerDown(file.path, j, e)
                         }
                         onPointerEnter={() =>
                           lineNumber !== undefined &&
-                          onLinePointerEnter(file.path, lineNumber)
+                          onLinePointerEnter(file.path, j)
                         }
                         title={
                           lineNumber === undefined
@@ -1497,7 +1527,7 @@ function SelectableDiffView({
                           type="button"
                           onClick={(e) =>
                             lineNumber !== undefined &&
-                            onGutterKeyboardClick(file.path, lineNumber, e)
+                            onGutterKeyboardClick(file.path, j, e)
                           }
                           className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
                           aria-label={`Select line ${lineNumber}`}
@@ -1508,7 +1538,7 @@ function SelectableDiffView({
                           type="button"
                           onClick={(e) =>
                             lineNumber !== undefined &&
-                            onGutterKeyboardClick(file.path, lineNumber, e)
+                            onGutterKeyboardClick(file.path, j, e)
                           }
                           className="w-9 shrink-0 text-right pr-2 py-0.5 select-none font-mono text-[10px] text-muted-foreground/40 hover:bg-primary/20 hover:text-primary border-r border-border/20 bg-background/10"
                           aria-label={`Select line ${lineNumber}`}
@@ -1537,7 +1567,7 @@ function SelectableDiffView({
                         >
                           <div className="flex items-center gap-2 rounded-md border border-border bg-popover px-2 py-1 shadow-md">
                             <span className="font-mono text-[10px] text-muted-foreground">
-                              {fileRanges
+                              {(toolbarLineRanges ?? [])
                                 .map((range) =>
                                   range.start === range.end
                                     ? `L${range.start}`
@@ -3757,8 +3787,16 @@ export function SessionView({
   const [steerInProgress, setSteerInProgress] = useState(false);
   const steerInProgressRef = useRef(false);
   // Carries the steer text across the stop -> stream-close -> resume hop
-  // for emulated (Claude/Anita) steering.
-  const pendingSteerRef = useRef<string | null>(null);
+  // for emulated (Claude/Anita) steering, together with the mention and
+  // selection chips snapshotted when the user pressed steer. The resume
+  // runs in a completion handler that closed over the chip state from
+  // when the original run started, so reading `activeMentions` /
+  // `activeSelections` there would replay stale chips (issue #416).
+  const pendingSteerRef = useRef<{
+    text: string;
+    mentions: FileMention[];
+    selections: SelectionMention[];
+  } | null>(null);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -4924,7 +4962,8 @@ export function SessionView({
             pendingSteerRef.current &&
             sessionId
           ) {
-            const steerText = pendingSteerRef.current;
+            const pendingSteer = pendingSteerRef.current;
+            const steerText = pendingSteer.text;
             pendingSteerRef.current = null;
             steerInProgressRef.current = false;
             setSteerInProgress(false);
@@ -4937,18 +4976,9 @@ export function SessionView({
               undefined,
               undefined,
               { skillName: undefined },
-              // Snapshot the composer's mention stack at the moment
-              // of the emulated steer so the resumed run still
-              // includes the chips the user added before pressing
-              // Enter to steer (issue #312 P2). Without this, the
-              // mention chips would silently drop on the resumed
-              // turn and the agent prompt would be missing the
-              // file context the user already saw in the composer.
-              activeMentions.slice(),
-              // Same snapshot for selection chips (issue #416): a
-              // user that adds a chip to the composer, then steers,
-              // expects the new chip to ride on the resumed run.
-              activeSelections.slice()
+              // Chips snapshotted in `handleSteer` (issues #312, #416).
+              pendingSteer.mentions,
+              pendingSteer.selections
             );
             return;
           }
@@ -6154,7 +6184,8 @@ export function SessionView({
           pendingSteerRef.current &&
           completedSessionId
         ) {
-          const steerText = pendingSteerRef.current;
+          const pendingSteer = pendingSteerRef.current;
+          const steerText = pendingSteer.text;
           pendingSteerRef.current = null;
           steerInProgressRef.current = false;
           setSteerInProgress(false);
@@ -6167,13 +6198,9 @@ export function SessionView({
             undefined,
             undefined,
             { skillName: undefined },
-            // Snapshot the composer's mention stack at the moment
-            // of the emulated steer (issue #312 P2). See the
-            // matching comment on the other emulated-steer call
-            // site for the rationale.
-            activeMentions.slice(),
-            // Same snapshot for selection chips (issue #416).
-            activeSelections.slice()
+            // Chips snapshotted in `handleSteer` (issues #312, #416).
+            pendingSteer.mentions,
+            pendingSteer.selections
           );
           return;
         }
@@ -6637,6 +6664,15 @@ export function SessionView({
       return;
     }
 
+    // Snapshot the composer chips now: they ride on the resumed run and
+    // leave the composer, same as a normal send. A steer that promoted a
+    // queued message (empty composer) carries no composer chips.
+    const steerMentions = promotedId ? [] : activeMentions.slice();
+    const steerSelections = promotedId ? [] : activeSelections.slice();
+    if (!promotedId) {
+      setActiveMentions([]);
+      setActiveSelections([]);
+    }
     setMessage("");
     clearComposerDraft(composerDraftKey);
     setStreamItems((prev) => [
@@ -6650,7 +6686,11 @@ export function SessionView({
     // steer can't race the stop+resume.
     steerInProgressRef.current = true;
     setSteerInProgress(true);
-    pendingSteerRef.current = steerText;
+    pendingSteerRef.current = {
+      text: steerText,
+      mentions: steerMentions,
+      selections: steerSelections,
+    };
     try {
       await stopSession(projectId, targetSessionId, worktreeId);
     } catch (err) {
