@@ -114,7 +114,7 @@ test("locator reuses the registry snapshot and sees a rewritten registry", async
   });
 });
 
-test("worktree cache evicts entries after 64 project lookups", async () => {
+test("locator scans more than 64 projects without reparsing the shared registry", async () => {
   await withTempHome(async (home) => {
     const projects = Array.from({ length: 65 }, (_, i) => ({
       id: `proj-${i}`, name: `project ${i}`, path: path.join(home, `project-${i}`),
@@ -138,12 +138,50 @@ test("worktree cache evicts entries after 64 project lookups", async () => {
       mkdir: fs.mkdir,
     });
     try {
-      for (const project of projects) await getProjectWorktrees(project.id);
+      assert.equal(await locateSessionById("missing"), null);
+      assert.equal(await locateSessionById("missing"), null);
+      assert.equal(registryReads, 1, "both scans share one parsed registry");
+    } finally {
+      _setJsonRegistryFs(previous);
+    }
+  });
+});
+
+test("worktree cache evicts old registry snapshots after 64 files", async () => {
+  await withTempHome(async (home) => {
+    const homes = Array.from({ length: 65 }, (_, i) => path.join(home, `home-${i}`));
+    for (const fixtureHome of homes) {
+      mkdirSync(fixtureHome, { recursive: true });
+      const projectPath = path.join(fixtureHome, "project");
+      await plantProject(fixtureHome, "proj", "demo", projectPath);
+      writeFileSync(path.join(fixtureHome, "worktrees.json"), JSON.stringify([{
+        id: "main", projectId: "proj", name: "main", path: projectPath,
+        isMain: true, createdAt: "2026-01-01T00:00:00.000Z",
+      }]));
+    }
+    let registryReads = 0;
+    const previous = _setJsonRegistryFs({
+      readFile: async (file, encoding) => {
+        if (file.endsWith("/worktrees.json")) registryReads++;
+        return fs.readFile(file, encoding);
+      },
+      open: fs.open,
+      writeFile: fs.writeFile,
+      rename: fs.rename,
+      mkdir: fs.mkdir,
+    });
+    try {
+      for (const fixtureHome of homes) {
+        process.env.CONTROLLER_HOME = fixtureHome;
+        await getProjectWorktrees("proj");
+      }
       assert.equal(registryReads, 65);
-      await getProjectWorktrees(projects[64].id);
-      assert.equal(registryReads, 65, "most recent entry stays cached");
-      await getProjectWorktrees(projects[0].id);
-      assert.equal(registryReads, 66, "oldest entry was evicted");
+      process.env.CONTROLLER_HOME = homes[64];
+      await getProjectWorktrees("proj");
+      assert.equal(registryReads, 65, "most recent snapshot stays cached");
+      process.env.CONTROLLER_HOME = homes[0];
+      await getProjectWorktrees("proj");
+      assert.equal(registryReads, 66, "oldest snapshot was evicted");
     } finally {
       _setJsonRegistryFs(previous);
     }

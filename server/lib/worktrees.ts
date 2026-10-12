@@ -27,7 +27,11 @@ export interface Worktree {
 
 const MAIN_WORKTREE_NAME = "main";
 const WORKTREE_CACHE_LIMIT = 64;
-const worktreeCache = new Map<string, Worktree[]>();
+interface WorktreeSnapshot {
+  byProject: Map<string, Worktree[]>;
+  projectsWithMain: Set<string>;
+}
+const worktreeCache = new Map<string, WorktreeSnapshot>();
 
 /** Clear cached registry snapshots, primarily for tests that replace fixtures. */
 export function invalidateWorktreeCache(): void {
@@ -45,20 +49,39 @@ async function registryVersion(file: string): Promise<string> {
   }
 }
 
-function cachedWorktrees(key: string): Worktree[] | undefined {
+function cachedRegistry(key: string): WorktreeSnapshot | undefined {
   const cached = worktreeCache.get(key);
   if (!cached) return undefined;
   worktreeCache.delete(key);
   worktreeCache.set(key, cached);
-  return cached.map((worktree) => ({ ...worktree }));
+  return cached;
 }
 
-function cacheWorktrees(key: string, worktrees: Worktree[]): void {
-  worktreeCache.delete(key);
-  worktreeCache.set(key, worktrees.map((worktree) => ({ ...worktree })));
+function cacheRegistry(file: string, key: string, worktrees: Worktree[]): WorktreeSnapshot {
+  const snapshot: WorktreeSnapshot = {
+    byProject: new Map(),
+    projectsWithMain: new Set(),
+  };
+  for (const worktree of worktrees) {
+    const group = snapshot.byProject.get(worktree.projectId) ?? [];
+    group.push({ ...worktree });
+    snapshot.byProject.set(worktree.projectId, group);
+    if (worktree.isMain) snapshot.projectsWithMain.add(worktree.projectId);
+  }
+  // A newer version supersedes earlier snapshots of this same file.
+  for (const cachedKey of worktreeCache.keys()) {
+    if (cachedKey.startsWith(`${file}\0`)) worktreeCache.delete(cachedKey);
+  }
+  worktreeCache.set(key, snapshot);
   if (worktreeCache.size > WORKTREE_CACHE_LIMIT) {
     worktreeCache.delete(worktreeCache.keys().next().value!);
   }
+  return snapshot;
+}
+
+function projectWorktrees(snapshot: WorktreeSnapshot, projectId: string): Worktree[] | undefined {
+  if (!snapshot.projectsWithMain.has(projectId)) return undefined;
+  return snapshot.byProject.get(projectId)?.map((worktree) => ({ ...worktree })) ?? [];
 }
 
 /**
@@ -135,14 +158,20 @@ export async function getProjectWorktrees(
   if (!project) return [];
   const file = worktreesRegistryFile();
   try {
-    const key = `${file}\0${projectId}\0${await registryVersion(file)}`;
-    const hit = cachedWorktrees(key);
-    if (hit) return hit;
+    const key = `${file}\0${await registryVersion(file)}`;
+    const hit = cachedRegistry(key);
+    if (hit) {
+      const found = projectWorktrees(hit, projectId);
+      if (found) return found;
+    }
     return await withLock(file, async () => {
       // Another caller may have populated the cache while we waited.
-      const lockedKey = `${file}\0${projectId}\0${await registryVersion(file)}`;
-      const lockedHit = cachedWorktrees(lockedKey);
-      if (lockedHit) return lockedHit;
+      const lockedKey = `${file}\0${await registryVersion(file)}`;
+      const lockedHit = cachedRegistry(lockedKey);
+      if (lockedHit) {
+        const found = projectWorktrees(lockedHit, projectId);
+        if (found) return found;
+      }
       const { value: registry, fromBackup } = await readJsonRegistry<Worktree[]>(file, {
         defaultValue: [],
         backup: `${file}.bak`,
@@ -153,10 +182,9 @@ export async function getProjectWorktrees(
       if (!hasMain || fromBackup) {
         await writeJsonRegistry(file, registry);
       }
-      const result = registry.filter((w) => w.projectId === projectId);
-      const currentKey = `${file}\0${projectId}\0${await registryVersion(file)}`;
-      cacheWorktrees(currentKey, result);
-      return result;
+      const currentKey = `${file}\0${await registryVersion(file)}`;
+      const snapshot = cacheRegistry(file, currentKey, registry);
+      return projectWorktrees(snapshot, projectId) ?? [];
     });
   } catch (err) {
     if (err instanceof RegistryParseError) {
