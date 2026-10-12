@@ -270,6 +270,7 @@ test("archive returns 409 with an active-monitors blocker (issue #351)", async (
       persistent: true,
       deadlineAt: null,
       startedAt: new Date().toISOString(),
+      status: "running",
       lineCount: 0,
       onLinePattern: null,
     });
@@ -423,6 +424,7 @@ test("archive reports every blocker when multiple are present (issue #351)", asy
       persistent: true,
       deadlineAt: null,
       startedAt: new Date().toISOString(),
+      status: "running",
       lineCount: 0,
       onLinePattern: null,
     });

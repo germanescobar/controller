@@ -322,6 +322,7 @@ const MONITOR: Monitor = {
   persistent: false,
   deadlineAt: Date.now() + 5 * 60 * 1000,
   startedAt: "2026-09-21T00:00:00.000Z",
+  status: "running",
   lineCount: 3,
   onLinePattern: null,
 };

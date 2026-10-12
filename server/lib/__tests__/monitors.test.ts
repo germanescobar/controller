@@ -61,6 +61,7 @@ test("startMonitor spawns a process and lists it under the session", async () =>
     assert.ok(monitor.id);
     assert.equal(monitor.sessionId, "s1");
     assert.equal(monitor.command, "printf 'hello\nworld\n'");
+    assert.equal(monitor.status, "running");
     // `startMonitor` returns a snapshot copy of the monitor, so live
     // counter updates don't reflect on `monitor.lineCount`. Poll
     // `listMonitors` instead — that's a fresh snapshot every call.
@@ -73,6 +74,43 @@ test("startMonitor spawns a process and lists it under the session", async () =>
     assert.equal(listed[0].id, monitor.id);
     assert.equal(listed[0].lineCount, 2);
     stopMonitor(monitor.id);
+  });
+});
+
+test("a naturally finished monitor stays listed with exited status", async () => {
+  await withTempHome(async (home) => {
+    const monitor = startMonitor({
+      sessionId: "s-exit",
+      worktreePath: projectPath(home),
+      description: "finishes",
+      command: "printf 'done\\n'",
+      persistent: true,
+    });
+    assert.equal(monitor.status, "running");
+    await waitFor(
+      () => listMonitors("s-exit")[0]?.status === "exited",
+      2_000
+    );
+    assert.equal(listMonitors("s-exit").length, 1);
+    assert.equal(stopMonitor(monitor.id)?.status, "exited");
+  });
+});
+
+test("a child process error marks the retained monitor as exited", async () => {
+  await withTempHome(async (home) => {
+    const monitor = startMonitor({
+      sessionId: "s-error",
+      worktreePath: path.join(home, "missing-working-directory"),
+      description: "cannot start",
+      command: "printf 'unreachable\\n'",
+      persistent: true,
+    });
+    assert.equal(monitor.status, "running");
+    await waitFor(
+      () => listMonitors("s-error")[0]?.status === "exited",
+      2_000
+    );
+    assert.equal(stopMonitor(monitor.id)?.status, "exited");
   });
 });
 
@@ -117,6 +155,7 @@ test("stopMonitor removes the entry and kills the process", async () => {
       limits: { maxPerSession: 8, maxLines: 100 },
     });
     assert.equal(listMonitors("s2").length, 1);
+    assert.equal(listMonitors("s2")[0].status, "running");
     const stopped = stopMonitor(monitor.id);
     assert.ok(stopped);
     assert.equal(stopped?.id, monitor.id);
@@ -271,12 +310,11 @@ test("startMonitor auto-kills when the deadline elapses", async () => {
     assert.ok(monitor.deadlineAt);
     // The auto-kill SIGTERMs the child but keeps the entry in the map
     // (Claude Code parity: monitors persist until explicitly stopped).
-    // Asserting that the *child* is gone is enough — the process exit
-    // fires before the parent observes the timeout in some Node
-    // versions, so we poll for the process to be absent from
-    // `monitors` after the explicit `stopMonitor` rather than racing
-    // the timer.
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    // The timeout exits the child while retaining the monitor entry.
+    await waitFor(
+      () => listMonitors("s-timeout")[0]?.status === "exited",
+      2_000
+    );
     stopMonitor(monitor.id);
     assert.equal(listMonitors("s-timeout").length, 0);
   });
