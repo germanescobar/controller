@@ -14,6 +14,14 @@ export function editorWillUnmount(current: NavigationView, next: NavigationView)
   );
 }
 
+/** An empty focus queue leaves the current session visible. */
+export function focusDestinationNeedsConfirmation(
+  current: NavigationView,
+  next?: NavigationView,
+): boolean {
+  return next !== undefined && editorWillUnmount(current, next);
+}
+
 /** An earlier confirmation covers only the draft revision visible when it was accepted. */
 export function confirmNewEditsAfterAwait(
   approvedRevision: number,

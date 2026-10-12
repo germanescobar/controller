@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { confirmNewEditsAfterAwait, editorWillUnmount } from "./dirty-navigation.ts";
+import {
+  confirmNewEditsAfterAwait,
+  editorWillUnmount,
+  focusDestinationNeedsConfirmation,
+} from "./dirty-navigation.ts";
 
 test("dirty navigation guards only moves that unmount the editor", () => {
   const current = { page: "session", projectId: "project-a", worktreeId: "worktree-a", sessionId: "one" };
@@ -8,6 +12,15 @@ test("dirty navigation guards only moves that unmount the editor", () => {
   assert.equal(editorWillUnmount(current, { ...current, worktreeId: "worktree-b" }), true);
   assert.equal(editorWillUnmount(current, { page: "session", projectId: "project-b" }), true);
   assert.equal(editorWillUnmount(current, { page: "settings" }), true);
+});
+
+test("Mark Done skips the discard prompt for an empty queue or same worktree", () => {
+  const current = { page: "session", projectId: "project-a", worktreeId: "worktree-a" };
+  assert.equal(focusDestinationNeedsConfirmation(current), false);
+  assert.equal(focusDestinationNeedsConfirmation(current, { ...current, sessionId: "two" }), false);
+  assert.equal(focusDestinationNeedsConfirmation(current, {
+    page: "session", projectId: "project-a", worktreeId: "worktree-b",
+  }), true);
 });
 
 test("an async Mark Done cannot discard edits made after its first confirmation", async () => {

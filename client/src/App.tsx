@@ -42,7 +42,11 @@ import {
 } from "./lib/useShortcutBindings.tsx";
 import { FileIndexProvider } from "./lib/useFileIndex.tsx";
 import { pickFirstFocusItem } from "./lib/focus-advance.ts";
-import { confirmNewEditsAfterAwait, editorWillUnmount } from "./lib/dirty-navigation.ts";
+import {
+  confirmNewEditsAfterAwait,
+  editorWillUnmount,
+  focusDestinationNeedsConfirmation,
+} from "./lib/dirty-navigation.ts";
 import {
   loadSavedVisitedAt,
   persistVisitedAt,
@@ -690,23 +694,33 @@ function AppBody() {
 
   const handleFocusDone = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
-    if (!confirmDiscardSourceEdits()) return;
-    const approvedRevision = sourceEditorRevisionRef.current;
-    const wasDirtyAtApproval = sourceEditorDirtyRef.current;
     const projectId = activeView.projectId;
     const worktreeId = currentFocusItem?.worktreeId ?? activeView.worktreeId;
     const sessionId = activeView.sessionId;
+    const nextQueue = focusQueue.filter(
+      (item) =>
+        !(
+          item.projectId === projectId &&
+          item.worktreeId === worktreeId &&
+          item.session.id === sessionId
+        )
+    );
+    const nextItem = nextQueue[0];
+    const willUnmountEditor = focusDestinationNeedsConfirmation(
+      activeView,
+      nextItem && {
+        page: "session",
+        projectId: nextItem.projectId,
+        worktreeId: nextItem.worktreeId,
+        sessionId: nextItem.session.id,
+      },
+    );
+    if (willUnmountEditor && !confirmDiscardSourceEdits()) return;
+    const approvedRevision = sourceEditorRevisionRef.current;
+    const wasDirtyAtApproval = sourceEditorDirtyRef.current;
 
     try {
       await markSessionFocusDone(projectId, sessionId, worktreeId);
-      const nextQueue = focusQueue.filter(
-        (item) =>
-          !(
-            item.projectId === projectId &&
-            item.worktreeId === worktreeId &&
-            item.session.id === sessionId
-          )
-      );
       focusQueueRef.current = nextQueue;
       setFocusQueue(nextQueue);
       setFocusRefreshKey((key) => key + 1);
@@ -720,14 +734,14 @@ function AppBody() {
         viewRef.current.projectId === projectId &&
         viewRef.current.worktreeId === activeView.worktreeId &&
         viewRef.current.sessionId === sessionId;
-      if (stillViewingSession && confirmNewEditsAfterAwait(
+      if (stillViewingSession && (!willUnmountEditor || confirmNewEditsAfterAwait(
         approvedRevision,
         sourceEditorRevisionRef.current,
         wasDirtyAtApproval,
         sourceEditorDirtyRef.current,
         confirmDiscardSourceEdits,
-      )) {
-        openFocusItem(nextQueue[0], true);
+      ))) {
+        openFocusItem(nextItem, willUnmountEditor);
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update focus queue");
