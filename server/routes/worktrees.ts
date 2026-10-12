@@ -345,6 +345,12 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
       path: targetRealPath,
       relativePath: matchingRoot.relativePath || path.basename(targetRealPath),
       content,
+      // File mtime at the moment the read happened. The client
+      // echoes this back as `?baseMtime=…` on PUT so a concurrent
+      // external write (an agent rewriting the file, a teammate
+      // pushing to a shared checkout) is detected as a 412 instead
+      // of being silently clobbered (Codex P1 review, PR #422).
+      mtime: stat.mtime.toISOString(),
     });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -353,6 +359,176 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
       return;
     }
     console.error("GET /projects/:projectId/source error:", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/*
+ * Save the contents of a file inside the active worktree. Mirrors the
+ * path-safety rules of the GET `/source` handler above: the requested
+ * path must resolve (via `fs.realpath` for the parent directory) to a
+ * regular file inside the project root, the worktree path, or one of
+ * the project's other worktree roots. This stops a malicious or
+ * confused client from writing outside the workspace — same trust
+ * model as the read endpoint, intentionally symmetric.
+ *
+ * Capped at the same 1 MiB ceiling as the read endpoint. Pairs with
+ * the in-experience editor in `SourceViewerPanel` (see
+ * `client/src/components/SourceEditor.tsx`) so the Files tab can save
+ * changes back to disk. Returns the new file metadata so the client
+ * can re-sync its `SourceFilePreview` cache without a follow-up read.
+ */
+worktreesRouter.put("/:projectId/source", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json(
+      await worktreeNotFoundPayload(
+        project.id,
+        getQueryString(req.query.worktreeId)
+      )
+    );
+    return;
+  }
+
+  const requestedPath = getQueryString(req.query.path);
+  if (!requestedPath) {
+    res.status(400).json({ error: "path is required" });
+    return;
+  }
+
+  const body = (req.body ?? {}) as { content?: unknown; baseMtime?: unknown };
+  if (typeof body.content !== "string") {
+    res.status(400).json({ error: "content must be a string" });
+    return;
+  }
+  // Optional revision token: the ISO mtime the client captured when
+  // it last read the file. When present and the file already exists
+  // on disk, we compare against the current mtime and reject the
+  // write with 412 if they disagree — protecting against the case
+  // where the user typed for a while, the file was changed by an
+  // agent or another process in the meantime, and a blind PUT
+  // would clobber the external edit (Codex P1 review, PR #422).
+  // Absent baseMtime (older clients, or a brand-new file) means
+  // "skip the check" — we still apply the path-safety gate above.
+  const baseMtimeRaw = body.baseMtime;
+  const baseMtimeParsed =
+    typeof baseMtimeRaw === "string" && baseMtimeRaw.trim()
+      ? new Date(baseMtimeRaw)
+      : null;
+  const baseMtime =
+    baseMtimeParsed && !Number.isNaN(baseMtimeParsed.getTime())
+      ? baseMtimeParsed
+      : null;
+
+  const absolutePath = path.isAbsolute(requestedPath)
+    ? requestedPath
+    : path.resolve(worktree.path, requestedPath);
+
+  try {
+    const worktrees = await getProjectWorktrees(project.id);
+    const allowedRoots = [
+      project.path,
+      worktree.path,
+      ...worktrees.map((item) => item.path),
+    ];
+
+    // For an existing file we can `realpath` it directly; for a new
+    // file we have to walk the parent directory instead and append
+    // the basename — the file itself doesn't exist yet so `realpath`
+    // would ENOENT. Both branches still resolve every symlink on the
+    // way so a symlinked file under the project root is accepted
+    // only when the symlink target is *also* under an allowed root.
+    let targetRealPath: string;
+    try {
+      targetRealPath = await fs.realpath(absolutePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const parentDir = path.dirname(absolutePath);
+      const parentReal = await fs.realpath(parentDir);
+      targetRealPath = path.join(parentReal, path.basename(absolutePath));
+    }
+
+    const rootRealPaths = await Promise.all(
+      Array.from(new Set(allowedRoots)).map((root) => fs.realpath(root))
+    );
+    const matchingRoot = rootRealPaths
+      .map((rootRealPath) => ({
+        rootRealPath,
+        relativePath: path.relative(rootRealPath, targetRealPath),
+      }))
+      .filter(
+        ({ relativePath }) =>
+          relativePath === "" ||
+          (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+      )
+      .sort((a, b) => b.rootRealPath.length - a.rootRealPath.length)[0];
+
+    if (!matchingRoot) {
+      res.status(403).json({ error: "File is outside this project" });
+      return;
+    }
+
+    const maxSourceFileBytes = 1024 * 1024;
+    const byteLength = Buffer.byteLength(body.content, "utf-8");
+    if (byteLength > maxSourceFileBytes) {
+      res.status(413).json({ error: "File is too large to save" });
+      return;
+    }
+
+    // Reject directories outright — we only write file contents. The
+    // file explorer never lists a directory as a preview target, but
+    // a stale path could still be in flight from the client; failing
+    // here is friendlier than letting `fs.writeFile` error on EISDIR.
+    let existingStat: Awaited<ReturnType<typeof fs.stat>> | null = null;
+    try {
+      existingStat = await fs.stat(targetRealPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (existingStat && !existingStat.isFile()) {
+      res.status(400).json({ error: "Path does not reference a file" });
+      return;
+    }
+
+    // Optimistic concurrency: if the client supplied a `baseMtime`
+    // and the file already exists on disk, the on-disk mtime must
+    // still match — otherwise an external write happened between
+    // the GET and the PUT and a blind write would clobber it. We
+    // don't apply the check for brand-new files (`existingStat`
+    // null) because there's no previous revision to disagree with,
+    // and we don't apply it when the client opted out by omitting
+    // `baseMtime` (back-compat for older callers).
+    if (baseMtime && existingStat) {
+      if (existingStat.mtime.getTime() !== baseMtime.getTime()) {
+        res.status(412).json({
+          error: "File changed on disk since it was opened",
+          currentMtime: existingStat.mtime.toISOString(),
+        });
+        return;
+      }
+    }
+
+    await fs.writeFile(targetRealPath, body.content, "utf-8");
+    const savedStat = await fs.stat(targetRealPath);
+    res.json({
+      path: targetRealPath,
+      relativePath: matchingRoot.relativePath || path.basename(targetRealPath),
+      content: body.content,
+      savedAt: savedStat.mtime.toISOString(),
+    });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    console.error("PUT /projects/:projectId/source error:", err);
     res.status(500).json({ error: (err as Error).message });
   }
 });
