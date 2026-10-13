@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
+import { ArrowLeft, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit, SKIP } from "unist-util-visit";
@@ -3098,6 +3098,7 @@ function SourceViewerPanel({
   onPreviewSaved,
   onDirtyChange,
   onDraftEdit,
+  onBackToExplorer,
 }: {
   projectId: string;
   preview: SourceFilePreview | null;
@@ -3106,9 +3107,14 @@ function SourceViewerPanel({
   onPreviewSaved?: (saved: { path: string; relativePath: string; content: string; savedAt: string }) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onDraftEdit?: () => void;
+  onBackToExplorer: () => boolean;
 }) {
   const selectedLine = preview?.line;
   const [editedPreview, setEditedPreview] = useState<SourceFilePreview | null>(null);
+  const [mobileView, setMobileView] = useState<"explorer" | "editor">(
+    preview ? "editor" : "explorer"
+  );
+  const [editorVersion, setEditorVersion] = useState(0);
 
   // The CodeMirror buffer is the source of truth for the on-screen
   // content. We swap `preview` for `editedPreview` after a successful
@@ -3122,10 +3128,25 @@ function SourceViewerPanel({
     setEditedPreview(null);
   }, [preview?.file.path, preview?.file.content]);
 
+  // A tree selection, file finder result, or source reference all update
+  // preview through the same parent path. Keep the tree mounted while it is
+  // hidden so its expanded folders and scroll position survive the return.
+  useEffect(() => {
+    if (preview) setMobileView("editor");
+  }, [preview]);
+
+  const returnToExplorer = () => {
+    if (!onBackToExplorer()) return;
+    // A confirmed back action discards the draft. Remounting the editor
+    // resets CodeMirror before the file is opened again.
+    setEditorVersion((version) => version + 1);
+    setMobileView("explorer");
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex min-h-0 flex-1">
-        <div className="w-56 shrink-0 overflow-y-auto border-r border-border bg-muted/10 py-2">
+        <div className={`${mobileView === "explorer" ? "flex-1" : "hidden"} min-w-0 overflow-y-auto bg-muted/10 py-2 md:block md:w-56 md:flex-none md:border-r md:border-border`}>
           <FileTree
             activePath={displayedPreview?.file.path}
             onOpenFile={onOpenFile}
@@ -3133,8 +3154,18 @@ function SourceViewerPanel({
             worktreeId={worktreeId}
           />
         </div>
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className={`${mobileView === "editor" ? "flex" : "hidden"} min-w-0 flex-1 flex-col md:flex`}>
           <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+            <button
+              type="button"
+              onClick={returnToExplorer}
+              className="-ml-2 flex h-10 shrink-0 items-center gap-1 rounded px-2 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground md:hidden"
+              aria-label="Back to file explorer"
+              title="Back to file explorer"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              <span>Files</span>
+            </button>
             <FileCode className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
               {displayedPreview ? (
@@ -3149,6 +3180,7 @@ function SourceViewerPanel({
           </div>
           {displayedPreview ? (
             <SourceEditor
+              key={editorVersion}
               file={displayedPreview.file}
               projectId={projectId}
               worktreeId={worktreeId}
@@ -9108,6 +9140,7 @@ export function SessionView({
                 <div className="absolute inset-0 overflow-hidden bg-background">
                   <SourceViewerPanel
                     onOpenFile={(path) => requestOpenSourcePath(path)}
+                    onBackToExplorer={confirmLeaveFilesIfDirty}
                     onDirtyChange={(dirty) => {
                       setSourceEditorDirty(dirty);
                       onSourceEditorDirtyChange?.(dirty);
