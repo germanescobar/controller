@@ -775,7 +775,7 @@ export async function removeSessionQueuedMessage(
 //
 // A monitor is a long-lived child process per session whose stdout
 // streams into the session event log (see `server/lib/monitors.ts`).
-// The floating bar reads the live list to surface running watches in
+// The floating bar reads the session list to surface watches in
 // the current session. Stop / start are out of scope for the bar
 // (issue #339 review); they live in dedicated surfaces.
 
@@ -789,6 +789,7 @@ export interface Monitor {
   /** Epoch ms; `null` for persistent monitors with no deadline. */
   deadlineAt: number | null;
   startedAt: string;
+  status: "running" | "exited";
   /** Number of stdout lines captured so far. */
   lineCount: number;
   /** Pattern string used to re-inject matching lines as user turns; `null` when unset. */
@@ -796,7 +797,7 @@ export interface Monitor {
 }
 
 /**
- * List every monitor running on a session. Uses the per-session mirror
+ * List every retained monitor on a session. Uses the per-session mirror
  * route (`/api/sessions/:sessionId/monitors`) so the floating bar
  * doesn't need a project id — the relationship rows already carry
  * that for the current session but the monitor surface is symmetric.

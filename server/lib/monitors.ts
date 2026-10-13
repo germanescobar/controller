@@ -43,6 +43,8 @@ export interface Monitor {
   /** Epoch ms; the monitor self-kills when `Date.now() > deadlineAt`. */
   deadlineAt: number | null;
   startedAt: string;
+  /** Whether the child process is still alive. Exited entries remain listed until stopped. */
+  status: "running" | "exited";
   /** Number of stdout lines captured so far. Capped at `limits.maxLines`. */
   lineCount: number;
   /**
@@ -152,6 +154,7 @@ export function startMonitor(params: {
     persistent,
     deadlineAt,
     startedAt: new Date().toISOString(),
+    status: "running",
     lineCount: 0,
     onLinePattern: params.onLinePattern ?? null,
   };
@@ -255,6 +258,7 @@ export function startMonitor(params: {
     }
   });
   child.on("exit", () => {
+    monitor.status = "exited";
     // Mark the monitor as exited in-place rather than removing the
     // entry — a process that finishes naturally (e.g. `printf`) is
     // still a meaningful record: the agent can read its lineCount
@@ -264,6 +268,7 @@ export function startMonitor(params: {
     // `TaskStop` analogue — explicit stop, never implicit vanish).
   });
   child.on("error", (error) => {
+    monitor.status = "exited";
     if (monitor.lineCount < limits.maxLines) {
       monitor.lineCount += 1;
       const event: AgentEvent = {

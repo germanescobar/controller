@@ -142,6 +142,7 @@ test("archiveSession route stops persistent monitors for the session", async () 
       persistent: true,
       deadlineAt: null,
       startedAt: new Date().toISOString(),
+      status: "running",
       lineCount: 0,
       onLinePattern: null,
     });
@@ -201,6 +202,7 @@ test("archiveSession route cleanup drains monitors when the strict-archive block
       persistent: true,
       deadlineAt: null,
       startedAt: new Date().toISOString(),
+      status: "running",
       lineCount: 0,
       onLinePattern: null,
     } as const;
