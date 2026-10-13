@@ -654,9 +654,6 @@ function AppBody() {
 
   const confirmArchiveCurrentSession = async () => {
     if (activeView.page !== "session" || !activeView.sessionId) return;
-    if (!confirmDiscardSourceEdits()) return;
-    const approvedRevision = sourceEditorRevisionRef.current;
-    const wasDirtyAtApproval = sourceEditorDirtyRef.current;
     const { projectId, worktreeId, sessionId } = activeView;
 
     try {
@@ -677,14 +674,8 @@ function AppBody() {
         viewRef.current.projectId === projectId &&
         viewRef.current.worktreeId === worktreeId &&
         viewRef.current.sessionId === sessionId;
-      if (stillViewingSession && confirmNewEditsAfterAwait(
-        approvedRevision,
-        sourceEditorRevisionRef.current,
-        wasDirtyAtApproval,
-        sourceEditorDirtyRef.current,
-        confirmDiscardSourceEdits,
-      )) {
-        setView({ page: "session", projectId, worktreeId }, true);
+      if (stillViewingSession) {
+        setView({ page: "session", projectId, worktreeId });
       }
       toast.success("Session archived");
     } catch (err) {
@@ -873,7 +864,6 @@ function AppBody() {
           onBeforeRemove={(target) => {
             if (view.page !== "session" || view.projectId !== target.projectId) return true;
             if (target.worktreeId && view.worktreeId !== target.worktreeId) return true;
-            if (target.sessionId && view.sessionId !== target.sessionId) return true;
             return confirmDiscardSourceEdits();
           }}
           onFocusQueueChange={handleFocusQueueChange}

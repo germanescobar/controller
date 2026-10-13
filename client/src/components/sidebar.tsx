@@ -86,8 +86,8 @@ interface SidebarProps {
   onNewWorktree: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSettings: () => void;
-  /** Confirm before removing the active editor's project, worktree, or session. */
-  onBeforeRemove?: (target: { projectId: string; worktreeId?: string; sessionId?: string }) => boolean;
+  /** Confirm before deleting the active editor's project or worktree. */
+  onBeforeRemove?: (target: { projectId: string; worktreeId?: string }) => boolean;
   /**
    * The canonical sorted focus queue, owned by App (which overlays
    * per-session handled timestamps and runs `sortFocusQueue`). The
@@ -2399,7 +2399,6 @@ export function Sidebar({
                 event.preventDefault();
                 if (!confirmArchiveSession) return;
                 const { projectId, sessionId, worktreeId } = confirmArchiveSession;
-                if (onBeforeRemove?.({ projectId, worktreeId, sessionId }) === false) return;
                 setArchivingSession(true);
                 try {
                   await archiveSession(projectId, sessionId, worktreeId);

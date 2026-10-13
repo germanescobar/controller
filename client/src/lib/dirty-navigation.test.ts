@@ -9,6 +9,9 @@ import {
 test("dirty navigation guards only moves that unmount the editor", () => {
   const current = { page: "session", projectId: "project-a", worktreeId: "worktree-a", sessionId: "one" };
   assert.equal(editorWillUnmount(current, { ...current, sessionId: "two" }), false);
+  assert.equal(editorWillUnmount(current, {
+    page: "session", projectId: "project-a", worktreeId: "worktree-a",
+  }), false); // Archiving clears the session id but preserves the editor's key.
   assert.equal(editorWillUnmount(current, { ...current, worktreeId: "worktree-b" }), true);
   assert.equal(editorWillUnmount(current, { page: "session", projectId: "project-b" }), true);
   assert.equal(editorWillUnmount(current, { page: "settings" }), true);
