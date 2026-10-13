@@ -68,7 +68,9 @@ import { canonicalProviderId } from "@/lib/provider-id";
 import { DOCS_URL } from "@/lib/links";
 import {
   fetchStableProjectSessionSnapshot,
+  isCurrentCatchUpCommit,
   mergeProjectSessionSnapshot,
+  type CatchUpCommit,
 } from "@/lib/sidebar-project-catch-up";
 
 const SESSION_BATCH_SIZE = 5;
@@ -131,6 +133,7 @@ interface WorktreeWithSessions extends Worktree {
 interface ProjectWithWorktrees extends Project {
   worktrees: WorktreeWithSessions[];
   isExpanded: boolean;
+  catchUpCommit?: CatchUpCommit;
 }
 
 export interface FocusQueueItem {
@@ -1114,6 +1117,7 @@ export function Sidebar({
   // made while it was inactive appear without reloading every project.
   const previousActiveProjectIdRef = useRef(activeProjectId);
   const [catchUpProjectId, setCatchUpProjectId] = useState<string | null>(null);
+  const catchUpAttemptRef = useRef(0);
   const projectEventGenerationRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     if (previousActiveProjectIdRef.current === activeProjectId) return;
@@ -1126,6 +1130,7 @@ export function Sidebar({
     }
     const projectId = catchUpProjectId;
     const fullLoadVersion = loadAllStateRef.current.version;
+    const attemptId = ++catchUpAttemptRef.current;
     let cancelled = false;
     const invalidated = () =>
       cancelled ||
@@ -1148,6 +1153,7 @@ export function Sidebar({
               activeLocationRef.current;
             return {
               ...project,
+              catchUpCommit: { attemptId, fullLoadVersion },
               worktrees: mergeProjectSessionSnapshot(
                 project.worktrees,
                 snapshot,
@@ -1168,6 +1174,26 @@ export function Sidebar({
       cancelled = true;
     };
   }, [catchUpProjectId, loadAllVersion, refreshActiveSessions]);
+
+  // The marker travels with the committed project state. Clear the
+  // pending target only after that state lands and remains current;
+  // an invalidated updater leaves no matching marker and can retry.
+  useEffect(() => {
+    if (!catchUpProjectId || activeProjectId !== catchUpProjectId) return;
+    const commit = projectData.find(
+      (project) => project.id === catchUpProjectId,
+    )?.catchUpCommit;
+    if (
+      isCurrentCatchUpCommit(
+        commit,
+        catchUpAttemptRef.current,
+        loadAllStateRef.current.version,
+        loadAllStateRef.current.inFlightTokens.size > 0,
+      )
+    ) {
+      setCatchUpProjectId(null);
+    }
+  }, [projectData, catchUpProjectId, activeProjectId, loadAllVersion]);
 
   // Last `pendingProjectRefreshes.counter` we already dispatched.
   // App.tsx bumps the counter on every event burst and never

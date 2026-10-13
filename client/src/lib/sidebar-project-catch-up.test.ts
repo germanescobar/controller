@@ -4,6 +4,7 @@ import type { SessionSummary, Worktree } from "../api.ts";
 import {
   fetchProjectSessionSnapshot,
   fetchStableProjectSessionSnapshot,
+  isCurrentCatchUpCommit,
   mergeProjectSessionSnapshot,
 } from "./sidebar-project-catch-up.ts";
 
@@ -37,6 +38,15 @@ test("project catch-up fetches every worktree session list for only the newly ac
       ["created-while-inactive", "current-created-while-inactive"],
     ],
   );
+});
+
+test("catch-up clears only after the current attempt commits", () => {
+  const commit = { attemptId: 7, fullLoadVersion: 12 };
+  assert.equal(isCurrentCatchUpCommit(commit, 7, 12, false), true);
+  assert.equal(isCurrentCatchUpCommit(undefined, 7, 12, false), false);
+  assert.equal(isCurrentCatchUpCommit(commit, 8, 12, false), false);
+  assert.equal(isCurrentCatchUpCommit(commit, 7, 13, false), false);
+  assert.equal(isCurrentCatchUpCommit(commit, 7, 12, true), false);
 });
 
 test("project catch-up retries when a newer lifecycle event arrives during the fetch", async () => {

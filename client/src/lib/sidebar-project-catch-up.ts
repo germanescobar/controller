@@ -1,5 +1,23 @@
 import type { SessionSummary, Worktree } from "../api.ts";
 
+export interface CatchUpCommit {
+  attemptId: number;
+  fullLoadVersion: number;
+}
+
+export function isCurrentCatchUpCommit(
+  commit: CatchUpCommit | undefined,
+  attemptId: number,
+  fullLoadVersion: number,
+  fullLoadInFlight: boolean,
+): boolean {
+  return (
+    !fullLoadInFlight &&
+    commit?.attemptId === attemptId &&
+    commit.fullLoadVersion === fullLoadVersion
+  );
+}
+
 /** Reconcile a project that may have missed events while it was inactive. */
 export async function fetchProjectSessionSnapshot(
   projectId: string,
