@@ -66,6 +66,12 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
 import { DOCS_URL } from "@/lib/links";
+import {
+  fetchStableProjectSessionSnapshot,
+  isCurrentCatchUpCommit,
+  mergeProjectSessionSnapshot,
+  type CatchUpCommit,
+} from "@/lib/sidebar-project-catch-up";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -127,6 +133,7 @@ interface WorktreeWithSessions extends Worktree {
 interface ProjectWithWorktrees extends Project {
   worktrees: WorktreeWithSessions[];
   isExpanded: boolean;
+  catchUpCommit?: CatchUpCommit;
 }
 
 export interface FocusQueueItem {
@@ -475,6 +482,10 @@ export function Sidebar({
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
+  const archivedIdsRef = useRef(archivedIds);
+  useEffect(() => {
+    archivedIdsRef.current = archivedIds;
+  }, [archivedIds]);
   const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(
     new Set(),
   );
@@ -698,6 +709,13 @@ export function Sidebar({
   useEffect(() => {
     projectDataRef.current = projectData;
   }, [projectData]);
+  // Navigation only changes the default expansion for newly discovered
+  // projects/worktrees. Keep the latest location available to async
+  // refreshes without making every navigation restart the full load.
+  const activeLocationRef = useRef({ activeProjectId, activeWorktreeId });
+  useEffect(() => {
+    activeLocationRef.current = { activeProjectId, activeWorktreeId };
+  }, [activeProjectId, activeWorktreeId]);
 
   // ---------------------------------------------------------------------------
   // LoadAllCoordinator
@@ -795,12 +813,14 @@ export function Sidebar({
           const wtWithSessions = await Promise.all(
             worktrees.map(async (wt) => {
               const sessions = await fetchSessions(project.id, wt.id);
-              const existingProject = projectData.find(
+              const existingProject = projectDataRef.current.find(
                 (p) => p.id === project.id,
               );
               const existingWt = existingProject?.worktrees.find(
                 (w) => w.id === wt.id,
               );
+              const { activeProjectId, activeWorktreeId } =
+                activeLocationRef.current;
               const isActiveWt =
                 wt.id === activeWorktreeId ||
                 (!activeWorktreeId &&
@@ -813,11 +833,15 @@ export function Sidebar({
               } satisfies WorktreeWithSessions;
             }),
           );
-          const existing = projectData.find((p) => p.id === project.id);
+          const existing = projectDataRef.current.find(
+            (p) => p.id === project.id,
+          );
           return {
             ...project,
             worktrees: wtWithSessions,
-            isExpanded: existing?.isExpanded ?? project.id === activeProjectId,
+            isExpanded:
+              existing?.isExpanded ??
+              project.id === activeLocationRef.current.activeProjectId,
           } satisfies ProjectWithWorktrees;
         }),
       );
@@ -841,7 +865,7 @@ export function Sidebar({
         }
       });
     }
-  }, [projects, activeProjectId, activeWorktreeId, archivedIds]);
+  }, [projects, archivedIds, bumpLoadAllState, refreshActiveSessions]);
 
   /**
    * Refresh a single worktree's session list. Used by the targeted
@@ -1088,6 +1112,89 @@ export function Sidebar({
     loadAll().catch(() => {});
   }, [loadAll, focusRefreshKey]);
 
+  // The event stream only follows the active project. When returning
+  // to another project, reconcile its entire subtree once so changes
+  // made while it was inactive appear without reloading every project.
+  const previousActiveProjectIdRef = useRef(activeProjectId);
+  const [catchUpProjectId, setCatchUpProjectId] = useState<string | null>(null);
+  const catchUpAttemptRef = useRef(0);
+  const projectEventGenerationRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (previousActiveProjectIdRef.current === activeProjectId) return;
+    previousActiveProjectIdRef.current = activeProjectId;
+    setCatchUpProjectId(activeProjectId);
+  }, [activeProjectId]);
+  useEffect(() => {
+    if (!catchUpProjectId || loadAllStateRef.current.inFlightTokens.size > 0) {
+      return;
+    }
+    const projectId = catchUpProjectId;
+    const fullLoadVersion = loadAllStateRef.current.version;
+    const attemptId = ++catchUpAttemptRef.current;
+    let cancelled = false;
+    const invalidated = () =>
+      cancelled ||
+      activeLocationRef.current.activeProjectId !== projectId ||
+      loadAllStateRef.current.version !== fullLoadVersion;
+    fetchStableProjectSessionSnapshot(
+      projectId,
+      () => projectEventGenerationRef.current.get(projectId) ?? 0,
+      invalidated,
+      fetchWorktrees,
+      fetchSessions,
+    )
+      .then((snapshot) => {
+        if (invalidated() || !snapshot) return;
+        setProjectData((prev) =>
+          prev.map((project) => {
+            if (invalidated()) return project;
+            if (project.id !== projectId) return project;
+            const { activeProjectId, activeWorktreeId } =
+              activeLocationRef.current;
+            return {
+              ...project,
+              catchUpCommit: { attemptId, fullLoadVersion },
+              worktrees: mergeProjectSessionSnapshot(
+                project.worktrees,
+                snapshot,
+                archivedIdsRef.current,
+                (worktree) =>
+                  worktree.id === activeWorktreeId ||
+                  (!activeWorktreeId &&
+                    worktree.isMain &&
+                    projectId === activeProjectId),
+              ),
+            };
+          }),
+        );
+        refreshActiveSessions().catch(() => {});
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [catchUpProjectId, loadAllVersion, refreshActiveSessions]);
+
+  // The marker travels with the committed project state. Clear the
+  // pending target only after that state lands and remains current;
+  // an invalidated updater leaves no matching marker and can retry.
+  useEffect(() => {
+    if (!catchUpProjectId || activeProjectId !== catchUpProjectId) return;
+    const commit = projectData.find(
+      (project) => project.id === catchUpProjectId,
+    )?.catchUpCommit;
+    if (
+      isCurrentCatchUpCommit(
+        commit,
+        catchUpAttemptRef.current,
+        loadAllStateRef.current.version,
+        loadAllStateRef.current.inFlightTokens.size > 0,
+      )
+    ) {
+      setCatchUpProjectId(null);
+    }
+  }, [projectData, catchUpProjectId, activeProjectId, loadAllVersion]);
+
   // Last `pendingProjectRefreshes.counter` we already dispatched.
   // App.tsx bumps the counter on every event burst and never
   // clears the payload; without this, any callback-dep change
@@ -1124,6 +1231,18 @@ export function Sidebar({
       return;
     }
     lastConsumedRefreshesCounterRef.current = pendingProjectRefreshes.counter;
+    // A catch-up already in flight must retry if this event refresh
+    // would otherwise be overwritten by its older snapshot.
+    const changedProjects = new Set([
+      ...pendingProjectRefreshes.sessions.map((scope) => scope.projectId),
+      ...pendingProjectRefreshes.worktrees,
+    ]);
+    changedProjects.forEach((projectId) => {
+      projectEventGenerationRef.current.set(
+        projectId,
+        (projectEventGenerationRef.current.get(projectId) ?? 0) + 1,
+      );
+    });
     pendingProjectRefreshes.sessions.forEach((scope) => {
       refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
         () => {},

@@ -1,0 +1,143 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import type { SessionSummary, Worktree } from "../api.ts";
+import {
+  fetchProjectSessionSnapshot,
+  fetchStableProjectSessionSnapshot,
+  isCurrentCatchUpCommit,
+  mergeProjectSessionSnapshot,
+} from "./sidebar-project-catch-up.ts";
+
+test("project catch-up fetches every worktree session list for only the newly active project", async () => {
+  const requests: string[] = [];
+  const worktrees = [
+    { id: "existing", projectId: "b" },
+    { id: "created-while-inactive", projectId: "b" },
+  ] as Worktree[];
+  const snapshot = await fetchProjectSessionSnapshot(
+    "b",
+    async (projectId) => {
+      requests.push(`worktrees:${projectId}`);
+      return worktrees;
+    },
+    async (projectId, worktreeId) => {
+      requests.push(`sessions:${projectId}:${worktreeId}`);
+      return [{ id: `current-${worktreeId}` }] as SessionSummary[];
+    },
+  );
+
+  assert.deepEqual(requests.sort(), [
+    "sessions:b:created-while-inactive",
+    "sessions:b:existing",
+    "worktrees:b",
+  ]);
+  assert.deepEqual(
+    snapshot.map(({ worktree, sessions }) => [worktree.id, sessions[0].id]),
+    [
+      ["existing", "current-existing"],
+      ["created-while-inactive", "current-created-while-inactive"],
+    ],
+  );
+});
+
+test("catch-up clears only after the current attempt commits", () => {
+  const commit = { attemptId: 7, fullLoadVersion: 12 };
+  assert.equal(isCurrentCatchUpCommit(commit, 7, 12, false), true);
+  assert.equal(isCurrentCatchUpCommit(undefined, 7, 12, false), false);
+  assert.equal(isCurrentCatchUpCommit(commit, 8, 12, false), false);
+  assert.equal(isCurrentCatchUpCommit(commit, 7, 13, false), false);
+  assert.equal(isCurrentCatchUpCommit(commit, 7, 12, true), false);
+});
+
+test("project catch-up retries when a newer lifecycle event arrives during the fetch", async () => {
+  const worktree = { id: "w", projectId: "b" } as Worktree;
+  const firstResponse = Promise.withResolvers<SessionSummary[]>();
+  let generation = 0;
+  let requests = 0;
+  const catchUp = fetchStableProjectSessionSnapshot(
+    "b",
+    () => generation,
+    () => false,
+    async () => [worktree],
+    async () => {
+      requests += 1;
+      return requests === 1
+        ? firstResponse.promise
+        : ([{ id: "newer-event" }] as SessionSummary[]);
+    },
+  );
+
+  // The first response was fetched before the event and is now stale.
+  await Promise.resolve();
+  assert.equal(requests, 1);
+  generation += 1;
+  firstResponse.resolve([{ id: "old-snapshot" }] as SessionSummary[]);
+  const snapshot = await catchUp;
+
+  assert.equal(requests, 2);
+  assert.deepEqual(snapshot?.[0].sessions.map((session) => session.id), [
+    "newer-event",
+  ]);
+});
+
+test("project catch-up rejects a snapshot overlapped by an older full load", async () => {
+  const worktree = { id: "w", projectId: "b" } as Worktree;
+  const oldResponse = Promise.withResolvers<SessionSummary[]>();
+  let fullLoadVersion = 2;
+  const staleCatchUp = fetchStableProjectSessionSnapshot(
+    "b",
+    () => 0,
+    () => fullLoadVersion !== 2,
+    async () => [worktree],
+    async () => oldResponse.promise,
+  );
+
+  await Promise.resolve();
+  fullLoadVersion = 3; // A full load starts before the catch-up resolves.
+  oldResponse.resolve([{ id: "stale" }] as SessionSummary[]);
+  assert.equal(await staleCatchUp, null);
+
+  fullLoadVersion = 4; // Once the full load settles, catch-up runs again.
+  const freshCatchUp = await fetchStableProjectSessionSnapshot(
+    "b",
+    () => 0,
+    () => fullLoadVersion !== 4,
+    async () => [worktree],
+    async () => [{ id: "current" }] as SessionSummary[],
+  );
+  assert.deepEqual(freshCatchUp?.[0].sessions.map((session) => session.id), [
+    "current",
+  ]);
+});
+
+test("project catch-up replaces missed changes and preserves expansion choices", () => {
+  const worktree = (id: string) => ({ id, projectId: "b" }) as Worktree;
+  const session = (id: string) => ({ id }) as SessionSummary;
+  const merged = mergeProjectSessionSnapshot(
+    [
+      { ...worktree("existing"), sessions: [session("stale")], isExpanded: false },
+      { ...worktree("removed"), sessions: [session("gone")], isExpanded: true },
+    ],
+    [
+      { worktree: worktree("existing"), sessions: [session("current")] },
+      {
+        worktree: worktree("created-while-inactive"),
+        sessions: [session("new"), session("archived")],
+      },
+    ],
+    new Set(["archived"]),
+    () => true,
+  );
+
+  assert.deepEqual(
+    merged.map(({ id, sessions, isExpanded }) => ({
+      id,
+      sessionIds: sessions.map((item) => item.id),
+      isExpanded,
+    })),
+    [
+      { id: "existing", sessionIds: ["current"], isExpanded: false },
+      { id: "created-while-inactive", sessionIds: ["new"], isExpanded: true },
+    ],
+  );
+});
