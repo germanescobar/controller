@@ -87,6 +87,8 @@ interface SidebarProps {
   onNewWorktree: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSettings: () => void;
+  /** Confirm before deleting the active editor's project or worktree. */
+  onBeforeRemove?: (target: { projectId: string; worktreeId?: string }) => boolean;
   /**
    * The canonical sorted focus queue, owned by App (which overlays
    * per-session handled timestamps and runs `sortFocusQueue`). The
@@ -404,6 +406,7 @@ export function Sidebar({
   onNewWorktree,
   onProjectsChanged,
   onSettings,
+  onBeforeRemove,
   focusQueue: focusQueueProp,
   onFocusQueueChange,
   focusRefreshKey,
@@ -881,6 +884,7 @@ export function Sidebar({
   const confirmDeleteProject = async () => {
     if (!confirmDeleteProjectId) return;
     if (deletingProject) return;
+    if (onBeforeRemove?.({ projectId: confirmDeleteProjectId }) === false) return;
     setDeletingProject(true);
     try {
       await deleteProject(confirmDeleteProjectId);
@@ -899,6 +903,7 @@ export function Sidebar({
     if (!confirmDeleteWorktree) return;
     if (deletingWorktree) return;
     const { projectId, worktreeId, dirtyFiles } = confirmDeleteWorktree;
+    if (onBeforeRemove?.({ projectId, worktreeId }) === false) return;
     // Issue #332: when the orchestrator already returned the dirty
     // file list for this worktree, the user has seen the warning and
     // clicked through to retry — pass `?force=1` so we don't loop on

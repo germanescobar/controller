@@ -183,6 +183,9 @@ interface SessionViewProps {
    * when there are no changes to report or no session is open.
    */
   onDiffSummary?: (summary: { added: number; deleted: number } | null) => void;
+  /** Mirrors the Files editor's dirty state for app-level navigation guards. */
+  onSourceEditorDirtyChange?: (dirty: boolean) => void;
+  onSourceEditorDraftEdit?: () => void;
   // Fires after the session title is renamed so the parent can refresh
   // other views (sidebar, focus queue) that cache the title separately.
   onTitleChange?: () => void;
@@ -3092,6 +3095,7 @@ function SourceViewerPanel({
   onOpenFile,
   onPreviewSaved,
   onDirtyChange,
+  onDraftEdit,
 }: {
   projectId: string;
   preview: SourceFilePreview | null;
@@ -3099,6 +3103,7 @@ function SourceViewerPanel({
   onOpenFile: (path: string) => void;
   onPreviewSaved?: (saved: { path: string; relativePath: string; content: string; savedAt: string }) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onDraftEdit?: () => void;
 }) {
   const selectedLine = preview?.line;
   const [editedPreview, setEditedPreview] = useState<SourceFilePreview | null>(null);
@@ -3147,6 +3152,7 @@ function SourceViewerPanel({
               worktreeId={worktreeId}
               initialLine={selectedLine}
               onDirtyChange={onDirtyChange}
+              onDraftEdit={onDraftEdit}
               onSaved={(saved) => {
                 // Refresh the parent cache so the file-tree active
                 // marker and the Files tab title both reflect the
@@ -3666,6 +3672,8 @@ export function SessionView({
   focusAdvanceCountdown = null,
   onArchive,
   onDiffSummary,
+  onSourceEditorDirtyChange,
+  onSourceEditorDraftEdit,
 }: SessionViewProps) {
   // Composer draft persistence (issue #251): rehydrate the textarea and skill
   // chips from localStorage so an in-progress message survives re-mounts and
@@ -3869,9 +3877,7 @@ export function SessionView({
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
   // True while the SourceEditor (Files tab) has unsaved edits.
-  // Drives two guards: a `beforeunload` warning when closing the
-  // app, and a confirm() prompt when the user navigates away from
-  // the Files tab / opens a different file (issue #313 follow-up).
+  // Drives the browser, Files tab, and app navigation guards.
   const [sourceEditorDirty, setSourceEditorDirty] = useState(false);
   // Browser-level guard: when the SourceEditor is dirty, warn on
   // tab close / window unload. The handler is registered only
@@ -9100,7 +9106,11 @@ export function SessionView({
                 <div className="absolute inset-0 overflow-hidden bg-background">
                   <SourceViewerPanel
                     onOpenFile={(path) => requestOpenSourcePath(path)}
-                    onDirtyChange={setSourceEditorDirty}
+                    onDirtyChange={(dirty) => {
+                      setSourceEditorDirty(dirty);
+                      onSourceEditorDirtyChange?.(dirty);
+                    }}
+                    onDraftEdit={onSourceEditorDraftEdit}
                     onPreviewSaved={(saved) => {
                       // Keep the parent's `sourcePreview` cache
                       // in sync with the editor's saved content
