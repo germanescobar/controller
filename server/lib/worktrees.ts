@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs/promises";
 import { v4 as uuidv4 } from "uuid";
 import { getProject, getProjects, type Project } from "./projects.js";
 import {
@@ -25,6 +26,63 @@ export interface Worktree {
 }
 
 const MAIN_WORKTREE_NAME = "main";
+const WORKTREE_CACHE_LIMIT = 64;
+interface WorktreeSnapshot {
+  byProject: Map<string, Worktree[]>;
+  projectsWithMain: Set<string>;
+}
+const worktreeCache = new Map<string, WorktreeSnapshot>();
+
+/** Clear cached registry snapshots, primarily for tests that replace fixtures. */
+export function invalidateWorktreeCache(): void {
+  worktreeCache.clear();
+}
+
+async function registryVersion(file: string): Promise<string> {
+  try {
+    const stat = await fs.stat(file);
+    // The inode and size distinguish atomic replacements with the same mtime.
+    return `${stat.mtimeMs}:${stat.ino}:${stat.size}`;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw err;
+  }
+}
+
+function cachedRegistry(key: string): WorktreeSnapshot | undefined {
+  const cached = worktreeCache.get(key);
+  if (!cached) return undefined;
+  worktreeCache.delete(key);
+  worktreeCache.set(key, cached);
+  return cached;
+}
+
+function cacheRegistry(file: string, key: string, worktrees: Worktree[]): WorktreeSnapshot {
+  const snapshot: WorktreeSnapshot = {
+    byProject: new Map(),
+    projectsWithMain: new Set(),
+  };
+  for (const worktree of worktrees) {
+    const group = snapshot.byProject.get(worktree.projectId) ?? [];
+    group.push({ ...worktree });
+    snapshot.byProject.set(worktree.projectId, group);
+    if (worktree.isMain) snapshot.projectsWithMain.add(worktree.projectId);
+  }
+  // A newer version supersedes earlier snapshots of this same file.
+  for (const cachedKey of worktreeCache.keys()) {
+    if (cachedKey.startsWith(`${file}\0`)) worktreeCache.delete(cachedKey);
+  }
+  worktreeCache.set(key, snapshot);
+  if (worktreeCache.size > WORKTREE_CACHE_LIMIT) {
+    worktreeCache.delete(worktreeCache.keys().next().value!);
+  }
+  return snapshot;
+}
+
+function projectWorktrees(snapshot: WorktreeSnapshot, projectId: string): Worktree[] | undefined {
+  if (!snapshot.projectsWithMain.has(projectId)) return undefined;
+  return snapshot.byProject.get(projectId)?.map((worktree) => ({ ...worktree })) ?? [];
+}
 
 /**
  * Run `fn` with the worktrees registry loaded and the per-file mutex held.
@@ -98,10 +156,35 @@ export async function getProjectWorktrees(
 ): Promise<Worktree[]> {
   const project = await getProject(projectId);
   if (!project) return [];
+  const file = worktreesRegistryFile();
   try {
-    return await withWorktreeRegistry(async (registry) => {
-      ensureMainInRegistry(project, registry);
-      return registry.filter((w) => w.projectId === projectId);
+    const key = `${file}\0${await registryVersion(file)}`;
+    const hit = cachedRegistry(key);
+    if (hit) {
+      const found = projectWorktrees(hit, projectId);
+      if (found) return found;
+    }
+    return await withLock(file, async () => {
+      // Another caller may have populated the cache while we waited.
+      const lockedKey = `${file}\0${await registryVersion(file)}`;
+      const lockedHit = cachedRegistry(lockedKey);
+      if (lockedHit) {
+        const found = projectWorktrees(lockedHit, projectId);
+        if (found) return found;
+      }
+      const { value: registry, fromBackup } = await readJsonRegistry<Worktree[]>(file, {
+        defaultValue: [],
+        backup: `${file}.bak`,
+        validate: validateArray<Worktree>,
+      });
+      const hasMain = registry.some((w) => w.projectId === projectId && w.isMain);
+      if (!hasMain) ensureMainInRegistry(project, registry);
+      if (!hasMain || fromBackup) {
+        await writeJsonRegistry(file, registry);
+      }
+      const currentKey = `${file}\0${await registryVersion(file)}`;
+      const snapshot = cacheRegistry(file, currentKey, registry);
+      return projectWorktrees(snapshot, projectId) ?? [];
     });
   } catch (err) {
     if (err instanceof RegistryParseError) {
