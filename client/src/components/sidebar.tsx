@@ -66,12 +66,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { canonicalProviderId } from "@/lib/provider-id";
 import { DOCS_URL } from "@/lib/links";
-import {
-  fetchStableProjectSessionSnapshot,
-  isCurrentCatchUpCommit,
-  mergeProjectSessionSnapshot,
-  type CatchUpCommit,
-} from "@/lib/sidebar-project-catch-up";
+import { SidebarRefreshQueue, type SidebarRefreshScopes } from "../lib/sidebar-refresh-queue.ts";
 
 const SESSION_BATCH_SIZE = 5;
 
@@ -133,7 +128,6 @@ interface WorktreeWithSessions extends Worktree {
 interface ProjectWithWorktrees extends Project {
   worktrees: WorktreeWithSessions[];
   isExpanded: boolean;
-  catchUpCommit?: CatchUpCommit;
 }
 
 export interface FocusQueueItem {
@@ -335,71 +329,6 @@ function SessionProviderIcon({
   return <MessageSquare className={className} />;
 }
 
-export interface PendingRefreshDrainPlan {
-  // Session scopes (`projectId\u0000worktreeId`) to remove from the
-  // queue and replay now.
-  dispatchSessions: Array<{ key: string; projectId: string; worktreeId: string }>;
-  // Project ids whose worktree list should be removed from the queue
-  // and replayed now.
-  dispatchProjects: string[];
-  // Scopes to drop without replaying (their project is gone).
-  evictSessions: string[];
-  evictProjects: string[];
-}
-
-/**
- * Decide what the sidebar's queued-refresh drain should do. Pure so
- * the ordering rules can be unit-tested without a DOM.
- *
- * While any `loadAll` is in flight the plan is empty: a replay would
- * only see the same in-flight load, defer, re-queue and re-drain on
- * the next microtask — a request loop that lasts as long as the
- * load. The `loadAll` state transition at completion re-runs the
- * drain, so nothing queued here is lost.
- *
- * A scope whose project is missing from the snapshot is evicted only
- * once a `loadAll` has succeeded, so a failed or not-yet-run initial
- * load doesn't discard refreshes for projects that haven't painted.
- */
-export function planPendingRefreshDrain(input: {
-  inFlightLoadAlls: number;
-  lastSuccessToken: number;
-  pendingSessionKeys: Iterable<string>;
-  pendingProjectIds: Iterable<string>;
-  projects: Array<{ id: string; worktrees: Array<{ id: string }> }>;
-}): PendingRefreshDrainPlan {
-  const plan: PendingRefreshDrainPlan = {
-    dispatchSessions: [],
-    dispatchProjects: [],
-    evictSessions: [],
-    evictProjects: [],
-  };
-  if (input.inFlightLoadAlls > 0) return plan;
-  const canEvictMissingProject = input.lastSuccessToken > 0;
-  const projectsById = new Map(input.projects.map((p) => [p.id, p]));
-  for (const key of input.pendingSessionKeys) {
-    const idx = key.indexOf("\u0000");
-    const projectId = key.slice(0, idx);
-    const worktreeId = key.slice(idx + 1);
-    const project = projectsById.get(projectId);
-    if (!project) {
-      if (canEvictMissingProject) plan.evictSessions.push(key);
-      continue;
-    }
-    // Worktree not loaded yet: keep it queued.
-    if (!project.worktrees.some((w) => w.id === worktreeId)) continue;
-    plan.dispatchSessions.push({ key, projectId, worktreeId });
-  }
-  for (const projectId of input.pendingProjectIds) {
-    if (!projectsById.has(projectId)) {
-      if (canEvictMissingProject) plan.evictProjects.push(projectId);
-      continue;
-    }
-    plan.dispatchProjects.push(projectId);
-  }
-  return plan;
-}
-
 function worktreeVisibilityKey(projectId: string, worktreeId: string): string {
   return `${projectId}:${worktreeId}`;
 }
@@ -482,10 +411,6 @@ export function Sidebar({
 }: SidebarProps) {
   const [projectData, setProjectData] = useState<ProjectWithWorktrees[]>([]);
   const [archivedIds, setArchivedIds] = useState<Set<string>>(new Set());
-  const archivedIdsRef = useRef(archivedIds);
-  useEffect(() => {
-    archivedIdsRef.current = archivedIds;
-  }, [archivedIds]);
   const [activeSessionIds, setActiveSessionIds] = useState<Set<string>>(
     new Set(),
   );
@@ -709,105 +634,14 @@ export function Sidebar({
   useEffect(() => {
     projectDataRef.current = projectData;
   }, [projectData]);
-  // Navigation only changes the default expansion for newly discovered
-  // projects/worktrees. Keep the latest location available to async
-  // refreshes without making every navigation restart the full load.
+  // Navigation changes defaults for newly discovered worktrees, not the full refresh schedule.
   const activeLocationRef = useRef({ activeProjectId, activeWorktreeId });
   useEffect(() => {
     activeLocationRef.current = { activeProjectId, activeWorktreeId };
   }, [activeProjectId, activeWorktreeId]);
 
-  // ---------------------------------------------------------------------------
-  // LoadAllCoordinator
-  //
-  // Replaces four pieces of bookkeeping that grew across the first four
-  // codex rounds: `loadAllTokenRef`, `inFlightLoadAllsRef`,
-  // `inFlightLoadAllsVersion`, and an ad-hoc "did the last loadAll
-  // succeed" check. The original problem the targeted refresh path has to
-  // answer is: "given that a `loadAll` *might* be painting a fresh
-  // snapshot right now, is it safe for me to write the data I just
-  // fetched, or should I keep my scope queued and let the next drain
-  // decide?" That's a single ordering question, and it deserves a single
-  // state machine.
-  //
-  // Invariants:
-  //
-  //   - `inFlightTokens`    =  the set of tokens for every `loadAll`
-  //     currently in flight. Empty ⇔ no loadAll in flight. A
-  //     single-token "current token" was insufficient because two
-  //     loadAlls can overlap (e.g. rapid project selection or
-  //     React StrictMode's development effect replay) and the first
-  //     to finish would otherwise clear the slot out from under the
-  //     second.
-  //   - `lastSuccessToken`  =  max over all successful `loadAll`
-  //     tokens (a failed loadAll does not bump it; an older successful
-  //     loadAll completing after a newer one does not regress it).
-  //   - `version`           =  monotonic counter bumped on every
-  //     transition. The drain effect depends on it so the drain re-fires
-  //     after any loadAll transition.
-  //
-  // The targeted refresh's deferral rule (single comparison, no chained
-  // gates):
-  //
-  //     tokenAtStart := max token in `inFlightTokens` at fetch start
-  //                    (0 if no loadAll in flight at start)
-  //     after fetch resolves:
-  //       safe to apply ⇔ lastSuccessToken ≥ tokenAtStart
-  //
-  // The logic: a successful loadAll that *started* at or after our
-  // snapshot means we have authoritative data and no pending loadAll
-  // is about to clobber us. Conversely, if `lastSuccessToken <
-  // tokenAtStart`, either (a) a loadAll is still in flight at our
-  // token, (b) a loadAll is in flight at a *newer* token, or (c) the
-  // loadAll at our token failed — all three cases defer. The next
-  // drain trigger (a transition on `version`) re-evaluates.
-  //
-  // Why this is the right shape: the prior four rounds were all variants
-  // of "did a loadAll start/succeed/fail since I sampled?". Folding that
-  // into one state + one comparison replaces ~70 lines of layered refs,
-  // double-bookkeeping (ref + state mirror), and chained gates with a
-  // single source of truth that any future reviewer can verify in one
-  // place.
-  // ---------------------------------------------------------------------------
-  const loadAllStateRef = useRef<{
-    inFlightTokens: Set<number>;
-    lastSuccessToken: number;
-    version: number;
-  }>({ inFlightTokens: new Set(), lastSuccessToken: 0, version: 0 });
-  const [loadAllVersion, setLoadAllVersion] = useState(0);
-  const bumpLoadAllState = useCallback((updater: () => void) => {
-    updater();
-    loadAllStateRef.current.version += 1;
-    setLoadAllVersion(loadAllStateRef.current.version);
-  }, []);
-
-  // Snapshot the loadAll state into a single comparison token. The
-  // targeted refresh uses this as `tokenAtStart`; the deferral
-  // rule is then `lastSuccessToken >= tokenAtStart`. Returns 0
-  // when no loadAll is in flight, which the rule treats as
-  // "always apply once the fetch returns" (every successful
-  // loadAll is at least token 1).
-  const snapshotLoadAllToken = (
-    state: { inFlightTokens: Set<number> }
-  ): number => {
-    if (state.inFlightTokens.size === 0) return 0;
-    let max = 0;
-    for (const t of state.inFlightTokens) {
-      if (t > max) max = t;
-    }
-    return max;
-  };
-
-  const loadAll = useCallback(async () => {
-    // Allocate a fresh token, claim an in-flight slot, bump version so
-    // the drain effect re-runs.
-    const myToken = loadAllStateRef.current.version + 1;
-    bumpLoadAllState(() => {
-      loadAllStateRef.current.inFlightTokens.add(myToken);
-    });
-    let succeeded = false;
-    try {
-      const next = await Promise.all(
+  const performLoadAll = useCallback(async () => {
+    const next = await Promise.all(
         projects.map(async (project) => {
           const worktrees = await fetchWorktrees(project.id);
           const wtWithSessions = await Promise.all(
@@ -845,80 +679,20 @@ export function Sidebar({
           } satisfies ProjectWithWorktrees;
         }),
       );
-      setProjectData(next);
-      await refreshActiveSessions();
-      succeeded = true;
-    } finally {
-      // Release this run's in-flight slot. With concurrent loadAlls
-      // the slot set is the source of truth — we only remove our
-      // own token, not the whole set. `lastSuccessToken` advances
-      // via max (not assignment) so a stale older loadAll
-      // completing after a newer one does not regress the
-      // authoritative marker.
-      bumpLoadAllState(() => {
-        loadAllStateRef.current.inFlightTokens.delete(myToken);
-        if (succeeded) {
-          loadAllStateRef.current.lastSuccessToken = Math.max(
-            loadAllStateRef.current.lastSuccessToken,
-            myToken,
-          );
-        }
-      });
-    }
-  }, [projects, archivedIds, bumpLoadAllState, refreshActiveSessions]);
+    projectDataRef.current = next;
+    setProjectData(next);
+    await refreshActiveSessions();
+  }, [projects, archivedIds, refreshActiveSessions]);
 
-  /**
-   * Refresh a single worktree's session list. Used by the targeted
-   * event handler below so a `session_added` / `session_removed` /
-   * `session_updated` event only re-fetches the affected worktree's
-   * sessions instead of every worktree in every project.
-   *
-   * Defers (queues + returns) when:
-   *   - a `loadAll` was in flight when the fetch started and no
-   *     `loadAll` at least that new has succeeded since (it is still
-   *     running, or it failed), or
-   *   - the project/worktree isn't in `projectDataRef.current` yet
-   *     (might appear once the in-flight/queued loadAll paints).
-   *
-   * A `loadAll` that starts *after* the fetch began doesn't defer it:
-   * that load issues its own requests later, so whichever write lands
-   * last is at least as fresh as the event that triggered us.
-   *
-   * Queued scopes are replayed by the drain once no `loadAll` is in
-   * flight (see `planPendingRefreshDrain`).
-   */
   const refreshWorktreeSessions = useCallback(
     async (projectId: string, worktreeId: string): Promise<void> => {
-      const tokenAtStart = snapshotLoadAllToken(loadAllStateRef.current);
       let sessions: SessionSummary[];
       try {
         sessions = await fetchSessions(projectId, worktreeId);
       } catch {
         return;
       }
-      // Single deferral rule. `lastSuccessToken >= tokenAtStart`
-      // means a successful loadAll that started at or after our
-      // snapshot has landed. If not, either a loadAll is still in
-      // flight, a newer loadAll started, or the loadAll at our
-      // snapshot failed — all three cases defer.
-      if (loadAllStateRef.current.lastSuccessToken < tokenAtStart) {
-        queueSessionRefresh(projectId, worktreeId);
-        return;
-      }
       const filtered = sessions.filter((s) => !archivedIds.has(s.id));
-      // Read the latest state via the ref to decide whether the
-      // scope is ready to apply. The ref is updated synchronously
-      // after every render, so this reflects the freshest snapshot
-      // we have *before* the awaited fetch — close enough for the
-      // decision; the setProjectData updater below re-checks the
-      // same condition on the live `prev` to avoid races.
-      const project = projectDataRef.current.find(
-        (p) => p.id === projectId,
-      );
-      if (!project || !project.worktrees.some((w) => w.id === worktreeId)) {
-        queueSessionRefresh(projectId, worktreeId);
-        return;
-      }
       setProjectData((prev) => {
         if (!prev.some((p) => p.id === projectId)) {
           return prev;
@@ -945,261 +719,89 @@ export function Sidebar({
     [archivedIds, refreshActiveSessions],
   );
 
-  /**
-   * Refresh a single project's worktree list. Used when a
-   * `worktree_added` / `worktree_removed` / `worktree_updated` event
-   * lands. Preserves each surviving worktree's `isExpanded` and
-   * `sessions` so the user doesn't lose their expansion state on
-   * every refresh, and so we only pay the sessions cost for worktrees
-   * the event actually changed.
-   *
-   * Defers (queues + returns) on the same `loadAllStateRef` condition
-   * as `refreshWorktreeSessions`: a loadAll is racing us, or the
-   * project isn't in `projectDataRef.current` yet.
-   */
-  const refreshProjectWorktrees = useCallback(
-    async (projectId: string): Promise<void> => {
-      const tokenAtStart = snapshotLoadAllToken(loadAllStateRef.current);
-      let worktrees: Worktree[];
-      try {
-        worktrees = await fetchWorktrees(projectId);
-      } catch {
-        return;
+  const performTargetedRefresh = useCallback(async (scopes: SidebarRefreshScopes) => {
+    // Project lists go first so a session event for a new worktree can
+    // update the worktree added by the same batch.
+    const newSessions: Array<{ projectId: string; worktreeId: string }> = [];
+    const catchUpIds = new Set(scopes.catchUpProjects);
+    const projectsToFetch = new Set([...scopes.projects, ...scopes.catchUpProjects]);
+    for (const { projectId, worktreeId } of scopes.sessions) {
+      const current = projectDataRef.current.find((p) => p.id === projectId);
+      if (!current?.worktrees.some((w) => w.id === worktreeId)) {
+        projectsToFetch.add(projectId);
       }
-      if (loadAllStateRef.current.lastSuccessToken < tokenAtStart) {
-        queueProjectWorktreesRefresh(projectId);
-        return;
-      }
-      const existingProject = projectDataRef.current.find(
-        (p) => p.id === projectId,
-      );
-      if (!existingProject) {
-        queueProjectWorktreesRefresh(projectId);
-        return;
-      }
-      const existingIds = new Set(
-        existingProject.worktrees.map((w) => w.id),
-      );
-      const newWorktreeIds = worktrees
-        .filter((w) => !existingIds.has(w.id))
-        .map((w) => w.id);
-      setProjectData((prev) => {
-        if (!prev.some((p) => p.id === projectId)) return prev;
-        return prev.map((p) => {
-          if (p.id !== projectId) return p;
-          const existingById = new Map(p.worktrees.map((w) => [w.id, w]));
-          const merged = worktrees.map((wt) => {
-            const existing = existingById.get(wt.id);
-            const isActiveWt =
-              wt.id === activeWorktreeId ||
-              (!activeWorktreeId && wt.isMain && projectId === activeProjectId);
-            return {
-              ...wt,
-              sessions: existing?.sessions ?? [],
-              isExpanded: existing?.isExpanded ?? isActiveWt,
-            } satisfies WorktreeWithSessions;
-          });
-          return { ...p, worktrees: merged };
-        });
-      });
-      // New worktrees won't have session lists yet — fetch them so
-      // the sidebar can render a fresh tree. Removed worktrees drop
-      // out naturally because we trust the server's worktree list.
-      await Promise.all(
-        newWorktreeIds.map((wtId) =>
-          refreshWorktreeSessions(projectId, wtId).catch(() => {}),
-        ),
-      );
-    },
-    [
-      activeProjectId,
-      activeWorktreeId,
-      refreshWorktreeSessions,
-    ],
-  );
-
-  // Queued scopes that arrived before their project/worktree was in
-  // `projectData`, or while a `loadAll` was racing them. The targeted
-  // refresh drops the data and records the scope here; the drain
-  // replays every entry once the loadAll bookkeeping says it's safe.
-  //
-  // Two parallel sets keyed by the same string key: one for session
-  // scopes (`projectId\u0000worktreeId`) and one for worktree scopes
-  // (`projectId`). Keeping them separate means a queued session
-  // refresh and a queued worktree refresh don't accidentally
-  // collapse into one and skip half the work.
-  const pendingSessionScopesRef = useRef<Set<string>>(new Set());
-  const pendingProjectScopesRef = useRef<Set<string>>(new Set());
-  // The drain is defined later in the file, so we keep a ref to its
-  // latest instance. The queue helpers schedule a microtask drain
-  // after adding to the set so a scope that arrives after a loadAll
-  // transition has already fired its drain still gets a chance to
-  // apply: a plain ref mutation doesn't trigger React effects.
-  const drainPendingRefreshesRef = useRef<() => void>(() => {});
-  const drainScheduledRef = useRef<boolean>(false);
-  const scheduleDrain = useCallback(() => {
-    if (drainScheduledRef.current) return;
-    drainScheduledRef.current = true;
-    queueMicrotask(() => {
-      drainScheduledRef.current = false;
-      drainPendingRefreshesRef.current();
-    });
-  }, []);
-  const queueSessionRefresh = useCallback(
-    (projectId: string, worktreeId: string) => {
-      pendingSessionScopesRef.current.add(`${projectId}\u0000${worktreeId}`);
-      scheduleDrain();
-    },
-    [scheduleDrain],
-  );
-  const queueProjectWorktreesRefresh = useCallback(
-    (projectId: string) => {
-      pendingProjectScopesRef.current.add(projectId);
-      scheduleDrain();
-    },
-    [scheduleDrain],
-  );
-
-  /**
-   * Replay every queued targeted refresh that has a now-loaded
-   * target. Called whenever `projectData` changes (a loadAll
-   * painted a new snapshot), `loadAllVersion` bumps (a loadAll
-   * started, succeeded, or failed), or a scope is queued. The
-   * decision rules — hold everything while a loadAll is in flight,
-   * evict only after a successful load — live in
-   * `planPendingRefreshDrain`; this just applies the plan.
-   */
-  const drainPendingRefreshes = useCallback(() => {
-    if (
-      pendingSessionScopesRef.current.size === 0 &&
-      pendingProjectScopesRef.current.size === 0
-    ) {
-      return;
     }
-    const plan = planPendingRefreshDrain({
-      inFlightLoadAlls: loadAllStateRef.current.inFlightTokens.size,
-      lastSuccessToken: loadAllStateRef.current.lastSuccessToken,
-      pendingSessionKeys: pendingSessionScopesRef.current,
-      pendingProjectIds: pendingProjectScopesRef.current,
-      projects: projectDataRef.current,
-    });
-    plan.evictSessions.forEach((key) =>
-      pendingSessionScopesRef.current.delete(key),
-    );
-    plan.evictProjects.forEach((projectId) =>
-      pendingProjectScopesRef.current.delete(projectId),
-    );
-    plan.dispatchSessions.forEach(({ key, projectId, worktreeId }) => {
-      pendingSessionScopesRef.current.delete(key);
-      refreshWorktreeSessions(projectId, worktreeId).catch(() => {});
-    });
-    plan.dispatchProjects.forEach((projectId) => {
-      pendingProjectScopesRef.current.delete(projectId);
-      refreshProjectWorktrees(projectId).catch(() => {});
-    });
-  }, [refreshWorktreeSessions, refreshProjectWorktrees]);
+    for (const projectId of projectsToFetch) {
+      const before = projectDataRef.current.find((p) => p.id === projectId);
+      const sourceProject = projects.find((p) => p.id === projectId);
+      if (!sourceProject) continue;
+      const beforeIds = new Set(before?.worktrees.map((w) => w.id) ?? []);
+      const worktrees = await fetchWorktrees(projectId).catch(() => null);
+      if (!worktrees) continue;
+      const { activeProjectId, activeWorktreeId } = activeLocationRef.current;
+      setProjectData((prev) => {
+        const current = prev.find((p) => p.id === projectId);
+        const project = current ?? {
+          ...sourceProject,
+          worktrees: [],
+          isExpanded: projectId === activeProjectId,
+        };
+        const existing = new Map(project.worktrees.map((w) => [w.id, w]));
+        const updated = {
+          ...project,
+          worktrees: worktrees.map((wt) => ({
+            ...wt,
+            sessions: existing.get(wt.id)?.sessions ?? [],
+            isExpanded: existing.get(wt.id)?.isExpanded ??
+              (wt.id === activeWorktreeId ||
+                (!activeWorktreeId && wt.isMain && projectId === activeProjectId)),
+          })),
+        };
+        return current
+          ? prev.map((p) => p.id === projectId ? updated : p)
+          : [...prev, updated];
+      });
+      newSessions.push(...worktrees
+        .filter((wt) => catchUpIds.has(projectId) || !beforeIds.has(wt.id))
+        .map((wt) => ({ projectId, worktreeId: wt.id })));
+    }
+    const seen = new Set<string>();
+    for (const { projectId, worktreeId } of [...scopes.sessions, ...newSessions]) {
+      const key = projectId + "\u0000" + worktreeId;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      await refreshWorktreeSessions(projectId, worktreeId);
+    }
+  }, [projects, refreshWorktreeSessions]);
 
-  // Keep the queue-helpers' ref mirror current so they can
-  // schedule a microtask drain after adding to the set. The
-  // microtask is the only way to fire a drain from inside the
-  // queue helper without coupling the helpers' definition to
-  // the drain's order in the file (forward reference).
-  useEffect(() => {
-    drainPendingRefreshesRef.current = drainPendingRefreshes;
-  }, [drainPendingRefreshes]);
+  // The queue instance survives renders; its workers use the latest callbacks.
+  const workersRef = useRef({ performLoadAll, performTargetedRefresh });
+  workersRef.current = { performLoadAll, performTargetedRefresh };
+  const refreshQueueRef = useRef<SidebarRefreshQueue | null>(null);
+  if (!refreshQueueRef.current) {
+    refreshQueueRef.current = new SidebarRefreshQueue(
+      () => workersRef.current.performLoadAll(),
+      (scopes) => workersRef.current.performTargetedRefresh(scopes),
+    );
+  }
+  const refreshQueue = refreshQueueRef.current;
+  const loadAll = useCallback(() => refreshQueue.enqueueFull(), [refreshQueue]);
 
   useEffect(() => {
     loadAll().catch(() => {});
-  }, [loadAll, focusRefreshKey]);
+  }, [loadAll, focusRefreshKey, projects, archivedIds]);
 
-  // The event stream only follows the active project. When returning
-  // to another project, reconcile its entire subtree once so changes
-  // made while it was inactive appear without reloading every project.
-  const previousActiveProjectIdRef = useRef(activeProjectId);
-  const [catchUpProjectId, setCatchUpProjectId] = useState<string | null>(null);
-  const catchUpAttemptRef = useRef(0);
-  const projectEventGenerationRef = useRef<Map<string, number>>(new Map());
+  // Reconcile the newly active project's entire subtree. The queue
+  // serializes this with full and lifecycle refreshes.
   useEffect(() => {
-    if (previousActiveProjectIdRef.current === activeProjectId) return;
-    previousActiveProjectIdRef.current = activeProjectId;
-    setCatchUpProjectId(activeProjectId);
-  }, [activeProjectId]);
-  useEffect(() => {
-    if (!catchUpProjectId || loadAllStateRef.current.inFlightTokens.size > 0) {
-      return;
-    }
-    const projectId = catchUpProjectId;
-    const fullLoadVersion = loadAllStateRef.current.version;
-    const attemptId = ++catchUpAttemptRef.current;
-    let cancelled = false;
-    const invalidated = () =>
-      cancelled ||
-      activeLocationRef.current.activeProjectId !== projectId ||
-      loadAllStateRef.current.version !== fullLoadVersion;
-    fetchStableProjectSessionSnapshot(
-      projectId,
-      () => projectEventGenerationRef.current.get(projectId) ?? 0,
-      invalidated,
-      fetchWorktrees,
-      fetchSessions,
-    )
-      .then((snapshot) => {
-        if (invalidated() || !snapshot) return;
-        setProjectData((prev) =>
-          prev.map((project) => {
-            if (invalidated()) return project;
-            if (project.id !== projectId) return project;
-            const { activeProjectId, activeWorktreeId } =
-              activeLocationRef.current;
-            return {
-              ...project,
-              catchUpCommit: { attemptId, fullLoadVersion },
-              worktrees: mergeProjectSessionSnapshot(
-                project.worktrees,
-                snapshot,
-                archivedIdsRef.current,
-                (worktree) =>
-                  worktree.id === activeWorktreeId ||
-                  (!activeWorktreeId &&
-                    worktree.isMain &&
-                    projectId === activeProjectId),
-              ),
-            };
-          }),
-        );
-        refreshActiveSessions().catch(() => {});
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [catchUpProjectId, loadAllVersion, refreshActiveSessions]);
-
-  // The marker travels with the committed project state. Clear the
-  // pending target only after that state lands and remains current;
-  // an invalidated updater leaves no matching marker and can retry.
-  useEffect(() => {
-    if (!catchUpProjectId || activeProjectId !== catchUpProjectId) return;
-    const commit = projectData.find(
-      (project) => project.id === catchUpProjectId,
-    )?.catchUpCommit;
-    if (
-      isCurrentCatchUpCommit(
-        commit,
-        catchUpAttemptRef.current,
-        loadAllStateRef.current.version,
-        loadAllStateRef.current.inFlightTokens.size > 0,
-      )
-    ) {
-      setCatchUpProjectId(null);
-    }
-  }, [projectData, catchUpProjectId, activeProjectId, loadAllVersion]);
+    if (activeProjectId) refreshQueue.enqueueCatchUpProject(activeProjectId);
+  }, [activeProjectId, refreshQueue]);
 
   // Last `pendingProjectRefreshes.counter` we already dispatched.
   // App.tsx bumps the counter on every event burst and never
   // clears the payload; without this, any callback-dep change
-  // (notably `activeProjectId`/`activeWorktreeId` recreating
-  // `refreshProjectWorktrees`) re-fires the same burst and
+  // (notably `activeProjectId`/`activeWorktreeId` changes) re-fires
+  // the same burst and
   // re-issues the last lifecycle's session/worktree requests —
   // which is exactly the request storm this whole change was
   // supposed to prevent.
@@ -1231,53 +833,13 @@ export function Sidebar({
       return;
     }
     lastConsumedRefreshesCounterRef.current = pendingProjectRefreshes.counter;
-    // A catch-up already in flight must retry if this event refresh
-    // would otherwise be overwritten by its older snapshot.
-    const changedProjects = new Set([
-      ...pendingProjectRefreshes.sessions.map((scope) => scope.projectId),
-      ...pendingProjectRefreshes.worktrees,
-    ]);
-    changedProjects.forEach((projectId) => {
-      projectEventGenerationRef.current.set(
-        projectId,
-        (projectEventGenerationRef.current.get(projectId) ?? 0) + 1,
-      );
-    });
     pendingProjectRefreshes.sessions.forEach((scope) => {
-      refreshWorktreeSessions(scope.projectId, scope.worktreeId).catch(
-        () => {},
-      );
+      refreshQueue.enqueueSession(scope.projectId, scope.worktreeId);
     });
     pendingProjectRefreshes.worktrees.forEach((projectId) => {
-      refreshProjectWorktrees(projectId).catch(() => {});
+      refreshQueue.enqueueProject(projectId);
     });
-    drainPendingRefreshes();
-  }, [
-    pendingProjectRefreshes,
-    refreshWorktreeSessions,
-    refreshProjectWorktrees,
-    drainPendingRefreshes,
-  ]);
-
-  /**
-   * Drain queued targeted refreshes after every `projectData` update
-   * (a loadAll painted a new snapshot) and after every
-   * `loadAllVersion` bump (a loadAll started, succeeded, or failed).
-   * The two deps together ensure the drain re-evaluates whenever the
-   * loadAll state machine transitions: scope deferrals that were
-   * waiting on a loadAll outcome get replayed against the fresh
-   * snapshot.
-   *
-   * The lifecycle dispatch lives in the consume-once effect above.
-   * An earlier draft of this refactor had a second unguarded effect
-   * here that re-dispatched the same payload on every callback-dep
-   * change, bypassing `lastConsumedRefreshesCounterRef` and
-   * resurrecting the original request-storm problem the consume-once
-   * check was meant to prevent.
-   */
-  useEffect(() => {
-    drainPendingRefreshes();
-  }, [projectData, loadAllVersion, drainPendingRefreshes]);
+  }, [pendingProjectRefreshes, refreshQueue]);
 
   useEffect(() => {
     if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
