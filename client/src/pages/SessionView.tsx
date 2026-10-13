@@ -730,7 +730,9 @@ function rowsToLineRanges(
   processed.forEach((line, j) => {
     const n = rowLineNumber(line);
     if (n !== undefined && isRowSelected(rowRanges, j)) {
-      lineRanges.push({ start: n, end: n });
+      lineRanges.push(line.kind === "del"
+        ? { start: n, end: n, side: "old" }
+        : { start: n, end: n });
     }
   });
   return normalizeRanges(lineRanges);
@@ -1536,8 +1538,8 @@ function SelectableDiffView({
                               {(toolbarLineRanges ?? [])
                                 .map((range) =>
                                   range.start === range.end
-                                    ? `L${range.start}`
-                                    : `L${range.start}-${range.end}`,
+                                    ? `${range.side === "old" ? "Old " : ""}L${range.start}`
+                                    : `${range.side === "old" ? "Old " : ""}L${range.start}-${range.end}`,
                                 )
                                 .join(", ")}
                             </span>
