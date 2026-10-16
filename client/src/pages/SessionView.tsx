@@ -4843,16 +4843,25 @@ export function SessionView({
   // Reload the persisted message queue for whichever session this view is
   // bound to. The server owns the queue; this keeps the rendered list and
   // the "promote first enqueued to steer" shortcut in sync.
+  const queueRefreshInFlightRef = useRef(new Set<string>());
+  const queueTargetKeyRef = useRef("");
+  queueTargetKeyRef.current = `${projectId}:${activeStreamSessionId ?? sessionId ?? ""}`;
   const refreshQueue = useCallback(async () => {
     const targetSessionId = activeStreamSessionId ?? sessionId;
     if (!targetSessionId) {
       setQueue([]);
       return;
     }
+    const targetKey = `${projectId}:${targetSessionId}`;
+    if (queueRefreshInFlightRef.current.has(targetKey)) return;
+    queueRefreshInFlightRef.current.add(targetKey);
     try {
-      setQueue(await fetchSessionQueue(projectId, targetSessionId));
+      const nextQueue = await fetchSessionQueue(projectId, targetSessionId);
+      if (queueTargetKeyRef.current === targetKey) setQueue(nextQueue);
     } catch {
       // A missing/unreadable queue is treated as empty — non-fatal.
+    } finally {
+      queueRefreshInFlightRef.current.delete(targetKey);
     }
   }, [projectId, activeStreamSessionId, sessionId]);
 
@@ -4891,12 +4900,15 @@ export function SessionView({
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
-      if (eventSourceRef.current || streamingRef.current) {
-        void refreshQueue();
-        return;
-      }
+      if (inFlight) return;
+      inFlight = true;
       try {
+        if (eventSourceRef.current || streamingRef.current) {
+          void refreshQueue();
+          return;
+        }
         const runtimes = await fetchActiveRuntimes();
         if (cancelled) return;
         const active = runtimes.some(
@@ -4909,6 +4921,8 @@ export function SessionView({
         void refreshQueue();
       } catch {
         // Ignore transient polling failures.
+      } finally {
+        inFlight = false;
       }
     };
     const interval = window.setInterval(tick, 2000);
@@ -4938,7 +4952,10 @@ export function SessionView({
     }
 
     let cancelled = false;
-    const interval = window.setInterval(async () => {
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const [evts, runtimes] = await Promise.all([
           fetchEvents(projectId, sessionId, worktreeId),
@@ -4990,7 +5007,12 @@ export function SessionView({
         if (!cancelled) {
           setStreaming(false);
         }
+      } finally {
+        inFlight = false;
       }
+    };
+    const interval = window.setInterval(() => {
+      void poll();
     }, 1500);
 
     return () => {

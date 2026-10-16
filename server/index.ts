@@ -24,7 +24,7 @@ import { listSessionRuntimes } from "./lib/session-runtime.js";
 import {
   installSessionRuntimeShutdownHandlers,
 } from "./lib/process-shutdown.js";
-import { listPersistedAttentionSessionIds } from "./lib/session-attention.js";
+import { getCachedPersistedAttentionSessionIds } from "./lib/session-attention.js";
 import { getProject } from "./lib/projects.js";
 import {
   resolveWorktree,
@@ -118,11 +118,11 @@ app.get("/api/agent-providers", async (_req, res) => {
 
 // Bulk session runtime snapshot — replaces the per-session /runtime polling
 // the sidebar and SessionView were doing. One request returns the active
-// state for every session currently known to the runtime map, plus unresolved
-// prompts reconstructed from persisted events after a server restart.
-app.get("/api/runtimes", async (_req, res) => {
-  const persistedAttention = await listPersistedAttentionSessionIds();
-  res.json({ sessions: listSessionRuntimes(persistedAttention) });
+// state for every session currently known to the runtime map, plus the latest
+// persisted attention snapshot. A cold scan refreshes that snapshot in the
+// background so a large transcript archive cannot stall this endpoint.
+app.get("/api/runtimes", (_req, res) => {
+  res.json({ sessions: listSessionRuntimes(getCachedPersistedAttentionSessionIds()) });
 });
 
 const shouldServeClient =
