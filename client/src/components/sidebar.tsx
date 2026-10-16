@@ -21,7 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   fetchSessions,
-  fetchActiveRuntimes,
+  fetchRuntimeSnapshot,
   fetchWorktrees,
   deleteProject,
   deleteWorktree,
@@ -36,6 +36,7 @@ import {
   type Worktree,
   type WorktreeSetupEvent,
   type ArchiveBlocker,
+  type RuntimeSnapshot,
 } from "../api.ts";
 import {
   groupSessionsByParent,
@@ -426,6 +427,7 @@ export function Sidebar({
   const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<
     Set<string>
   >(new Set());
+  const [persistedAttentionReady, setPersistedAttentionReady] = useState(false);
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<
     Record<string, number>
   >({});
@@ -615,7 +617,15 @@ export function Sidebar({
   const refreshActiveSessions = useCallback(async () => {
     // One bulk request replaces the previous per-session /runtime polling loop
     // (which issued N requests every 2s for every non-archived session).
-    const entries = await fetchActiveRuntimes().catch(() => []);
+    let snapshot: RuntimeSnapshot;
+    try {
+      snapshot = await fetchRuntimeSnapshot();
+    } catch {
+      // Keep the last known states and retry on the next poll.
+      return;
+    }
+    const entries = snapshot.sessions;
+    setPersistedAttentionReady(snapshot.persistedAttentionReady);
     setActiveSessionIds(
       new Set(entries.filter((entry) => entry.active).map((entry) => entry.sessionId)),
     );
@@ -845,12 +855,16 @@ export function Sidebar({
   }, [pendingProjectRefreshes, refreshQueue]);
 
   useEffect(() => {
-    if (activeSessionIds.size === 0 && awaitingInputSessionIds.size === 0) return;
+    if (
+      persistedAttentionReady &&
+      activeSessionIds.size === 0 &&
+      awaitingInputSessionIds.size === 0
+    ) return;
     const interval = window.setInterval(() => {
       refreshActiveSessions().catch(() => {});
     }, 2000);
     return () => window.clearInterval(interval);
-  }, [activeSessionIds, awaitingInputSessionIds, refreshActiveSessions]);
+  }, [persistedAttentionReady, activeSessionIds, awaitingInputSessionIds, refreshActiveSessions]);
 
   const toggleProject = (id: string) => {
     setProjectData((prev) =>

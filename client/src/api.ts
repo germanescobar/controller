@@ -502,17 +502,44 @@ export async function fetchSessionRuntime(
  * calling `fetchSessionRuntime` per session — useful for the sidebar, which
  * needs the active state of every session in the workspace.
  */
+export interface RuntimeSnapshot {
+  sessions: SessionRuntimeEntry[];
+  persistedAttentionReady: boolean;
+}
+
+let runtimeSnapshotRequest: Promise<RuntimeSnapshot> | null = null;
+
+export function fetchRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+  if (runtimeSnapshotRequest) return runtimeSnapshotRequest;
+  runtimeSnapshotRequest = (async () => {
+    try {
+      const res = await fetch(`${BASE}/runtimes`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      await throwIfNotOk(res, "Failed to fetch session runtimes");
+      const body = (await res.json()) as {
+        sessions?: unknown;
+        persistedAttentionReady?: unknown;
+      };
+      const sessions = Array.isArray(body?.sessions) ? body.sessions : [];
+      return {
+        sessions: sessions.filter(
+          (entry): entry is SessionRuntimeEntry =>
+            Boolean(entry) &&
+            typeof (entry as SessionRuntimeEntry).sessionId === "string" &&
+            typeof (entry as SessionRuntimeEntry).active === "boolean",
+        ),
+        persistedAttentionReady: body?.persistedAttentionReady === true,
+      };
+    } finally {
+      runtimeSnapshotRequest = null;
+    }
+  })();
+  return runtimeSnapshotRequest;
+}
+
 export async function fetchActiveRuntimes(): Promise<SessionRuntimeEntry[]> {
-  const res = await fetch(`${BASE}/runtimes`);
-  await throwIfNotOk(res, "Failed to fetch session runtimes");
-  const body = (await res.json()) as { sessions?: unknown };
-  if (!body || !Array.isArray(body.sessions)) return [];
-  return body.sessions.filter(
-    (entry): entry is SessionRuntimeEntry =>
-      Boolean(entry) &&
-      typeof (entry as SessionRuntimeEntry).sessionId === "string" &&
-      typeof (entry as SessionRuntimeEntry).active === "boolean",
-  );
+  return (await fetchRuntimeSnapshot()).sessions;
 }
 
 export type ArchiveBlocker =
@@ -734,7 +761,8 @@ export async function fetchSessionQueue(
   sessionId: string
 ): Promise<QueuedMessage[]> {
   const res = await fetch(
-    `${BASE}/projects/${projectId}/sessions/${sessionId}/queue`
+    `${BASE}/projects/${projectId}/sessions/${sessionId}/queue`,
+    { signal: AbortSignal.timeout(10_000) },
   );
   await throwIfNotOk(res, "Failed to fetch message queue");
   const body = (await res.json()) as { queue?: QueuedMessage[] };
@@ -808,7 +836,9 @@ export interface Monitor {
 export async function listSessionMonitors(
   sessionId: string
 ): Promise<Monitor[]> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/monitors`);
+  const res = await fetch(`${BASE}/sessions/${sessionId}/monitors`, {
+    signal: AbortSignal.timeout(10_000),
+  });
   if (res.status === 404) return [];
   await throwIfNotOk(res, "Failed to fetch monitors");
   const body = (await res.json()) as { monitors?: Monitor[] };

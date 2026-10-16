@@ -145,36 +145,43 @@ export function useSessionRuntimeState(
     // effect-local `cancelled` flag now matches the new mount.
     setState(EMPTY_STATE);
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
       // Run the two fetches in parallel — they hit different routes
       // and the floating bar shows them as separate rows, so neither
       // should gate the other.
-      const [queue, monitors] = await Promise.all([
-        fetchSessionQueue(projectId, sessionId).catch(() => []),
-        listSessionMonitors(sessionId).catch(() => []),
-      ]);
-      if (cancelled) return;
-      const head = queue[0];
-      // `runAt` is the wakes consumer's "hold until" timestamp; a
-      // message without it goes straight to the head of the queue
-      // and isn't really a wake, so we don't surface it in the
-      // panel's delay row.
-      const delayRunAt =
-        head && typeof head.runAt === "string" && head.runAt
-          ? head.runAt
-          : null;
-      // Prefer `visibleText` (the user-visible form, e.g. after
-      // stripping skill preambles) and fall back to `text` for
-      // older queue shapes. Empty / whitespace-only previews are
-      // dropped so the row never renders an empty label.
-      const rawPreview =
-        head && typeof head.visibleText === "string" && head.visibleText.trim()
-          ? head.visibleText.trim()
-          : head && typeof head.text === "string" && head.text.trim()
-            ? head.text.trim()
+      try {
+        const [queue, monitors] = await Promise.all([
+          fetchSessionQueue(projectId, sessionId).catch(() => []),
+          listSessionMonitors(sessionId).catch(() => []),
+        ]);
+        if (cancelled) return;
+        const head = queue[0];
+        // `runAt` is the wakes consumer's "hold until" timestamp; a
+        // message without it goes straight to the head of the queue
+        // and isn't really a wake, so we don't surface it in the
+        // panel's delay row.
+        const delayRunAt =
+          head && typeof head.runAt === "string" && head.runAt
+            ? head.runAt
             : null;
-      const delayMessagePreview = delayRunAt && rawPreview ? rawPreview : null;
-      setState({ delayRunAt, delayMessagePreview, monitors });
+        // Prefer `visibleText` (the user-visible form, e.g. after
+        // stripping skill preambles) and fall back to `text` for
+        // older queue shapes. Empty / whitespace-only previews are
+        // dropped so the row never renders an empty label.
+        const rawPreview =
+          head && typeof head.visibleText === "string" && head.visibleText.trim()
+            ? head.visibleText.trim()
+            : head && typeof head.text === "string" && head.text.trim()
+              ? head.text.trim()
+              : null;
+        const delayMessagePreview = delayRunAt && rawPreview ? rawPreview : null;
+        setState({ delayRunAt, delayMessagePreview, monitors });
+      } finally {
+        inFlight = false;
+      }
     };
     void tick();
     const interval = window.setInterval(() => {
