@@ -17,6 +17,8 @@ import {
   FileCode,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
 import type {
@@ -65,16 +67,15 @@ interface TimelineItem {
 
 /**
  * Render a PR body (description / comment / review) as Markdown
- * with `<details>` blocks promoted to real collapsibles and noisy
- * raw-HTML void elements stripped.
+ * with sanitized inline HTML, `<details>` blocks promoted to real
+ * collapsibles, and noisy raw-HTML void elements stripped.
  *
  * Bodies can be arbitrary GitHub-flavored Markdown plus raw HTML —
  * the most useful raw-HTML construct is `<details>` / `<summary>`
  * (collapsible "Repro steps", bot footers, etc.). The Codex bot
- * uses this for its "About Codex in GitHub" footer. `react-markdown`
- * doesn't pass raw HTML through to the output (we deliberately
- * avoid `rehype-raw` for security), so without help those
- * collapsibles show up as literal `<details>` text in the panel.
+ * uses this for its "About Codex in GitHub" footer. Raw HTML is
+ * parsed and sanitized so inline tags such as `<sub>` render and
+ * HTML comments disappear.
  *
  * `extractDetailsBlocks` pulls them out before render; we then
  * render the surrounding Markdown normally and append each
@@ -86,9 +87,7 @@ interface TimelineItem {
  * that wouldn't add value in the sidebar: line breaks and
  * horizontal rules are visual noise on a 300–500 px column, and
  * `<img>` in body content is already handled by the
- * `prMarkdownImage` resolver. Inline wrappers (`<em>`,
- * `<strong>`, `<code>`, etc.) are NOT stripped because they're
- * identical to the surrounding Markdown syntax.
+ * `prMarkdownImage` resolver. Safe inline wrappers are retained.
  */
 function MarkdownBody({ body, prUrl }: { body: string; prUrl: string }) {
   const { body: stripped, blocks } = extractDetailsBlocks(body);
@@ -97,6 +96,7 @@ function MarkdownBody({ body, prUrl }: { body: string; prUrl: string }) {
       {stripped.trim() ? (
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeRaw, rehypeSanitize]}
           components={buildPrMarkdownComponents(prUrl)}
         >
           {stripNoisyHtmlTags(stripped)}
@@ -118,6 +118,7 @@ function MarkdownBody({ body, prUrl }: { body: string; prUrl: string }) {
             {block.body.trim() ? (
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
+                rehypePlugins={[rehypeRaw, rehypeSanitize]}
                 components={buildPrMarkdownComponents(prUrl)}
               >
                 {stripNoisyHtmlTags(block.body)}
@@ -137,21 +138,15 @@ function MarkdownBody({ body, prUrl }: { body: string; prUrl: string }) {
  * Why: GitHub PR / comment / review bodies can contain arbitrary
  * raw HTML — the most common useful block is `<details>` /
  * `<summary>` (collapsible "Steps to reproduce", "About this bot",
- * etc.). `react-markdown` (which we use for the body) does NOT
- * enable `rehype-raw` because raw HTML through the Electron
- * renderer is a security risk (it would let a public PR description
- * embed iframes / scripts / image beacons). Without `rehype-raw`,
- * raw HTML tags leak through to the output as literal text —
- * `<details>` shows up as the four characters `<details>` in the
- * panel, which is ugly and confusing.
+ * etc.). These blocks retain their collapsible UI while the
+ * remaining raw HTML is parsed and sanitized before rendering.
  *
  * Instead of stripping the collapsibles (which would discard real
  * user content like a "Repro steps" / "Expected behavior" pair),
  * pull them out of the source and render them as actual JSX
  * `<details>` elements. The rest of the body — including any
- * inline `<em>` / `<strong>` / `<code>` wrappers — is left alone
- * because `react-markdown` already handles those via standard
- * Markdown syntax.
+ * inline `<em>` / `<strong>` / `<code>` wrappers — is left for the
+ * sanitized Markdown renderer.
  *
  * Returns the body with `<details>` blocks replaced by `\n\n`
  * placeholders, plus a list of extracted blocks in source order.
@@ -220,10 +215,7 @@ export function extractDetailsBlocks(input: string): ExtractedBody {
  * `prMarkdownImage` resolver).
  *
  * Inline wrappers (`<em>`, `<strong>`, `<code>`, `<span>`, etc.)
- * are NOT stripped — they're valid Markdown syntax, so the
- * surrounding `**bold**` / `*italic*` / `` `code` `` source already
- * renders correctly through `react-markdown` without needing the
- * raw HTML form.
+ * are retained for the sanitized HTML renderer.
  *
  * @internal — exported for tests only.
  */
@@ -292,14 +284,25 @@ const TRUSTED_IMAGE_HOSTS = new Set([
   "avatars.githubusercontent.com",
 ]);
 
+const PRIORITY_BADGE_COLORS: Record<string, string> = {
+  red: "#b91c1c",
+  orange: "#ea580c",
+  yellow: "#ca8a04",
+  blue: "#2563eb",
+  grey: "#6b7280",
+  gray: "#6b7280",
+  lightgrey: "#6b7280",
+};
+
 /**
  * Markdown image override.
  *
- * Two distinct render paths:
+ * Three render paths:
  *
- *   1. Trusted host → render `<img src=… loading="lazy">`. Used
- *      for avatars and GitHub-hosted screenshots.
- *   2. Untrusted host / repo-relative / root-relative / data URI
+ *   1. Codex priority badge → render a local badge, avoiding a
+ *      request to img.shields.io while preserving the visual cue.
+ *   2. Trusted host → render `<img src=… loading="lazy">`.
+ *   3. Untrusted host / repo-relative / root-relative / data URI
  *      → render a small anchor instead of `<img>`. This handles
  *      three concerns at once: (a) repo-relative sources like
  *      `docs/diagram.png` would 404 against the Controller
@@ -325,6 +328,10 @@ function prMarkdownImage(prUrl: string) {
     if (!href) {
       return null;
     }
+    const priorityBadge = renderPriorityBadge(href, alt);
+    if (priorityBadge) {
+      return priorityBadge;
+    }
     if (isTrustedImageHost(href)) {
       return <img src={href} alt={alt ?? ""} loading="lazy" {...rest} />;
     }
@@ -347,6 +354,35 @@ function prMarkdownImage(prUrl: string) {
       </a>
     );
   };
+}
+
+function renderPriorityBadge(href: string, alt: string | undefined): React.ReactNode {
+  const priority = /^(P[0-3]) Badge$/.exec(alt ?? "")?.[1];
+  if (!priority) return null;
+  try {
+    const url = new URL(href);
+    const match = /^\/badge\/(P[0-3])-([a-z]+)$/.exec(url.pathname);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "img.shields.io" ||
+      !match ||
+      match[1] !== priority ||
+      url.search !== "?style=flat"
+    ) return null;
+    const color = PRIORITY_BADGE_COLORS[match[2]];
+    if (!color) return null;
+    return (
+      <span
+        aria-label={alt}
+        className="inline-block rounded px-1.5 py-0.5 text-[10px] font-medium leading-none text-white"
+        style={{ backgroundColor: color }}
+      >
+        {priority}
+      </span>
+    );
+  } catch {
+    return null;
+  }
 }
 
 /**
