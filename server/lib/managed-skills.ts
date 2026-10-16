@@ -823,6 +823,11 @@ ${cliPath} sessions goal set "\$SELF" \\
 - \`sessions wake\` with no \`--delay\` replays as soon as the live turn
   finishes. Don't poll with short delays for work Controller already
   notifies you about — use a monitor or a goal instead.
+- Before ending a turn with pending work, register a Controller follow-up and
+  check that the CLI returned success. A provider-native wait or background
+  task cannot resume this Controller session after the turn ends. A monitor
+  needs \`--on-line\` matching stdout to queue a follow-up. Do not promise a
+  later report without a registered Controller follow-up.
 - A goal re-fires only while the queue is empty; \`--max-turns\` is the hard
   ceiling and \`goal clear\` is the manual stop.
 - Monitors are capped at 8 per session and 1000 captured lines per monitor;
