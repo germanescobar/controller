@@ -559,6 +559,48 @@ test("PrPanel comment bodies render <details> as real collapsibles (issue #387)"
   assert.match(html, /<li>Open a pull request for review<\/li>/);
 });
 
+test("PrPanel renders safe inline HTML in Codex findings", () => {
+  const withFinding: PullRequest = {
+    ...SAMPLE_PR,
+    inlineComments: [{
+      id: "IC1",
+      author: SAMPLE_PR.comments[0].author,
+      body: [
+        "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub> Expose the completed cold scan**",
+        "",
+        "The first request returns an empty snapshot.",
+        "",
+        "<!-- codex-code-review-finding:v1 -->",
+      ].join("\n"),
+      createdAt: "2026-09-22T21:30:00Z",
+      url: "https://github.com/germanescobar/controller/pull/388#discussion_rIC1",
+      path: "server/index.ts",
+      line: 125,
+      side: "RIGHT",
+    }],
+  };
+  const html = render(withFinding);
+  assert.match(html, /<sub><sub>/);
+  assert.match(html, /Expose the completed cold scan<\/strong>/);
+  assert.doesNotMatch(html, /&lt;\/?sub&gt;/);
+  assert.doesNotMatch(html, /codex-code-review-finding/);
+  assert.match(html, /aria-label="P1 Badge"/);
+  assert.doesNotMatch(html, /src="https:\/\/img\.shields\.io/);
+});
+
+test("PrPanel sanitizes unsafe raw HTML in comments", () => {
+  const withUnsafeHtml: PullRequest = {
+    ...SAMPLE_PR,
+    comments: [{
+      ...SAMPLE_PR.comments[0],
+      body: '<sub onclick="alert(1)">Safe</sub><script>alert(2)</script><iframe src="https://example.com"></iframe>',
+    }],
+  };
+  const html = render(withUnsafeHtml);
+  assert.match(html, /<sub>Safe<\/sub>/);
+  assert.doesNotMatch(html, /onclick|<script|<iframe|alert\(/);
+});
+
 test("PrPanel review bodies render <details> as real collapsibles (issue #387)", () => {
   const withRawHtml: PullRequest = {
     ...SAMPLE_PR,
