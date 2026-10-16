@@ -55,6 +55,12 @@ monitor can also use `--on-line <regex>` to queue a follow-up when a matching
 line appears. Inspect active monitors with `controller sessions monitor list
 self` and stop one with `controller sessions monitor stop <monitorId>`.
 
+Before ending a turn with work still pending, confirm that a Controller
+follow-up was registered. A watch or background task inside Codex or Claude
+Code can return results during the current turn, but does not resume a
+Controller session after that turn ends. Monitor output alone is only logged;
+use `--on-line` to queue a new turn when a matching line arrives.
+
 ## Example: stay with a PR until CI passes
 
 After opening a PR, attach a goal and queue the first check:
