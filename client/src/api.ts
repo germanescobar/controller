@@ -502,29 +502,44 @@ export async function fetchSessionRuntime(
  * calling `fetchSessionRuntime` per session — useful for the sidebar, which
  * needs the active state of every session in the workspace.
  */
-let activeRuntimesRequest: Promise<SessionRuntimeEntry[]> | null = null;
+export interface RuntimeSnapshot {
+  sessions: SessionRuntimeEntry[];
+  persistedAttentionReady: boolean;
+}
 
-export function fetchActiveRuntimes(): Promise<SessionRuntimeEntry[]> {
-  if (activeRuntimesRequest) return activeRuntimesRequest;
-  activeRuntimesRequest = (async () => {
+let runtimeSnapshotRequest: Promise<RuntimeSnapshot> | null = null;
+
+export function fetchRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+  if (runtimeSnapshotRequest) return runtimeSnapshotRequest;
+  runtimeSnapshotRequest = (async () => {
     try {
       const res = await fetch(`${BASE}/runtimes`, {
         signal: AbortSignal.timeout(10_000),
       });
       await throwIfNotOk(res, "Failed to fetch session runtimes");
-      const body = (await res.json()) as { sessions?: unknown };
-      if (!body || !Array.isArray(body.sessions)) return [];
-      return body.sessions.filter(
-        (entry): entry is SessionRuntimeEntry =>
-          Boolean(entry) &&
-          typeof (entry as SessionRuntimeEntry).sessionId === "string" &&
-          typeof (entry as SessionRuntimeEntry).active === "boolean",
-      );
+      const body = (await res.json()) as {
+        sessions?: unknown;
+        persistedAttentionReady?: unknown;
+      };
+      const sessions = Array.isArray(body?.sessions) ? body.sessions : [];
+      return {
+        sessions: sessions.filter(
+          (entry): entry is SessionRuntimeEntry =>
+            Boolean(entry) &&
+            typeof (entry as SessionRuntimeEntry).sessionId === "string" &&
+            typeof (entry as SessionRuntimeEntry).active === "boolean",
+        ),
+        persistedAttentionReady: body?.persistedAttentionReady === true,
+      };
     } finally {
-      activeRuntimesRequest = null;
+      runtimeSnapshotRequest = null;
     }
   })();
-  return activeRuntimesRequest;
+  return runtimeSnapshotRequest;
+}
+
+export async function fetchActiveRuntimes(): Promise<SessionRuntimeEntry[]> {
+  return (await fetchRuntimeSnapshot()).sessions;
 }
 
 export type ArchiveBlocker =

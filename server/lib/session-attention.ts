@@ -38,12 +38,16 @@ const scans = new Map<string, Promise<Set<string>>>();
 const completedSnapshots = new Map<string, Set<string>>();
 
 /** Return the latest snapshot immediately while refreshing it in the background. */
-export function getCachedPersistedAttentionSessionIds(): Set<string> {
+export function getCachedPersistedAttentionSnapshot(): {
+  sessionIds: Set<string>;
+  ready: boolean;
+} {
   const storesRoot = path.join(orchestratorHome(), "projects");
+  const completed = completedSnapshots.get(storesRoot);
   void listPersistedAttentionSessionIds().catch((error: Error) => {
     console.error("Failed to refresh persisted session attention", error);
   });
-  return completedSnapshots.get(storesRoot) ?? new Set();
+  return { sessionIds: completed ?? new Set(), ready: Boolean(completed) };
 }
 
 /** Discover unresolved prompts without loading whole transcripts into memory. */

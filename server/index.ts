@@ -24,7 +24,7 @@ import { listSessionRuntimes } from "./lib/session-runtime.js";
 import {
   installSessionRuntimeShutdownHandlers,
 } from "./lib/process-shutdown.js";
-import { getCachedPersistedAttentionSessionIds } from "./lib/session-attention.js";
+import { getCachedPersistedAttentionSnapshot } from "./lib/session-attention.js";
 import { getProject } from "./lib/projects.js";
 import {
   resolveWorktree,
@@ -122,7 +122,11 @@ app.get("/api/agent-providers", async (_req, res) => {
 // persisted attention snapshot. A cold scan refreshes that snapshot in the
 // background so a large transcript archive cannot stall this endpoint.
 app.get("/api/runtimes", (_req, res) => {
-  res.json({ sessions: listSessionRuntimes(getCachedPersistedAttentionSessionIds()) });
+  const attention = getCachedPersistedAttentionSnapshot();
+  res.json({
+    sessions: listSessionRuntimes(attention.sessionIds),
+    persistedAttentionReady: attention.ready,
+  });
 });
 
 const shouldServeClient =

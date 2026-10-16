@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  getCachedPersistedAttentionSessionIds,
+  getCachedPersistedAttentionSnapshot,
   hasPendingSessionAttention,
   listPersistedAttentionSessionIds,
 } from "../session-attention.js";
@@ -79,11 +79,15 @@ test("updates attention from appended lines and waits for incomplete writes", as
   await fs.writeFile(filePath, `${JSON.stringify(event("user_input_requested"))}\n`);
 
   try {
-    assert.deepEqual([...getCachedPersistedAttentionSessionIds()], []);
+    const cold = getCachedPersistedAttentionSnapshot();
+    assert.equal(cold.ready, false);
+    assert.deepEqual([...cold.sessionIds], []);
     const first = listPersistedAttentionSessionIds();
     assert.equal(listPersistedAttentionSessionIds(), first);
     assert.deepEqual([...await first], ["waiting-session"]);
-    assert.deepEqual([...getCachedPersistedAttentionSessionIds()], ["waiting-session"]);
+    const complete = getCachedPersistedAttentionSnapshot();
+    assert.equal(complete.ready, true);
+    assert.deepEqual([...complete.sessionIds], ["waiting-session"]);
     await listPersistedAttentionSessionIds();
 
     const response = Buffer.from(JSON.stringify(event("user_input_response", { text: "😀" })));
