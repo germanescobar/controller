@@ -1886,6 +1886,19 @@ export async function runProjectScript(
   return { terminalId: body.terminalId, tabs: body.tabs as TerminalTab[] };
 }
 
+/** Interrupt the worktree's running run.sh terminals; their tabs stay open. */
+export async function stopProjectScript(
+  projectId: string,
+  worktreeId?: string
+): Promise<{ stoppedTerminalIds: string[] }> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/stop-run-script${withWorktree(worktreeId)}`,
+    { method: "POST" }
+  );
+  await throwIfNotOk(res, "Failed to stop project script");
+  return res.json();
+}
+
 export async function fetchSourceFile(
   projectId: string,
   filePath: string,

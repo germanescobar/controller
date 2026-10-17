@@ -18,6 +18,7 @@ import {
   resolveWorktree,
   updateWorktree,
   worktreeNotFoundPayload,
+  type Worktree,
 } from "../lib/worktrees.js";
 import { projectWorktreesDir, worktreePath } from "../lib/paths.js";
 import { getSessions } from "../lib/sessions.js";
@@ -250,12 +251,8 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   );
   const hasRunScript = (await resolveProjectScripts(project.path)).run.length > 0;
   res.json(await Promise.all(worktrees.map(async (worktree) => {
-    const tabs = hasRunScript && worktree.presence === "active"
-      ? await getTerminalTabs(project.id, worktree.id) : [];
-    const serverRunning = tabs.some((tab) =>
-      (tab.id === RUN_TERMINAL_ID || tab.id.startsWith("run-")) &&
-      ptyManager.isCommandRunning(`${project.id}:${worktree.id}:${tab.id}`)
-    );
+    const serverRunning = hasRunScript && worktree.presence === "active" &&
+      (await runningServerTerminalIds(project.id, worktree.id)).length > 0;
     return {
       ...worktree,
       taskStatus: worktree.taskStatus ?? "active",
@@ -794,10 +791,39 @@ worktreesRouter.post("/:projectId/run-script", async (req, res) => {
     const env = buildScriptEnv({ project, worktree });
     const command = buildTerminalScriptCommand(scripts.run);
     ptyManager.runCommand(terminalKey, worktree.path, command, env);
+    announceRunStateChange(project.id, worktree, true);
 
     res.json({ ok: true, terminalId, tabs });
   } catch (err) {
     console.error("POST /projects/:projectId/run-script error:", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// Stop the worktree's run server by interrupting its run terminals. The tabs
+// and their output stay so the user can still read the server's logs.
+worktreesRouter.post("/:projectId/stop-run-script", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json(
+      await worktreeNotFoundPayload(project.id, getQueryString(req.query.worktreeId))
+    );
+    return;
+  }
+  try {
+    const stoppedTerminalIds = await runningServerTerminalIds(project.id, worktree.id);
+    for (const terminalId of stoppedTerminalIds) {
+      ptyManager.interrupt(`${project.id}:${worktree.id}:${terminalId}`);
+    }
+    if (stoppedTerminalIds.length > 0) announceRunStateChange(project.id, worktree, false);
+    res.json({ ok: true, stoppedTerminalIds });
+  } catch (err) {
+    console.error("POST /projects/:projectId/stop-run-script error:", err);
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -1478,4 +1504,35 @@ function writeScriptOutput(
 function formatScriptLabels(commands: ProjectScriptCommand[]): string {
   const labels = new Set(commands.map((command) => command.label));
   return Array.from(labels).join(", ");
+}
+
+/** Run terminals (from run.sh) whose foreground command is still running. */
+async function runningServerTerminalIds(projectId: string, worktreeId: string): Promise<string[]> {
+  const tabs = await getTerminalTabs(projectId, worktreeId);
+  return tabs
+    .filter((tab) => tab.id === RUN_TERMINAL_ID || tab.id.startsWith("run-"))
+    .filter((tab) => ptyManager.isCommandRunning(`${projectId}:${worktreeId}:${tab.id}`))
+    .map((tab) => tab.id);
+}
+
+const RUN_STATE_POLL_MS = 250;
+const RUN_STATE_TIMEOUT_MS = 5_000;
+
+/*
+ * A server starts or exits shortly after its keystrokes land, so wait for the
+ * expected state before telling clients to refetch. On timeout, announce
+ * anyway so the sidebar reflects whatever state the server reached.
+ */
+function announceRunStateChange(projectId: string, worktree: Worktree, running: boolean): void {
+  void (async () => {
+    const deadline = Date.now() + RUN_STATE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const isRunning = (await runningServerTerminalIds(projectId, worktree.id)).length > 0;
+      if (isRunning === running) break;
+      await new Promise((resolve) => setTimeout(resolve, RUN_STATE_POLL_MS));
+    }
+    emitWorktreeUpdated(projectId, worktree);
+  })().catch((err) => {
+    console.error(`Failed to announce run state for worktree ${worktree.id}:`, err);
+  });
 }

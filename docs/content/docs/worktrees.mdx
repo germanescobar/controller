@@ -29,9 +29,10 @@ worktree.
 Each worktree row shows its linked PR number on the right (green icon when
 open, violet when merged); click it to open the PR tab for that worktree.
 The session header shows the same PR next to its change summary. Hover a
-worktree to see whether its run server is running (pause icon) or stopped
-(play icon), and use **Mark finished** or **Reopen** to change its task
-status. Finished worktrees appear dimmed with a check icon, and removed ones
+worktree to start its [`run.sh`](/docs/controller-scripts) server (play) or
+stop it (pause, shown in green while running). Stopping interrupts the
+server but keeps its Run terminal and output. Use **Mark finished** or
+**Reopen** to change its task status. Finished worktrees appear dimmed with a check icon, and removed ones
 with an archive icon. A merged PR marks the task finished; a
 closed, unmerged PR does not. Marking a task finished does not make its
 worktree safe to delete.

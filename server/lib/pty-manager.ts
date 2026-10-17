@@ -398,6 +398,17 @@ class PtyManager {
     });
   }
 
+  /**
+   * Send Ctrl-C to a terminal's foreground command. The tab and its output
+   * stay, which is what stopping a run server needs (closing would lose logs).
+   */
+  interrupt(sessionId: string): void {
+    const target = tmuxFirstPaneTarget(tmuxSessionName(sessionId));
+    runTmux(["send-keys", "-t", target, "C-c"], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  }
+
   /** Resize the PTY. */
   resize(sessionId: string, cols: number, rows: number): void {
     const session = this.sessions.get(sessionId);

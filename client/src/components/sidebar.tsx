@@ -34,6 +34,8 @@ import {
   updateSessionTitle,
   fetchWorktreeSetupLog,
   runWorktreeSetup,
+  runProjectScript,
+  stopProjectScript,
   updateWorktreeMetadata,
   type Project,
   type SessionSummary,
@@ -1459,7 +1461,7 @@ export function Sidebar({
                                     : "md:bg-sidebar-accent md:before:from-sidebar-accent",
                                 )}
                               >
-                              <ServerStateIcon worktree={worktree} />
+                              <ServerToggleButton projectId={project.id} worktree={worktree} />
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -2232,21 +2234,44 @@ function WorktreeStateIcon({ worktree }: { worktree: Worktree }) {
 }
 
 /*
- * Run-server state for a worktree row. Nothing is shown without a run.sh, or
- * for missing and removed worktrees, since there is no server to report.
+ * Start or stop the worktree's run.sh server: play when stopped, pause when
+ * running. Hidden without a run.sh, or for missing and removed worktrees.
+ * The server announces the new state, which refreshes this row.
  */
-function ServerStateIcon({ worktree }: { worktree: Worktree }) {
+function ServerToggleButton({ projectId, worktree }: { projectId: string; worktree: Worktree }) {
+  const [pending, setPending] = useState(false);
   if (!worktree.hasRunScript) return null;
   if (worktree.presence === "missing" || worktree.presence === "removed") return null;
-  const label = worktree.serverRunning ? "Server running" : "Server stopped";
-  const Icon = worktree.serverRunning ? Pause : Play;
+  const running = worktree.serverRunning === true;
+  const label = running ? "Stop server" : "Start server";
+  const toggle = async () => {
+    setPending(true);
+    try {
+      if (running) await stopProjectScript(projectId, worktree.id);
+      else await runProjectScript(projectId, worktree.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Failed to ${label.toLowerCase()}`);
+    } finally {
+      setPending(false);
+    }
+  };
+  const Icon = pending ? Loader2 : running ? Pause : Play;
   return (
-    <span
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        void toggle();
+      }}
+      disabled={pending}
       title={label}
-      aria-label={label}
-      className="p-1 text-muted-foreground"
+      aria-label={`${label} for ${worktree.name}`}
+      className={cn(
+        "rounded p-1 transition-colors hover:text-sidebar-foreground disabled:cursor-wait",
+        running ? "text-emerald-500" : "text-muted-foreground",
+      )}
     >
-      <Icon className="h-3.5 w-3.5" />
-    </span>
+      <Icon className={cn("h-3.5 w-3.5", pending && "animate-spin")} />
+    </button>
   );
 }

@@ -5356,7 +5356,7 @@ export function SessionView({
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectId, worktreeId, shouldPollChanges]);
 
-  // Poll the open PR (issue #387). Two-tier cadence:
+  // Poll the branch's PR, in any state (issues #387, #436). Two-tier cadence:
   //   - 30s while the PR tab is focused (focusedPoll = true).
   //   - 90s while the panel is visible but parked on a different
   //     tab (discoveryPoll = true) — keeps the tab button's
@@ -5388,7 +5388,7 @@ export function SessionView({
   ]);
 
   // Auto-switch away from the PR tab when the branch no longer has
-  // an open PR (e.g., it was merged / closed). Mirrors the Changes
+  // a PR at all (e.g., the branch changed). Mirrors the Changes
   // tab auto-hide behavior above. The endpoint resolves the default
   // worktree when `worktreeId` is unset (e.g., the project root
   // surface), so the cleanup runs even in that case — otherwise the

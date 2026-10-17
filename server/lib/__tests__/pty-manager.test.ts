@@ -693,3 +693,30 @@ test("git log paginates in a controller terminal (issue #317)", async (t) => {
     await fs.rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("interrupt stops a running command but keeps the terminal alive (issue #436)", async (t) => {
+  if (!tmuxAvailable()) {
+    t.skip("tmux is not available");
+    return;
+  }
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-interrupt-"));
+  const sessionId = "p1:w1:run-" + Math.random().toString(36).slice(2, 8);
+  const waitFor = async (predicate: () => boolean) => {
+    const deadline = Date.now() + PTY_OUTPUT_TIMEOUT_MS;
+    while (!predicate() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return predicate();
+  };
+  try {
+    ptyManager.runCommand(sessionId, cwd, "sleep 30");
+    assert.ok(await waitFor(() => ptyManager.isCommandRunning(sessionId)), "expected sleep to be running");
+
+    ptyManager.interrupt(sessionId);
+    assert.ok(await waitFor(() => !ptyManager.isCommandRunning(sessionId)), "expected sleep to stop");
+    assert.equal(ptyManager.isLive(sessionId), true);
+  } finally {
+    ptyManager.kill(sessionId);
+    await fs.rm(cwd, { recursive: true, force: true });
+  }
+});
