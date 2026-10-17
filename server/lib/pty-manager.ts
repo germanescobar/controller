@@ -66,6 +66,19 @@ export function tmuxSessionNames(sessionId: string): string[] {
   ];
 }
 
+/* The tmux session currently backing `sessionId` (current or legacy name). */
+function liveTmuxSessionName(sessionId: string): string | null {
+  for (const name of tmuxSessionNames(sessionId)) {
+    try {
+      execTmuxSync(["has-session", "-t", `=${name}`], { stdio: "ignore" });
+      return name;
+    } catch {
+      // Not this name; try the next candidate.
+    }
+  }
+  return null;
+}
+
 function tmuxFirstPaneTarget(sessionName: string): string {
   return `${sessionName}:0.0`;
 }
@@ -403,8 +416,9 @@ class PtyManager {
    * stay, which is what stopping a run server needs (closing would lose logs).
    */
   interrupt(sessionId: string): void {
-    const target = tmuxFirstPaneTarget(tmuxSessionName(sessionId));
-    runTmux(["send-keys", "-t", target, "C-c"], {
+    const name = liveTmuxSessionName(sessionId);
+    if (!name) return;
+    runTmux(["send-keys", "-t", tmuxFirstPaneTarget(name), "C-c"], {
       stdio: ["ignore", "ignore", "pipe"],
     });
   }
@@ -510,20 +524,31 @@ class PtyManager {
     return tmuxSessionExists(sessionId);
   }
 
-  /** True when a terminal is running a foreground command beyond its idle shell. */
+  /**
+   * True when a terminal is running a foreground job beyond its idle shell.
+   * Compares the pane shell's process group with the terminal's foreground
+   * process group: they match at an idle prompt and differ while a command
+   * such as `bash run.sh` runs. Command names can't tell these apart (a
+   * running script shows up as `bash`), and counting child processes would
+   * misfire on shell plugins that keep background helpers alive.
+   */
   isCommandRunning(sessionId: string): boolean {
-    for (const name of tmuxSessionNames(sessionId)) {
-      try {
-        const command = (execTmuxSync(
-          ["display-message", "-p", "-t", `${name}:0.0`, "#{pane_current_command}"],
-          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
-        ) as string).trim().replace(/^-/, "");
-        return command !== "" && !["sh", "bash", "zsh", "fish", "nu", "pwsh", "csh", "tcsh"].includes(command);
-      } catch {
-        // Try a legacy tmux name before treating the terminal as stopped.
-      }
+    const name = liveTmuxSessionName(sessionId);
+    if (!name) return false;
+    try {
+      const panePid = (execTmuxSync(
+        ["display-message", "-p", "-t", tmuxFirstPaneTarget(name), "#{pane_pid}"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      ) as string).trim();
+      const [pgid, tpgid] = execFileSync("ps", ["-o", "pgid=,tpgid=", "-p", panePid], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim().split(/\s+/);
+      return Boolean(pgid && tpgid) && tpgid !== "-1" && pgid !== tpgid;
+    } catch {
+      // The pane exited between the lookup and the check: nothing is running.
+      return false;
     }
-    return false;
   }
 
   /**

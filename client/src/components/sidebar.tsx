@@ -152,6 +152,8 @@ export interface FocusQueueItem {
   projectName: string;
   worktreeId: string;
   worktreeName: string;
+  /** The worktree's PR, shown on the radar row when present. */
+  linkedPr?: Worktree["linkedPr"];
   session: SessionSummary;
   active: boolean;
   /**
@@ -606,6 +608,7 @@ export function Sidebar({
             projectName: project.name,
             worktreeId: worktree.id,
             worktreeName: worktree.name,
+            linkedPr: worktree.linkedPr,
             session,
             active: activeSessionIds.has(session.id),
             awaitingInput: awaitingInputSessionIds.has(session.id) || undefined,
@@ -1263,8 +1266,21 @@ export function Sidebar({
                       <span className="block truncate text-left">
                         {item.session.title || item.session.id.slice(0, 8)}
                       </span>
-                      <span className="block truncate text-left text-[11px] text-muted-foreground">
-                        {item.projectName} / {item.worktreeName}
+                      <span className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                        <span className="min-w-0 flex-1 truncate text-left">
+                          {item.projectName} / {item.worktreeName}
+                        </span>
+                        {item.linkedPr && (
+                          <PullRequestBadge
+                            nested
+                            number={item.linkedPr.number}
+                            state={item.linkedPr.state}
+                            onClick={() =>
+                              onOpenPullRequest(item.projectId, item.worktreeId, item.session.id)
+                            }
+                            className="text-[11px]"
+                          />
+                        )}
                       </span>
                     </span>
                   </span>

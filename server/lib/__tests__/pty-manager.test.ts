@@ -694,27 +694,60 @@ test("git log paginates in a controller terminal (issue #317)", async (t) => {
   }
 });
 
-test("interrupt stops a running command but keeps the terminal alive (issue #436)", async (t) => {
+/*
+ * Issue #436: the sidebar's run-server state and its Stop button rely on
+ * `isCommandRunning` and `interrupt`. A run.sh launches as `bash run.sh`,
+ * so a running script must not look like an idle shell, and terminals from
+ * pre-rename builds (legacy tmux names) must be reachable too.
+ */
+async function waitFor(predicate: () => boolean): Promise<boolean> {
+  const deadline = Date.now() + PTY_OUTPUT_TIMEOUT_MS;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return predicate();
+}
+
+async function assertInterruptStops(sessionId: string, start: () => void): Promise<void> {
+  start();
+  assert.ok(await waitFor(() => ptyManager.isCommandRunning(sessionId)), "expected the command to be running");
+  ptyManager.interrupt(sessionId);
+  assert.ok(await waitFor(() => !ptyManager.isCommandRunning(sessionId)), "expected the command to stop");
+  assert.equal(ptyManager.isLive(sessionId), true);
+}
+
+for (const command of ["sleep 30", "bash -c 'sleep 30; true'"]) {
+  test(`interrupt stops \`${command}\` but keeps the terminal alive (issue #436)`, async (t) => {
+    if (!tmuxAvailable()) {
+      t.skip("tmux is not available");
+      return;
+    }
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-interrupt-"));
+    const sessionId = "p1:w1:run-" + Math.random().toString(36).slice(2, 8);
+    try {
+      await assertInterruptStops(sessionId, () => ptyManager.runCommand(sessionId, cwd, command));
+    } finally {
+      ptyManager.kill(sessionId);
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+}
+
+test("isCommandRunning and interrupt reach legacy-named tmux sessions (issue #436)", async (t) => {
   if (!tmuxAvailable()) {
     t.skip("tmux is not available");
     return;
   }
-  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-interrupt-"));
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-legacy-"));
   const sessionId = "p1:w1:run-" + Math.random().toString(36).slice(2, 8);
-  const waitFor = async (predicate: () => boolean) => {
-    const deadline = Date.now() + PTY_OUTPUT_TIMEOUT_MS;
-    while (!predicate() && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    return predicate();
-  };
+  const legacyName = tmuxSessionNames(sessionId)[1];
   try {
-    ptyManager.runCommand(sessionId, cwd, "sleep 30");
-    assert.ok(await waitFor(() => ptyManager.isCommandRunning(sessionId)), "expected sleep to be running");
-
-    ptyManager.interrupt(sessionId);
-    assert.ok(await waitFor(() => !ptyManager.isCommandRunning(sessionId)), "expected sleep to stop");
-    assert.equal(ptyManager.isLive(sessionId), true);
+    execFileSync("tmux", ["new-session", "-d", "-s", legacyName, "-c", cwd, "bash --norc -i"], { stdio: "ignore" });
+    assert.ok(await waitFor(() => ptyManager.isLive(sessionId)), "expected the legacy session to be live");
+    assert.equal(ptyManager.isCommandRunning(sessionId), false);
+    await assertInterruptStops(sessionId, () =>
+      execFileSync("tmux", ["send-keys", "-t", `${legacyName}:0.0`, "sleep 30", "Enter"], { stdio: "ignore" })
+    );
   } finally {
     ptyManager.kill(sessionId);
     await fs.rm(cwd, { recursive: true, force: true });

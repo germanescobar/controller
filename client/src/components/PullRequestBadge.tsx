@@ -9,31 +9,50 @@ export function PullRequestBadge({
   number,
   state,
   onClick,
+  nested = false,
   className,
 }: {
   number: number;
   state: string;
   onClick: () => void;
+  /** Render as a span with button semantics when placed inside another button. */
+  nested?: boolean;
   className?: string;
 }) {
   const { label } = prStyle(state);
+  const props = {
+    onClick: (e: React.MouseEvent) => {
+      e.stopPropagation();
+      onClick();
+    },
+    title: `PR #${number} (${label})`,
+    "aria-label": `Open PR #${number} (${label})`,
+    className: cn(
+      "inline-flex shrink-0 items-center gap-1 rounded px-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors",
+      className,
+    ),
+  };
+  const content = (
+    <>
+      <PullRequestStateIcon state={state} className="h-3.5 w-3.5" />
+      #{number}
+    </>
+  );
+  if (!nested) return <button type="button" {...props}>{content}</button>;
   return (
-    <button
-      type="button"
-      onClick={(e) => {
+    <span
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
         e.stopPropagation();
         onClick();
       }}
-      title={`PR #${number} (${label})`}
-      aria-label={`Open PR #${number} (${label})`}
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1 rounded px-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors",
-        className,
-      )}
+      {...props}
     >
-      <PullRequestStateIcon state={state} className="h-3.5 w-3.5" />
-      #{number}
-    </button>
+      {content}
+    </span>
   );
 }
 

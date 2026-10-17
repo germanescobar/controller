@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { linkedPrPatch } from "../worktree-pull-requests.js";
 import type { Worktree } from "../worktrees.js";
 
-/* Issue #436: each worktree records the latest PR for its branch. */
+/*
+ * Issue #436: each worktree records the PR for the branch it currently has
+ * checked out, which can differ from the branch it was created with.
+ */
 
 const base: Worktree = {
   id: "wt-1",
@@ -16,25 +19,26 @@ const base: Worktree = {
   presence: "active",
 };
 
-function prs(state: "OPEN" | "CLOSED" | "MERGED") {
-  return new Map([["feature", { number: 7, state, url: "https://github.com/o/r/pull/7" }]]);
-}
+const pr7 = { number: 7, state: "OPEN" as const, url: "https://github.com/o/r/pull/7" };
+const pr9 = { number: 9, state: "OPEN" as const, url: "https://github.com/o/r/pull/9" };
+const prs = new Map([["feature", pr7], ["other", pr9]]);
 
 test("a new or changed PR state is recorded", () => {
-  assert.equal(linkedPrPatch(base, prs("OPEN"))?.linkedPr?.state, "OPEN");
-  const open: Worktree = { ...base, linkedPr: { number: 7, state: "OPEN", url: "u" } };
-  assert.equal(linkedPrPatch(open, prs("MERGED"))?.linkedPr?.state, "MERGED");
+  assert.deepEqual(linkedPrPatch(base, "feature", prs), { linkedPr: pr7 });
+  const merged = new Map([["feature", { ...pr7, state: "MERGED" as const }]]);
+  assert.equal(linkedPrPatch({ ...base, linkedPr: pr7 }, "feature", merged)?.linkedPr?.state, "MERGED");
 });
 
 test("an unchanged PR produces no update", () => {
-  const merged: Worktree = {
-    ...base,
-    linkedPr: { number: 7, state: "MERGED", url: "https://github.com/o/r/pull/7" },
-  };
-  assert.equal(linkedPrPatch(merged, prs("MERGED")), null);
+  assert.equal(linkedPrPatch({ ...base, linkedPr: pr7 }, "feature", prs), null);
 });
 
-test("main and removed worktrees keep their recorded PR", () => {
-  assert.equal(linkedPrPatch({ ...base, isMain: true }, prs("OPEN")), null);
-  assert.equal(linkedPrPatch({ ...base, presence: "removed" }, prs("OPEN")), null);
+test("the PR follows the branch currently checked out", () => {
+  assert.deepEqual(linkedPrPatch({ ...base, linkedPr: pr7 }, "other", prs), { linkedPr: pr9 });
+});
+
+test("a branch without a PR, or a detached HEAD, clears the recorded PR", () => {
+  assert.deepEqual(linkedPrPatch({ ...base, linkedPr: pr7 }, "no-pr", prs), { linkedPr: undefined });
+  assert.deepEqual(linkedPrPatch({ ...base, linkedPr: pr7 }, null, prs), { linkedPr: undefined });
+  assert.equal(linkedPrPatch(base, null, prs), null);
 });
