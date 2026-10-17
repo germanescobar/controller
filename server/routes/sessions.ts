@@ -1572,7 +1572,12 @@ export async function handleSessionStream(
   // surface the project-scoped pinned snippet and notes (issue #350).
   const controllerPreamble = await buildControllerPreamble({
     projectId: req.params.projectId,
-    isMainWorktree: worktree.isMain,
+    worktree: {
+      id: worktree.id,
+      name: worktree.name,
+      path: worktree.path,
+      isMain: worktree.isMain,
+    },
   });
   const usesSystemPrompt = providerId === "anita";
   // Resolve the `@`-mentions (issue #312) before composing the prompt so

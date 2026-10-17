@@ -569,8 +569,8 @@ test("first turn on a branched session starts a fresh provider thread and captur
       // actually knows what "the proposal above" refers to.
       assert.match(invocations[0], /First assistant reply/);
       assert.match(invocations[0], /Review the proposal above/);
-      assert.match(invocations[0], /Do not edit repository source, documentation, or configuration in main/);
-      assert.match(invocations[0], /sessions start --worktree <id> --parent self/);
+      assert.match(invocations[0], /Do not edit repository source, documentation, or configuration here/);
+      assert.match(invocations[0], /sessions start --worktree <worktreeId> --parent self/);
 
       const session = await readSessionFile(projectPath, controllerId);
       assert.equal(

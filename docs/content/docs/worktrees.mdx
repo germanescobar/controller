@@ -21,10 +21,11 @@ Controller checks out the new worktree and, if the project has a
 ## Pick a worktree when starting a session
 
 Expand a worktree in the sidebar and use **New conversation**. The session's
-agent, terminals, and `run.sh` operate inside that worktree's checkout. A
-main-worktree conversation can inspect, test, and run the project; its agent
-is guided to delegate repository edits to a linked session in a feature
-worktree.
+agent, terminals, and `run.sh` operate inside that worktree's checkout, and
+the agent is told to edit files only there. A main-worktree conversation can
+inspect, test, and run the project. When you ask it for a change, its agent
+hands the work off to a new linked conversation in a feature worktree and
+replies with a link to it, instead of making the change itself.
 
 Each worktree row shows its linked PR number on the right (green icon when
 open, violet when merged); click it to open the PR tab for that worktree.

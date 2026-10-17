@@ -44,6 +44,13 @@ import { buildMemoryBlock } from "./memory.js";
 import { listUnifiedSkills } from "./unified-skills.js";
 import type { SkillMetadata } from "./skills.js";
 
+export interface PreambleWorktree {
+  id: string;
+  name: string;
+  path: string;
+  isMain: boolean;
+}
+
 export interface ControllerPreambleOptions {
   /**
    * When supplied, the preamble includes the project's pinned memory
@@ -54,10 +61,11 @@ export interface ControllerPreambleOptions {
    */
   projectId?: string;
   /**
-   * Adds the main-worktree delegation guidance (issue #436). This is
-   * prompt guidance, not a filesystem permission boundary.
+   * The worktree this conversation is bound to (issue #436). Adds the
+   * workspace rule, plus the hand-off guidance when it is the main
+   * worktree. This is prompt guidance, not a filesystem permission boundary.
    */
-  isMainWorktree?: boolean;
+  worktree?: PreambleWorktree;
 }
 
 // Some providers (Codex) sanitize or rebuild env vars before spawning user
@@ -395,24 +403,37 @@ export async function buildControllerPreamble(
     loopPrimitivesIntro(),
     "",
     sessionsListIntro(),
-    ...(options?.isMainWorktree ? ["", mainWorktreeIntro()] : []),
+    ...(options?.worktree ? ["", worktreeIntro(options.worktree)] : []),
   ].join("\n");
 }
 
 /*
- * Main is for planning, inspection, tests, and running the project. Edits go
- * to a linked conversation in a feature worktree, because a conversation
- * stays bound to the worktree it was created in.
+ * A conversation stays bound to the worktree it was created in, so it only
+ * edits there. Main is for planning, inspection, tests, and running the
+ * project; edits are handed off to a new conversation in a feature worktree.
+ * The hand-off is complete: the new conversation owns the work, and this one
+ * reports where it went instead of also doing it (issue #436).
  */
-function mainWorktreeIntro(): string {
+function worktreeIntro(worktree: PreambleWorktree): string {
+  const scope = [
+    `This conversation is bound to the \`${worktree.name}\` worktree at \`${worktree.path}\`.`,
+    "Only edit files inside it. Other worktrees belong to their own conversations: do not edit, commit, stash, or otherwise change their files.",
+  ];
+  if (!worktree.isMain) return scope.join("\n");
   const cli = controllerCliShellPath();
   return [
-    "This conversation runs in the project's main worktree. Use it for planning, inspection, tests, and running the project.",
-    "Do not edit repository source, documentation, or configuration in main. For changes, create or select a non-main worktree and start a new linked conversation there:",
+    ...scope,
     "",
-    `   ${cli} sessions start --worktree <id> --parent self "<task>"`,
+    "This is the project's main worktree. Use it for planning, inspection, tests, and running the project. Do not edit repository source, documentation, or configuration here.",
     "",
-    "Keep this conversation on main to coordinate and review the delegated work.",
+    "When the user asks for a change, hand it off to a new conversation in a feature worktree:",
+    "",
+    `  1. Create a worktree (or pick an existing one): ${cli} worktrees create --name <name>. Use the worktree id it prints.`,
+    `  2. Start the new conversation with the complete task: ${cli} sessions start --worktree <worktreeId> --parent self "<task with all the context it needs>". It starts working immediately.`,
+    `     On this conversation's first turn \`--parent self\` is not available yet; use \`--parent <id>\` with the id from ${cli} sessions list --worktree ${worktree.id} --json --limit 1.`,
+    "  3. Tell the user where the work went: the worktree name and the controller:// link that sessions start printed. Then end your turn.",
+    "",
+    "After the hand-off, do not implement the change yourself, here or in that worktree. If the user asks for status, check it with sessions children self; send follow-up work with sessions send.",
   ].join("\n");
 }
 
