@@ -255,45 +255,10 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
       (await runningServerTerminalIds(project.id, worktree.id)).length > 0;
     return {
       ...worktree,
-      taskStatus: worktree.taskStatus ?? "active",
       hasRunScript,
       serverRunning,
     };
   })));
-});
-
-worktreesRouter.patch("/:projectId/worktrees/:worktreeId", async (req, res) => {
-  const worktree = await getWorktree(req.params.projectId, req.params.worktreeId);
-  if (!worktree) {
-    res.status(404).json(await worktreeNotFoundPayload(req.params.projectId, req.params.worktreeId));
-    return;
-  }
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  const patch: Pick<typeof worktree, "taskStatus" | "linkedIssue"> = {};
-  if (body.taskStatus !== undefined) {
-    if (body.taskStatus !== "active" && body.taskStatus !== "finished") {
-      res.status(400).json({ error: "taskStatus must be active or finished" });
-      return;
-    }
-    patch.taskStatus = body.taskStatus;
-  }
-  if (body.linkedIssue !== undefined) {
-    if (body.linkedIssue === null) {
-      patch.linkedIssue = undefined;
-    } else {
-      const issue = body.linkedIssue as Record<string, unknown>;
-      if (typeof issue.repository !== "string" ||
-          !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(issue.repository) ||
-          !Number.isInteger(issue.number) || (issue.number as number) <= 0) {
-        res.status(400).json({ error: "linkedIssue requires repository and positive number" });
-        return;
-      }
-      patch.linkedIssue = { repository: issue.repository, number: issue.number as number };
-    }
-  }
-  const updated = await updateWorktree(worktree.id, patch);
-  if (updated) emitWorktreeUpdated(worktree.projectId, updated);
-  res.json(updated);
 });
 
 worktreesRouter.get("/:projectId/terminal-tabs", async (req, res) => {

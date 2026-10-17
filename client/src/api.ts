@@ -81,8 +81,6 @@ export interface Worktree {
   setupLogPath?: string;
   origin?: "controller" | "external";
   presence?: "active" | "missing" | "removed";
-  taskStatus?: "active" | "finished";
-  linkedIssue?: { repository: string; number: number };
   linkedPr?: { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string };
   /** Project has a run.sh; without one there is no server to report. */
   hasRunScript?: boolean;
@@ -1822,20 +1820,6 @@ export async function fetchPullRequest(
 
 export async function fetchWorktrees(projectId: string): Promise<Worktree[]> {
   const res = await fetch(`${BASE}/projects/${projectId}/worktrees`);
-  return res.json();
-}
-
-export async function updateWorktreeMetadata(
-  projectId: string,
-  worktreeId: string,
-  patch: { taskStatus: "active" | "finished" }
-): Promise<Worktree> {
-  const res = await fetch(`${BASE}/projects/${projectId}/worktrees/${worktreeId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  await throwIfNotOk(res, "Failed to update worktree");
   return res.json();
 }
 

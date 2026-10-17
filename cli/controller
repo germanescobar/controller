@@ -686,8 +686,7 @@ function formatWorktreeRow(worktree) {
       ? `  setup=${worktree.setupExitCode === 0 ? "ok" : `exit(${worktree.setupExitCode})`}`
       : "";
   const presence = worktree.presence && worktree.presence !== "active" ? `  [${worktree.presence}]` : "";
-  const task = worktree.taskStatus === "finished" ? "  task=finished" : "";
-  return `${worktree.id}  ${worktree.name}  ${worktree.branch ?? "(no branch)"}${worktree.isMain ? "  [main]" : ""}${presence}${task}${port}${setup}\n  ${worktree.path}`;
+  return `${worktree.id}  ${worktree.name}  ${worktree.branch ?? "(no branch)"}${worktree.isMain ? "  [main]" : ""}${presence}${port}${setup}\n  ${worktree.path}`;
 }
 
 export async function runWorktrees(argv, serverUrl) {

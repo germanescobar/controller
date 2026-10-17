@@ -25,8 +25,6 @@ export interface Worktree {
   setupLogPath?: string;
   origin?: "controller" | "external";
   presence?: "active" | "missing" | "removed";
-  taskStatus?: "active" | "finished";
-  linkedIssue?: { repository: string; number: number };
   linkedPr?: { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string };
   /** Project has a run.sh; without one there is no server to report. */
   hasRunScript?: boolean;
@@ -369,7 +367,6 @@ export async function addWorktree(
     createdAt: new Date().toISOString(),
     origin: "controller",
     presence: "active",
-    taskStatus: "active",
     ...worktree,
   };
   return withWorktreeRegistry(async (registry) => {

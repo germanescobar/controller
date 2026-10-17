@@ -16,7 +16,6 @@ import {
   Loader2,
   CheckCircle2,
   RotateCw,
-  RotateCcw,
   AlertTriangle,
   HelpCircle,
 } from "lucide-react";
@@ -36,7 +35,6 @@ import {
   runWorktreeSetup,
   runProjectScript,
   stopProjectScript,
-  updateWorktreeMetadata,
   type Project,
   type SessionSummary,
   type Worktree,
@@ -77,11 +75,11 @@ import { SidebarRefreshQueue, type SidebarRefreshScopes } from "../lib/sidebar-r
 
 const SESSION_BATCH_SIZE = 5;
 
+// Main first, then live worktrees, then removed ones kept for history.
 function compareWorktrees(a: Worktree, b: Worktree): number {
   const rank = (worktree: Worktree) => {
     if (worktree.isMain) return 0;
-    if (worktree.presence === "removed") return 3;
-    return worktree.taskStatus === "finished" ? 2 : 1;
+    return worktree.presence === "removed" ? 2 : 1;
   };
   return rank(a) - rank(b) || a.name.localeCompare(b.name);
 }
@@ -1211,17 +1209,6 @@ export function Sidebar({
     };
   }, []);
 
-  // The server emits `worktree_updated`, which refreshes this project's rows.
-  const toggleTaskStatus = async (projectId: string, worktree: Worktree) => {
-    try {
-      await updateWorktreeMetadata(projectId, worktree.id, {
-        taskStatus: worktree.taskStatus === "finished" ? "active" : "finished",
-      });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update worktree");
-    }
-  };
-
   const formatTime = (iso: string) => {
     const diff = Date.now() - new Date(iso).getTime();
     const mins = Math.floor(diff / 60000);
@@ -1424,7 +1411,7 @@ export function Sidebar({
                                 <span
                                   className={cn(
                                     "truncate",
-                                    isWorktreeDimmed(worktree) && "text-muted-foreground",
+                                    worktree.presence === "removed" && "text-muted-foreground",
                                   )}
                                 >
                                   {worktree.name}
@@ -1474,23 +1461,6 @@ export function Sidebar({
                               >
                                 <PenSquare className="h-3.5 w-3.5" />
                               </button>
-                              {!worktree.isMain && worktree.presence !== "removed" && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void toggleTaskStatus(project.id, worktree);
-                                  }}
-                                  title={worktree.taskStatus === "finished" ? "Reopen" : "Mark finished"}
-                                  aria-label={`${worktree.taskStatus === "finished" ? "Reopen" : "Mark finished"} ${worktree.name}`}
-                                  className="rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
-                                >
-                                  {worktree.taskStatus === "finished" ? (
-                                    <RotateCcw className="h-3.5 w-3.5" />
-                                  ) : (
-                                    <CheckCircle2 className="h-3.5 w-3.5" />
-                                  )}
-                                </button>
-                              )}
                               {!worktree.isMain && worktree.presence !== "removed" && (
                                 <button
                                   onClick={(e) => {
@@ -2213,22 +2183,11 @@ export function Sidebar({
   );
 }
 
-function isWorktreeDimmed(worktree: Worktree): boolean {
-  return worktree.taskStatus === "finished" || worktree.presence === "removed";
-}
-
-/*
- * Leading icon for a worktree row. Active is the normal state and keeps the
- * branch icon; finished and removed get distinct icons so a removed
- * worktree is never mistaken for a finished one.
- */
+/* Leading icon for a worktree row: the branch icon, or an archive icon once removed. */
 function WorktreeStateIcon({ worktree }: { worktree: Worktree }) {
   const className = "h-3.5 w-3.5 shrink-0 text-muted-foreground";
   if (worktree.presence === "removed") {
     return <Archive className={className} aria-label="Removed"><title>Removed</title></Archive>;
-  }
-  if (worktree.taskStatus === "finished") {
-    return <CheckCircle2 className={className} aria-label="Finished"><title>Finished</title></CheckCircle2>;
   }
   return <GitBranch className={className} />;
 }

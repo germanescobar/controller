@@ -56,22 +56,17 @@ async function syncPullRequests(
   }
 }
 
-/*
- * A newly merged PR finishes the task; a closed unmerged PR does not.
- * Only the transition finishes it, so a user who reopens the task by
- * hand is not overridden on the next sync.
- */
+/* The worktree's PR when it changed since the last sync; null otherwise. */
 export function linkedPrPatch(
   worktree: Worktree,
   pullRequests: Map<string, LinkedPr>
-): Pick<Worktree, "linkedPr" | "taskStatus"> | null {
+): Pick<Worktree, "linkedPr"> | null {
   if (worktree.isMain || worktree.presence === "removed" || !worktree.branch) return null;
   const linkedPr = pullRequests.get(worktree.branch);
   if (!linkedPr) return null;
   const previous = worktree.linkedPr;
   if (previous?.number === linkedPr.number && previous.state === linkedPr.state) return null;
-  const newlyMerged = linkedPr.state === "MERGED" && previous?.state !== "MERGED";
-  return newlyMerged ? { linkedPr, taskStatus: "finished" } : { linkedPr };
+  return { linkedPr };
 }
 
 async function listPullRequestsByBranch(projectPath: string): Promise<Map<string, LinkedPr>> {

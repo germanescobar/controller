@@ -142,25 +142,6 @@ test("DELETE refuses a dirty worktree with 409 (default-on safety)", async () =>
   });
 });
 
-test("worktree task status and issue association persist independently of deletion", async () => {
-  await withDeleteEnv(async () => {}, async ({ baseUrl, projectId, worktreeId }) => {
-    const response = await fetch(baseUrl, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        taskStatus: "finished",
-        linkedIssue: { repository: "germanescobar/controller", number: 436 },
-      }),
-    });
-    assert.equal(response.status, 200);
-    const { getProjectWorktrees } = await import("../worktrees.js");
-    const worktree = (await getProjectWorktrees(projectId)).find((item) => item.id === worktreeId);
-    assert.equal(worktree?.taskStatus, "finished");
-    assert.deepEqual(worktree?.linkedIssue, { repository: "germanescobar/controller", number: 436 });
-    assert.equal(worktree?.presence, "active");
-  });
-});
-
 test("DELETE allows a clean worktree to be deleted", async () => {
   await withDeleteEnv(async ({ worktreePath, worktreeId }) => {
     const { projectStoreDir } = await import("../paths.js");
