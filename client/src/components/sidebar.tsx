@@ -4,7 +4,8 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
-  GitBranchPlus,
+  Pause,
+  Play,
   ChevronDown,
   ChevronRight,
   Settings,
@@ -19,6 +20,7 @@ import {
   HelpCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PullRequestBadge } from "@/components/PullRequestBadge";
 import {
   fetchSessions,
   fetchRuntimeSnapshot,
@@ -31,6 +33,8 @@ import {
   updateSessionTitle,
   fetchWorktreeSetupLog,
   runWorktreeSetup,
+  runProjectScript,
+  stopProjectScript,
   type Project,
   type SessionSummary,
   type Worktree,
@@ -71,6 +75,15 @@ import { SidebarRefreshQueue, type SidebarRefreshScopes } from "../lib/sidebar-r
 
 const SESSION_BATCH_SIZE = 5;
 
+// Main first, then live worktrees, then removed ones kept for history.
+function compareWorktrees(a: Worktree, b: Worktree): number {
+  const rank = (worktree: Worktree) => {
+    if (worktree.isMain) return 0;
+    return worktree.presence === "removed" ? 2 : 1;
+  };
+  return rank(a) - rank(b) || a.name.localeCompare(b.name);
+}
+
 interface SidebarProps {
   projects: Project[];
   activeProjectId: string | null;
@@ -83,9 +96,10 @@ interface SidebarProps {
     worktreeId?: string,
   ) => void;
   onNewThread: (projectId: string, worktreeId?: string) => void;
+  /** Open the worktree's PR tab, keeping the current session when already there. */
+  onOpenPullRequest: (projectId: string, worktreeId: string, fallbackSessionId?: string) => void;
   onNewProject: () => void;
   onEditProject: (projectId: string) => void;
-  onNewWorktree: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSettings: () => void;
   /** Confirm before deleting the active editor's project or worktree. */
@@ -138,6 +152,8 @@ export interface FocusQueueItem {
   projectName: string;
   worktreeId: string;
   worktreeName: string;
+  /** The worktree's PR, shown on the radar row when present. */
+  linkedPr?: Worktree["linkedPr"];
   session: SessionSummary;
   active: boolean;
   /**
@@ -402,9 +418,9 @@ export function Sidebar({
   onSelectProject,
   onSelectSession,
   onNewThread,
+  onOpenPullRequest,
   onNewProject,
   onEditProject,
-  onNewWorktree,
   onProjectsChanged,
   onSettings,
   onBeforeRemove,
@@ -592,6 +608,7 @@ export function Sidebar({
             projectName: project.name,
             worktreeId: worktree.id,
             worktreeName: worktree.name,
+            linkedPr: worktree.linkedPr,
             session,
             active: activeSessionIds.has(session.id),
             awaitingInput: awaitingInputSessionIds.has(session.id) || undefined,
@@ -685,7 +702,7 @@ export function Sidebar({
           );
           return {
             ...project,
-            worktrees: wtWithSessions,
+            worktrees: wtWithSessions.sort(compareWorktrees),
             isExpanded:
               existing?.isExpanded ??
               project.id === activeLocationRef.current.activeProjectId,
@@ -762,7 +779,7 @@ export function Sidebar({
         const existing = new Map(project.worktrees.map((w) => [w.id, w]));
         const updated = {
           ...project,
-          worktrees: worktrees.map((wt) => ({
+          worktrees: worktrees.sort(compareWorktrees).map((wt) => ({
             ...wt,
             sessions: existing.get(wt.id)?.sessions ?? [],
             isExpanded: existing.get(wt.id)?.isExpanded ??
@@ -1249,8 +1266,21 @@ export function Sidebar({
                       <span className="block truncate text-left">
                         {item.session.title || item.session.id.slice(0, 8)}
                       </span>
-                      <span className="block truncate text-left text-[11px] text-muted-foreground">
-                        {item.projectName} / {item.worktreeName}
+                      <span className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                        <span className="min-w-0 flex-1 truncate text-left">
+                          {item.projectName} / {item.worktreeName}
+                        </span>
+                        {item.linkedPr && (
+                          <PullRequestBadge
+                            nested
+                            number={item.linkedPr.number}
+                            state={item.linkedPr.state}
+                            onClick={() =>
+                              onOpenPullRequest(item.projectId, item.worktreeId, item.session.id)
+                            }
+                            className="text-[11px]"
+                          />
+                        )}
                       </span>
                     </span>
                   </span>
@@ -1325,16 +1355,6 @@ export function Sidebar({
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      onNewWorktree(project.id);
-                    }}
-                    title="New worktree"
-                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
-                  >
-                    <GitBranchPlus className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
                       onEditProject(project.id);
                     }}
                     title="Edit project"
@@ -1386,6 +1406,7 @@ export function Sidebar({
                         return (
                           <div key={worktree.id}>
                             <div className="group/worktree flex items-center">
+                              <div className="relative flex min-w-0 flex-1 items-center">
                               <button
                                 onClick={() =>
                                   toggleWorktree(project.id, worktree.id)
@@ -1394,7 +1415,7 @@ export function Sidebar({
                                   "flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors min-w-0",
                                   worktree.id === activeWorktreeId
                                     ? "text-sidebar-foreground"
-                                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
+                                    : "text-sidebar-foreground/80 group-hover/worktree:bg-sidebar-accent",
                                 )}
                               >
                                 {worktree.isExpanded ? (
@@ -1402,8 +1423,13 @@ export function Sidebar({
                                 ) : (
                                   <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                                 )}
-                                <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                                <span className="truncate">
+                                <WorktreeStateIcon worktree={worktree} />
+                                <span
+                                  className={cn(
+                                    "truncate",
+                                    worktree.presence === "removed" && "text-muted-foreground",
+                                  )}
+                                >
                                   {worktree.name}
                                   {worktree.setupExitCode != null &&
                                     worktree.setupExitCode !== 0 && (
@@ -1427,17 +1453,31 @@ export function Sidebar({
                                     )}
                                 </span>
                               </button>
+                              {/* Desktop: hover actions overlay the end of the title
+                                  instead of reserving width. Mobile: inline. */}
+                              <div
+                                className={cn(
+                                  "flex shrink-0 items-center md:pointer-events-none md:absolute md:inset-y-0 md:right-0 md:rounded-r-md md:pl-1 md:opacity-0 md:transition-opacity md:group-hover/worktree:pointer-events-auto md:group-hover/worktree:opacity-100",
+                                  "md:before:pointer-events-none md:before:absolute md:before:inset-y-0 md:before:right-full md:before:w-4 md:before:bg-linear-to-l md:before:to-transparent",
+                                  worktree.id === activeWorktreeId
+                                    ? "md:bg-sidebar md:before:from-sidebar"
+                                    : "md:bg-sidebar-accent md:before:from-sidebar-accent",
+                                )}
+                              >
+                              <ServerToggleButton projectId={project.id} worktree={worktree} />
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   onNewThread(project.id, worktree.id);
                                 }}
-                                title="New session"
-                                className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
+                                disabled={worktree.presence === "missing" || worktree.presence === "removed"}
+                                title={`New conversation in ${worktree.name}`}
+                                aria-label={`New conversation in ${worktree.name}`}
+                                className="rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                               >
                                 <PenSquare className="h-3.5 w-3.5" />
                               </button>
-                              {!worktree.isMain && (
+                              {!worktree.isMain && worktree.presence !== "removed" && (
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -1449,10 +1489,26 @@ export function Sidebar({
                                     });
                                   }}
                                   title="Delete worktree"
-                                  className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                                  className="rounded p-1 text-muted-foreground hover:text-destructive transition-all"
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
+                              )}
+                              </div>
+                              </div>
+                              {worktree.linkedPr && (
+                                <PullRequestBadge
+                                  number={worktree.linkedPr.number}
+                                  state={worktree.linkedPr.state}
+                                  onClick={() =>
+                                    onOpenPullRequest(
+                                      project.id,
+                                      worktree.id,
+                                      worktree.sessions[0]?.id,
+                                    )
+                                  }
+                                  className="ml-1"
+                                />
                               )}
                             </div>
 
@@ -2140,5 +2196,57 @@ export function Sidebar({
         </AlertDialogContent>
       </AlertDialog>
     </aside>
+  );
+}
+
+/* Leading icon for a worktree row: the branch icon, or an archive icon once removed. */
+function WorktreeStateIcon({ worktree }: { worktree: Worktree }) {
+  const className = "h-3.5 w-3.5 shrink-0 text-muted-foreground";
+  if (worktree.presence === "removed") {
+    return <Archive className={className} aria-label="Removed"><title>Removed</title></Archive>;
+  }
+  return <GitBranch className={className} />;
+}
+
+/*
+ * Start or stop the worktree's run.sh server: play when stopped, pause when
+ * running. Hidden without a run.sh, or for missing and removed worktrees.
+ * The server announces the new state, which refreshes this row.
+ */
+function ServerToggleButton({ projectId, worktree }: { projectId: string; worktree: Worktree }) {
+  const [pending, setPending] = useState(false);
+  if (!worktree.hasRunScript) return null;
+  if (worktree.presence === "missing" || worktree.presence === "removed") return null;
+  const running = worktree.serverRunning === true;
+  const label = running ? "Stop server" : "Start server";
+  const toggle = async () => {
+    setPending(true);
+    try {
+      if (running) await stopProjectScript(projectId, worktree.id);
+      else await runProjectScript(projectId, worktree.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Failed to ${label.toLowerCase()}`);
+    } finally {
+      setPending(false);
+    }
+  };
+  const Icon = pending ? Loader2 : running ? Pause : Play;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        void toggle();
+      }}
+      disabled={pending}
+      title={label}
+      aria-label={`${label} for ${worktree.name}`}
+      className={cn(
+        "rounded p-1 transition-colors hover:text-sidebar-foreground disabled:cursor-wait",
+        running ? "text-emerald-500" : "text-muted-foreground",
+      )}
+    >
+      <Icon className={cn("h-3.5 w-3.5", pending && "animate-spin")} />
+    </button>
   );
 }

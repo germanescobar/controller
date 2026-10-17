@@ -802,12 +802,9 @@ test("GET /git/pr surfaces gh_not_installed without nuking a cached PR (issue #3
   });
 });
 
-test("GET /git/pr returns { pr: null } when the branch's PR is MERGED or CLOSED (issue #387)", async () => {
-  // The panel's tab is documented as rendered only for OPEN PRs.
-  // `gh pr view --json` returns MERGED / CLOSED entries for the
-  // current branch — without an explicit state filter — so the
-  // server has to suppress them, otherwise the tab never performs
-  // its documented auto-hide (issue #387 review feedback).
+test("GET /git/pr returns MERGED and CLOSED PRs so the PR tab stays available (issue #436)", async () => {
+  // A worktree keeps its PR tab after the PR is merged or closed; the
+  // panel renders the state. Supersedes the open-only rule from #387.
   for (const closedState of ["MERGED", "CLOSED"]) {
     const mergedMeta: RunnerResult = {
       stdout: JSON.stringify({
@@ -830,11 +827,7 @@ test("GET /git/pr returns { pr: null } when the branch's PR is MERGED or CLOSED 
         const res = await fetchPr(env.baseUrl, env.worktreeId);
         const body = await res.json();
         assert.equal(body.error, undefined);
-        assert.equal(
-          body.pr,
-          null,
-          `${closedState} PRs should surface as { pr: null } so the panel auto-hides`,
-        );
+        assert.equal(body.pr?.state, closedState);
       } finally {
         dispose();
       }

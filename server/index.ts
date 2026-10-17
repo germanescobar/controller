@@ -27,6 +27,7 @@ import {
 import { getCachedPersistedAttentionSnapshot } from "./lib/session-attention.js";
 import { getProject } from "./lib/projects.js";
 import {
+  isWorktreeUnavailable,
   resolveWorktree,
   worktreeNotFoundMessage,
   worktreeNotFoundPayload,
@@ -227,6 +228,13 @@ terminalWss.on("connection", (ws: WebSocket) => {
             message: worktreeNotFoundMessage(payload),
           })
         );
+        return;
+      }
+      if (isWorktreeUnavailable(worktree)) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: `Cannot open a terminal in a ${worktree.presence} worktree`,
+        }));
         return;
       }
 

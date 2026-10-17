@@ -23,6 +23,17 @@ export interface Worktree {
   setupRanAt?: string;
   setupExitCode?: number;
   setupLogPath?: string;
+  origin?: "controller" | "external";
+  presence?: "active" | "missing" | "removed";
+  linkedPr?: { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string };
+  /** Project has a run.sh; without one there is no server to report. */
+  hasRunScript?: boolean;
+  serverRunning?: boolean;
+}
+
+/** Missing and removed worktrees keep their history but cannot run work. */
+export function isWorktreeUnavailable(worktree: Worktree): boolean {
+  return worktree.presence === "missing" || worktree.presence === "removed";
 }
 
 const MAIN_WORKTREE_NAME = "main";
@@ -108,8 +119,9 @@ async function withWorktreeRegistry<T>(
       backup: `${file}.bak`,
       validate: validateArray<Worktree>,
     });
+    const before = JSON.stringify(registry);
     const result = await fn(registry);
-    await writeJsonRegistry(file, registry);
+    if (JSON.stringify(registry) !== before) await writeJsonRegistry(file, registry);
     return result;
   });
 }
@@ -162,9 +174,9 @@ export async function getProjectWorktrees(
     const hit = cachedRegistry(key);
     if (hit) {
       const found = projectWorktrees(hit, projectId);
-      if (found) return found;
+      if (found) return withPresence(found);
     }
-    return await withLock(file, async () => {
+    const worktrees = await withLock(file, async () => {
       // Another caller may have populated the cache while we waited.
       const lockedKey = `${file}\0${await registryVersion(file)}`;
       const lockedHit = cachedRegistry(lockedKey);
@@ -186,6 +198,7 @@ export async function getProjectWorktrees(
       const snapshot = cacheRegistry(file, currentKey, registry);
       return projectWorktrees(snapshot, projectId) ?? [];
     });
+    return withPresence(worktrees);
   } catch (err) {
     if (err instanceof RegistryParseError) {
       // Surface the corruption to the operator but do not persist a
@@ -196,6 +209,19 @@ export async function getProjectWorktrees(
     }
     throw err;
   }
+}
+
+/** Report missing paths without mutating or reparsing the registry on every read. */
+async function withPresence(worktrees: Worktree[]): Promise<Worktree[]> {
+  return Promise.all(worktrees.map(async (worktree) => {
+    if (worktree.presence === "removed") return worktree;
+    try {
+      await fs.access(worktree.path);
+      return { ...worktree, presence: "active" as const };
+    } catch {
+      return { ...worktree, presence: "missing" as const };
+    }
+  }));
 }
 
 export async function getWorktree(
@@ -223,6 +249,7 @@ export async function findWorktreeByPath(
   let bestLen = -1;
   for (const project of projects) {
     for (const worktree of await getProjectWorktrees(project.id)) {
+      if (isWorktreeUnavailable(worktree)) continue;
       const worktreePath = path.resolve(worktree.path);
       const inside =
         resolved === worktreePath ||
@@ -338,6 +365,8 @@ export async function addWorktree(
   const record: Worktree = {
     id: worktree.id ?? uuidv4(),
     createdAt: new Date().toISOString(),
+    origin: "controller",
+    presence: "active",
     ...worktree,
   };
   return withWorktreeRegistry(async (registry) => {
@@ -361,10 +390,9 @@ export async function updateWorktree(
 
 export async function removeWorktree(worktreeId: string): Promise<boolean> {
   return withWorktreeRegistry(async (registry) => {
-    const next = registry.filter((w) => w.id !== worktreeId);
-    if (next.length === registry.length) return false;
-    registry.length = 0;
-    registry.push(...next);
+    const worktree = registry.find((entry) => entry.id === worktreeId);
+    if (!worktree || worktree.presence === "removed") return false;
+    worktree.presence = "removed";
     return true;
   });
 }

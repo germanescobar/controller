@@ -143,9 +143,19 @@ test("DELETE refuses a dirty worktree with 409 (default-on safety)", async () =>
 });
 
 test("DELETE allows a clean worktree to be deleted", async () => {
-  await withDeleteEnv(async () => {
-    // No edits — the worktree is clean.
-  }, async ({ baseUrl, worktreePath }) => {
+  await withDeleteEnv(async ({ worktreePath, worktreeId }) => {
+    const { projectStoreDir } = await import("../paths.js");
+    const store = projectStoreDir(worktreePath);
+    await fs.mkdir(path.join(store, "sessions"), { recursive: true });
+    await fs.mkdir(path.join(store, "events"), { recursive: true });
+    await fs.writeFile(path.join(store, "sessions", "historical.json"), JSON.stringify({
+      id: "historical", title: "Historical conversation", worktreeId,
+      workingDirectory: worktreePath, createdAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(), status: "active", messages: [],
+    }));
+    await fs.writeFile(path.join(store, "events", "historical.jsonl"),
+      JSON.stringify({ id: "event-1", sessionId: "historical", type: "user_message", timestamp: new Date().toISOString(), data: { text: "hello" } }) + "\n");
+  }, async ({ baseUrl, worktreePath, projectId, worktreeId }) => {
     const res = await fetch(baseUrl, { method: "DELETE" });
     assert.equal(res.status, 200);
     // Directory should be gone (git worktree remove or fs.rm fallback).
@@ -153,6 +163,22 @@ test("DELETE allows a clean worktree to be deleted", async () => {
       assert.equal((err as NodeJS.ErrnoException).code, "ENOENT");
       return true;
     });
+    const { getProjectWorktrees } = await import("../worktrees.js");
+    const removed = (await getProjectWorktrees(projectId)).find((worktree) => worktree.id === worktreeId);
+    assert.equal(removed?.presence, "removed");
+    const { getSessions } = await import("../sessions.js");
+    assert.equal((await getSessions(worktreePath))[0]?.id, "historical");
+    const { projectStoreDir } = await import("../paths.js");
+    assert.match(await fs.readFile(path.join(projectStoreDir(worktreePath), "events", "historical.jsonl"), "utf-8"), /hello/);
+
+    // Session storage is keyed by path, so the removed name stays reserved.
+    const reuse = await fetch(`http://127.0.0.1:${new URL(baseUrl).port}/api/projects/${projectId}/worktrees`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "issue-1" }),
+    });
+    assert.equal(reuse.status, 409);
+    assert.match(((await reuse.json()) as { error: string }).error, /removed worktree/);
   });
 });
 

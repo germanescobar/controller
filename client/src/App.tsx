@@ -18,7 +18,6 @@ import {
   subscribeProjectEvents,
   type Project,
   type ProjectEvent,
-  type Worktree,
 } from "./api.ts";
 import type { ControllerLinkTarget } from "../../shared/conversation-links.ts";
 import {
@@ -30,7 +29,6 @@ import {
 import { StatusBar } from "./components/StatusBar.tsx";
 import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
-import { NewWorktree } from "./pages/NewWorktree.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
@@ -73,7 +71,6 @@ export type View =
   | { page: "empty" }
   | { page: "new-project" }
   | { page: "edit-project"; projectId: string }
-  | { page: "new-worktree"; projectId: string }
   | { page: "session"; projectId: string; worktreeId?: string; sessionId?: string }
   | { page: "settings"; section: SettingsSection };
 
@@ -143,6 +140,7 @@ function AppBody() {
     return saved.page === "session" ? saved.projectId : null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [prPanelRequest, setPrPanelRequest] = useState<{ worktreeId: string; id: number } | null>(null);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
   // Per-session "last handled" timestamp. Updated only when the user
@@ -535,6 +533,27 @@ function AppBody() {
     [activeProjectId]
   );
 
+  /*
+   * Open a worktree's PR tab in Controller. Stays on the current session when
+   * it already belongs to that worktree; otherwise opens the fallback session
+   * (or a new conversation). SessionView consumes the request and clears it.
+   */
+  const handleOpenPullRequest = (
+    projectId: string,
+    worktreeId: string,
+    fallbackSessionId?: string
+  ) => {
+    const current = view.page === "session" &&
+      view.projectId === projectId && view.worktreeId === worktreeId
+      ? view.sessionId
+      : fallbackSessionId;
+    if (setView({ page: "session", projectId, worktreeId, sessionId: current })) {
+      setActiveProjectId(projectId);
+      setPrPanelRequest({ worktreeId, id: Date.now() });
+      closeSidebar();
+    }
+  };
+
   const handleNewThread = (projectId: string, worktreeId?: string) => {
     if (setView({ page: "session", projectId, worktreeId })) {
       setActiveProjectId(projectId);
@@ -551,12 +570,6 @@ function AppBody() {
   const handleProjectSaved = (project: Project) => {
     loadProjects();
     setView({ page: "session", projectId: project.id });
-    closeSidebar();
-  };
-
-  const handleWorktreeCreated = (projectId: string, worktree: Worktree) => {
-    loadProjects();
-    setView({ page: "session", projectId, worktreeId: worktree.id });
     closeSidebar();
   };
 
@@ -818,8 +831,7 @@ function AppBody() {
       : "non-session";
   const mobileHeaderProjectId =
     activeView.page === "session" ||
-    activeView.page === "edit-project" ||
-    activeView.page === "new-worktree"
+    activeView.page === "edit-project"
       ? activeView.projectId
       : null;
   const mobileHeaderTitle =
@@ -848,14 +860,12 @@ function AppBody() {
           onSelectProject={handleSelectProject}
           onSelectSession={handleSelectSession}
           onNewThread={handleNewThread}
+          onOpenPullRequest={handleOpenPullRequest}
           onNewProject={() => {
             if (setView({ page: "new-project" })) closeSidebar();
           }}
           onEditProject={(projectId) => {
             if (setView({ page: "edit-project", projectId })) closeSidebar();
-          }}
-          onNewWorktree={(projectId) => {
-            if (setView({ page: "new-worktree", projectId })) closeSidebar();
           }}
           onProjectsChanged={loadProjects}
           onSettings={() => {
@@ -944,18 +954,6 @@ function AppBody() {
           );
         })()}
 
-        {activeView.page === "new-worktree" && (() => {
-          const project = projects.find((p) => p.id === activeView.projectId);
-          if (!project) return null;
-          return (
-            <NewWorktree
-              project={project}
-              onCreated={(worktree) => handleWorktreeCreated(activeView.projectId, worktree)}
-              onCancel={() => setView({ page: "session", projectId: activeView.projectId })}
-            />
-          );
-        })()}
-
         {activeView.page === "session" && (
           <SessionView
             key={sessionViewKey}
@@ -976,6 +974,12 @@ function AppBody() {
               loadProjects();
             }}
             onOpenConversation={handleOpenConversation}
+            prPanelRequestId={
+              prPanelRequest && prPanelRequest.worktreeId === activeView.worktreeId
+                ? prPanelRequest.id
+                : undefined
+            }
+            onPrPanelRequestHandled={() => setPrPanelRequest(null)}
             shortcutBindings={shortcutBindings.bindings}
             autoAdvance={autoAdvance}
             onToggleAutoAdvance={handleToggleAutoAdvance}

@@ -492,3 +492,29 @@ test("preamble documents the same-session loop primitives (issue #339)", async (
     assert.match(preamble, /sessions wake <self>/);
   });
 });
+
+test("every preamble binds the conversation to its own worktree (issue #436)", async () => {
+  await withTempHome(async () => {
+    const feature = await buildControllerPreamble({
+      worktree: { id: "wt-feature", name: "feature", path: "/repo/wt/feature", isMain: false },
+    });
+    assert.match(feature, /bound to the `feature` worktree at `\/repo\/wt\/feature`/);
+    assert.match(feature, /Other worktrees belong to their own conversations/);
+    assert.doesNotMatch(feature, /hand it off/);
+  });
+});
+
+test("main-worktree preambles hand changes off and report the link (issue #436)", async () => {
+  await withTempHome(async () => {
+    const main = await buildControllerPreamble({
+      worktree: { id: "wt-main", name: "main", path: "/repo", isMain: true },
+    });
+    assert.match(main, /Use it for planning, inspection, tests, and running the project/);
+    assert.match(main, /Do not edit repository source, documentation, or configuration here/);
+    assert.match(main, /sessions start --worktree <worktreeId> --parent self/);
+    // First turn has no CONTROLLER_SESSION_ID, so point at a lookup that works.
+    assert.match(main, /sessions list --worktree wt-main --json --limit 1/);
+    assert.match(main, /controller:\/\/ link/);
+    assert.match(main, /do not implement the change yourself/);
+  });
+});

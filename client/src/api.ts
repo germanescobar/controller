@@ -79,6 +79,12 @@ export interface Worktree {
   setupRanAt?: string;
   setupExitCode?: number;
   setupLogPath?: string;
+  origin?: "controller" | "external";
+  presence?: "active" | "missing" | "removed";
+  linkedPr?: { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string };
+  /** Project has a run.sh; without one there is no server to report. */
+  hasRunScript?: boolean;
+  serverRunning?: boolean;
 }
 
 export interface TerminalTab {
@@ -1734,6 +1740,8 @@ export async function branchSession(
     worktreeId?: string;
     /** Defaults to "Branch of <sourceTitle>". */
     title?: string;
+    /** Link a continuation to its source as a child conversation. */
+    linkAsChild?: boolean;
   }
 ): Promise<{ sessionId: string; url: string }> {
   const res = await fetch(`${BASE}/projects/${projectId}/sessions/branch`, {
@@ -1744,6 +1752,7 @@ export async function branchSession(
       ...(options?.upToEventId ? { upToEventId: options.upToEventId } : {}),
       ...(options?.worktreeId ? { worktreeId: options.worktreeId } : {}),
       ...(options?.title ? { title: options.title } : {}),
+      ...(options?.linkAsChild ? { linkAsChild: true } : {}),
     }),
   });
   await throwIfNotOk(res, "Failed to branch session");
@@ -1859,6 +1868,19 @@ export async function runProjectScript(
     throw new Error("Failed to run project script");
   }
   return { terminalId: body.terminalId, tabs: body.tabs as TerminalTab[] };
+}
+
+/** Interrupt the worktree's running run.sh terminals; their tabs stay open. */
+export async function stopProjectScript(
+  projectId: string,
+  worktreeId?: string
+): Promise<{ stoppedTerminalIds: string[] }> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/stop-run-script${withWorktree(worktreeId)}`,
+    { method: "POST" }
+  );
+  await throwIfNotOk(res, "Failed to stop project script");
+  return res.json();
 }
 
 export async function fetchSourceFile(

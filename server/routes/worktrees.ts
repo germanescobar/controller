@@ -11,16 +11,20 @@ import {
   addWorktree,
   getProjectWorktrees,
   getWorktree,
+  isWorktreeUnavailable,
   isMainWorktreeName,
   nextPortOffset,
   removeWorktree,
   resolveWorktree,
   updateWorktree,
   worktreeNotFoundPayload,
+  type Worktree,
 } from "../lib/worktrees.js";
 import { projectWorktreesDir, worktreePath } from "../lib/paths.js";
 import { getSessions } from "../lib/sessions.js";
 import { getSessionRuntime } from "../lib/session-runtime.js";
+import { listMonitors } from "../lib/monitors.js";
+import { refreshWorktreePullRequests } from "../lib/worktree-pull-requests.js";
 import { ptyManager } from "../lib/pty-manager.js";
 import {
   getTerminalTabs,
@@ -42,12 +46,7 @@ import {
   MENTION_WALK_MAX_DEPTH,
   MENTION_WALK_MAX_LIMIT,
 } from "../lib/file-index.js";
-import {
-  emitSessionRemoved,
-  emitWorktreeAdded,
-  emitWorktreeRemoved,
-  emitWorktreeUpdated,
-} from "../lib/events.js";
+import { emitWorktreeAdded, emitWorktreeUpdated } from "../lib/events.js";
 
 export const worktreesRouter = Router();
 
@@ -247,7 +246,19 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   // `server/routes/sessions.ts`).
   res.set("Cache-Control", "no-store");
   const worktrees = await getProjectWorktrees(project.id);
-  res.json(worktrees);
+  refreshWorktreePullRequests(project.path, worktrees, (updated) =>
+    emitWorktreeUpdated(project.id, updated)
+  );
+  const hasRunScript = (await resolveProjectScripts(project.path)).run.length > 0;
+  res.json(await Promise.all(worktrees.map(async (worktree) => {
+    const serverRunning = hasRunScript && worktree.presence === "active" &&
+      (await runningServerTerminalIds(project.id, worktree.id)).length > 0;
+    return {
+      ...worktree,
+      hasRunScript,
+      serverRunning,
+    };
+  })));
 });
 
 worktreesRouter.get("/:projectId/terminal-tabs", async (req, res) => {
@@ -305,7 +316,7 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
     const allowedRoots = [
       project.path,
       worktree.path,
-      ...worktrees.map((item) => item.path),
+      ...worktrees.filter((item) => !isWorktreeUnavailable(item)).map((item) => item.path),
     ];
     const [targetRealPath, ...rootRealPaths] = await Promise.all([
       fs.realpath(absolutePath),
@@ -435,7 +446,7 @@ worktreesRouter.put("/:projectId/source", async (req, res) => {
     const allowedRoots = [
       project.path,
       worktree.path,
-      ...worktrees.map((item) => item.path),
+      ...worktrees.filter((item) => !isWorktreeUnavailable(item)).map((item) => item.path),
     ];
 
     // For an existing file we can `realpath` it directly; for a new
@@ -716,6 +727,10 @@ worktreesRouter.post("/:projectId/run-script", async (req, res) => {
     );
     return;
   }
+  if (isWorktreeUnavailable(worktree)) {
+    res.status(409).json({ error: `Cannot run scripts in a ${worktree.presence} worktree` });
+    return;
+  }
 
   try {
     const scripts = await resolveProjectScripts(project.path);
@@ -741,10 +756,39 @@ worktreesRouter.post("/:projectId/run-script", async (req, res) => {
     const env = buildScriptEnv({ project, worktree });
     const command = buildTerminalScriptCommand(scripts.run);
     ptyManager.runCommand(terminalKey, worktree.path, command, env);
+    announceRunStateChange(project.id, worktree, true);
 
     res.json({ ok: true, terminalId, tabs });
   } catch (err) {
     console.error("POST /projects/:projectId/run-script error:", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// Stop the worktree's run server by interrupting its run terminals. The tabs
+// and their output stay so the user can still read the server's logs.
+worktreesRouter.post("/:projectId/stop-run-script", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const worktree = await resolveWorktree(project.id, getQueryString(req.query.worktreeId));
+  if (!worktree) {
+    res.status(404).json(
+      await worktreeNotFoundPayload(project.id, getQueryString(req.query.worktreeId))
+    );
+    return;
+  }
+  try {
+    const stoppedTerminalIds = await runningServerTerminalIds(project.id, worktree.id);
+    for (const terminalId of stoppedTerminalIds) {
+      ptyManager.interrupt(`${project.id}:${worktree.id}:${terminalId}`);
+    }
+    if (stoppedTerminalIds.length > 0) announceRunStateChange(project.id, worktree, false);
+    res.json({ ok: true, stoppedTerminalIds });
+  } catch (err) {
+    console.error("POST /projects/:projectId/stop-run-script error:", err);
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -794,6 +838,10 @@ worktreesRouter.post(
       res.status(404).json(
         await worktreeNotFoundPayload(project.id, req.params.worktreeId)
       );
+      return;
+    }
+    if (isWorktreeUnavailable(worktree)) {
+      res.status(409).json({ error: `Cannot run setup in a ${worktree.presence} worktree` });
       return;
     }
 
@@ -946,8 +994,15 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
   }
 
   const existingWorktrees = await getProjectWorktrees(project.id);
-  if (existingWorktrees.some((w) => w.name === name)) {
-    res.status(409).json({ error: "worktree with this name already exists" });
+  // Session storage is keyed by worktree path, so reusing a removed
+  // worktree's name would merge its historical sessions into the new one.
+  const sameName = existingWorktrees.find((w) => w.name === name);
+  if (sameName) {
+    res.status(409).json({
+      error: sameName.presence === "removed"
+        ? "a removed worktree with this name keeps its conversation history; choose another name"
+        : "worktree with this name already exists",
+    });
     return;
   }
 
@@ -1110,6 +1165,10 @@ worktreesRouter.delete(
       res.status(400).json({ error: "cannot delete main worktree" });
       return;
     }
+    if (worktree.presence === "removed") {
+      res.status(409).json({ error: "worktree was already removed" });
+      return;
+    }
 
     // Issue #332: a paused worktree (no active session, no running PTY)
     // can still carry uncommitted changes. The previous version called
@@ -1145,21 +1204,17 @@ worktreesRouter.delete(
       return;
     }
 
-    ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
-
-    // Notify listeners (e.g. the sidebar in another window) that the
-    // sessions on this worktree are going away, so they can drop the
-    // corresponding rows from the tree before the worktree itself is
-    // unregistered (issue #210). Best-effort: if a session file is
-    // missing or unreadable we still continue with the archive/delete.
-    try {
-      const sessionsToRemove = await getSessions(worktree.path);
-      for (const session of sessionsToRemove) {
-        emitSessionRemoved(project.id, worktree.id, session.id);
-      }
-    } catch (err) {
-      console.error("Failed to enumerate sessions before worktree delete:", err);
+    const runningMonitorIds = sessions.flatMap((session) =>
+      listMonitors(session.id).filter((monitor) => monitor.status === "running").map((monitor) => monitor.id)
+    );
+    const runningTerminalIds = (await getTerminalTabs(project.id, worktree.id))
+      .filter((tab) => ptyManager.isCommandRunning(`${project.id}:${worktree.id}:${tab.id}`))
+      .map((tab) => tab.id);
+    if (runningMonitorIds.length > 0 || runningTerminalIds.length > 0) {
+      res.status(409).json({ error: "worktree has running processes", runningMonitorIds, runningTerminalIds });
+      return;
     }
+    ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
 
     const scripts = await resolveProjectScripts(project.path);
     if (scripts.archive.length > 0) {
@@ -1246,7 +1301,8 @@ worktreesRouter.delete(
 
     await removeWorktree(worktree.id);
     await removeTerminalTabsForWorktree(project.id, worktree.id);
-    emitWorktreeRemoved(project.id, worktree.id);
+    const removed = await getWorktree(project.id, worktree.id);
+    if (removed) emitWorktreeUpdated(project.id, removed);
     res.json({ ok: true });
   }
 );
@@ -1413,4 +1469,35 @@ function writeScriptOutput(
 function formatScriptLabels(commands: ProjectScriptCommand[]): string {
   const labels = new Set(commands.map((command) => command.label));
   return Array.from(labels).join(", ");
+}
+
+/** Run terminals (from run.sh) whose foreground command is still running. */
+async function runningServerTerminalIds(projectId: string, worktreeId: string): Promise<string[]> {
+  const tabs = await getTerminalTabs(projectId, worktreeId);
+  return tabs
+    .filter((tab) => tab.id === RUN_TERMINAL_ID || tab.id.startsWith("run-"))
+    .filter((tab) => ptyManager.isCommandRunning(`${projectId}:${worktreeId}:${tab.id}`))
+    .map((tab) => tab.id);
+}
+
+const RUN_STATE_POLL_MS = 250;
+const RUN_STATE_TIMEOUT_MS = 5_000;
+
+/*
+ * A server starts or exits shortly after its keystrokes land, so wait for the
+ * expected state before telling clients to refetch. On timeout, announce
+ * anyway so the sidebar reflects whatever state the server reached.
+ */
+function announceRunStateChange(projectId: string, worktree: Worktree, running: boolean): void {
+  void (async () => {
+    const deadline = Date.now() + RUN_STATE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const isRunning = (await runningServerTerminalIds(projectId, worktree.id)).length > 0;
+      if (isRunning === running) break;
+      await new Promise((resolve) => setTimeout(resolve, RUN_STATE_POLL_MS));
+    }
+    emitWorktreeUpdated(projectId, worktree);
+  })().catch((err) => {
+    console.error(`Failed to announce run state for worktree ${worktree.id}:`, err);
+  });
 }

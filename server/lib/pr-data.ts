@@ -1,7 +1,7 @@
 /**
  * Pull-request metadata for the right sidebar's PR tab (issue #387).
  *
- * Resolves the open PR for a worktree's branch by shelling out to
+ * Resolves the PR (open, merged, or closed) for a worktree's branch by shelling out to
  * `gh pr view --json …` in three parallel calls (metadata / review
  * state / threads), with a small in-memory cache keyed by
  * `${worktreePath}:${branch}` and invalidated when the worktree's
@@ -709,7 +709,7 @@ async function fetchInlineCommentsForPr(
 }
 
 /**
- * Fetch the open PR for a worktree's current branch. Returns
+ * Fetch the PR (any state) for a worktree's current branch. Returns
  * `{ pr: null }` when the branch has no PR (the normal "nothing to
  * show" case) and `{ pr: null, error: ... }` when something else went
  * wrong.
@@ -865,17 +865,9 @@ export async function fetchPullRequestForWorktree(
   const pr = normalizePr(
     mergePrParts(metaRaw, stateRaw, threadsRaw, inlineCommentsRaw)
   );
-  // The panel's tab is documented as "rendered only when the branch
-  // has an open PR"; closed / merged PRs must surface as `{ pr: null }`
-  // so the auto-hide effect fires. `gh pr view --json` does not
-  // filter by state — it returns whatever PR exists for the current
-  // branch, including MERGED / CLOSED, which the panel would otherwise
-  // keep displaying forever (issue #387 review feedback).
-  if (pr && pr.state.toUpperCase() !== "OPEN") {
-    const payload: PrResponse = { pr: null };
-    setCacheEntry(key, { fetchedAt: now, headSha, payload });
-    return payload;
-  }
+  // Merged and closed PRs are returned too: a worktree keeps showing its PR
+  // tab after the PR lands (issue #436). `gh pr view` resolves the most
+  // recent PR for the branch regardless of state.
   const payload: PrResponse = pr ? { pr } : { pr: null };
   setCacheEntry(key, { fetchedAt: now, headSha, payload });
   return payload;

@@ -205,7 +205,7 @@ test("corrupted worktrees.json is auto-recovered from .bak when the backup is va
   );
 });
 
-test("removeWorktree only drops the targeted record, never siblings", async () => {
+test("removeWorktree retains the targeted record as history and never changes siblings", async () => {
   await withHome(
     async ({ worktreesFile, projectsFile }) => {
       const seeded = [];
@@ -227,11 +227,11 @@ test("removeWorktree only drops the targeted record, never siblings", async () =
       const removed = await removeWorktree("wt-2");
       assert.equal(removed, true);
       const remaining = await getProjectWorktrees("proj-a");
-      const ids = remaining.map((w) => w.id).sort();
-      // Expect the four untouched siblings plus the lazily-created
-      // main worktree (id is random — filter by name).
+      // The removed row remains addressable for historical sessions.
       const names = remaining.map((w) => w.name).sort();
-      assert.deepEqual(names, ["main", "wt-0", "wt-1", "wt-3", "wt-4"]);
+      assert.deepEqual(names, ["main", "wt-0", "wt-1", "wt-2", "wt-3", "wt-4"]);
+      assert.equal(remaining.find((w) => w.id === "wt-2")?.presence, "removed");
+      assert.equal(await removeWorktree("wt-2"), false);
     }
   );
 });
@@ -267,9 +267,10 @@ test("concurrent updateWorktree + removeWorktree calls preserve all untargeted r
       const { getProjectWorktrees } = await import("../worktrees.js");
       const list = await getProjectWorktrees("proj-a");
       const names = list.map((w) => w.name).sort();
-      // The four updates and two removes must all land; the remaining
-      // rows (wt-6, wt-7) plus the lazily-created main must survive.
-      assert.deepEqual(names, ["main", "wt-0", "wt-1", "wt-2", "wt-3", "wt-6", "wt-7"]);
+      // The four updates and two tombstones must all land.
+      assert.deepEqual(names, ["main", "wt-0", "wt-1", "wt-2", "wt-3", "wt-4", "wt-5", "wt-6", "wt-7"]);
+      assert.equal(list.find((w) => w.id === "wt-4")?.presence, "removed");
+      assert.equal(list.find((w) => w.id === "wt-5")?.presence, "removed");
       for (const worktree of list) {
         if (worktree.name === "wt-0") assert.equal(worktree.portOffset, 100);
         if (worktree.name === "wt-1") assert.equal(worktree.portOffset, 101);

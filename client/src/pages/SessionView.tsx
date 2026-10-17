@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowLeft, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
+import { ArrowLeft, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit, SKIP } from "unist-util-visit";
@@ -32,6 +32,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { PrPanel } from "@/components/PrPanel";
+import { PullRequestBadge, PullRequestStateIcon } from "@/components/PullRequestBadge";
 import { FocusConversationControls } from "@/components/focus-conversation-controls";
 import { useSessionRelationships } from "@/lib/session-relationships.ts";
 import { useResizablePanel } from "@/lib/useResizablePanel";
@@ -158,6 +159,10 @@ interface SessionViewProps {
   // the transcript. Resolves the short form (session-only) to its owning
   // project/worktree before navigating. No-op if the parent doesn't provide it.
   onOpenConversation?: (target: ControllerLinkTarget) => void;
+  // A request from outside (e.g. the sidebar PR badge) to open the PR tab.
+  // Each new id opens it once; the parent clears it via the handled callback.
+  prPanelRequestId?: number;
+  onPrPanelRequestHandled?: () => void;
   /**
    * Effective shortcut bindings for the focus-queue chords (Next /
    * Stay / Done). `null` while the settings hook is still loading.
@@ -3695,6 +3700,8 @@ export function SessionView({
   onSessionCreated,
   onBackgroundComplete,
   onOpenConversation,
+  prPanelRequestId,
+  onPrPanelRequestHandled,
   shortcutBindings = null,
   autoAdvance = true,
   onToggleAutoAdvance,
@@ -3909,6 +3916,7 @@ export function SessionView({
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
+  const [continuingOnMain, setContinuingOnMain] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
   // True while the SourceEditor (Files tab) has unsaved edits.
   // Drives the browser, Files tab, and app navigation guards.
@@ -5348,7 +5356,7 @@ export function SessionView({
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectId, worktreeId, shouldPollChanges]);
 
-  // Poll the open PR (issue #387). Two-tier cadence:
+  // Poll the branch's PR, in any state (issues #387, #436). Two-tier cadence:
   //   - 30s while the PR tab is focused (focusedPoll = true).
   //   - 90s while the panel is visible but parked on a different
   //     tab (discoveryPoll = true) — keeps the tab button's
@@ -5380,7 +5388,7 @@ export function SessionView({
   ]);
 
   // Auto-switch away from the PR tab when the branch no longer has
-  // an open PR (e.g., it was merged / closed). Mirrors the Changes
+  // a PR at all (e.g., the branch changed). Mirrors the Changes
   // tab auto-hide behavior above. The endpoint resolves the default
   // worktree when `worktreeId` is unset (e.g., the project root
   // surface), so the cleanup runs even in that case — otherwise the
@@ -6422,6 +6430,7 @@ export function SessionView({
   // `textOverride` lets the picker path submit the text it just stripped the
   // `/<token>` from without depending on `message` state timing.
   const sendComposerMessage = async (textOverride?: string): Promise<void> => {
+    if (activeWorktree?.presence === "removed" || activeWorktree?.presence === "missing") return;
     const baseText = textOverride ?? message;
     if (!baseText.trim() && composerAttachments.length === 0) return;
     if (!validateComposerAttachments()) return;
@@ -6484,6 +6493,7 @@ export function SessionView({
   // completes (the default action for Enter while streaming). Requires a
   // known session to attach to.
   const handleEnqueue = async () => {
+    if (activeWorktree?.presence === "removed" || activeWorktree?.presence === "missing") return;
     if (!message.trim() && composerAttachments.length === 0) return;
     const targetSessionId = activeStreamSessionId ?? sessionId;
     if (!targetSessionId) return;
@@ -6577,6 +6587,7 @@ export function SessionView({
   // whole transcript — which is the same thing, since the stream *is*
   // the end of the conversation.
   const handleBranchCurrent = useCallback(async (upToEventId?: string) => {
+    if (activeWorktree?.presence === "removed" || activeWorktree?.presence === "missing") return;
     const targetSessionId = activeStreamSessionId ?? sessionId;
     if (!targetSessionId) return;
     if (branchingSessionId === targetSessionId) return;
@@ -6613,7 +6624,27 @@ export function SessionView({
     worktreeId,
     onSessionCreated,
     branchingSessionId,
+    activeWorktree?.presence,
   ]);
+
+  const handleContinueOnMain = async () => {
+    if (!sessionId || continuingOnMain) return;
+    setContinuingOnMain(true);
+    try {
+      const main = (await fetchWorktrees(projectId)).find((worktree) => worktree.isMain);
+      if (!main || main.presence === "missing") throw new Error("Main worktree is unavailable");
+      const { sessionId: newSessionId } = await branchSession(projectId, sessionId, {
+        worktreeId: main.id,
+        title: `Continuation of ${sessionTitle || "conversation"}`,
+        linkAsChild: true,
+      });
+      onOpenConversation?.({ projectId, worktreeId: main.id, sessionId: newSessionId });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to continue on main");
+    } finally {
+      setContinuingOnMain(false);
+    }
+  };
 
   // Steer the running turn (Shift+Enter while streaming). Uses the composer
   // text, or the first enqueued message when the composer is empty
@@ -6976,6 +7007,14 @@ export function SessionView({
     [rightTab, confirmLeaveFilesIfDirty, mobilePanel]
   );
 
+  useEffect(() => {
+    if (prPanelRequestId === undefined) return;
+    requestRightTab("pr");
+    onPrPanelRequestHandled?.();
+    // Only a new request id should open the tab, not tab-state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prPanelRequestId]);
+
   const openSourceReference = useCallback((reference: OpenSourceReferenceOptions) => {
     if (rightTab === "files" && sourceEditorDirty && !confirmLeaveFilesIfDirty()) return;
     openSourcePath(reference.path, reference.line, reference.label);
@@ -7319,6 +7358,8 @@ export function SessionView({
               : "Send"
         }
         disabled={
+          activeWorktree?.presence === "removed" ||
+          activeWorktree?.presence === "missing" ||
           steerInProgress ||
           (!message.trim() &&
             composerAttachments.length === 0 &&
@@ -7577,8 +7618,8 @@ export function SessionView({
                     : "text-muted-foreground"
                 }`}
               >
-                <GitPullRequest className="h-3 w-3" />
-                PR
+                <PullRequestStateIcon state={pullRequest.state} className="h-3 w-3" />
+                #{pullRequest.number}
               </button>
             )}
             {previewAvailable && (
@@ -7599,6 +7640,13 @@ export function SessionView({
 
         {/* Desktop: terminal toggle */}
         <div className="hidden md:flex items-center gap-2">
+          {pullRequest && (
+            <PullRequestBadge
+              number={pullRequest.number}
+              state={pullRequest.state}
+              onClick={() => requestRightTab("pr")}
+            />
+          )}
           {(() => {
             const { added: headerAdded, deleted: headerDeleted } = summarizeDiffFiles(
               gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles
@@ -7637,6 +7685,18 @@ export function SessionView({
           </button>
         </div>
       </header>
+
+      {sessionId && (activeWorktree?.presence === "removed" || activeWorktree?.presence === "missing") && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/40 px-4 py-2 text-sm">
+          <span>
+            {activeWorktree.presence === "removed" ? "This worktree was removed." : "This worktree is missing."}
+            {" "}The conversation is available as history.
+          </span>
+          <Button type="button" size="sm" onClick={() => void handleContinueOnMain()} disabled={continuingOnMain}>
+            {continuingOnMain ? "Continuing…" : "Continue on main"}
+          </Button>
+        </div>
+      )}
 
       {/* Rename conversation dialog */}
       <Dialog
@@ -8204,6 +8264,7 @@ export function SessionView({
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
+                  if (activeWorktree?.presence === "removed" || activeWorktree?.presence === "missing") return;
                   if (steerInProgress) return;
                   if (
                     streaming &&
@@ -8458,7 +8519,7 @@ export function SessionView({
                       }
                       placeholder={composerPlaceholder}
                       rows={1}
-                      disabled={steerInProgress}
+                      disabled={steerInProgress || activeWorktree?.presence === "removed" || activeWorktree?.presence === "missing"}
                       className="min-w-0 flex-1 resize-none overflow-y-auto bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
                       style={{ maxHeight: "calc(1.25rem * 5)" }}
                     />
@@ -9028,11 +9089,8 @@ export function SessionView({
                   }`}
                   title={`PR #${pullRequest.number} · ${pullRequest.title}`}
                 >
-                  <GitPullRequest className="h-3 w-3 shrink-0" />
-                  <span className="shrink-0">PR</span>
-                  <span className="max-w-36 truncate font-mono text-[10px] text-muted-foreground/70">
-                    #{pullRequest.number}
-                  </span>
+                  <PullRequestStateIcon state={pullRequest.state} className="h-3 w-3 shrink-0" />
+                  <span className="shrink-0">#{pullRequest.number}</span>
                 </button>
               )}
               {previewAvailable && (

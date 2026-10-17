@@ -685,7 +685,8 @@ function formatWorktreeRow(worktree) {
     worktree.setupExitCode != null
       ? `  setup=${worktree.setupExitCode === 0 ? "ok" : `exit(${worktree.setupExitCode})`}`
       : "";
-  return `${worktree.id}  ${worktree.name}  ${worktree.branch ?? "(no branch)"}${worktree.isMain ? "  [main]" : ""}${port}${setup}\n  ${worktree.path}`;
+  const presence = worktree.presence && worktree.presence !== "active" ? `  [${worktree.presence}]` : "";
+  return `${worktree.id}  ${worktree.name}  ${worktree.branch ?? "(no branch)"}${worktree.isMain ? "  [main]" : ""}${presence}${port}${setup}\n  ${worktree.path}`;
 }
 
 export async function runWorktrees(argv, serverUrl) {
