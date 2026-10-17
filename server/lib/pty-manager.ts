@@ -499,6 +499,22 @@ class PtyManager {
     return tmuxSessionExists(sessionId);
   }
 
+  /** True when a terminal is running a foreground command beyond its idle shell. */
+  isCommandRunning(sessionId: string): boolean {
+    for (const name of tmuxSessionNames(sessionId)) {
+      try {
+        const command = (execTmuxSync(
+          ["display-message", "-p", "-t", `${name}:0.0`, "#{pane_current_command}"],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+        ) as string).trim().replace(/^-/, "");
+        return command !== "" && !["sh", "bash", "zsh", "fish", "nu", "pwsh", "csh", "tcsh"].includes(command);
+      } catch {
+        // Try a legacy tmux name before treating the terminal as stopped.
+      }
+    }
+    return false;
+  }
+
   /**
    * Return the last `lines` lines of a session's output, or null when the
    * session is not live. PTY-backed sessions read from the in-memory rolling

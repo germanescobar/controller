@@ -53,6 +53,11 @@ export interface ControllerPreambleOptions {
    * message-send `projectId` param (issue #350).
    */
   projectId?: string;
+  /**
+   * Adds the main-worktree delegation guidance (issue #436). This is
+   * prompt guidance, not a filesystem permission boundary.
+   */
+  isMainWorktree?: boolean;
 }
 
 // Some providers (Codex) sanitize or rebuild env vars before spawning user
@@ -390,6 +395,24 @@ export async function buildControllerPreamble(
     loopPrimitivesIntro(),
     "",
     sessionsListIntro(),
+    ...(options?.isMainWorktree ? ["", mainWorktreeIntro()] : []),
+  ].join("\n");
+}
+
+/*
+ * Main is for planning, inspection, tests, and running the project. Edits go
+ * to a linked conversation in a feature worktree, because a conversation
+ * stays bound to the worktree it was created in.
+ */
+function mainWorktreeIntro(): string {
+  const cli = controllerCliShellPath();
+  return [
+    "This conversation runs in the project's main worktree. Use it for planning, inspection, tests, and running the project.",
+    "Do not edit repository source, documentation, or configuration in main. For changes, create or select a non-main worktree and start a new linked conversation there:",
+    "",
+    `   ${cli} sessions start --worktree <id> --parent self "<task>"`,
+    "",
+    "Keep this conversation on main to coordinate and review the delegated work.",
   ].join("\n");
 }
 

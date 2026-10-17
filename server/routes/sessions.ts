@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { getProject, getProjects } from "../lib/projects.js";
 import {
   getProjectWorktrees,
+  isWorktreeUnavailable,
   resolveWorktree,
   worktreeNotFoundPayload,
 } from "../lib/worktrees.js";
@@ -929,6 +930,7 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
     upToEventId?: string;
     worktreeId?: string;
     title?: string;
+    linkAsChild?: boolean;
   };
   const sourceSessionId = body.sourceSessionId;
   if (typeof sourceSessionId !== "string" || !sourceSessionId) {
@@ -959,15 +961,13 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   // written before worktrees existed). Resolve those to the project's
   // main worktree rather than persisting an empty id the sidebar
   // can't place.
+  const worktrees = await getProjectWorktrees(req.params.projectId);
   let targetWorktreeId = located.worktreeId;
   if (!targetWorktreeId) {
-    const worktrees = await getProjectWorktrees(req.params.projectId);
     targetWorktreeId = (worktrees.find((w) => w.isMain) ?? worktrees[0])?.id ?? "";
   }
   if (typeof body.worktreeId === "string" && body.worktreeId.trim()) {
-    const worktrees = await getProjectWorktrees(req.params.projectId);
-    const match = worktrees.find((w) => w.id === body.worktreeId);
-    if (!match) {
+    if (!worktrees.some((w) => w.id === body.worktreeId)) {
       res
         .status(404)
         .json(
@@ -975,8 +975,14 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
         );
       return;
     }
-    targetWorktreeId = match.id;
+    targetWorktreeId = body.worktreeId;
   }
+  const targetWorktree = worktrees.find((w) => w.id === targetWorktreeId);
+  if (!targetWorktree || isWorktreeUnavailable(targetWorktree)) {
+    res.status(409).json({ error: "Cannot branch into a missing or removed worktree" });
+    return;
+  }
+  const targetWorktreePath = targetWorktree.path;
   // Read the source's events. The events file is the session's
   // transcript, full stop: the chat view renders from it, and
   // `handleSessionStream` reads the branched session's own copy to
@@ -1029,7 +1035,7 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   // events keep their original `sessionId` field — the chat view
   // renders from the file it was asked for, so the inner id is inert
   // (this matches what the old `seedBranchFromSource` did).
-  const eventsDir = path.join(projectStoreDir(worktreePath), "events");
+  const eventsDir = path.join(projectStoreDir(targetWorktreePath), "events");
   await fs.mkdir(eventsDir, { recursive: true });
   const newEventsPath = path.join(eventsDir, `${newSessionId}.jsonl`);
   const sourceLines = sourceEvents
@@ -1049,23 +1055,21 @@ sessionsRouter.post("/:projectId/sessions/branch", async (req, res) => {
   // clears it on that turn (its `saveSession` rewrites the whole file
   // without the flag).
   //
-  // No `parentId`. That field means "a coordinator spawned this child"
-  // (issues #351 / #353) — it is what `sessions children <id>` and the
-  // sidebar subtree read, and it implies a supervision relationship
-  // the branch doesn't have. A branch is a fork of a conversation, not
-  // work delegated by it, so it stands on its own and the
-  // `branch_marker` event is where its lineage is recorded.
+  // Ordinary branches remain independent. A continuation from a removed
+  // worktree explicitly links to its source so the relationship survives
+  // after the source workspace is gone.
   const derivedTitle =
     body.title && body.title.trim()
       ? body.title.trim()
       : sourceSession.title && sourceSession.title.trim()
         ? `Branch of ${sourceSession.title.trim()}`
         : "Branched session";
-  await saveSession(worktreePath, {
+  await saveSession(targetWorktreePath, {
     id: newSessionId,
     title: derivedTitle,
-    workingDirectory: worktreePath,
+    workingDirectory: targetWorktreePath,
     worktreeId: targetWorktreeId,
+    ...(body.linkAsChild === true ? { parentId: sourceSessionId } : {}),
     model: "",
     // Empty, like every other Controller-started session. The
     // transcript lives in the events file alone.
@@ -1409,6 +1413,10 @@ export async function handleSessionStream(
     );
     return;
   }
+  if (isWorktreeUnavailable(worktree)) {
+    res.status(409).json({ error: `Cannot run a session in a ${worktree.presence} worktree` });
+    return;
+  }
 
   const message = req.query.message as string;
   // `historyText` overrides the text the persistence layer records
@@ -1564,6 +1572,7 @@ export async function handleSessionStream(
   // surface the project-scoped pinned snippet and notes (issue #350).
   const controllerPreamble = await buildControllerPreamble({
     projectId: req.params.projectId,
+    isMainWorktree: worktree.isMain,
   });
   const usesSystemPrompt = providerId === "anita";
   // Resolve the `@`-mentions (issue #312) before composing the prompt so

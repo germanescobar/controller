@@ -79,6 +79,12 @@ export interface Worktree {
   setupRanAt?: string;
   setupExitCode?: number;
   setupLogPath?: string;
+  origin?: "controller" | "external";
+  presence?: "active" | "missing" | "removed";
+  taskStatus?: "active" | "finished";
+  linkedIssue?: { repository: string; number: number };
+  linkedPr?: { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string };
+  serverRunning?: boolean;
 }
 
 export interface TerminalTab {
@@ -1734,6 +1740,8 @@ export async function branchSession(
     worktreeId?: string;
     /** Defaults to "Branch of <sourceTitle>". */
     title?: string;
+    /** Link a continuation to its source as a child conversation. */
+    linkAsChild?: boolean;
   }
 ): Promise<{ sessionId: string; url: string }> {
   const res = await fetch(`${BASE}/projects/${projectId}/sessions/branch`, {
@@ -1744,6 +1752,7 @@ export async function branchSession(
       ...(options?.upToEventId ? { upToEventId: options.upToEventId } : {}),
       ...(options?.worktreeId ? { worktreeId: options.worktreeId } : {}),
       ...(options?.title ? { title: options.title } : {}),
+      ...(options?.linkAsChild ? { linkAsChild: true } : {}),
     }),
   });
   await throwIfNotOk(res, "Failed to branch session");
@@ -1811,6 +1820,20 @@ export async function fetchPullRequest(
 
 export async function fetchWorktrees(projectId: string): Promise<Worktree[]> {
   const res = await fetch(`${BASE}/projects/${projectId}/worktrees`);
+  return res.json();
+}
+
+export async function updateWorktreeMetadata(
+  projectId: string,
+  worktreeId: string,
+  patch: { taskStatus: "active" | "finished" }
+): Promise<Worktree> {
+  const res = await fetch(`${BASE}/projects/${projectId}/worktrees/${worktreeId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  await throwIfNotOk(res, "Failed to update worktree");
   return res.json();
 }
 

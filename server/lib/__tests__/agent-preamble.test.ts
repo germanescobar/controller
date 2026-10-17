@@ -492,3 +492,14 @@ test("preamble documents the same-session loop primitives (issue #339)", async (
     assert.match(preamble, /sessions wake <self>/);
   });
 });
+
+test("only main-worktree preambles delegate edits to linked sessions (issue #436)", async () => {
+  await withTempHome(async () => {
+    const main = await buildControllerPreamble({ isMainWorktree: true });
+    assert.match(main, /Use it for planning, inspection, tests, and running the project/);
+    assert.match(main, /Do not edit repository source, documentation, or configuration in main/);
+    assert.match(main, /sessions start --worktree <id> --parent self/);
+    const feature = await buildControllerPreamble({ isMainWorktree: false });
+    assert.doesNotMatch(feature, /Do not edit repository source/);
+  });
+});

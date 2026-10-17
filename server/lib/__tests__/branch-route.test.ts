@@ -401,6 +401,52 @@ test("POST /sessions/branch honors a title override (issue #382)", async () => {
   );
 });
 
+test("continuing a removed worktree session creates a linked session in main", async () => {
+  let removedPath = "";
+  let removedWorktreeId = "";
+  await withBranchEnv(
+    async ({ projectPath, homeDir }) => {
+      const { addWorktree, removeWorktree } = await import("../worktrees.js");
+      removedPath = path.join(homeDir, "removed-worktree");
+      await fs.mkdir(removedPath);
+      const removed = await addWorktree({
+        projectId: "proj-1", name: "old-task", path: removedPath,
+        branch: "old-task", isMain: false,
+      });
+      removedWorktreeId = removed.id;
+      await seedSourceSession({ projectPath: removedPath, worktreeId: removed.id, projectId: "proj-1" });
+      assert.equal(await removeWorktree(removed.id), true);
+    },
+    async ({ baseUrl, projectPath, worktreeId }) => {
+      const rejectedTurn = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId: removedWorktreeId, message: "Continue here", provider: "anita", resumeSessionId: SOURCE_ID }),
+      });
+      assert.equal(rejectedTurn.status, 409);
+      const response = await fetch(`${baseUrl}/sessions/branch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sourceSessionId: SOURCE_ID,
+          worktreeId,
+          linkAsChild: true,
+        }),
+      });
+      const body = (await response.json()) as { sessionId?: string; error?: string };
+      assert.equal(response.status, 200, body.error);
+      const session = await readSessionFile(projectPath, body.sessionId!);
+      assert.equal(session.worktreeId, worktreeId);
+      assert.equal(session.workingDirectory, projectPath);
+      assert.equal(session.parentId, SOURCE_ID);
+      const { projectStoreDir } = await import("../paths.js");
+      await fs.access(path.join(projectStoreDir(projectPath), "events", `${body.sessionId}.jsonl`));
+      await assert.rejects(fs.access(path.join(projectStoreDir(removedPath), "sessions", `${body.sessionId}.json`)));
+      assert.equal((await readSessionFile(removedPath, SOURCE_ID)).id, SOURCE_ID);
+    },
+  );
+});
+
 test("POST /sessions/branch rejects an unknown or missing source (issue #382)", async () => {
   await withBranchEnv(
     async ({ projectPath, worktreeId }) => {
@@ -523,6 +569,8 @@ test("first turn on a branched session starts a fresh provider thread and captur
       // actually knows what "the proposal above" refers to.
       assert.match(invocations[0], /First assistant reply/);
       assert.match(invocations[0], /Review the proposal above/);
+      assert.match(invocations[0], /Do not edit repository source, documentation, or configuration in main/);
+      assert.match(invocations[0], /sessions start --worktree <id> --parent self/);
 
       const session = await readSessionFile(projectPath, controllerId);
       assert.equal(

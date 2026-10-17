@@ -4,23 +4,46 @@ description: Run sessions on isolated git worktrees so branches and dev servers 
 ---
 
 A *worktree* is a git worktree Controller manages for a project: an isolated
-checkout on its own branch. Running each session on its own worktree keeps
-parallel work — and parallel dev servers — from stepping on each other.
+checkout on its own branch. Each session belongs to one worktree for its
+entire lifetime. Multiple sessions can share a worktree, while separate
+worktrees keep parallel changes and dev servers isolated.
 
-## Create a worktree from the UI
+## Create a worktree
 
-1. Open the project.
-2. Create a worktree, pick the **base branch** to fork from, and give it a
-   **name**.
+Ask a main-worktree agent to create a worktree for a task, or run
+`controller worktrees create [<project>] --name <name>` from the terminal.
+The agent can use the `controller-worktrees` skill to choose a branch and
+start a linked conversation in the new worktree.
 
 Controller checks out the new worktree and, if the project has a
 [`setup.sh`](/docs/controller-scripts), runs it to install dependencies.
 
 ## Pick a worktree when starting a session
 
-When you start a session, choose which worktree it runs on. The session's
-agent, terminals, and `run.sh` all operate inside that worktree's checkout, so
-its changes stay isolated to that branch.
+Expand a worktree in the sidebar and use **New conversation**. The session's
+agent, terminals, and `run.sh` operate inside that worktree's checkout. A
+main-worktree conversation can inspect, test, and run the project; its agent
+is guided to delegate repository edits to a linked session in a feature
+worktree.
+
+Each worktree row shows its linked PR number on the right (green icon when
+open, violet when merged); click it to open the PR tab for that worktree.
+The session header shows the same PR next to its change summary. Hover a
+worktree to see whether its run server is running (pause icon) or stopped
+(play icon), and use **Mark finished** or **Reopen** to change its task
+status. Finished worktrees appear dimmed with a check icon, and removed ones
+with an archive icon. A merged PR marks the task finished; a
+closed, unmerged PR does not. Marking a task finished does not make its
+worktree safe to delete.
+
+## Remove a worktree
+
+Controller checks for uncommitted changes and running processes before
+removing a worktree. Its conversations and transcripts remain in the sidebar
+as history. They cannot run new turns. Open one and select **Continue on main**
+to create a distinct linked conversation in the main worktree. A removed
+worktree's name stays reserved so its history is never mixed with a new
+worktree's conversations.
 
 ## Parallel worktrees and PORT_OFFSET
 
