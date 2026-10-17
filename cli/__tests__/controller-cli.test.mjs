@@ -6047,3 +6047,197 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
     `expected non-running bucket before running bucket, got: ${out}`
   );
 });
+
+test("parseSessions on-radar finds the project positional regardless of flag order (PR review, issue #322)", async () => {
+  // The P1 review (commit 1802929c) caught that the previous
+  // "first bare token only" extraction missed `on-radar --json demo`
+  // because the flag was at index 0. The fix splits `rest` into
+  // flags + positionals, so the project can land anywhere.
+  const cli = await loadCli();
+  // Project first (the shape that was already working).
+  assert.deepEqual(cli.parseSessions(["on-radar", "demo"]), {
+    project: "demo",
+    action: "on-radar",
+    allProjects: false,
+    json: false,
+  });
+  // Flag first, project after — this was the regression.
+  assert.deepEqual(cli.parseSessions(["on-radar", "--json", "demo"]), {
+    project: "demo",
+    action: "on-radar",
+    allProjects: false,
+    json: true,
+  });
+  // Multiple flags, project between them.
+  assert.deepEqual(
+    cli.parseSessions(["on-radar", "--all-projects", "demo", "--json"]),
+    {
+      project: "demo",
+      action: "on-radar",
+      allProjects: true,
+      json: true,
+    }
+  );
+});
+
+test("parseSessions on-radar rejects more than one positional (PR review, issue #322)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    // Two project positionals — on-radar takes at most one.
+    await assert.rejects(
+      async () => cli.parseSessions(["on-radar", "demo1", "demo2"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /at most <project>/);
+  assert.match(stderrText, /demo1/);
+  assert.match(stderrText, /demo2/);
+});
+
+test("runSessions on-radar surfaces per-worktree session-list errors instead of silently skipping (PR review, issue #322)", async () => {
+  // The P2 review (commit 1802929c) caught that a feature-worktree
+  // session-list 404 would silently drop the worktree from the
+  // queue, leaving pinned sessions on that worktree unprocessed.
+  // The fix is to `fail()` on the per-worktree error so a
+  // scheduled sweep treats it as an error, not as "queue empty".
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "wt-1", name: "main", isMain: true },
+          { id: "wt-2", name: "feature", isMain: false },
+        ],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-1"
+    ) {
+      return { status: 200, json: async () => [] };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-2"
+    ) {
+      return {
+        status: 500,
+        json: async () => ({ error: "Worktree not accessible" }),
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.runSessions(["on-radar", "demo"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  // The error surfaces the server's message so the agent can
+  // diagnose which worktree failed (the fallback "Failed to list
+  // sessions for worktree wt-2" is suppressed when the server
+  // returns its own `error` field, which is the right behavior —
+  // we just need the *server's* error to be visible).
+  assert.match(stderrText, /Worktree not accessible/);
+});
+
+test("parseSessions pin/unpin/done reject --worktree as the last token (PR review, issue #322)", async () => {
+  // The P2 review (commit 1802929c) caught that
+  // `pin sess-xyz --worktree` parsed to `worktreeId: undefined`
+  // and would silently fall back to the main worktree on a
+  // non-main-worktree session — same root cause as the legacy
+  // worktree bug, but triggered by a malformed invocation rather
+  // than a missing persisted field. The fix is a clear "value
+  // required" error at parse time.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["pin", "sess-xyz", "--worktree"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--worktree/);
+  // The error should explain the shape, not just name the flag.
+  assert.match(stderrText, /value/);
+});
+
+test("parseSessions pin/unpin/done accept --worktree followed by a non-flag value (regression, PR review, issue #322)", async () => {
+  // Mirror of the test above for the well-formed shape — the fix
+  // must not regress the existing happy paths.
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseSessions(["pin", "controller", "sess-xyz", "--worktree", "wt-1"]),
+    {
+      project: "controller",
+      action: "pin",
+      sessionId: "sess-xyz",
+      worktreeId: "wt-1",
+    }
+  );
+  // The flag can land before the sessionId, and the value can
+  // follow it correctly even when interleaved with positionals.
+  assert.deepEqual(
+    cli.parseSessions(["unpin", "--worktree", "wt-1", "sess-xyz"]),
+    {
+      project: "",
+      action: "unpin",
+      sessionId: "sess-xyz",
+      worktreeId: "wt-1",
+    }
+  );
+});

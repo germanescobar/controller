@@ -882,24 +882,47 @@ export function parseSessions(argv) {
     command === "unpin" ||
     command === "done"
   ) {
-    // `on-radar [<project>] ...` and `pin|unpin|done [<project>]
-    // <sessionId> ...` (issue #322). The first bare token is the
-    // optional `<project>` positional; the rest is forwarded to
-    // each case's own positional logic. We only extract the project
-    // here for `on-radar`; the `pin|unpin|done` cases read
-    // `rest` directly to disambiguate the 1-arg (sessionId only)
-    // and 2-arg (project + sessionId) shapes — see the comment
-    // block in the `pin|unpin|done` case below. Doing the project
-    // strip uniformly here would silently consume the
-    // `pin <sessionId>` shape (no project), which is the common
-    // case from a scheduled agent.
-    if (
-      command === "on-radar" &&
-      rest[0] !== undefined &&
-      !rest[0].startsWith("--")
-    ) {
-      project = rest[0];
-      args = rest.slice(1);
+    // `on-radar [<project>] [--all-projects] [--json]` and
+    // `pin|unpin|done [<project>] <sessionId> [--worktree <id>]`
+    // (issue #322). The optional `<project>` positional can land
+    // anywhere in argv — `controller on-radar --json demo` and
+    // `controller on-radar demo --json` are both legitimate, and
+    // the P1 review (commit 1802929c) caught that the previous
+    // "first bare token only" extraction missed the flag-first
+    // shape, leaving `demo` in `args` and falling through to the
+    // cwd resolve. Split positionals out of `rest` regardless of
+    // position and surface them as the `<project>` if there is
+    // exactly one. The `on-radar` case rejects more than one
+    // positional since it has no second positional to compete
+    // with; the `pin|unpin|done` cases have their own
+    // project-vs-sessionId disambiguation (see the comment block
+    // in that case below) and consume the rest directly.
+    const positionals = rest.filter((a) => !a.startsWith("--"));
+    if (command === "on-radar") {
+      if (positionals.length > 1) {
+        fail(
+          `sessions on-radar takes at most <project> as a positional; ` +
+            `got ${positionals.length} (${positionals.join(", ")}). ` +
+            `Move flags after the project or drop the extras.`
+        );
+      }
+      if (positionals.length === 1) {
+        project = positionals[0];
+      }
+    } else {
+      // For `pin|unpin|done`, leave `args = rest` intact so the
+      // case branch can decide whether the first positional is
+      // the project (two-positional shape) or the sessionId
+      // (one-positional shape, which is the common case from a
+      // scheduled agent — see the case comment). We only set
+      // `project` here as a hint for the case: when there are
+      // exactly two positionals, the first is the project, so we
+      // forward that to keep the run path uniform with the other
+      // sessions commands. The case still owns the truth and
+      // reads `rest` to make the final call.
+      if (positionals.length === 2) {
+        project = positionals[0];
+      }
     }
   }
   // `wake` doesn't take a `<project>` positional because the server's
@@ -1091,6 +1114,16 @@ export function parseSessions(argv) {
       // walk the project itself.
       assertKnownFlags(rest, ["--worktree"], `sessions ${command}`);
       const worktreeId = flagValue(rest, "--worktree");
+      // Validate the flag's value. `flagValue` returns `undefined`
+      // both when `--worktree` is missing and when it's the last
+      // token with no value, so we disambiguate: if the index of
+      // the flag equals `rest.length - 1`, there is no value, and
+      // a "silent main-worktree fallback" would 404 on a
+      // non-main-worktree session (P2 review, issue #322).
+      const wtIdx = rest.indexOf("--worktree");
+      if (wtIdx >= 0 && wtIdx === rest.length - 1) {
+        fail(`sessions ${command} requires a value after --worktree (got the flag as the last token)`);
+      }
       // Strip `--worktree` AND its value before counting
       // positionals. The value (e.g. `wt-1`) doesn't start with
       // `--`, so a naïve `!arg.startsWith("--")` filter would
@@ -1657,7 +1690,23 @@ async function runSessionsOnRadar(parsed, serverUrl) {
         serverUrl,
         `/api/projects/${source.projectId}/sessions?worktreeId=${encodeURIComponent(worktree.id)}`
       );
-      if (listResp.status >= 400) continue;
+      // Surface per-worktree session-list errors instead of
+      // silently continuing. The queue IS the deliverable for
+      // `on-radar` — a partial read on a feature worktree would
+      // hide pinned sessions and a scheduled sweep would treat
+      // `No sessions on radar.` as a complete answer (P2 review,
+      // issue #322). This is intentionally stricter than
+      // `fetchSessionSummaries` (where the same `continue` is
+      // fine for `--parent` discovery, since the parent might
+      // just be on a different worktree).
+      if (listResp.status >= 400) {
+        fail(
+          serverError(
+            listResult,
+            `Failed to list sessions for worktree ${worktree.id} (HTTP ${listResp.status})`
+          )
+        );
+      }
       const summaries = Array.isArray(listResult) ? listResult : [];
       for (const session of summaries) {
         if (!session || !session.focusPinnedAt) continue;
