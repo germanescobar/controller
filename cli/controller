@@ -8,7 +8,7 @@
  *   controller skills <action> ...          Search and activate unified skills.
  *   controller projects <action> ...        List the onboarded projects.
  *   controller worktrees <action> ...       Manage worktrees on a project.
- *   controller sessions <action> ...        Start a session pinned to a worktree.
+ *   controller sessions <action> ...        Start a session, browse the focus queue, or steer the agent.
  *   controller memory <action> ...          Read/write the app-owned memory layer.
  *
  * Invoked by its absolute install path (`<controllerHome>/bin/controller`,
@@ -161,6 +161,39 @@ const USAGE = `Usage:
   \`controller sessions send --from $(jq -r .id)\`. \`--limit\` caps the
   result count; default 100. \`No sessions match.\` is printed when the
   filter result is empty.
+
+  controller sessions on-radar [<project>] [--all-projects] [--json]
+  controller sessions pin [<project>] <sessionId> [--worktree <worktreeId>]
+  controller sessions unpin [<project>] <sessionId> [--worktree <worktreeId>]
+  controller sessions done [<project>] <sessionId> [--worktree <worktreeId>]
+
+  \`sessions on-radar\` lists the focus-queue sessions — the entries whose
+  \`focusPinnedAt\` is set on the sidebar's session summaries. The server's
+  session endpoint is per-worktree, so the CLI walks every worktree of the
+  project(s) to mirror the sidebar's client-side projection
+  (issue #322). The CLI sorts by the same per-bucket recency the
+  sidebar's \`sortFocusQueue\` uses
+  (\`client/src/components/sidebar.tsx:198-249\`), but it can only
+  approximate the sidebar's order from server-side signals: the CLI
+  buckets by \`status\` (running last, everything else by recency of
+  \`lastActiveAt\`) because the awaiting-input flag and the
+  visited/unvisited split live client-side. Treat the CLI as
+  authoritative for a sweep, not for triage — the desktop view is
+  the source of truth for the awaiting-vs-visited split. By default
+  it walks one project; \`--all-projects\` merges every project's
+  queue into a single sorted list. \`--json\` prints the rows as a
+  JSON array. \`No sessions on radar.\` is printed when the filter
+  result is empty (the same copy the sidebar uses) so agents can
+  detect an empty queue without grepping.
+
+  \`pin\` / \`unpin\` / \`done\` wrap the existing
+  \`POST /api/projects/<projectId>/sessions/<sessionId>/focus-pin|unpin|done\`
+  routes so a scheduled agent can maintain its own focus queue from the
+  shell. \`<project>\` is optional and falls back to cwd; the
+  \`<sessionId>\` is required. The focus-action route defaults to the
+  project's main worktree when \`--worktree\` is omitted, which silently
+  404s for sessions on other worktrees — pass \`--worktree\` with the
+  worktree id from a \`sessions on-radar\` row to disambiguate.
 
   controller sessions wake <sessionId> <message> \\
       [--delay <duration>] [--run-at <iso>] \\
@@ -844,6 +877,54 @@ export function parseSessions(argv) {
       project = rest[0];
       args = rest.slice(1);
     }
+  } else if (
+    command === "on-radar" ||
+    command === "pin" ||
+    command === "unpin" ||
+    command === "done"
+  ) {
+    // `on-radar [<project>] [--all-projects] [--json]` and
+    // `pin|unpin|done [<project>] <sessionId> [--worktree <id>]`
+    // (issue #322). The optional `<project>` positional can land
+    // anywhere in argv — `controller on-radar --json demo` and
+    // `controller on-radar demo --json` are both legitimate, and
+    // the P1 review (commit 1802929c) caught that the previous
+    // "first bare token only" extraction missed the flag-first
+    // shape, leaving `demo` in `args` and falling through to the
+    // cwd resolve. Split positionals out of `rest` regardless of
+    // position and surface them as the `<project>` if there is
+    // exactly one. The `on-radar` case rejects more than one
+    // positional since it has no second positional to compete
+    // with; the `pin|unpin|done` cases have their own
+    // project-vs-sessionId disambiguation (see the comment block
+    // in that case below) and consume the rest directly.
+    const positionals = rest.filter((a) => !a.startsWith("--"));
+    if (command === "on-radar") {
+      if (positionals.length > 1) {
+        fail(
+          `sessions on-radar takes at most <project> as a positional; ` +
+            `got ${positionals.length} (${positionals.join(", ")}). ` +
+            `Move flags after the project or drop the extras.`
+        );
+      }
+      if (positionals.length === 1) {
+        project = positionals[0];
+      }
+    } else {
+      // For `pin|unpin|done`, leave `args = rest` intact so the
+      // case branch can decide whether the first positional is
+      // the project (two-positional shape) or the sessionId
+      // (one-positional shape, which is the common case from a
+      // scheduled agent — see the case comment). We only set
+      // `project` here as a hint for the case: when there are
+      // exactly two positionals, the first is the project, so we
+      // forward that to keep the run path uniform with the other
+      // sessions commands. The case still owns the truth and
+      // reads `rest` to make the final call.
+      if (positionals.length === 2) {
+        project = positionals[0];
+      }
+    }
   }
   // `wake` doesn't take a `<project>` positional because the server's
   // per-session routes resolve the owning project from the session
@@ -972,6 +1053,115 @@ export function parseSessions(argv) {
           ...(json ? { json: true } : {}),
           ...(limit != null ? { limit } : {}),
         },
+      };
+    }
+    case "on-radar": {
+      // `sessions on-radar [<project>] [--all-projects] [--json]`
+      // (issue #322).
+      //
+      // `--all-projects` walks every onboarded project and merges
+      // their focus queues into one sorted list — the common case for
+      // a "go through everything on radar" sweep, where the agent
+      // doesn't care which project owns each entry. The bare
+      // `<project>` shape mirrors `sessions list` / `schedules list`:
+      // first positional, falls back to the project that owns cwd.
+      // `--json` swaps the human-readable row format for a JSON
+      // array so scripted sweeps (`controller .. | jq`) don't have
+      // to parse whitespace-padded columns.
+      const allProjects = args.includes("--all-projects");
+      const json = args.includes("--json");
+      // Surface unknown `--…` flags as a clear error rather than
+      // silently dropping them. The other sessions commands use
+      // `assertKnownFlags`, but here we accept two boolean flags
+      // and nothing else, so a hand-rolled check is shorter than
+      // passing a two-element allowlist to the helper.
+      for (const arg of args) {
+        if (arg.startsWith("--") && arg !== "--all-projects" && arg !== "--json") {
+          fail(`Unknown flag for sessions on-radar: ${arg}`);
+        }
+      }
+      return {
+        // The outer `<project>` strip already extracted the
+        // positional; nothing else to do for `on-radar`.
+        project,
+        action: "on-radar",
+        allProjects,
+        json,
+      };
+    }
+    case "pin":
+    case "unpin":
+    case "done": {
+      // `sessions pin|unpin|done [<project>] <sessionId> [--worktree <id>]`
+      // (issue #322).
+      //
+      // The session id is the primary argument the user came to
+      // pass, so we can't reuse the outer "first positional is the
+      // project" rule from `start`/`list` — that would force the
+      // common `pin <sessionId>` shape to thread a project too.
+      // Instead, with one positional we treat it as the sessionId
+      // (project falls back to cwd); with two positionals the first
+      // is the project and the second is the sessionId.
+      //
+      // The focus-action route
+      // (`POST /:projectId/sessions/:sessionId/focus-pin|unpin|done`)
+      // calls `resolveWorktree(projectId, worktreeId?)` and then
+      // reads `.coding-agent/sessions/<sessionId>.json` inside that
+      // worktree. Without `--worktree` the route defaults to the
+      // project's main worktree, which silently 404s for sessions
+      // on other worktrees. The CLI accepts `--worktree` so a
+      // scheduled agent can lift the worktree id straight out of
+      // the `on-radar` output and forward it without having to
+      // walk the project itself.
+      assertKnownFlags(rest, ["--worktree"], `sessions ${command}`);
+      const worktreeId = flagValue(rest, "--worktree");
+      // Validate the flag's value. `flagValue` returns `undefined`
+      // both when `--worktree` is missing and when it's the last
+      // token with no value, so we disambiguate: if the index of
+      // the flag equals `rest.length - 1`, there is no value, and
+      // a "silent main-worktree fallback" would 404 on a
+      // non-main-worktree session (P2 review, issue #322).
+      const wtIdx = rest.indexOf("--worktree");
+      if (wtIdx >= 0 && wtIdx === rest.length - 1) {
+        fail(`sessions ${command} requires a value after --worktree (got the flag as the last token)`);
+      }
+      // Strip `--worktree` AND its value before counting
+      // positionals. The value (e.g. `wt-1`) doesn't start with
+      // `--`, so a naïve `!arg.startsWith("--")` filter would
+      // mistake it for the `<project>` positional and turn
+      // `pin --worktree wt-1 sess-xyz` into
+      // `{ project: "wt-1", sessionId: "sess-xyz" }` — the
+      // opposite of what the user asked for. We walk `rest` by
+      // index so the value-skip stays correct even when the flag
+      // is followed by a `--` (it can't be, since `--worktree`
+      // is the only allowed flag, but the index walk makes the
+      // shape explicit).
+      const positionals = rest.filter((a, i) => {
+        if (a === "--worktree") return false;
+        if (i > 0 && rest[i - 1] === "--worktree") return false;
+        return !a.startsWith("--");
+      });
+      if (positionals.length === 0) {
+        fail(`sessions ${command} requires a <sessionId> positional argument`);
+      }
+      if (positionals.length > 2) {
+        fail(
+          `sessions ${command} takes at most <project> and <sessionId>; ` +
+            `got ${positionals.length} positional args.`
+        );
+      }
+      const sessionId = positionals.length === 1 ? positionals[0] : positionals[1];
+      const projectArg = positionals.length === 2 ? positionals[0] : "";
+      return {
+        project: projectArg,
+        action: command,
+        sessionId,
+        // Only include `worktreeId` when it was actually supplied
+        // so a deepEqual against tests that don't expect the field
+        // doesn't trip on the extra `undefined` property (Node's
+        // deepEqual treats `undefined` values as present and a
+        // no-show as absent).
+        ...(worktreeId ? { worktreeId } : {}),
       };
     }
     case "wake": {
@@ -1275,6 +1465,25 @@ export function parseGoal(argv) {
 
 export async function runSessions(argv, serverUrl) {
   const parsed = parseSessions(argv);
+  // `on-radar` and `pin|unpin|done` resolve their own projects
+  // (either via `--all-projects` skipping the resolve entirely, or
+  // via a per-action `resolveProjectId` call with the right
+  // arguments). Resolving here would call `resolveProjectId("")`
+  // for `--all-projects`, which would then try the cwd fallback
+  // and fail before we got to the dispatcher (issue #322).
+  if (
+    parsed.action === "on-radar" ||
+    parsed.action === "pin" ||
+    parsed.action === "unpin" ||
+    parsed.action === "done"
+  ) {
+    if (parsed.action === "on-radar") {
+      await runSessionsOnRadar(parsed, serverUrl);
+    } else {
+      await runSessionFocusAction(parsed, serverUrl);
+    }
+    return;
+  }
   const projectId = await resolveProjectId(serverUrl, parsed.project);
   if (parsed.action === "start") {
     const { response, result } = await postJson(
@@ -1392,6 +1601,253 @@ export async function runSessions(argv, serverUrl) {
     return;
   }
   fail(`Unknown sessions action: ${parsed.action}`);
+}
+
+/*
+ * `sessions on-radar` dispatcher (issue #322).
+ *
+ * Lists the focus-queue sessions for one project (or every project,
+ * with `--all-projects`) in the closest server-side approximation
+ * of the sidebar's order. The server's session-list endpoint is
+ * per-worktree, so we walk every worktree of the project(s) and
+ * filter to the entries with `focusPinnedAt` set — the same filter
+ * the sidebar's `client/src/components/sidebar.tsx:325` uses.
+ *
+ * Why duplicate the sidebar's filter+sort client-side here? The
+ * server's session summaries endpoint returns every session in the
+ * worktree regardless of focus state, and there's no `?focusPinned=1`
+ * filter. Mirroring the client-side logic in the CLI keeps the two
+ * in sync without a shared module; the same approach `sessions list`
+ * already takes for `--parent`.
+ *
+ * Approximating the sidebar's order:
+ * - The sidebar's true sort lives in
+ *   `client/src/components/sidebar.tsx:sortFocusQueue` and buckets
+ *   items as `awaiting → finishedUnvisited → finishedVisited →
+ *   running` before sorting each bucket by `lastActiveAt` /
+ *   `lastVisitedAt`. Two of those signals are client-only:
+ *   `awaitingInput` lives on the runtime entry (the CLI sees
+ *   `status` instead, and only as a free-form string), and
+ *   `lastVisitedAt` lives in localStorage. The closest server-only
+ *   approximation is to bucket by `status === "running"` and then
+ *   sort each bucket by `lastActiveAt` ascending. The CLI documents
+ *   this gap so the agent knows the desktop view is authoritative
+ *   for the awaiting-vs-visited split.
+ * - The CLI also has to record the worktree it discovered each
+ *   session in, not just `session.worktreeId` from the persisted
+ *   `SessionState`. Legacy sessions persisted before worktree id
+ *   tracking shipped don't carry the field even when they live on
+ *   a non-main worktree; without stamping the queried worktree id
+ *   the row would report `worktree=?` and a follow-up `pin` would
+ *   default to the main worktree and 404 (PR review, issue #322).
+ */
+async function runSessionsOnRadar(parsed, serverUrl) {
+  const sources = parsed.allProjects
+    ? await gatherAllProjectSources(serverUrl)
+    : [
+        await gatherProjectSource(
+          serverUrl,
+          await resolveProjectId(serverUrl, parsed.project)
+        ),
+      ];
+  const rows = [];
+  for (const source of sources) {
+    if (!source) continue;
+    // We walk worktrees explicitly (rather than reusing
+    // `fetchSessionSummaries`) so we can stamp each row with the
+    // worktree it was discovered in. The walker is otherwise the
+    // same one `fetchSessionSummaries` uses for the no-`worktreeId`
+    // case: GET `/api/projects/<id>/worktrees`, then a per-worktree
+    // session list. Main worktree first because the sidebar renders
+    // it first and the per-worktree filter would have caught the
+    // common case.
+    const { response: wtResp, result: wtResult } = await getJson(
+      serverUrl,
+      `/api/projects/${source.projectId}/worktrees`
+    );
+    if (wtResp.status >= 400) {
+      fail(
+        serverError(
+          wtResult,
+          `Failed to list worktrees (HTTP ${wtResp.status})`
+        )
+      );
+    }
+    const worktrees = Array.isArray(wtResult) ? wtResult : [];
+    // Also cache worktree names per project so the human-readable
+    // row can show "wt-1 (main)" without a second round trip per
+    // row. For `--all-projects` the cache is keyed by projectId
+    // (rebuilt per project below) so we never bleed worktree names
+    // across projects.
+    const worktreeNameCache = new Map();
+    for (const worktree of worktrees) {
+      if (worktree && typeof worktree.id === "string") {
+        worktreeNameCache.set(worktree.id, worktree.name ?? null);
+      }
+    }
+    for (const worktree of worktrees) {
+      if (!worktree || typeof worktree.id !== "string") continue;
+      const { response: listResp, result: listResult } = await getJson(
+        serverUrl,
+        `/api/projects/${source.projectId}/sessions?worktreeId=${encodeURIComponent(worktree.id)}`
+      );
+      // Surface per-worktree session-list errors instead of
+      // silently continuing. The queue IS the deliverable for
+      // `on-radar` — a partial read on a feature worktree would
+      // hide pinned sessions and a scheduled sweep would treat
+      // `No sessions on radar.` as a complete answer (P2 review,
+      // issue #322). This is intentionally stricter than
+      // `fetchSessionSummaries` (where the same `continue` is
+      // fine for `--parent` discovery, since the parent might
+      // just be on a different worktree).
+      if (listResp.status >= 400) {
+        fail(
+          serverError(
+            listResult,
+            `Failed to list sessions for worktree ${worktree.id} (HTTP ${listResp.status})`
+          )
+        );
+      }
+      const summaries = Array.isArray(listResult) ? listResult : [];
+      for (const session of summaries) {
+        if (!session || !session.focusPinnedAt) continue;
+        rows.push({
+          projectId: source.projectId,
+          projectName: source.projectName,
+          // Stamp the queried worktree id first, then fall back to
+          // the persisted `SessionState.worktreeId` if present.
+          // Modern sessions carry the field; legacy sessions don't,
+          // and the queried id is authoritative for "which worktree
+          // actually returned this summary".
+          worktreeId: worktree.id,
+          worktreeName: worktreeNameCache.get(worktree.id) ?? null,
+          sessionId: session.id,
+          title: session.title,
+          provider: session.provider,
+          mode: session.mode,
+          status: session.status,
+          focusPinnedAt: session.focusPinnedAt,
+          createdAt: session.createdAt,
+          lastActiveAt: session.lastActiveAt,
+        });
+      }
+    }
+  }
+  // Bucket by `status` (running last, everything else by recency).
+  // The sidebar's true order is
+  //   `awaiting → finishedUnvisited → finishedVisited → running`
+  // (see `client/src/components/sidebar.tsx:198-249`). The
+  // server-only signals we have are coarse: `status` carries a
+  // free-form string the agent runtime writes (`"running"`,
+  // `"exited"`, `"failed"`, etc.), and `lastActiveAt` is the only
+  // timestamp we can sort by. So we collapse to two buckets:
+  //   1. not running  — sort by `lastActiveAt` asc (oldest first,
+  //      so a freshly-finished session doesn't jump the queue)
+  //   2. running      — sort by `lastActiveAt` asc (matches the
+  //      sidebar's within-bucket ordering for the running bucket)
+  // The agent should treat this as "good enough for a sweep, not
+  // authoritative for triage" — the desktop app is the source of
+  // truth for the awaiting-input and visited/unvisited split.
+  const statusBucket = (status) => {
+    if (typeof status === "string" && status.toLowerCase() === "running") {
+      return 1;
+    }
+    return 0;
+  };
+  rows.sort((a, b) => {
+    const bucketDiff = statusBucket(a.status) - statusBucket(b.status);
+    if (bucketDiff !== 0) return bucketDiff;
+    const aTime = new Date(a.lastActiveAt ?? a.focusPinnedAt ?? a.createdAt ?? 0).getTime();
+    const bTime = new Date(b.lastActiveAt ?? b.focusPinnedAt ?? b.createdAt ?? 0).getTime();
+    return aTime - bTime;
+  });
+  if (parsed.json) {
+    process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+    return;
+  }
+  if (rows.length === 0) {
+    // The sidebar copy is "No sessions on radar." — agents grep for
+    // it to detect an empty queue, so don't change the wording.
+    process.stdout.write("No sessions on radar.\n");
+    return;
+  }
+  for (const row of rows) {
+    process.stdout.write(`${formatOnRadarRow(row)}\n`);
+  }
+}
+
+function formatOnRadarRow(row) {
+  const title = row.title ? row.title : "(untitled)";
+  const provider = row.provider ? `${row.provider}` : "?";
+  const placed = row.focusPinnedAt ?? row.createdAt ?? "?";
+  const lastActive = row.lastActiveAt ?? "?";
+  // One row per session, fields the sidebar doesn't already show
+  // but that an agent needs to decide whether to visit:
+  //   sessionId (id won't change), projectId/worktreeId (the tuple
+  //   the session-start needs), title (human-readable), provider
+  //   (so the agent can pick the right tool to send follow-up
+  //   turns), and focusPinnedAt/lastActiveAt timestamps so it can
+  //   rank by recency. The exact wire shape is in `parsed.json`
+  //   mode above; this is just the human-readable rendering.
+  return `${row.sessionId}  ${title}\n` +
+    `  project=${row.projectId}${row.projectName ? ` (${row.projectName})` : ""}  worktree=${row.worktreeId ?? "?"}${row.worktreeName ? ` (${row.worktreeName})` : ""}\n` +
+    `  provider=${provider}  pinned=${placed}  lastActive=${lastActive}`;
+}
+
+async function gatherProjectSource(serverUrl, projectId) {
+  // Match the project name alongside the id so the human-readable
+  // row can include both. The session list endpoint doesn't return
+  // the project name, so we either grabbed it from the project list
+  // earlier (for `--all-projects`) or we fetch it on demand here.
+  const projects = await fetchProjectList(serverUrl);
+  const project = projects.find((p) => p && p.id === projectId);
+  return { projectId, projectName: project?.name ?? null };
+}
+
+async function gatherAllProjectSources(serverUrl) {
+  const projects = await fetchProjectList(serverUrl);
+  return projects
+    .filter((p) => p && typeof p.id === "string")
+    .map((p) => ({ projectId: p.id, projectName: p.name ?? null }));
+}
+
+/*
+ * `sessions pin` / `unpin` / `done` dispatcher (issue #322).
+ *
+ * Thin wrapper around the existing focus-action routes
+ * (`POST /:projectId/sessions/:sessionId/focus-pin|unpin|done`)
+ * that the sidebar and SessionView buttons already POST to. The
+ * worktree is resolved server-side from the session id, and the
+ * optional `?worktreeId=` query is forwarded when the agent passes
+ * `--worktree` (so a session on a non-main worktree doesn't 404).
+ */
+async function runSessionFocusAction(parsed, serverUrl) {
+  const projectId = await resolveProjectId(serverUrl, parsed.project);
+  const qs = parsed.worktreeId
+    ? `?worktreeId=${encodeURIComponent(parsed.worktreeId)}`
+    : "";
+  const route = `/api/projects/${projectId}/sessions/${parsed.sessionId}/focus-${parsed.action}${qs}`;
+  const { response, result } = await postJson(serverUrl, route, {});
+  if (response.status >= 400) {
+    fail(
+      result?.error ??
+        `Failed to ${parsed.action} session (HTTP ${response.status})`
+    );
+  }
+  const focusPinnedAt = result?.focusPinnedAt;
+  const focusDoneAt = result?.focusDoneAt;
+  const verb =
+    parsed.action === "pin"
+      ? "Pinned"
+      : parsed.action === "unpin"
+      ? "Unpinned"
+      : "Marked done";
+  const tail = focusPinnedAt
+    ? ` (pinned at ${focusPinnedAt})`
+    : focusDoneAt
+    ? ` (marked done at ${focusDoneAt})`
+    : "";
+  process.stdout.write(`${verb} session ${parsed.sessionId}.${tail}\n`);
 }
 
 /*

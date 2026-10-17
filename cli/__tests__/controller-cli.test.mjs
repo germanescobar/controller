@@ -5128,3 +5128,1116 @@ test("controller --help lists the projects subcommand (issue #370)", async () =>
   assert.match(out, /controller worktrees list \[<project>\]/);
   assert.match(out, /controller sessions list \[<project>\]/);
 });
+
+// ---------------------------------------------------------------------------
+// sessions on-radar + focus-action commands (issue #322)
+// ---------------------------------------------------------------------------
+//
+// `sessions on-radar` is the CLI's bridge to the sidebar's focus queue.
+// It walks every worktree of one project (or every project, with
+// `--all-projects`), filters the session summaries to entries with
+// `focusPinnedAt` set, sorts ascending by `focusPinnedAt ?? createdAt`,
+// and prints one row per session. The companion `pin` / `unpin` /
+// `done` subcommands wrap the existing focus-action routes so a
+// scheduled agent can maintain its own queue from the shell.
+
+test("parseSessions on-radar maps to an on-radar action and forwards --all-projects / --json", async () => {
+  const cli = await loadCli();
+  // No flags, no positional: just one project, the cwd-resolved one.
+  assert.deepEqual(cli.parseSessions(["on-radar"]), {
+    project: "",
+    action: "on-radar",
+    allProjects: false,
+    json: false,
+  });
+  // Explicit project positional.
+  assert.deepEqual(cli.parseSessions(["on-radar", "demo"]), {
+    project: "demo",
+    action: "on-radar",
+    allProjects: false,
+    json: false,
+  });
+  // Flags can land before or after the project positional — when
+  // the project follows a flag, the top-of-function strip can't see
+  // it (same shape as `sessions list` for the flag-first form), but
+  // the runner resolves from cwd as a fallback, which is fine for
+  // the no-project case.
+  assert.deepEqual(cli.parseSessions(["on-radar", "--all-projects"]), {
+    project: "",
+    action: "on-radar",
+    allProjects: true,
+    json: false,
+  });
+  // When the project positional comes first, it lands in the
+  // `project` field; flags can come after.
+  assert.deepEqual(
+    cli.parseSessions(["on-radar", "demo", "--json", "--all-projects"]),
+    {
+      project: "demo",
+      action: "on-radar",
+      allProjects: true,
+      json: true,
+    }
+  );
+});
+
+test("parseSessions on-radar rejects unknown flags with a clear error", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["on-radar", "--frobnicate"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Unknown flag for sessions on-radar/);
+  assert.match(stderrText, /--frobnicate/);
+});
+
+test("parseSessions pin/unpin/done accept <project> and <sessionId> positionals", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseSessions(["pin", "demo", "sess-xyz"]), {
+    project: "demo",
+    action: "pin",
+    sessionId: "sess-xyz",
+  });
+  assert.deepEqual(cli.parseSessions(["unpin", "demo", "sess-xyz"]), {
+    project: "demo",
+    action: "unpin",
+    sessionId: "sess-xyz",
+  });
+  assert.deepEqual(cli.parseSessions(["done", "demo", "sess-xyz"]), {
+    project: "demo",
+    action: "done",
+    sessionId: "sess-xyz",
+  });
+  // <project> is optional — the single positional becomes the session id.
+  assert.deepEqual(cli.parseSessions(["pin", "sess-xyz"]), {
+    project: "",
+    action: "pin",
+    sessionId: "sess-xyz",
+  });
+});
+
+test("parseSessions pin/unpin/done require a <sessionId> positional", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => cli.parseSessions(["pin"]), /__exit__/);
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /sessions pin requires a <sessionId>/);
+});
+
+test("parseSessions pin/unpin/done reject unknown flags (they only take --worktree)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    // `--frobnicate` is not a known flag for `pin` (only `--worktree`
+    // is). The two positionals (`demo`, `sess-xyz`) are otherwise
+    // valid, but the unknown flag should trip the assertion first.
+    await assert.rejects(
+      async () =>
+        cli.parseSessions(["pin", "demo", "sess-xyz", "--frobnicate", "yes"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  // The error should explain why — these commands don't accept flags.
+  assert.match(stderrText, /Unknown flag for sessions pin/);
+  assert.match(stderrText, /--frobnicate/);
+});
+
+test("parseSessions pin/unpin/done accept --worktree to disambiguate the session", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseSessions(["pin", "controller", "sess-xyz", "--worktree", "wt-1"]),
+    {
+      project: "controller",
+      action: "pin",
+      sessionId: "sess-xyz",
+      worktreeId: "wt-1",
+    }
+  );
+  // --worktree can land before the positional sessionId, which is the
+  // shape a scheduled agent ends up in when piping out of `on-radar`.
+  // Crucially, the worktree value (`wt-1`) must not be mistaken for
+  // the project — the filter below strips `--worktree` AND its value
+  // before counting positionals.
+  assert.deepEqual(
+    cli.parseSessions(["unpin", "--worktree", "wt-1", "sess-xyz"]),
+    {
+      project: "",
+      action: "unpin",
+      sessionId: "sess-xyz",
+      worktreeId: "wt-1",
+    }
+  );
+});
+
+test("runSessions on-radar filters to focusPinnedAt sessions and prints them in the sidebar's order", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "proj-uuid-2", name: "demo" }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "wt-1", name: "main", branch: "main", isMain: true, path: "/tmp/wt/main" },
+        ],
+      };
+    }
+    if (
+      String(url).startsWith(
+        "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId="
+      )
+    ) {
+      return {
+        status: 200,
+        json: async () => [
+          // Not pinned — must be filtered out.
+          {
+            id: "sess-c",
+            title: "no-pin",
+            worktreeId: "wt-1",
+            focusPinnedAt: undefined,
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            provider: "codex",
+          },
+          // Pinned second-oldest — second in the output.
+          {
+            id: "sess-b",
+            title: "second",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T09:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T09:30:00.000Z",
+            provider: "claude",
+          },
+          // Pinned oldest — first in the output.
+          {
+            id: "sess-a",
+            title: "first",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            provider: "codex",
+          },
+          // Pinned newest — third in the output.
+          {
+            id: "sess-d",
+            title: "newest",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T10:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T10:30:00.000Z",
+            provider: "anita",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // The runner hits /api/projects (for name resolution) and then
+  // /worktrees (the same walker `sessions list` uses for cross-
+  // worktree discovery).
+  assert.ok(calls.some((c) => c.endsWith("/api/projects")));
+  assert.ok(
+    calls.some((c) => c.endsWith("/api/projects/proj-uuid-2/worktrees"))
+  );
+  const out = stdoutChunks.join("");
+  // Three pinned rows, in ascending pin order.
+  assert.match(out, /sess-a  first/);
+  assert.match(out, /sess-b  second/);
+  assert.match(out, /sess-d  newest/);
+  // The unpinned session is filtered out.
+  assert.ok(!out.includes("sess-c"), `expected sess-c to be filtered out, got: ${out}`);
+  // Order: sess-a must appear before sess-b which must appear before sess-d.
+  const ai = out.indexOf("sess-a");
+  const bi = out.indexOf("sess-b");
+  const di = out.indexOf("sess-d");
+  assert.ok(
+    ai >= 0 && bi >= 0 && di >= 0 && ai < bi && bi < di,
+    `unexpected order in: ${out}`
+  );
+  // Each row exposes the (project, worktree, session) tuple a session-start
+  // needs to re-enter the session.
+  assert.match(out, /project=proj-uuid-2 \(demo\)/);
+  assert.match(out, /worktree=wt-1/);
+  // Provider + timestamps so an agent can rank visits.
+  assert.match(out, /provider=codex/);
+  assert.match(out, /pinned=2026-06-26T08:00:00\.000Z/);
+});
+
+test("runSessions on-radar prints 'No sessions on radar.' when nothing is pinned", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    return {
+      status: 200,
+      // Only unpinned sessions on the only worktree.
+      json: async () => [
+        {
+          id: "sess-x",
+          title: "not pinned",
+          worktreeId: "wt-1",
+          focusPinnedAt: undefined,
+          createdAt: "2026-06-26T08:00:00.000Z",
+          lastActiveAt: "2026-06-26T08:30:00.000Z",
+          provider: "codex",
+        },
+      ],
+    };
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // Exact copy from the sidebar — agents grep for it.
+  assert.deepEqual(stdoutChunks.join(""), "No sessions on radar.\n");
+});
+
+test("runSessions on-radar --json emits a JSON array (no human-readable rows)", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    return {
+      status: 200,
+      json: async () => [
+        {
+          id: "sess-a",
+          title: "first",
+          worktreeId: "wt-1",
+          focusPinnedAt: "2026-06-26T08:00:00.000Z",
+          createdAt: "2026-06-26T08:00:00.000Z",
+          lastActiveAt: "2026-06-26T08:30:00.000Z",
+          provider: "codex",
+        },
+      ],
+    };
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo", "--json"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // The output must be valid JSON the agent can pipe into jq / node.
+  const parsed = JSON.parse(stdoutChunks.join(""));
+  assert.ok(Array.isArray(parsed));
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].sessionId, "sess-a");
+  assert.equal(parsed[0].projectId, "proj-uuid-2");
+  assert.equal(parsed[0].worktreeId, "wt-1");
+  assert.equal(parsed[0].title, "first");
+  assert.equal(parsed[0].provider, "codex");
+  assert.equal(parsed[0].focusPinnedAt, "2026-06-26T08:00:00.000Z");
+});
+
+test("runSessions on-radar --all-projects walks every project and merges the queues in sort order", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/api/projects")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "proj-a", name: "alpha" },
+          { id: "proj-b", name: "beta" },
+        ],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-a/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-a1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).endsWith("/api/projects/proj-b/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-b1", name: "main", isMain: true }],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-a/sessions?")) {
+      return {
+        status: 200,
+        json: async () => [
+          // Older pin in proj-a — second overall.
+          {
+            id: "sess-a1",
+            title: "a1",
+            worktreeId: "wt-a1",
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    if (String(url).includes("/api/projects/proj-b/sessions?")) {
+      return {
+        status: 200,
+        json: async () => [
+          // Newer pin in proj-b — first overall (after merging).
+          {
+            id: "sess-b1",
+            title: "b1",
+            worktreeId: "wt-b1",
+            focusPinnedAt: "2026-06-26T07:00:00.000Z",
+            createdAt: "2026-06-26T07:00:00.000Z",
+            lastActiveAt: "2026-06-26T07:30:00.000Z",
+            provider: "claude",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["on-radar", "--all-projects"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  // The project list is hit once; both projects' worktrees and
+  // session lists are walked.
+  assert.ok(calls.filter((c) => c.endsWith("/api/projects")).length >= 1);
+  assert.ok(
+    calls.some((c) => c.endsWith("/api/projects/proj-a/worktrees"))
+  );
+  assert.ok(
+    calls.some((c) => c.endsWith("/api/projects/proj-b/worktrees"))
+  );
+  const out = stdoutChunks.join("");
+  // Merged and sorted by pin time across projects: b1 (07:00) before
+  // a1 (08:00).
+  const bIdx = out.indexOf("sess-b1");
+  const aIdx = out.indexOf("sess-a1");
+  assert.ok(
+    bIdx >= 0 && aIdx >= 0 && bIdx < aIdx,
+    `expected b1 before a1 in: ${out}`
+  );
+  // Both projects are present in the output so the agent can
+  // disambiguate when a session moves between projects (issue #322).
+  assert.match(out, /project=proj-a \(alpha\)/);
+  assert.match(out, /project=proj-b \(beta\)/);
+});
+
+test("runSessions on-radar surfaces worktree-list errors as a non-zero exit", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    return {
+      status: 404,
+      json: async () => ({ error: "Project not found" }),
+    };
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.runSessions(["on-radar", "demo"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Project not found/);
+});
+
+test("runSessions pin POSTs to the focus-pin route and prints a confirmation", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-1", name: "controller" }] };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-1/sessions/sess-xyz/focus-pin"
+    ) {
+      return {
+        status: 200,
+        json: async () => ({
+          id: "sess-xyz",
+          focusPinnedAt: "2026-06-26T08:00:00.000Z",
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["pin", "controller", "sess-xyz"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const pinCall = calls.find(
+    (c) =>
+      c.url ===
+      "http://controller.test/api/projects/proj-uuid-1/sessions/sess-xyz/focus-pin"
+  );
+  assert.ok(pinCall, "expected a POST to the focus-pin endpoint");
+  assert.equal(pinCall.init.method, "POST");
+  assert.match(stdoutChunks.join(""), /Pinned session sess-xyz\./);
+});
+
+test("runSessions pin forwards --worktree as ?worktreeId= on the focus-action route", async () => {
+  // The on-radar output prints the worktree id for every session, so
+  // a scheduled agent can pipe it straight into `--worktree` to
+  // disambiguate when the session lives on a non-main worktree
+  // (issue #322). Without the query string, the focus-action route
+  // defaults to the project's main worktree and silently 404s.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-1", name: "controller" }] };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-1/sessions/sess-xyz/focus-pin?worktreeId=wt-2"
+    ) {
+      return {
+        status: 200,
+        json: async () => ({
+          id: "sess-xyz",
+          focusPinnedAt: "2026-06-26T08:00:00.000Z",
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = () => true;
+  try {
+    await cli.runSessions(
+      ["pin", "controller", "sess-xyz", "--worktree", "wt-2"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const pinCall = calls.find(
+    (c) =>
+      c.url ===
+      "http://controller.test/api/projects/proj-uuid-1/sessions/sess-xyz/focus-pin?worktreeId=wt-2"
+  );
+  assert.ok(pinCall, "expected a POST with worktreeId query");
+  assert.equal(pinCall.init.method, "POST");
+});
+
+test("runSessions unpin and done POST to the right focus-action routes", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-1", name: "controller" }] };
+    }
+    return { status: 200, json: async () => ({ id: "sess-xyz" }) };
+  };
+  process.stdout.write = () => true;
+  try {
+    await cli.runSessions(
+      ["unpin", "controller", "sess-xyz"],
+      "http://controller.test"
+    );
+    await cli.runSessions(
+      ["done", "controller", "sess-xyz"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.ok(
+    calls.some(
+      (c) =>
+        c.url ===
+        "http://controller.test/api/projects/proj-uuid-1/sessions/sess-xyz/focus-unpin"
+    ),
+    `expected focus-unpin call; got ${JSON.stringify(calls.map((c) => c.url))}`
+  );
+  assert.ok(
+    calls.some(
+      (c) =>
+        c.url ===
+        "http://controller.test/api/projects/proj-uuid-1/sessions/sess-xyz/focus-done"
+    ),
+    `expected focus-done call; got ${JSON.stringify(calls.map((c) => c.url))}`
+  );
+});
+
+test("runSessions on-radar preserves the queried worktree for legacy sessions whose persisted state omits worktreeId (PR review, issue #322)", async () => {
+  // Codex review (issue #322) caught a regression in the first
+  // version: the CLI copied `session.worktreeId` off the summary
+  // and dropped sessions whose persisted `SessionState.worktreeId`
+  // was `undefined` even when the per-worktree endpoint found them.
+  // The follow-up `pin <sessionId>` would then default to the main
+  // worktree and 404. The fix is to stamp the queried worktree id
+  // onto each row at fetch time so legacy sessions stay actionable
+  // and the round-trip can pass `--worktree` automatically.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "wt-1", name: "main", isMain: true },
+          // The legacy session lives on this worktree, not main.
+          { id: "wt-2", name: "feature", isMain: false },
+        ],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-1"
+    ) {
+      return { status: 200, json: async () => [] };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-2"
+    ) {
+      return {
+        status: 200,
+        // No `worktreeId` on the persisted session — this is the
+        // legacy shape the regression caught. The CLI should still
+        // know it came from wt-2 because the walker stamped it.
+        json: async () => [
+          {
+            id: "sess-legacy",
+            title: "Legacy",
+            // worktreeId deliberately omitted
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            status: "exited",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const out = stdoutChunks.join("");
+  // The row should report the queried worktree (wt-2), not `?`.
+  assert.match(out, /worktree=wt-2 \(feature\)/);
+  // And the legacy session id should still be there.
+  assert.match(out, /sess-legacy  Legacy/);
+});
+
+test("runSessions on-radar --json stamps queriedWorktree on legacy sessions (PR review, issue #322)", async () => {
+  // Mirror of the human-readable test above for the JSON path. The
+  // pinned-session row must carry the queried worktree id so an
+  // agent piping the output into a follow-up `pin` can read the
+  // worktree straight out of the row and round-trip it.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-2", name: "feature", isMain: false }],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-2"
+    ) {
+      return {
+        status: 200,
+        json: async () => [
+          {
+            id: "sess-legacy",
+            title: "Legacy",
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            status: "exited",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["on-radar", "demo", "--json"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const parsed = JSON.parse(stdoutChunks.join(""));
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].worktreeId, "wt-2");
+  assert.equal(parsed[0].worktreeName, "feature");
+});
+
+test("runSessions on-radar puts running sessions last and orders non-running by lastActiveAt (PR review, issue #322)", async () => {
+  // Codex review (issue #322) caught that the first version of
+  // the sort used `focusPinnedAt ?? createdAt` (which the issue
+  // claimed matched the sidebar but the sidebar's real
+  // `sortFocusQueue` actually buckets by state and then sorts by
+  // recency). The CLI can only see `status` and `lastActiveAt`
+  // server-side, so we collapse the four sidebar buckets to two:
+  // running last, everything else by recency.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-1"
+    ) {
+      return {
+        status: 200,
+        json: async () => [
+          // Newer running session — must end up LAST despite the
+          // newer lastActiveAt, because the sidebar's running
+          // bucket comes after the finished buckets.
+          {
+            id: "sess-running",
+            title: "Running",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T10:00:00.000Z",
+            createdAt: "2026-06-26T10:00:00.000Z",
+            lastActiveAt: "2026-06-26T10:30:00.000Z",
+            status: "running",
+            provider: "anita",
+          },
+          // Newest finished session — should be LAST among the
+          // non-running bucket (so the agent visits the oldest
+          // finished work first).
+          {
+            id: "sess-fresh",
+            title: "Fresh",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T09:00:00.000Z",
+            createdAt: "2026-06-26T09:00:00.000Z",
+            lastActiveAt: "2026-06-26T09:30:00.000Z",
+            status: "exited",
+            provider: "claude",
+          },
+          // Oldest finished session — should be FIRST.
+          {
+            id: "sess-old",
+            title: "Old",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            status: "failed",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const out = stdoutChunks.join("");
+  const oldIdx = out.indexOf("sess-old");
+  const freshIdx = out.indexOf("sess-fresh");
+  const runningIdx = out.indexOf("sess-running");
+  assert.ok(
+    oldIdx >= 0 && freshIdx >= 0 && runningIdx >= 0,
+    `expected all three rows in: ${out}`
+  );
+  // Non-running bucket: oldest lastActiveAt first.
+  assert.ok(
+    oldIdx < freshIdx,
+    `expected sess-old before sess-fresh in non-running bucket, got: ${out}`
+  );
+  // Running bucket: AFTER the non-running bucket, even though the
+  // running session is the most recent.
+  assert.ok(
+    freshIdx < runningIdx,
+    `expected non-running bucket before running bucket, got: ${out}`
+  );
+});
+
+test("parseSessions on-radar finds the project positional regardless of flag order (PR review, issue #322)", async () => {
+  // The P1 review (commit 1802929c) caught that the previous
+  // "first bare token only" extraction missed `on-radar --json demo`
+  // because the flag was at index 0. The fix splits `rest` into
+  // flags + positionals, so the project can land anywhere.
+  const cli = await loadCli();
+  // Project first (the shape that was already working).
+  assert.deepEqual(cli.parseSessions(["on-radar", "demo"]), {
+    project: "demo",
+    action: "on-radar",
+    allProjects: false,
+    json: false,
+  });
+  // Flag first, project after — this was the regression.
+  assert.deepEqual(cli.parseSessions(["on-radar", "--json", "demo"]), {
+    project: "demo",
+    action: "on-radar",
+    allProjects: false,
+    json: true,
+  });
+  // Multiple flags, project between them.
+  assert.deepEqual(
+    cli.parseSessions(["on-radar", "--all-projects", "demo", "--json"]),
+    {
+      project: "demo",
+      action: "on-radar",
+      allProjects: true,
+      json: true,
+    }
+  );
+});
+
+test("parseSessions on-radar rejects more than one positional (PR review, issue #322)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    // Two project positionals — on-radar takes at most one.
+    await assert.rejects(
+      async () => cli.parseSessions(["on-radar", "demo1", "demo2"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /at most <project>/);
+  assert.match(stderrText, /demo1/);
+  assert.match(stderrText, /demo2/);
+});
+
+test("runSessions on-radar surfaces per-worktree session-list errors instead of silently skipping (PR review, issue #322)", async () => {
+  // The P2 review (commit 1802929c) caught that a feature-worktree
+  // session-list 404 would silently drop the worktree from the
+  // queue, leaving pinned sessions on that worktree unprocessed.
+  // The fix is to `fail()` on the per-worktree error so a
+  // scheduled sweep treats it as an error, not as "queue empty".
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "wt-1", name: "main", isMain: true },
+          { id: "wt-2", name: "feature", isMain: false },
+        ],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-1"
+    ) {
+      return { status: 200, json: async () => [] };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-2"
+    ) {
+      return {
+        status: 500,
+        json: async () => ({ error: "Worktree not accessible" }),
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.runSessions(["on-radar", "demo"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  // The error surfaces the server's message so the agent can
+  // diagnose which worktree failed (the fallback "Failed to list
+  // sessions for worktree wt-2" is suppressed when the server
+  // returns its own `error` field, which is the right behavior —
+  // we just need the *server's* error to be visible).
+  assert.match(stderrText, /Worktree not accessible/);
+});
+
+test("parseSessions pin/unpin/done reject --worktree as the last token (PR review, issue #322)", async () => {
+  // The P2 review (commit 1802929c) caught that
+  // `pin sess-xyz --worktree` parsed to `worktreeId: undefined`
+  // and would silently fall back to the main worktree on a
+  // non-main-worktree session — same root cause as the legacy
+  // worktree bug, but triggered by a malformed invocation rather
+  // than a missing persisted field. The fix is a clear "value
+  // required" error at parse time.
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(
+      async () => cli.parseSessions(["pin", "sess-xyz", "--worktree"]),
+      /__exit__/
+    );
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /--worktree/);
+  // The error should explain the shape, not just name the flag.
+  assert.match(stderrText, /value/);
+});
+
+test("parseSessions pin/unpin/done accept --worktree followed by a non-flag value (regression, PR review, issue #322)", async () => {
+  // Mirror of the test above for the well-formed shape — the fix
+  // must not regress the existing happy paths.
+  const cli = await loadCli();
+  assert.deepEqual(
+    cli.parseSessions(["pin", "controller", "sess-xyz", "--worktree", "wt-1"]),
+    {
+      project: "controller",
+      action: "pin",
+      sessionId: "sess-xyz",
+      worktreeId: "wt-1",
+    }
+  );
+  // The flag can land before the sessionId, and the value can
+  // follow it correctly even when interleaved with positionals.
+  assert.deepEqual(
+    cli.parseSessions(["unpin", "--worktree", "wt-1", "sess-xyz"]),
+    {
+      project: "",
+      action: "unpin",
+      sessionId: "sess-xyz",
+      worktreeId: "wt-1",
+    }
+  );
+});
