@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowLeft, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
+import { ArrowLeft, ArrowDown, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit, SKIP } from "unist-util-visit";
@@ -34,6 +34,7 @@ import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { PrPanel } from "@/components/PrPanel";
 import { PullRequestBadge, PullRequestStateIcon } from "@/components/PullRequestBadge";
 import { FocusConversationControls } from "@/components/focus-conversation-controls";
+import { JumpToBottomButton } from "@/components/JumpToBottomButton";
 import { useSessionRelationships } from "@/lib/session-relationships.ts";
 import { useResizablePanel } from "@/lib/useResizablePanel";
 import { isControllerAvailable } from "@/lib/controller";
@@ -5257,6 +5258,28 @@ export function SessionView({
     }
   };
 
+  /**
+   * Smoothly scroll the conversation to the bottom and re-arm the
+   * stick-to-bottom auto-scroll. Wired to the JumpToBottomButton's
+   * click — the user is explicitly asking to return to the latest
+   * message, so we both (a) snap the viewport there with a smooth
+   * animation and (b) flip `stickToBottomRef.current` back to true
+   * so the existing `[events, streamItems]` effect (and the
+   * pending-message effect) keep the chat pinned as the rest of the
+   * run streams in.
+   *
+   * `useCallback` keeps the same function identity across renders so
+   * JumpToBottomButton's `onClick` prop doesn't churn and force an
+   * unnecessary re-render of the child. The dependency list is
+   * intentionally empty — both refs are stable across the
+   * component's lifetime, just like the rest of the scroll handlers
+   * in this file.
+   */
+  const scrollToBottom = useCallback(() => {
+    stickToBottomRef.current = true;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
   // Viewport-underflow auto-load (PR review P1 round 2 from
   // chatgpt-codex-connector on #405). The initial tail-only page can
   // be shorter than the viewport — `groupEventsForRender` collapses
@@ -7814,7 +7837,17 @@ export function SessionView({
           <div
             ref={scrollContainerRef}
             onScroll={handleScroll}
-            className="flex-1 overflow-y-auto min-h-0"
+            // `relative` is the positioning anchor for the
+            // JumpToBottomButton's `absolute bottom-4 right-4`
+            // wrapper. Without it, the button would anchor against
+            // the nearest positioned ancestor (the right panel
+            // layout) and float on top of the terminal / files /
+            // PR / preview panes instead of the chat. Keeping the
+            // anchor local to the chat scroll container also makes
+            // the button inert outside of a conversation, which
+            // matches the rest of the chat-side surfaces
+            // (FocusConversationControls, the composer, etc.).
+            className="relative flex-1 overflow-y-auto min-h-0"
           >
             <ProjectRootContext.Provider value={activeWorktree?.path ?? project?.path}>
             <SelectionAddContext.Provider value={addSelection}>
@@ -8209,6 +8242,19 @@ export function SessionView({
             </OpenSourceReferenceContext.Provider>
             </SelectionAddContext.Provider>
             </ProjectRootContext.Provider>
+            {/* Floating "jump to bottom" button. Renders inside the
+                chat scroll container (whose `relative` class is the
+                positioning anchor) so it appears only on the chat
+                side of the layout — the terminal / files / PR /
+                preview panes to the right are intentionally
+                unaffected. The component owns its own visibility
+                based on the container's scroll position, and clicks
+                re-arm `stickToBottomRef` so subsequent new events
+                auto-scroll with the run. */}
+            <JumpToBottomButton
+              scrollContainerRef={scrollContainerRef}
+              onScrollToBottom={scrollToBottom}
+            />
           </div>
 
           {/* Input */}
