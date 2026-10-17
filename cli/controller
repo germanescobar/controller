@@ -168,15 +168,22 @@ const USAGE = `Usage:
   controller sessions done [<project>] <sessionId> [--worktree <worktreeId>]
 
   \`sessions on-radar\` lists the focus-queue sessions — the entries whose
-  \`focusPinnedAt\` is set on the sidebar's session summaries, in the same
-  order the sidebar uses (ascending by \`focusPinnedAt ?? createdAt\`,
-  matching \`client/src/components/sidebar.tsx\`). The server's session
-  endpoint is per-worktree, so the CLI walks every worktree of the
+  \`focusPinnedAt\` is set on the sidebar's session summaries. The server's
+  session endpoint is per-worktree, so the CLI walks every worktree of the
   project(s) to mirror the sidebar's client-side projection
-  (issue #322). By default it walks one project; \`--all-projects\` merges
-  every project's queue into a single sorted list. \`--json\` prints the
-  rows as a JSON array. \`No sessions on radar.\` is printed when the
-  filter result is empty (the same copy the sidebar uses) so agents can
+  (issue #322). The CLI sorts by the same per-bucket recency the
+  sidebar's \`sortFocusQueue\` uses
+  (\`client/src/components/sidebar.tsx:198-249\`), but it can only
+  approximate the sidebar's order from server-side signals: the CLI
+  buckets by \`status\` (running last, everything else by recency of
+  \`lastActiveAt\`) because the awaiting-input flag and the
+  visited/unvisited split live client-side. Treat the CLI as
+  authoritative for a sweep, not for triage — the desktop view is
+  the source of truth for the awaiting-vs-visited split. By default
+  it walks one project; \`--all-projects\` merges every project's
+  queue into a single sorted list. \`--json\` prints the rows as a
+  JSON array. \`No sessions on radar.\` is printed when the filter
+  result is empty (the same copy the sidebar uses) so agents can
   detect an empty queue without grepping.
 
   \`pin\` / \`unpin\` / \`done\` wrap the existing
@@ -1566,12 +1573,11 @@ export async function runSessions(argv, serverUrl) {
  * `sessions on-radar` dispatcher (issue #322).
  *
  * Lists the focus-queue sessions for one project (or every project,
- * with `--all-projects`) in the same order the sidebar uses. The
- * server's session-list endpoint is per-worktree, so we reuse
- * `fetchSessionSummaries` (the same walker `sessions list` already
- * uses for `--parent` cross-worktree discovery) and then filter to
- * the entries with `focusPinnedAt` set, which is exactly what the
- * sidebar's `client/src/components/sidebar.tsx:325` filter does.
+ * with `--all-projects`) in the closest server-side approximation
+ * of the sidebar's order. The server's session-list endpoint is
+ * per-worktree, so we walk every worktree of the project(s) and
+ * filter to the entries with `focusPinnedAt` set — the same filter
+ * the sidebar's `client/src/components/sidebar.tsx:325` uses.
  *
  * Why duplicate the sidebar's filter+sort client-side here? The
  * server's session summaries endpoint returns every session in the
@@ -1579,6 +1585,27 @@ export async function runSessions(argv, serverUrl) {
  * filter. Mirroring the client-side logic in the CLI keeps the two
  * in sync without a shared module; the same approach `sessions list`
  * already takes for `--parent`.
+ *
+ * Approximating the sidebar's order:
+ * - The sidebar's true sort lives in
+ *   `client/src/components/sidebar.tsx:sortFocusQueue` and buckets
+ *   items as `awaiting → finishedUnvisited → finishedVisited →
+ *   running` before sorting each bucket by `lastActiveAt` /
+ *   `lastVisitedAt`. Two of those signals are client-only:
+ *   `awaitingInput` lives on the runtime entry (the CLI sees
+ *   `status` instead, and only as a free-form string), and
+ *   `lastVisitedAt` lives in localStorage. The closest server-only
+ *   approximation is to bucket by `status === "running"` and then
+ *   sort each bucket by `lastActiveAt` ascending. The CLI documents
+ *   this gap so the agent knows the desktop view is authoritative
+ *   for the awaiting-vs-visited split.
+ * - The CLI also has to record the worktree it discovered each
+ *   session in, not just `session.worktreeId` from the persisted
+ *   `SessionState`. Legacy sessions persisted before worktree id
+ *   tracking shipped don't carry the field even when they live on
+ *   a non-main worktree; without stamping the queried worktree id
+ *   the row would report `worktree=?` and a follow-up `pin` would
+ *   default to the main worktree and 404 (PR review, issue #322).
  */
 async function runSessionsOnRadar(parsed, serverUrl) {
   const sources = parsed.allProjects
@@ -1592,71 +1619,96 @@ async function runSessionsOnRadar(parsed, serverUrl) {
   const rows = [];
   for (const source of sources) {
     if (!source) continue;
-    // `fetchSessionSummaries` already walks every worktree when no
-    // specific worktree id is requested, so we can drop the explicit
-    // worktree list / session list loop here. The summaries it
-    // returns include `focusPinnedAt` from the sidecar merge the
-    // server does in `getSessionSummaries` (#139).
-    const summaries = await fetchSessionSummaries(
+    // We walk worktrees explicitly (rather than reusing
+    // `fetchSessionSummaries`) so we can stamp each row with the
+    // worktree it was discovered in. The walker is otherwise the
+    // same one `fetchSessionSummaries` uses for the no-`worktreeId`
+    // case: GET `/api/projects/<id>/worktrees`, then a per-worktree
+    // session list. Main worktree first because the sidebar renders
+    // it first and the per-worktree filter would have caught the
+    // common case.
+    const { response: wtResp, result: wtResult } = await getJson(
       serverUrl,
-      source.projectId,
-      undefined
+      `/api/projects/${source.projectId}/worktrees`
     );
-    for (const session of summaries) {
-      if (!session || !session.focusPinnedAt) continue;
-      rows.push({
-        projectId: source.projectId,
-        projectName: source.projectName,
-        // The summary carries its own worktreeId — that field is
-        // populated by the server when the session lives in a
-        // specific worktree (see SessionState.worktreeId in
-        // `server/lib/sessions.ts`). The worktreeName comes from
-        // a separate lookup so the row can show "wt-1 (main)" in
-        // human-readable mode.
-        worktreeId: session.worktreeId,
-        worktreeName: null,
-        sessionId: session.id,
-        title: session.title,
-        provider: session.provider,
-        mode: session.mode,
-        focusPinnedAt: session.focusPinnedAt,
-        createdAt: session.createdAt,
-        lastActiveAt: session.lastActiveAt,
-      });
+    if (wtResp.status >= 400) {
+      fail(
+        serverError(
+          wtResult,
+          `Failed to list worktrees (HTTP ${wtResp.status})`
+        )
+      );
     }
-  }
-  // Enrich rows with worktree names so the human-readable output
-  // can show "wt-1 (main)" instead of just "wt-1". The worktree
-  // list is per-project; for `--all-projects` we cache by projectId
-  // to avoid re-fetching on every row.
-  const worktreeNameCache = new Map();
-  for (const row of rows) {
-    if (!row.worktreeId) continue;
-    if (worktreeNameCache.has(row.worktreeId)) {
-      row.worktreeName = worktreeNameCache.get(row.worktreeId);
-      continue;
-    }
-    // Look the worktree up against the per-project registry. The
-    // server doesn't expose a single-worktree GET, so we hit the
-    // project's full worktree list and pick the matching entry.
-    const { response, result } = await getJson(
-      serverUrl,
-      `/api/projects/${row.projectId}/worktrees`
-    );
-    if (response.status >= 400) continue;
-    const worktrees = Array.isArray(result) ? result : [];
+    const worktrees = Array.isArray(wtResult) ? wtResult : [];
+    // Also cache worktree names per project so the human-readable
+    // row can show "wt-1 (main)" without a second round trip per
+    // row. For `--all-projects` the cache is keyed by projectId
+    // (rebuilt per project below) so we never bleed worktree names
+    // across projects.
+    const worktreeNameCache = new Map();
     for (const worktree of worktrees) {
-      worktreeNameCache.set(worktree.id, worktree.name ?? null);
+      if (worktree && typeof worktree.id === "string") {
+        worktreeNameCache.set(worktree.id, worktree.name ?? null);
+      }
     }
-    row.worktreeName = worktreeNameCache.get(row.worktreeId) ?? null;
+    for (const worktree of worktrees) {
+      if (!worktree || typeof worktree.id !== "string") continue;
+      const { response: listResp, result: listResult } = await getJson(
+        serverUrl,
+        `/api/projects/${source.projectId}/sessions?worktreeId=${encodeURIComponent(worktree.id)}`
+      );
+      if (listResp.status >= 400) continue;
+      const summaries = Array.isArray(listResult) ? listResult : [];
+      for (const session of summaries) {
+        if (!session || !session.focusPinnedAt) continue;
+        rows.push({
+          projectId: source.projectId,
+          projectName: source.projectName,
+          // Stamp the queried worktree id first, then fall back to
+          // the persisted `SessionState.worktreeId` if present.
+          // Modern sessions carry the field; legacy sessions don't,
+          // and the queried id is authoritative for "which worktree
+          // actually returned this summary".
+          worktreeId: worktree.id,
+          worktreeName: worktreeNameCache.get(worktree.id) ?? null,
+          sessionId: session.id,
+          title: session.title,
+          provider: session.provider,
+          mode: session.mode,
+          status: session.status,
+          focusPinnedAt: session.focusPinnedAt,
+          createdAt: session.createdAt,
+          lastActiveAt: session.lastActiveAt,
+        });
+      }
+    }
   }
-  // Mirror the sidebar's sort: ascending by `focusPinnedAt ?? createdAt`.
-  // `client/src/components/sidebar.tsx:338-341` reads the same
-  // timestamps from the same summaries shape, so the two stay in
-  // lockstep without sharing code.
+  // Bucket by `status` (running last, everything else by recency).
+  // The sidebar's true order is
+  //   `awaiting → finishedUnvisited → finishedVisited → running`
+  // (see `client/src/components/sidebar.tsx:198-249`). The
+  // server-only signals we have are coarse: `status` carries a
+  // free-form string the agent runtime writes (`"running"`,
+  // `"exited"`, `"failed"`, etc.), and `lastActiveAt` is the only
+  // timestamp we can sort by. So we collapse to two buckets:
+  //   1. not running  — sort by `lastActiveAt` asc (oldest first,
+  //      so a freshly-finished session doesn't jump the queue)
+  //   2. running      — sort by `lastActiveAt` asc (matches the
+  //      sidebar's within-bucket ordering for the running bucket)
+  // The agent should treat this as "good enough for a sweep, not
+  // authoritative for triage" — the desktop app is the source of
+  // truth for the awaiting-input and visited/unvisited split.
+  const statusBucket = (status) => {
+    if (typeof status === "string" && status.toLowerCase() === "running") {
+      return 1;
+    }
+    return 0;
+  };
   rows.sort((a, b) => {
-    const aTime = new Date(a.focusPinnedAt ?? a.createdAt ?? 0).getTime();
-    const bTime = new Date(b.focusPinnedAt ?? b.createdAt ?? 0).getTime();
+    const bucketDiff = statusBucket(a.status) - statusBucket(b.status);
+    if (bucketDiff !== 0) return bucketDiff;
+    const aTime = new Date(a.lastActiveAt ?? a.focusPinnedAt ?? a.createdAt ?? 0).getTime();
+    const bTime = new Date(b.lastActiveAt ?? b.focusPinnedAt ?? b.createdAt ?? 0).getTime();
     return aTime - bTime;
   });
   if (parsed.json) {

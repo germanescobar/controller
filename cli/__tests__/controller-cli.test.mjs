@@ -5811,3 +5811,239 @@ test("runSessions unpin and done POST to the right focus-action routes", async (
     `expected focus-done call; got ${JSON.stringify(calls.map((c) => c.url))}`
   );
 });
+
+test("runSessions on-radar preserves the queried worktree for legacy sessions whose persisted state omits worktreeId (PR review, issue #322)", async () => {
+  // Codex review (issue #322) caught a regression in the first
+  // version: the CLI copied `session.worktreeId` off the summary
+  // and dropped sessions whose persisted `SessionState.worktreeId`
+  // was `undefined` even when the per-worktree endpoint found them.
+  // The follow-up `pin <sessionId>` would then default to the main
+  // worktree and 404. The fix is to stamp the queried worktree id
+  // onto each row at fetch time so legacy sessions stay actionable
+  // and the round-trip can pass `--worktree` automatically.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [
+          { id: "wt-1", name: "main", isMain: true },
+          // The legacy session lives on this worktree, not main.
+          { id: "wt-2", name: "feature", isMain: false },
+        ],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-1"
+    ) {
+      return { status: 200, json: async () => [] };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-2"
+    ) {
+      return {
+        status: 200,
+        // No `worktreeId` on the persisted session — this is the
+        // legacy shape the regression caught. The CLI should still
+        // know it came from wt-2 because the walker stamped it.
+        json: async () => [
+          {
+            id: "sess-legacy",
+            title: "Legacy",
+            // worktreeId deliberately omitted
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            status: "exited",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const out = stdoutChunks.join("");
+  // The row should report the queried worktree (wt-2), not `?`.
+  assert.match(out, /worktree=wt-2 \(feature\)/);
+  // And the legacy session id should still be there.
+  assert.match(out, /sess-legacy  Legacy/);
+});
+
+test("runSessions on-radar --json stamps queriedWorktree on legacy sessions (PR review, issue #322)", async () => {
+  // Mirror of the human-readable test above for the JSON path. The
+  // pinned-session row must carry the queried worktree id so an
+  // agent piping the output into a follow-up `pin` can read the
+  // worktree straight out of the row and round-trip it.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-2", name: "feature", isMain: false }],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-2"
+    ) {
+      return {
+        status: 200,
+        json: async () => [
+          {
+            id: "sess-legacy",
+            title: "Legacy",
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            status: "exited",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(
+      ["on-radar", "demo", "--json"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const parsed = JSON.parse(stdoutChunks.join(""));
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].worktreeId, "wt-2");
+  assert.equal(parsed[0].worktreeName, "feature");
+});
+
+test("runSessions on-radar puts running sessions last and orders non-running by lastActiveAt (PR review, issue #322)", async () => {
+  // Codex review (issue #322) caught that the first version of
+  // the sort used `focusPinnedAt ?? createdAt` (which the issue
+  // claimed matched the sidebar but the sidebar's real
+  // `sortFocusQueue` actually buckets by state and then sorts by
+  // recency). The CLI can only see `status` and `lastActiveAt`
+  // server-side, so we collapse the four sidebar buckets to two:
+  // running last, everything else by recency.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
+      return {
+        status: 200,
+        json: async () => [{ id: "wt-1", name: "main", isMain: true }],
+      };
+    }
+    if (
+      String(url) ===
+      "http://controller.test/api/projects/proj-uuid-2/sessions?worktreeId=wt-1"
+    ) {
+      return {
+        status: 200,
+        json: async () => [
+          // Newer running session — must end up LAST despite the
+          // newer lastActiveAt, because the sidebar's running
+          // bucket comes after the finished buckets.
+          {
+            id: "sess-running",
+            title: "Running",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T10:00:00.000Z",
+            createdAt: "2026-06-26T10:00:00.000Z",
+            lastActiveAt: "2026-06-26T10:30:00.000Z",
+            status: "running",
+            provider: "anita",
+          },
+          // Newest finished session — should be LAST among the
+          // non-running bucket (so the agent visits the oldest
+          // finished work first).
+          {
+            id: "sess-fresh",
+            title: "Fresh",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T09:00:00.000Z",
+            createdAt: "2026-06-26T09:00:00.000Z",
+            lastActiveAt: "2026-06-26T09:30:00.000Z",
+            status: "exited",
+            provider: "claude",
+          },
+          // Oldest finished session — should be FIRST.
+          {
+            id: "sess-old",
+            title: "Old",
+            worktreeId: "wt-1",
+            focusPinnedAt: "2026-06-26T08:00:00.000Z",
+            createdAt: "2026-06-26T08:00:00.000Z",
+            lastActiveAt: "2026-06-26T08:30:00.000Z",
+            status: "failed",
+            provider: "codex",
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runSessions(["on-radar", "demo"], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  const out = stdoutChunks.join("");
+  const oldIdx = out.indexOf("sess-old");
+  const freshIdx = out.indexOf("sess-fresh");
+  const runningIdx = out.indexOf("sess-running");
+  assert.ok(
+    oldIdx >= 0 && freshIdx >= 0 && runningIdx >= 0,
+    `expected all three rows in: ${out}`
+  );
+  // Non-running bucket: oldest lastActiveAt first.
+  assert.ok(
+    oldIdx < freshIdx,
+    `expected sess-old before sess-fresh in non-running bucket, got: ${out}`
+  );
+  // Running bucket: AFTER the non-running bucket, even though the
+  // running session is the most recent.
+  assert.ok(
+    freshIdx < runningIdx,
+    `expected non-running bucket before running bucket, got: ${out}`
+  );
+});
