@@ -1868,7 +1868,7 @@ export function Sidebar({
           if (!open && !deletingWorktree) setConfirmDeleteWorktree(null);
         }}
       >
-        <DialogContent showCloseButton={false}>
+        <DialogContent showCloseButton={false} className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
               {confirmDeleteWorktree?.dirtyFiles
@@ -1879,7 +1879,7 @@ export function Sidebar({
               {confirmDeleteWorktree?.dirtyFiles ? (
                 <>
                   Worktree{" "}
-                  <span className="font-medium text-foreground">
+                  <span className="break-all font-medium text-foreground">
                     {confirmDeleteWorktree.name}
                   </span>{" "}
                   has uncommitted changes. Force-deleting will discard
@@ -1890,7 +1890,7 @@ export function Sidebar({
               ) : (
                 <>
                   Delete worktree{" "}
-                  <span className="font-medium text-foreground">
+                  <span className="break-all font-medium text-foreground">
                     {confirmDeleteWorktree?.name}
                   </span>
                   ? This removes the directory from disk. The git
@@ -1900,11 +1900,11 @@ export function Sidebar({
             </DialogDescription>
           </DialogHeader>
           {confirmDeleteWorktree?.dirtyFiles && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
+            <div className="min-w-0 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs">
               <p className="mb-1 font-medium text-destructive">
                 Uncommitted changes:
               </p>
-              <ul className="list-disc space-y-0.5 pl-5 font-mono text-foreground/80">
+              <ul className="list-disc space-y-0.5 break-all pl-5 font-mono text-foreground/80">
                 {confirmDeleteWorktree.dirtyFiles
                   .slice(0, 10)
                   .map((file) => (
