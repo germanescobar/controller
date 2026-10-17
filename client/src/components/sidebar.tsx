@@ -1401,6 +1401,7 @@ export function Sidebar({
                         return (
                           <div key={worktree.id}>
                             <div className="group/worktree flex items-center">
+                              <div className="relative flex min-w-0 flex-1 items-center">
                               <button
                                 onClick={() =>
                                   toggleWorktree(project.id, worktree.id)
@@ -1409,7 +1410,7 @@ export function Sidebar({
                                   "flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors min-w-0",
                                   worktree.id === activeWorktreeId
                                     ? "text-sidebar-foreground"
-                                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent",
+                                    : "text-sidebar-foreground/80 group-hover/worktree:bg-sidebar-accent",
                                 )}
                               >
                                 {worktree.isExpanded ? (
@@ -1447,6 +1448,17 @@ export function Sidebar({
                                     )}
                                 </span>
                               </button>
+                              {/* Desktop: hover actions overlay the end of the title
+                                  instead of reserving width. Mobile: inline. */}
+                              <div
+                                className={cn(
+                                  "flex shrink-0 items-center md:pointer-events-none md:absolute md:inset-y-0 md:right-0 md:rounded-r-md md:pl-1 md:opacity-0 md:transition-opacity md:group-hover/worktree:pointer-events-auto md:group-hover/worktree:opacity-100",
+                                  "md:before:pointer-events-none md:before:absolute md:before:inset-y-0 md:before:right-full md:before:w-4 md:before:bg-linear-to-l md:before:to-transparent",
+                                  worktree.id === activeWorktreeId
+                                    ? "md:bg-sidebar md:before:from-sidebar"
+                                    : "md:bg-sidebar-accent md:before:from-sidebar-accent",
+                                )}
+                              >
                               <ServerStateIcon worktree={worktree} />
                               <button
                                 onClick={(e) => {
@@ -1456,7 +1468,7 @@ export function Sidebar({
                                 disabled={worktree.presence === "missing" || worktree.presence === "removed"}
                                 title={`New conversation in ${worktree.name}`}
                                 aria-label={`New conversation in ${worktree.name}`}
-                                className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
+                                className="rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                               >
                                 <PenSquare className="h-3.5 w-3.5" />
                               </button>
@@ -1468,7 +1480,7 @@ export function Sidebar({
                                   }}
                                   title={worktree.taskStatus === "finished" ? "Reopen" : "Mark finished"}
                                   aria-label={`${worktree.taskStatus === "finished" ? "Reopen" : "Mark finished"} ${worktree.name}`}
-                                  className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
+                                  className="rounded p-1 text-muted-foreground hover:text-sidebar-foreground transition-all"
                                 >
                                   {worktree.taskStatus === "finished" ? (
                                     <RotateCcw className="h-3.5 w-3.5" />
@@ -1489,11 +1501,13 @@ export function Sidebar({
                                     });
                                   }}
                                   title="Delete worktree"
-                                  className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                                  className="rounded p-1 text-muted-foreground hover:text-destructive transition-all"
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
                               )}
+                              </div>
+                              </div>
                               {worktree.linkedPr && (
                                 <PullRequestBadge
                                   number={worktree.linkedPr.number}
@@ -2229,7 +2243,7 @@ function ServerStateIcon({ worktree }: { worktree: Worktree }) {
     <span
       title={label}
       aria-label={label}
-      className="opacity-100 md:opacity-0 md:group-hover/worktree:opacity-100 p-1 text-muted-foreground transition-all"
+      className="p-1 text-muted-foreground"
     >
       <Icon className="h-3.5 w-3.5" />
     </span>
