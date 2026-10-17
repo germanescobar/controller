@@ -28,6 +28,8 @@ export interface Worktree {
   taskStatus?: "active" | "finished";
   linkedIssue?: { repository: string; number: number };
   linkedPr?: { number: number; state: "OPEN" | "CLOSED" | "MERGED"; url: string };
+  /** Project has a run.sh; without one there is no server to report. */
+  hasRunScript?: boolean;
   serverRunning?: boolean;
 }
 

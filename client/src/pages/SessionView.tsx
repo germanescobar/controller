@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
-import { ArrowLeft, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork, GitPullRequest } from "lucide-react";
+import { ArrowLeft, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { visit, SKIP } from "unist-util-visit";
@@ -32,7 +32,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Terminal, type TerminalHandle } from "@/components/terminal";
 import { TerminalMobileControls } from "@/components/terminal-mobile-controls";
 import { PrPanel } from "@/components/PrPanel";
-import { PullRequestBadge } from "@/components/PullRequestBadge";
+import { PullRequestBadge, PullRequestStateIcon } from "@/components/PullRequestBadge";
 import { FocusConversationControls } from "@/components/focus-conversation-controls";
 import { useSessionRelationships } from "@/lib/session-relationships.ts";
 import { useResizablePanel } from "@/lib/useResizablePanel";
@@ -7618,8 +7618,8 @@ export function SessionView({
                     : "text-muted-foreground"
                 }`}
               >
-                <GitPullRequest className="h-3 w-3" />
-                PR
+                <PullRequestStateIcon state={pullRequest.state} className="h-3 w-3" />
+                #{pullRequest.number}
               </button>
             )}
             {previewAvailable && (
@@ -9089,11 +9089,8 @@ export function SessionView({
                   }`}
                   title={`PR #${pullRequest.number} · ${pullRequest.title}`}
                 >
-                  <GitPullRequest className="h-3 w-3 shrink-0" />
-                  <span className="shrink-0">PR</span>
-                  <span className="max-w-36 truncate font-mono text-[10px] text-muted-foreground/70">
-                    #{pullRequest.number}
-                  </span>
+                  <PullRequestStateIcon state={pullRequest.state} className="h-3 w-3 shrink-0" />
+                  <span className="shrink-0">#{pullRequest.number}</span>
                 </button>
               )}
               {previewAvailable && (

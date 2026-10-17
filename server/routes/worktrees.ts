@@ -248,8 +248,9 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   refreshWorktreePullRequests(project.path, worktrees, (updated) =>
     emitWorktreeUpdated(project.id, updated)
   );
+  const hasRunScript = (await resolveProjectScripts(project.path)).run.length > 0;
   res.json(await Promise.all(worktrees.map(async (worktree) => {
-    const tabs = worktree.presence === "active"
+    const tabs = hasRunScript && worktree.presence === "active"
       ? await getTerminalTabs(project.id, worktree.id) : [];
     const serverRunning = tabs.some((tab) =>
       (tab.id === RUN_TERMINAL_ID || tab.id.startsWith("run-")) &&
@@ -258,6 +259,7 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
     return {
       ...worktree,
       taskStatus: worktree.taskStatus ?? "active",
+      hasRunScript,
       serverRunning,
     };
   })));

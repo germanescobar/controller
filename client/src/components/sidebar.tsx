@@ -2232,10 +2232,11 @@ function WorktreeStateIcon({ worktree }: { worktree: Worktree }) {
 }
 
 /*
- * Run-server state for a worktree row. Missing and removed worktrees have no
- * server, so nothing is shown for them.
+ * Run-server state for a worktree row. Nothing is shown without a run.sh, or
+ * for missing and removed worktrees, since there is no server to report.
  */
 function ServerStateIcon({ worktree }: { worktree: Worktree }) {
+  if (!worktree.hasRunScript) return null;
   if (worktree.presence === "missing" || worktree.presence === "removed") return null;
   const label = worktree.serverRunning ? "Server running" : "Server stopped";
   const Icon = worktree.serverRunning ? Pause : Play;

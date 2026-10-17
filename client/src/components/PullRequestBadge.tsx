@@ -16,7 +16,7 @@ export function PullRequestBadge({
   onClick: () => void;
   className?: string;
 }) {
-  const { Icon, iconClassName, label } = prStyle(state);
+  const { label } = prStyle(state);
   return (
     <button
       type="button"
@@ -31,10 +31,16 @@ export function PullRequestBadge({
         className,
       )}
     >
-      <Icon className={cn("h-3.5 w-3.5", iconClassName)} />
+      <PullRequestStateIcon state={state} className="h-3.5 w-3.5" />
       #{number}
     </button>
   );
+}
+
+/* PR icon colored by state: green open, violet merged, grey closed. */
+export function PullRequestStateIcon({ state, className }: { state: string; className?: string }) {
+  const { Icon, iconClassName } = prStyle(state);
+  return <Icon className={cn(iconClassName, className)} />;
 }
 
 function prStyle(state: string) {
