@@ -28,7 +28,12 @@ Each checkout installs its development CLI and runtime under a distinct
 app's CLI or runtime file. If another Controller server is already running,
 the new source server shares its state but skips managed skill installation and
 the schedules, wakes, and goals loops. A standalone source server runs those
-loops itself. When invoking a development CLI from a sanitized shell, use the
+loops itself. Discovery checks an opaque home identifier from each live server;
+a server using another `CONTROLLER_HOME` cannot suppress these loops. Older
+packaged apps without that identifier are recognized only through the runtime
+URL recorded in the same home. If that legacy runtime is stale, both servers
+may temporarily run shared loops until the packaged app is updated. When
+invoking a development CLI from a sanitized shell, use the
 absolute CLI path printed at server startup.
 
 To run the same app inside the Electron shell:

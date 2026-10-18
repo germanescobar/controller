@@ -1,9 +1,28 @@
 /* Classify source servers independently of the shell's inherited env. */
 import { readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 const PROBE_TIMEOUT_MS = 1000;
+
+export function controllerHomeId(home) {
+  return createHash("sha256").update(path.resolve(home)).digest("hex");
+}
+
+/** Null means this server is unreachable or predates home identity support. */
+export async function probeControllerHome(serverUrl, timeoutMs = PROBE_TIMEOUT_MS) {
+  try {
+    const response = await fetch(`${serverUrl.replace(/\/$/, "")}/api/instance`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    const body = await response.json();
+    return typeof body.homeId === "string" ? body.homeId : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function isControllerServerAlive(serverUrl, timeoutMs = PROBE_TIMEOUT_MS) {
   try {
@@ -37,9 +56,15 @@ async function runtimeUrl(file) {
 }
 
 /** Find an already running owner of shared schedules, wakes and goals. */
-export async function hasLiveController(env, probe = isControllerServerAlive) {
+export async function hasLiveController(
+  env,
+  probe = probeControllerHome,
+  legacyProbe = isControllerServerAlive,
+) {
   const home = controllerHome(env);
-  const urls = [env.CONTROLLER_SERVER_URL?.trim(), await runtimeUrl(path.join(home, "controller-runtime.json"))];
+  const expectedHomeId = controllerHomeId(home);
+  const sharedRuntimeUrl = await runtimeUrl(path.join(home, "controller-runtime.json"));
+  const urls = [env.CONTROLLER_SERVER_URL?.trim(), sharedRuntimeUrl];
   try {
     for (const entry of await readdir(path.join(home, "dev"), { withFileTypes: true })) {
       if (entry.isDirectory()) {
@@ -47,22 +72,34 @@ export async function hasLiveController(env, probe = isControllerServerAlive) {
       }
     }
   } catch { /* No dev runtimes yet. */ }
-  if ((await Promise.all([...new Set(urls.filter(Boolean))].map((url) => probe(url)))).some(Boolean)) {
+  const knownUrls = [...new Set(urls.filter(Boolean))];
+  const identities = await Promise.all(knownUrls.map((url) => probe(url)));
+  if (identities.includes(expectedHomeId)) {
+    return true;
+  }
+  // Older packaged apps have no identity endpoint. Only the exact URL
+  // published inside this home is trusted as a legacy binding.
+  const runtimeIndex = knownUrls.indexOf(sharedRuntimeUrl);
+  if (sharedRuntimeUrl && identities[runtimeIndex] === null && (await legacyProbe(sharedRuntimeUrl))) {
     return true;
   }
   // Electron walks up to 100 ports from 4500 when its preferred port is busy.
-  // This also recovers when an old dev server left the shared runtime stale.
+  // An unrelated Controller may occupy any one of them, so require identity.
   const appPorts = Array.from({ length: 101 }, (_, offset) => `http://localhost:${4500 + offset}`);
-  return (await Promise.all(appPorts.map((url) => probe(url)))).some(Boolean);
+  return (await Promise.all(appPorts.map((url) => probe(url)))).includes(expectedHomeId);
 }
 
-export async function devServerBaseEnv(env = process.env, probe = isControllerServerAlive) {
+export async function devServerBaseEnv(
+  env = process.env,
+  probe = probeControllerHome,
+  legacyProbe = isControllerServerAlive,
+) {
   const next = { ...env };
   delete next.CONTROLLER_SERVER_URL;
   delete next.CONTROLLER_SESSION_ID;
   delete next.CONTROLLER_SHARED_STATE_SECONDARY;
   // Every checkout must keep its CLI and runtime away from the packaged app.
   next.CONTROLLER_DEV_INSTANCE = "1";
-  if (await hasLiveController(env, probe)) next.CONTROLLER_SHARED_STATE_SECONDARY = "1";
+  if (await hasLiveController(env, probe, legacyProbe)) next.CONTROLLER_SHARED_STATE_SECONDARY = "1";
   return next;
 }

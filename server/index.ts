@@ -67,6 +67,7 @@ import {
   writeControllerRuntimeFile,
 } from "./lib/controller-cli.js";
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
+import { controllerHomeId } from "./lib/paths.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -114,6 +115,11 @@ app.use("/api", memoryRouter);
 app.get("/api/agent-providers", async (_req, res) => {
   const providers = (await getAvailableAgentProviders()).map((p) => ({ id: p.id, name: p.name }));
   res.json(providers);
+});
+
+// Lets dev launchers verify that a live Controller owns the same state home.
+app.get("/api/instance", (_req, res) => {
+  res.json({ homeId: controllerHomeId() });
 });
 
 // Bulk session runtime snapshot — replaces the per-session /runtime polling
