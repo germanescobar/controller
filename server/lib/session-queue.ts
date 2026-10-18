@@ -16,6 +16,8 @@ import {
 
 export interface QueuedMessage {
   id: string;
+  /** Origin of the queued turn. Missing on entries written before this field existed. */
+  origin?: "user" | "wake" | "goal" | "send" | "monitor";
   /** Message handed to the agent (skill block already prepended server-side). */
   text: string;
   /** Transcript echo, e.g. `[/skill: name] <text>`. */

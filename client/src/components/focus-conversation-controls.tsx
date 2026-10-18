@@ -8,6 +8,8 @@ import {
   Plus,
   StepForward,
 } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
@@ -16,6 +18,8 @@ import { truncateWakePreview } from "@/lib/session-runtime-state";
 import type { ShortcutBindings } from "../../../shared/shortcuts.ts";
 import type {
   Monitor,
+  QueuedMessage,
+  SessionGoal,
   SessionChildSummary,
   SessionSummary,
 } from "../api.ts";
@@ -83,10 +87,14 @@ interface FocusConversationControlsProps {
   /**
    * Live list of monitors running on the current session. When
    * non-empty, the panel renders a `Monitors` row with
-   * one entry per monitor. Stop / start actions are not exposed here;
-   * that's a future separate surface (issue #339 review).
+   * one entry per monitor. Details and stop controls open in a dialog.
    */
   monitors?: Monitor[];
+  followUps?: QueuedMessage[];
+  goal?: SessionGoal | null;
+  onCancelFollowUp?: (id: string) => void;
+  onStopMonitor?: (id: string) => void;
+  onClearGoal?: () => void;
 }
 
 const MAX_RELATIONSHIP_TITLE_LENGTH = 40;
@@ -130,6 +138,11 @@ export function FocusConversationControls({
   delayRunAt = null,
   delayMessagePreview = null,
   monitors = [],
+  followUps = [],
+  goal = null,
+  onCancelFollowUp,
+  onStopMonitor,
+  onClearGoal,
 }: FocusConversationControlsProps) {
   const nextChord = formatChord(
     bindings?.focusAdvanceNext ?? "ctrl-n",
@@ -148,6 +161,12 @@ export function FocusConversationControls({
     isMacPlatform(),
   );
   const [now, setNow] = useState(() => Date.now());
+  const [detail, setDetail] = useState<
+    | { kind: "followUp"; item: QueuedMessage }
+    | { kind: "monitor"; item: Monitor }
+    | { kind: "goal" }
+    | null
+  >(null);
 
   // The delay row (issue #339) needs wall-clock updates independent
   // of the auto-advance countdown, so derive `hasDelay` here (above
@@ -199,7 +218,7 @@ export function FocusConversationControls({
 
   const showMonitorRow =
     Array.isArray(monitors) && monitors.length > 0;
-  const showRuntime = hasDelay || showMonitorRow;
+  const showRuntime = hasDelay || showMonitorRow || followUps.length > 0 || Boolean(goal);
 
   const handleOpenTarget = (
     event: React.MouseEvent<HTMLAnchorElement>,
@@ -395,7 +414,7 @@ export function FocusConversationControls({
           data-testid={`focus-conversation-runtime-${variant}`}
           className="flex min-w-0 flex-col gap-1 border-t border-blue-500/20 pt-1.5 text-xs text-muted-foreground"
         >
-          {hasDelay ? (
+          {hasDelay && followUps.length === 0 ? (
             <div
               data-testid="focus-conversation-runtime-delay"
               className="flex min-w-0 items-start gap-2"
@@ -420,6 +439,22 @@ export function FocusConversationControls({
               </div>
             </div>
           ) : null}
+          {followUps.length > 0 ? (
+            <div className="flex min-w-0 flex-col gap-0.5" data-testid="focus-conversation-follow-ups">
+              <span className="text-[10px] font-medium uppercase">Follow-ups ({followUps.length})</span>
+              {followUps.map((item) => (
+                <button key={item.id} type="button" onClick={() => setDetail({ kind: "followUp", item })}
+                  className="min-w-0 truncate text-left text-xs hover:underline" title={item.visibleText || item.text}>
+                  <Hourglass className="mr-1 inline h-3 w-3" />{truncateWakePreview(item.visibleText || item.text)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {goal ? (
+            <button type="button" onClick={() => setDetail({ kind: "goal" })} className="truncate text-left text-xs hover:underline" data-testid="focus-conversation-goal">
+              Goal: {truncateWakePreview(goal.condition)}
+            </button>
+          ) : null}
           {showMonitorRow ? (
             <div
               data-testid="focus-conversation-runtime-monitors"
@@ -443,20 +478,73 @@ export function FocusConversationControls({
                 const visible = truncateTitle(description);
                 const tooltip = `${monitor.command} (started ${monitor.startedAt})`;
                 return (
-                  <span
+                  <button
                     key={monitor.id}
+                    type="button"
+                    onClick={() => setDetail({ kind: "monitor", item: monitor })}
                     title={tooltip}
-                    className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+                    className="flex min-w-0 items-center gap-1.5 text-left text-xs text-muted-foreground hover:underline"
                   >
                     <Activity className="h-3 w-3 shrink-0 text-blue-500" />
                     <span className="min-w-0 truncate">{visible}</span>
-                  </span>
+                  </button>
                 );
               })}
             </div>
           ) : null}
         </div>
       ) : null}
+      <Dialog
+        open={detail !== null}
+        onOpenChange={(open) => { if (!open) setDetail(null); }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {detail?.kind === "monitor" ? "Monitor" : detail?.kind === "goal" ? "Goal" : "Follow-up"}
+            </DialogTitle>
+            <DialogDescription>
+              {detail?.kind === "monitor" ? detail.item.description : detail?.kind === "goal" ? "Active completion condition" : "Queued agent turn"}
+            </DialogDescription>
+          </DialogHeader>
+          {detail?.kind === "followUp" ? (
+            <div className="space-y-2 text-sm">
+              <p className="whitespace-pre-wrap break-words">{detail.item.visibleText || detail.item.text}</p>
+              <p>Source: {detail.item.origin ?? "legacy follow-up"}</p>
+              <p>Queued: {new Date(detail.item.createdAt).toLocaleString()}</p>
+              <p>Trigger: {detail.item.runAt ? new Date(detail.item.runAt).toLocaleString() : "After the current turn"}</p>
+            </div>
+          ) : null}
+          {detail?.kind === "monitor" ? (
+            <div className="space-y-2 text-sm">
+              <p className="whitespace-pre-wrap break-all font-mono">{detail.item.command}</p>
+              <p>Source: monitor · Started: {new Date(detail.item.startedAt).toLocaleString()}</p>
+              <p>Trigger: {detail.item.onLinePattern ? `Matching lines: ${detail.item.onLinePattern}` : "Output lines"}</p>
+              {detail.item.deadlineAt ? <p>Stops: {new Date(detail.item.deadlineAt).toLocaleString()}</p> : null}
+            </div>
+          ) : null}
+          {detail?.kind === "goal" && goal ? (
+            <div className="space-y-2 text-sm">
+              <p className="whitespace-pre-wrap break-words">{goal.condition}</p>
+              <p>Set: {new Date(goal.setAt).toLocaleString()} · Evaluated: {goal.turnsEvaluated} turns</p>
+              {goal.maxTurns ? <p>Maximum: {goal.maxTurns} turns</p> : null}
+              {goal.expiresAt ? <p>Expires: {new Date(goal.expiresAt).toLocaleString()}</p> : null}
+              {goal.lastReason ? <p>Last result: {goal.lastReason}</p> : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            {detail?.kind === "followUp" && onCancelFollowUp ? (
+              <Button variant="destructive" onClick={() => { onCancelFollowUp(detail.item.id); setDetail(null); }}>Cancel follow-up</Button>
+            ) : null}
+            {detail?.kind === "monitor" && onStopMonitor ? (
+              <Button variant="destructive" onClick={() => { onStopMonitor(detail.item.id); setDetail(null); }}>Stop monitor</Button>
+            ) : null}
+            {detail?.kind === "goal" && onClearGoal ? (
+              <Button variant="destructive" onClick={() => { onClearGoal(); setDetail(null); }}>Clear goal</Button>
+            ) : null}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {countdown ? (
         <div className="absolute inset-x-0 bottom-0 h-0.5 bg-muted">
           <div

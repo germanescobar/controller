@@ -3149,6 +3149,7 @@ sessionsRouter.post(
           return {
             text: message,
             visibleText: message,
+            origin: "user",
             provider: session.provider,
             model: session.model,
             reasoningEffort: session.reasoningEffort,
@@ -3452,6 +3453,7 @@ sessionsRouter.post(
     const message: QueuedMessage = await enqueueMessage(req.params.sessionId, {
       text,
       visibleText: text,
+      origin: "wake",
       provider:
         typeof raw.provider === "string" && raw.provider
           ? raw.provider
@@ -3521,6 +3523,7 @@ wakeBySessionIdRouter.post("/:sessionId/wake", async (req, res) => {
   const message: QueuedMessage = await enqueueMessage(req.params.sessionId, {
     text,
     visibleText: text,
+    origin: "wake",
     provider:
       typeof raw.provider === "string" && raw.provider
         ? raw.provider
@@ -3574,7 +3577,8 @@ type FollowUpTarget = {
  */
 async function enqueueExternalFollowUp(
   target: FollowUpTarget,
-  text: string
+  text: string,
+  origin: "send" | "monitor"
 ): Promise<QueuedMessage> {
   const { session, projectId, worktreeId } = target;
   const message = await withSessionQueueTransaction(session.id, async (queue) => {
@@ -3587,6 +3591,7 @@ async function enqueueExternalFollowUp(
     return queue.enqueue({
       text,
       visibleText: text,
+      origin,
       provider: current.session.provider ?? "claude",
       model: current.session.model,
       reasoningEffort: current.session.reasoningEffort,
@@ -3644,7 +3649,7 @@ sendBySessionIdRouter.post(
     const markerText = `[/from: ${parentTitle}] ${parentUrl} ${text}`;
     let message: QueuedMessage;
     try {
-      message = await enqueueExternalFollowUp(located, markerText);
+      message = await enqueueExternalFollowUp(located, markerText, "send");
     } catch (error) {
       if (error instanceof Error && error.message.endsWith(" is archived")) {
         res.status(409).json({ error: error.message });
@@ -4055,7 +4060,8 @@ sessionsRouter.post(
               projectId: req.params.projectId,
               worktreeId: worktree.id,
             },
-            text
+            text,
+            "monitor"
           ).then(() => undefined),
       });
       res.status(201).json({ monitor });
@@ -4160,7 +4166,7 @@ monitorBySessionIdRouter.post(
         onLine,
         onLinePattern,
         onLineMatch: ({ text }) =>
-          enqueueExternalFollowUp(located, text).then(() => undefined),
+          enqueueExternalFollowUp(located, text, "monitor").then(() => undefined),
       });
       res.status(201).json({ monitor });
     } catch (error) {
@@ -4249,6 +4255,9 @@ function parseQueuedMessageInput(body: unknown): QueuedMessageInput | null {
   return {
     text,
     visibleText: typeof raw.visibleText === "string" ? raw.visibleText : text,
+    origin: raw.origin === "wake" || raw.origin === "goal" || raw.origin === "send" || raw.origin === "monitor"
+      ? raw.origin
+      : parseRunAt(raw.runAt) ? "wake" : "user",
     provider: raw.provider,
     model: raw.model,
     reasoningEffort,

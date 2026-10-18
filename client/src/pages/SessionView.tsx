@@ -79,6 +79,8 @@ import {
   fetchSessionQueue,
   enqueueSessionMessage,
   removeSessionQueuedMessage,
+  stopSessionMonitor,
+  clearSessionGoal,
   type QueuedMessage,
   type QueuedMessageInput,
   type AgentSkill,
@@ -147,7 +149,8 @@ import {
   MOBILE_COMPOSER_MEDIA_QUERY,
 } from "../lib/mobile-composer.ts";
 import { getConversationCountdown } from "../lib/focus-conversation-countdown.ts";
-import { useSessionRuntimeState, filterVisibleQueue } from "../lib/session-runtime-state.ts";
+import { parseFollowUpMarker } from "../lib/follow-up-markers.ts";
+import { useSessionRuntimeState, filterVisibleQueue, isUserQueuedMessage } from "../lib/session-runtime-state.ts";
 
 interface SessionViewProps {
   projectId: string;
@@ -462,17 +465,24 @@ function truncateInlineText(value: string, maxLength: number): string {
 
 function CollapsibleUserMessage({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
-  const lineCount = text.split("\n").length;
-  const shouldCollapse = lineCount > 12 || text.length > 1000;
+  const openConversation = useContext(OpenConversationContext);
+  const marker = parseFollowUpMarker(text);
+  const target = marker?.sourceUri ? parseControllerUri(marker.sourceUri) : null;
+  const visible = marker?.content ?? text;
+  const lineCount = visible.split("\n").length;
+  const shouldCollapse = lineCount > 12 || visible.length > 1000;
 
   return (
     <div>
+      {marker ? <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+        {target && openConversation ? <button type="button" className="hover:underline" onClick={() => openConversation(target)}>From: {marker.label}</button> : <span>{marker.kind === "monitor" ? "Monitor" : "From"}: {marker.label}</span>}
+      </div> : null}
       <div
         className={`whitespace-pre-wrap break-words ${
           !expanded && shouldCollapse ? "max-h-[15rem] overflow-hidden" : ""
         }`}
       >
-        {text}
+        {visible}
       </div>
       {shouldCollapse && (
         <button
@@ -4898,19 +4908,8 @@ export function SessionView({
     queueRef.current = queue;
   }, [queue]);
 
-  // The composer queue strip mirrors `queue`, but the *head* of
-  // the queue (when it is a wake with a future `runAt`) is
-  // surfaced in the floating panel's delay row instead (issue
-  // #339 + the wake-preview follow-up). The predicate drops
-  // only that one head wake so the strip never double-lists
-  // what the panel already shows. Every other queued item
-  // — including wakes queued behind an ordinary message, the
-  // second of two stacked wakes, and wakes past their `runAt`
-  // that haven't drained yet — is kept visible because the
-  // panel represents only `queue[0]` and those entries would
-  // otherwise lose their cancel button even though the server
-  // still fires them. See PR #403 codex-review follow-up for
-  // the bug this contract prevents.
+  // Generated follow-ups live in the focus panel; the composer shows
+  // messages the user typed while the current turn was running.
   const visibleQueue = useMemo(
     () => filterVisibleQueue(queue),
     [queue],
@@ -6549,6 +6548,7 @@ export function SessionView({
       const input: QueuedMessageInput = {
         text: agentMessage,
         visibleText: visibleMessage,
+        origin: "user",
         provider: selectedProvider,
         model: selectedModel,
         reasoningEffort: providerSupportsReasoningEffort
@@ -6685,8 +6685,8 @@ export function SessionView({
     }
   };
 
-  // Steer the running turn (Shift+Enter while streaming). Uses the composer
-  // text, or the first enqueued message when the composer is empty
+  // Steer the running turn (Cmd/Ctrl+Enter while streaming). Uses the composer
+  // text, or the first user-typed queued message when the composer is empty
   // ("promote queued to steer"). Codex steers natively; Claude/Anita stop the
   // run and resume with the steer text via the stream's `done` handler.
   const handleSteer = async () => {
@@ -6697,7 +6697,7 @@ export function SessionView({
     let steerText = message.trim();
     let promotedId: string | null = null;
     if (!steerText) {
-      const first = queue[0];
+      const first = queue.find(isUserQueuedMessage);
       if (!first) return;
       steerText = first.text;
       promotedId = first.id;
@@ -6796,6 +6796,7 @@ export function SessionView({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && e.shiftKey) return;
     if (skillPopoverOpen && filteredSkills.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -6830,7 +6831,7 @@ export function SessionView({
         // Enter adds the highlighted skill to the stack. It also submits the
         // turn in the same keystroke when the typed `/<token>` is an exact
         // (case-insensitive) match for a known skill — the documented
-        // `/skill text` flow — or when the user holds Shift. Partial matches
+        // `/skill text` flow. Partial matches
         // only add the chip, so the user can keep typing (e.g. to stack a
         // second skill) and submit on a follow-up Enter.
         const exactMatch = filteredSkills.some(
@@ -6841,7 +6842,7 @@ export function SessionView({
         // render, and queue the submit for the post-render effect (see
         // `pendingSkillSubmit`) once `activeSkills` reflects the new skill.
         const newMessage = addSkillToStack(choice);
-        if ((exactMatch || e.shiftKey) && newMessage !== null) {
+        if (exactMatch && newMessage !== null) {
           setPendingSkillSubmit({ text: newMessage });
         }
         return;
@@ -6874,11 +6875,11 @@ export function SessionView({
         if (!choice || isMentionActive(choice)) return;
         // Tab always adds and keeps typing; Enter only submits when the
         // typed token is an exact path match (mirrors the skill picker
-        // behavior). Shift+Enter / Shift+Tab add and submit. The
+        // behavior). Shift+Tab adds and submits. The
         // submit-after-chip effect is shared with the skill picker so a
         // mention+submit keystroke goes through the same path.
         const newMessage = addMention(choice);
-        if (newMessage !== null && (e.shiftKey || e.key === "Enter")) {
+        if (newMessage !== null && e.key === "Enter") {
           setPendingSkillSubmit({ text: newMessage });
         }
         return;
@@ -6897,7 +6898,7 @@ export function SessionView({
     }
     // Unified keymap (issue #113). Shift+Enter always inserts a newline.
     // Cmd/Ctrl+Enter steers the running turn (using the composer text, or
-    // the first enqueued message when empty). Plain Enter enqueues while a
+    // the first user-typed queued message when empty). Plain Enter enqueues while a
     // run is streaming and sends when idle.
     if (steerInProgress) {
       // Composer is locked during a stop->resume steer transition.
@@ -7466,7 +7467,14 @@ export function SessionView({
   // enough that two endpoints per tick is fine. The mobile variant
   // of the panel ignores both props (desktop-only), but we still
   // pass them so the same hook + state feeds both mount points.
-  const sessionRuntime = useSessionRuntimeState(projectId, sessionId);
+  const sessionRuntime = useSessionRuntimeState(projectId, sessionId, worktreeId);
+  const stopMonitor = (id: string) => {
+    void stopSessionMonitor(id).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Failed to stop monitor"));
+  };
+  const clearGoal = () => {
+    if (!sessionId) return;
+    void clearSessionGoal(projectId, sessionId, worktreeId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Failed to clear goal"));
+  };
 
   // Branch-this-conversation affordance (issue #364, UI). We pass the
   // callback down through both the persisted timeline (EventBlock)
@@ -7597,6 +7605,11 @@ export function SessionView({
                   delayRunAt={sessionRuntime.delayRunAt}
                   delayMessagePreview={sessionRuntime.delayMessagePreview}
                   monitors={sessionRuntime.monitors}
+                  followUps={sessionRuntime.followUps}
+                  goal={sessionRuntime.goal}
+                  onCancelFollowUp={(id) => void handleRemoveQueued(id)}
+                  onStopMonitor={stopMonitor}
+                  onClearGoal={clearGoal}
                   navigation={
                     <nav aria-label="Session views" className="flex flex-col gap-1 border-t border-blue-500/20 pt-2">
                       {mobileSidebarTabs.map((tab) => (
@@ -7819,6 +7832,11 @@ export function SessionView({
               delayRunAt={sessionRuntime.delayRunAt}
               delayMessagePreview={sessionRuntime.delayMessagePreview}
               monitors={sessionRuntime.monitors}
+              followUps={sessionRuntime.followUps}
+              goal={sessionRuntime.goal}
+              onCancelFollowUp={(id) => void handleRemoveQueued(id)}
+              onStopMonitor={stopMonitor}
+              onClearGoal={clearGoal}
             />
           ) : null}
 
@@ -8234,26 +8252,6 @@ export function SessionView({
           {/* Input */}
           <div className="shrink-0 border-t border-border bg-background px-3 pb-3 pt-2 md:px-4 md:pb-4 md:pt-3">
             <div className="mx-auto max-w-3xl">
-              {/*
-                The queue can hold three kinds of follow-ups:
-                  1. User-typed queue entries (no `runAt`) — shown here
-                     so the user can see and cancel what they queued.
-                  2. The head wake — a deferred follow-up (`runAt` in
-                     the future) from `sessions wake` /
-                     `sessions goal set` / direct `runAt` POSTs that
-                     happens to be at `queue[0]`. Surfaced in the
-                     floating panel's delay row instead (issue #339 +
-                     the wake-preview follow-up), so the strip doesn't
-                     double-list what the panel already shows.
-                  3. Everything else — wakes queued behind an ordinary
-                     message, additional scheduled wakes beyond the
-                     head, and wakes past their `runAt` that the wakes
-                     consumer hasn't drained yet — kept visible here
-                     because the floating panel represents only
-                     `queue[0]` and removing them would erase the only
-                     cancel button even though the server still fires
-                     them. See PR #403 codex-review follow-up.
-               */}
               {visibleQueue.length > 0 && (
                 <div className="mb-2 space-y-1">
                   <div className="flex items-center gap-1.5 px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -8290,10 +8288,10 @@ export function SessionView({
                     streaming &&
                     !message.trim() &&
                     composerAttachments.length === 0 &&
-                    queue.length > 0
+                    queue.some(isUserQueuedMessage)
                   ) {
                     // Secondary tap on Send while streaming with an empty
-                    // composer: promote the first queued message into an
+                    // composer: promote the first user-typed queued message into an
                     // interrupt (steer). Mirrors Cmd/Ctrl+Enter, but is
                     // reachable on mobile where that shortcut isn't
                     // available. `handleSteer` already handles the

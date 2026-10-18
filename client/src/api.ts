@@ -733,6 +733,7 @@ export async function steerSession(
 /** A message enqueued to run after the active turn completes (see issue #113). */
 export interface QueuedMessage {
   id: string;
+  origin?: "user" | "wake" | "goal" | "send" | "monitor";
   text: string;
   visibleText: string;
   provider: string;
@@ -818,6 +819,35 @@ export async function removeSessionQueuedMessage(
     { method: "DELETE" }
   );
   await throwIfNotOk(res, "Failed to remove queued message");
+}
+
+export interface SessionGoal {
+  sessionId: string;
+  condition: string;
+  maxTurns?: number;
+  expiresAt?: string;
+  setAt: string;
+  turnsEvaluated: number;
+  lastReason?: string;
+  updatedAt: string;
+}
+
+export async function getSessionGoal(projectId: string, sessionId: string, worktreeId: string): Promise<SessionGoal | null> {
+  const res = await fetch(`${BASE}/projects/${projectId}/sessions/${sessionId}/goal?worktreeId=${encodeURIComponent(worktreeId)}`);
+  await throwIfNotOk(res, "Failed to fetch goal");
+  return ((await res.json()) as { goal: SessionGoal | null }).goal;
+}
+
+export async function clearSessionGoal(projectId: string, sessionId: string, worktreeId: string): Promise<void> {
+  const res = await fetch(`${BASE}/projects/${projectId}/sessions/${sessionId}/goal?worktreeId=${encodeURIComponent(worktreeId)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear" }),
+  });
+  await throwIfNotOk(res, "Failed to clear goal");
+}
+
+export async function stopSessionMonitor(monitorId: string): Promise<void> {
+  const res = await fetch(`${BASE}/sessions/monitors/${monitorId}`, { method: "DELETE" });
+  await throwIfNotOk(res, "Failed to stop monitor");
 }
 
 // --- Monitors (issue #339) ----------------------------------------------

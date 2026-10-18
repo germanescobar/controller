@@ -42,6 +42,48 @@ test("connection diagnostic names the attempted URL and cause without credential
   assert.doesNotMatch(message, /user|secret/);
 });
 
+test("CLI recovers a stale local runtime port for the same Controller home", async () => {
+  const { createHash } = await import("node:crypto");
+  const { statSync } = await import("node:fs");
+  const home = mkdtempSync(path.join(os.tmpdir(), "controller-cli-discovery-"));
+  const stats = statSync(home, { bigint: true });
+  const homeId = createHash("sha256").update(`inode:${stats.dev}:${stats.ino}`).digest("hex");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url) === "http://localhost:4500/api/instance") {
+      return { ok: true, json: async () => ({ homeId }) };
+    }
+    throw new Error("connection refused");
+  };
+  try {
+    const cli = await loadCli();
+    assert.equal(await cli.resolveLiveServerUrl("http://localhost:3171", home), "http://localhost:4500");
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI prefers the legacy packaged app over a same-home dev server", async () => {
+  const { createHash } = await import("node:crypto");
+  const { statSync } = await import("node:fs");
+  const home = path.join(os.homedir(), "Library", "Application Support", "Controller");
+  const stats = statSync(home, { bigint: true });
+  const homeId = createHash("sha256").update(`inode:${stats.dev}:${stats.ino}`).digest("hex");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url) === "http://localhost:4500/api/agent-providers") return { ok: true };
+    if (String(url) === "http://localhost:4583/api/instance") return { ok: true, json: async () => ({ homeId }) };
+    throw new Error("connection refused");
+  };
+  try {
+    const cli = await loadCli();
+    assert.equal(await cli.resolveLiveServerUrl("http://localhost:3171", home), "http://localhost:4500");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("CLI reports a stopped dev server using only an isolated runtime", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "controller-cli-diagnostic-"));
   try {

@@ -236,6 +236,7 @@ test("POST /send-from enqueues a [/from: title] follow-up on the target", async 
         `[/from: Coordinator] controller://project/proj-1/worktree/wt-main/session/${parentId} ping the child`
       );
       assert.equal(queued[0].visibleText, queued[0].text);
+      assert.equal(queued[0].origin, "send");
       assert.equal(queued[0].provider, "claude");
       assert.deepEqual(queued[0].attachmentIds, []);
     } finally {
@@ -288,6 +289,7 @@ test("monitor --on-line enqueues matching output on the target session", async (
       }
       assert.equal(queued.length, 1);
       assert.equal(queued[0].text, "[/monitor: CI watcher] [CI] passed");
+      assert.equal(queued[0].origin, "monitor");
       monitors.stopMonitor(body.monitor.id);
     } finally {
       runtime.markSessionInactive(childId);

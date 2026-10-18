@@ -110,7 +110,7 @@ export async function enqueueWake(
     runAt = resolved;
   }
   const { delay, runAtIso, ...rest } = input;
-  return enqueue(sessionId, { ...rest, ...(runAt ? { runAt } : {}) });
+  return enqueue(sessionId, { ...rest, origin: "wake", ...(runAt ? { runAt } : {}) });
 }
 
 /**
