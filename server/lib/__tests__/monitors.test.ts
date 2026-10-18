@@ -352,7 +352,7 @@ test("startMonitor delivers matching stdout lines to the follow-up hook (issue #
     const monitor = startMonitor({
       sessionId: "s-on-line",
       worktreePath: proj,
-      description: "CI watcher",
+      description: "CI [watcher]",
       command: "printf 'noise 1\n[CI] passed\nnoise 2\n[CI] failed\n'",
       persistent: false,
       timeoutMs: 2_000,
@@ -389,12 +389,12 @@ test("startMonitor delivers matching stdout lines to the follow-up hook (issue #
     assert.deepEqual(delivered, [
       {
         line: "[CI] passed",
-        text: "[/monitor: CI watcher] [CI] passed",
+        text: "[/monitor: CI [watcher\\]] [CI] passed",
         monitorId: monitor.id,
       },
       {
         line: "[CI] failed",
-        text: "[/monitor: CI watcher] [CI] failed",
+        text: "[/monitor: CI [watcher\\]] [CI] failed",
         monitorId: monitor.id,
       },
     ]);

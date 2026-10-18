@@ -433,8 +433,13 @@ export async function resolveLiveServerUrl(url, home) {
       if (legacy.ok) return "http://localhost:4500";
     } catch { /* No packaged server on its canonical port. */ }
   }
-  const firstPort = isDevRuntime ? Number(parsed.port) || 3102 : 4500;
-  const ports = Array.from({ length: 101 }, (_, offset) => `http://localhost:${firstPort + offset}`);
+  const stalePort = Number(parsed.port);
+  const firstPort = isDevRuntime ? Math.max(1, (stalePort || 3102) - 100) : 4500;
+  const lastPort = isDevRuntime ? Math.min(65535, (stalePort || 3102) + 100) : 4600;
+  const ports = Array.from(
+    { length: lastPort - firstPort + 1 },
+    (_, offset) => `http://localhost:${firstPort + offset}`,
+  );
   const matches = await Promise.all(ports.map(async (candidate) => ({ candidate, id: await probe(candidate) })));
   return matches.find(({ id }) => id === expected)?.candidate ?? url;
 }

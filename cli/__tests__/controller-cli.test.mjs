@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
@@ -64,10 +64,36 @@ test("CLI recovers a stale local runtime port for the same Controller home", asy
   }
 });
 
+test("CLI recovers a dev server that restarted below the stale port", async () => {
+  const { createHash } = await import("node:crypto");
+  const { statSync } = await import("node:fs");
+  const home = mkdtempSync(path.join(os.tmpdir(), "controller-cli-dev-discovery-"));
+  const devRoot = path.join(home, "dev", "launch");
+  mkdirSync(devRoot, { recursive: true });
+  const stats = statSync(home, { bigint: true });
+  const homeId = createHash("sha256").update(`inode:${stats.dev}:${stats.ino}`).digest("hex");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url) === "http://localhost:3102/api/instance") {
+      return { ok: true, json: async () => ({ homeId }) };
+    }
+    throw new Error("connection refused");
+  };
+  try {
+    const cli = await loadCli();
+    assert.equal(await cli.resolveLiveServerUrl("http://localhost:3171", devRoot), "http://localhost:3102");
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("CLI prefers the legacy packaged app over a same-home dev server", async () => {
   const { createHash } = await import("node:crypto");
   const { statSync } = await import("node:fs");
-  const home = path.join(os.homedir(), "Library", "Application Support", "Controller");
+  const home = mkdtempSync(path.join(os.tmpdir(), "controller-cli-legacy-"));
+  mkdirSync(path.join(home, "bin"));
+  writeFileSync(path.join(home, "bin", "controller"), "fixture");
   const stats = statSync(home, { bigint: true });
   const homeId = createHash("sha256").update(`inode:${stats.dev}:${stats.ino}`).digest("hex");
   const originalFetch = globalThis.fetch;
@@ -81,6 +107,7 @@ test("CLI prefers the legacy packaged app over a same-home dev server", async ()
     assert.equal(await cli.resolveLiveServerUrl("http://localhost:3171", home), "http://localhost:4500");
   } finally {
     globalThis.fetch = originalFetch;
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

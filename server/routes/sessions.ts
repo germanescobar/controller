@@ -47,6 +47,7 @@ import {
 import { getApiKeyEnvVars } from "../lib/api-keys.js";
 import { childProcessEnv } from "../lib/shell-env.js";
 import { controllerAgentEnv } from "../lib/controller-cli.js";
+import { escapeFollowUpMarkerLabel } from "../../shared/follow-up-markers.js";
 import {
   buildControllerPreamble,
   framePreambleForPrompt,
@@ -3646,7 +3647,7 @@ sendBySessionIdRouter.post(
         ? parent.session.title.trim()
         : "(untitled)";
     const parentUrl = `controller://project/${parent.projectId}/worktree/${parent.worktreeId}/session/${parent.session.id}`;
-    const markerText = `[/from: ${parentTitle}] ${parentUrl} ${text}`;
+    const markerText = `[/from: ${escapeFollowUpMarkerLabel(parentTitle)}] ${parentUrl} ${text}`;
     let message: QueuedMessage;
     try {
       message = await enqueueExternalFollowUp(located, markerText, "send");
