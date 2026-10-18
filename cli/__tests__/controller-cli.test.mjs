@@ -5332,6 +5332,14 @@ test("runSessions on-radar filters to focusPinnedAt sessions and prints them in 
         json: async () => [{ id: "proj-uuid-2", name: "demo" }],
       };
     }
+    if (String(url).endsWith("/api/runtimes")) {
+      // No live sessions in this fixture — every row falls into
+      // the "finished" bucket and sorts by `lastActiveAt` asc.
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
+      };
+    }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {
         status: 200,
@@ -5442,6 +5450,12 @@ test("runSessions on-radar prints 'No sessions on radar.' when nothing is pinned
     if (String(url).endsWith("/api/projects")) {
       return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
     }
+    if (String(url).endsWith("/api/runtimes")) {
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
+      };
+    }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {
         status: 200,
@@ -5486,6 +5500,12 @@ test("runSessions on-radar --json emits a JSON array (no human-readable rows)", 
   globalThis.fetch = async (url) => {
     if (String(url).endsWith("/api/projects")) {
       return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/runtimes")) {
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
+      };
     }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {
@@ -5545,6 +5565,12 @@ test("runSessions on-radar --all-projects walks every project and merges the que
           { id: "proj-a", name: "alpha" },
           { id: "proj-b", name: "beta" },
         ],
+      };
+    }
+    if (String(url).endsWith("/api/runtimes")) {
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
       };
     }
     if (String(url).endsWith("/api/projects/proj-a/worktrees")) {
@@ -5829,6 +5855,12 @@ test("runSessions on-radar preserves the queried worktree for legacy sessions wh
     if (String(url).endsWith("/api/projects")) {
       return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
     }
+    if (String(url).endsWith("/api/runtimes")) {
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
+      };
+    }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {
         status: 200,
@@ -5900,6 +5932,12 @@ test("runSessions on-radar --json stamps queriedWorktree on legacy sessions (PR 
     if (String(url).endsWith("/api/projects")) {
       return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
     }
+    if (String(url).endsWith("/api/runtimes")) {
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
+      };
+    }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {
         status: 200,
@@ -5946,14 +5984,19 @@ test("runSessions on-radar --json stamps queriedWorktree on legacy sessions (PR 
   assert.equal(parsed[0].worktreeName, "feature");
 });
 
-test("runSessions on-radar puts running sessions last and orders non-running by lastActiveAt (PR review, issue #322)", async () => {
-  // Codex review (issue #322) caught that the first version of
-  // the sort used `focusPinnedAt ?? createdAt` (which the issue
-  // claimed matched the sidebar but the sidebar's real
-  // `sortFocusQueue` actually buckets by state and then sorts by
-  // recency). The CLI can only see `status` and `lastActiveAt`
-  // server-side, so we collapse the four sidebar buckets to two:
-  // running last, everything else by recency.
+test("runSessions on-radar puts live sessions last and orders the rest by lastActiveAt (PR review, issue #322)", async () => {
+  // Codex review (issue #322) caught two iterations of this sort:
+  // first the CLI bucketed by `focusPinnedAt ?? createdAt` (wrong —
+  // the sidebar's `sortFocusQueue` actually buckets by state and
+  // then sorts by recency); then the CLI bucketed by
+  // `status === "running"` (also wrong — the server only ever
+  // writes `status: "active"` for new/resumed sessions and never
+  // updates it on completion, see `server/routes/sessions.ts:1075,
+  // 1891, 2784`). The live-activity signal lives in the runtime
+  // snapshot at `GET /api/runtimes`. The CLI fetches that once and
+  // joins by `sessionId` to bucket live vs. finished; live sessions
+  // go last (matching the sidebar's running-last bucket), finished
+  // sessions sort by `lastActiveAt` asc.
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
   const originalStdout = process.stdout.write.bind(process.stdout);
@@ -5961,6 +6004,26 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
   globalThis.fetch = async (url) => {
     if (String(url).endsWith("/api/projects")) {
       return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/runtimes")) {
+      // `sess-running` is the only currently-active session in
+      // this fixture. `sess-fresh` and `sess-old` are NOT in the
+      // runtime snapshot, so they fall into the "finished" bucket
+      // regardless of the (uniformly `"active"`) value of their
+      // persisted `status` field.
+      return {
+        status: 200,
+        json: async () => ({
+          sessions: [
+            {
+              sessionId: "sess-running",
+              active: true,
+              provider: "anita",
+            },
+          ],
+          persistedAttentionReady: true,
+        }),
+      };
     }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {
@@ -5974,10 +6037,10 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
     ) {
       return {
         status: 200,
+        // Note: every session has `status: "active"` because the
+        // server only ever writes that literal — the bucket signal
+        // comes from the runtime snapshot, not from this field.
         json: async () => [
-          // Newer running session — must end up LAST despite the
-          // newer lastActiveAt, because the sidebar's running
-          // bucket comes after the finished buckets.
           {
             id: "sess-running",
             title: "Running",
@@ -5985,12 +6048,9 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
             focusPinnedAt: "2026-06-26T10:00:00.000Z",
             createdAt: "2026-06-26T10:00:00.000Z",
             lastActiveAt: "2026-06-26T10:30:00.000Z",
-            status: "running",
+            status: "active",
             provider: "anita",
           },
-          // Newest finished session — should be LAST among the
-          // non-running bucket (so the agent visits the oldest
-          // finished work first).
           {
             id: "sess-fresh",
             title: "Fresh",
@@ -5998,10 +6058,9 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
             focusPinnedAt: "2026-06-26T09:00:00.000Z",
             createdAt: "2026-06-26T09:00:00.000Z",
             lastActiveAt: "2026-06-26T09:30:00.000Z",
-            status: "exited",
+            status: "active",
             provider: "claude",
           },
-          // Oldest finished session — should be FIRST.
           {
             id: "sess-old",
             title: "Old",
@@ -6009,7 +6068,7 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
             focusPinnedAt: "2026-06-26T08:00:00.000Z",
             createdAt: "2026-06-26T08:00:00.000Z",
             lastActiveAt: "2026-06-26T08:30:00.000Z",
-            status: "failed",
+            status: "active",
             provider: "codex",
           },
         ],
@@ -6035,17 +6094,61 @@ test("runSessions on-radar puts running sessions last and orders non-running by 
     oldIdx >= 0 && freshIdx >= 0 && runningIdx >= 0,
     `expected all three rows in: ${out}`
   );
-  // Non-running bucket: oldest lastActiveAt first.
+  // Finished bucket: oldest lastActiveAt first.
   assert.ok(
     oldIdx < freshIdx,
-    `expected sess-old before sess-fresh in non-running bucket, got: ${out}`
+    `expected sess-old before sess-fresh in finished bucket, got: ${out}`
   );
-  // Running bucket: AFTER the non-running bucket, even though the
+  // Live bucket: AFTER the finished bucket, even though the
   // running session is the most recent.
   assert.ok(
     freshIdx < runningIdx,
-    `expected non-running bucket before running bucket, got: ${out}`
+    `expected finished bucket before live bucket, got: ${out}`
   );
+});
+
+test("runSessions on-radar surfaces runtime-snapshot errors as a non-zero exit (PR review, issue #322)", async () => {
+  // The runtime snapshot is the source of the live-activity
+  // signal the bucket relies on. A 5xx here would silently
+  // collapse every session into the "finished" bucket — exactly
+  // the misleading-success case the per-worktree error fix
+  // guards against. Surface the error instead.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/runtimes")) {
+      return { status: 500, json: async () => ({ error: "Runtime store offline" }) };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  };
+  try {
+    await assert.rejects(
+      async () =>
+        cli.runSessions(["on-radar", "demo"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Runtime store offline/);
 });
 
 test("parseSessions on-radar finds the project positional regardless of flag order (PR review, issue #322)", async () => {
@@ -6133,6 +6236,12 @@ test("runSessions on-radar surfaces per-worktree session-list errors instead of 
   globalThis.fetch = async (url) => {
     if (String(url).endsWith("/api/projects")) {
       return { status: 200, json: async () => [{ id: "proj-uuid-2", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/runtimes")) {
+      return {
+        status: 200,
+        json: async () => ({ sessions: [], persistedAttentionReady: true }),
+      };
     }
     if (String(url).endsWith("/api/projects/proj-uuid-2/worktrees")) {
       return {

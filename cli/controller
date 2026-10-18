@@ -175,16 +175,16 @@ const USAGE = `Usage:
   sidebar's \`sortFocusQueue\` uses
   (\`client/src/components/sidebar.tsx:198-249\`), but it can only
   approximate the sidebar's order from server-side signals: the CLI
-  buckets by \`status\` (running last, everything else by recency of
-  \`lastActiveAt\`) because the awaiting-input flag and the
-  visited/unvisited split live client-side. Treat the CLI as
-  authoritative for a sweep, not for triage — the desktop view is
-  the source of truth for the awaiting-vs-visited split. By default
-  it walks one project; \`--all-projects\` merges every project's
-  queue into a single sorted list. \`--json\` prints the rows as a
-  JSON array. \`No sessions on radar.\` is printed when the filter
-  result is empty (the same copy the sidebar uses) so agents can
-  detect an empty queue without grepping.
+  fetches the runtime snapshot (\`GET /api/runtimes\`) once and
+  buckets by the runtime \`active\` field (live sessions last,
+  everything else by recency of \`lastActiveAt\`). The awaiting-input
+  flag and the visited/unvisited split live client-side, so the
+  desktop view is the source of truth for the awaiting-vs-visited
+  split. By default it walks one project; \`--all-projects\` merges
+  every project's queue into a single sorted list. \`--json\` prints
+  the rows as a JSON array. \`No sessions on radar.\` is printed
+  when the filter result is empty (the same copy the sidebar uses)
+  so agents can detect an empty queue without grepping.
 
   \`pin\` / \`unpin\` / \`done\` wrap the existing
   \`POST /api/projects/<projectId>/sessions/<sessionId>/focus-pin|unpin|done\`
@@ -1625,13 +1625,14 @@ export async function runSessions(argv, serverUrl) {
  *   items as `awaiting → finishedUnvisited → finishedVisited →
  *   running` before sorting each bucket by `lastActiveAt` /
  *   `lastVisitedAt`. Two of those signals are client-only:
- *   `awaitingInput` lives on the runtime entry (the CLI sees
- *   `status` instead, and only as a free-form string), and
- *   `lastVisitedAt` lives in localStorage. The closest server-only
- *   approximation is to bucket by `status === "running"` and then
- *   sort each bucket by `lastActiveAt` ascending. The CLI documents
- *   this gap so the agent knows the desktop view is authoritative
- *   for the awaiting-vs-visited split.
+ *   `awaitingInput` lives on the runtime entry, and `lastVisitedAt`
+ *   lives in localStorage. We bucket by the runtime snapshot's
+ *   `active` field (the `awaitingInput` signal would also live in
+ *   the same snapshot if we wanted to promote awaiting sessions to
+ *   the top bucket; left as a follow-up since the issue doesn't
+ *   ask for it). The CLI documents this gap so the agent knows
+ *   the desktop view is authoritative for the awaiting-vs-visited
+ *   split.
  * - The CLI also has to record the worktree it discovered each
  *   session in, not just `session.worktreeId` from the persisted
  *   `SessionState`. Legacy sessions persisted before worktree id
@@ -1641,6 +1642,37 @@ export async function runSessions(argv, serverUrl) {
  *   default to the main worktree and 404 (PR review, issue #322).
  */
 async function runSessionsOnRadar(parsed, serverUrl) {
+  // Fetch the runtime snapshot up front so we can bucket pinned
+  // sessions by `active` (PR review, issue #322). The previous
+  // version tried to read `status === "running"` off the session
+  // summary, but the server only ever writes `status: "active"`
+  // for new/resumed sessions and never updates it on completion
+  // (see `server/routes/sessions.ts:1075`, `1891`, `2784`), so
+  // the predicate was dead code — every session landed in bucket
+  // 0 and the running-last behavior never triggered. The runtime
+  // snapshot at `GET /api/runtimes` is the authoritative live-
+  // activity signal; we read it once and join by `sessionId` in
+  // the sort. A 4xx/5xx here would be a server bug, not a queue
+  // miss, so a clear error is the right answer (same trade-off as
+  // the per-worktree session-list error above).
+  let liveSessionIds = new Set();
+  {
+    const { response, result } = await getJson(serverUrl, "/api/runtimes");
+    if (response.status >= 400) {
+      fail(
+        serverError(
+          result,
+          `Failed to fetch session runtimes (HTTP ${response.status})`
+        )
+      );
+    }
+    const runtimes = Array.isArray(result?.sessions) ? result.sessions : [];
+    for (const entry of runtimes) {
+      if (entry && entry.active === true && typeof entry.sessionId === "string") {
+        liveSessionIds.add(entry.sessionId);
+      }
+    }
+  }
   const sources = parsed.allProjects
     ? await gatherAllProjectSources(serverUrl)
     : [
@@ -1732,29 +1764,24 @@ async function runSessionsOnRadar(parsed, serverUrl) {
       }
     }
   }
-  // Bucket by `status` (running last, everything else by recency).
-  // The sidebar's true order is
+  // Bucket by the runtime snapshot's `active` flag (running last,
+  // everything else by recency). The sidebar's true order is
   //   `awaiting → finishedUnvisited → finishedVisited → running`
-  // (see `client/src/components/sidebar.tsx:198-249`). The
-  // server-only signals we have are coarse: `status` carries a
-  // free-form string the agent runtime writes (`"running"`,
-  // `"exited"`, `"failed"`, etc.), and `lastActiveAt` is the only
-  // timestamp we can sort by. So we collapse to two buckets:
-  //   1. not running  — sort by `lastActiveAt` asc (oldest first,
-  //      so a freshly-finished session doesn't jump the queue)
-  //   2. running      — sort by `lastActiveAt` asc (matches the
-  //      sidebar's within-bucket ordering for the running bucket)
-  // The agent should treat this as "good enough for a sweep, not
+  // (see `client/src/components/sidebar.tsx:198-249`). The runtime
+  // snapshot also carries `awaitingInput` (we read it above but
+  // don't promote it to a top bucket yet — the issue doesn't ask
+  // for it, and promoting awaiting sessions would interleave the
+  // queue in a way that breaks the "oldest first" sweep contract).
+  // The visited/unvisited split still requires `lastVisitedAt`,
+  // which is localStorage-only and never leaves the browser. The
+  // agent should treat this as "good enough for a sweep, not
   // authoritative for triage" — the desktop app is the source of
   // truth for the awaiting-input and visited/unvisited split.
-  const statusBucket = (status) => {
-    if (typeof status === "string" && status.toLowerCase() === "running") {
-      return 1;
-    }
-    return 0;
-  };
+  const isLive = (row) => liveSessionIds.has(row.sessionId);
   rows.sort((a, b) => {
-    const bucketDiff = statusBucket(a.status) - statusBucket(b.status);
+    const aLive = isLive(a) ? 1 : 0;
+    const bLive = isLive(b) ? 1 : 0;
+    const bucketDiff = aLive - bLive;
     if (bucketDiff !== 0) return bucketDiff;
     const aTime = new Date(a.lastActiveAt ?? a.focusPinnedAt ?? a.createdAt ?? 0).getTime();
     const bTime = new Date(b.lastActiveAt ?? b.focusPinnedAt ?? b.createdAt ?? 0).getTime();
