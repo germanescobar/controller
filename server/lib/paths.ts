@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
 
 /*
  * Centralizes every Controller-owned path on disk.
@@ -29,6 +30,38 @@ export function orchestratorHome(): string {
   const override = process.env.CONTROLLER_HOME?.trim();
   if (override) return override;
   return defaultHomeForPlatform();
+}
+
+/** Opaque identity for comparing Controller homes across local server processes. */
+export function controllerHomeId(): string {
+  const resolved = path.resolve(orchestratorHome());
+  let identity: string;
+  try {
+    const stats = statSync(resolved, { bigint: true });
+    if (!stats.isDirectory()) throw new Error(`Controller home is not a directory: ${resolved}`);
+    identity = stats.ino > 0n
+      ? `inode:${stats.dev}:${stats.ino}`
+      : `path:${realpathSync.native(resolved)}`;
+  } catch (error) {
+    if (!isMissingPath(error)) throw error;
+    const missing: string[] = [];
+    let ancestor = resolved;
+    for (;;) {
+      try {
+        identity = `path:${path.join(realpathSync.native(ancestor), ...missing)}`;
+        break;
+      } catch (ancestorError) {
+        if (!isMissingPath(ancestorError)) throw ancestorError;
+        missing.unshift(path.basename(ancestor));
+        ancestor = path.dirname(ancestor);
+      }
+    }
+  }
+  return createHash("sha256").update(identity).digest("hex");
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 /**

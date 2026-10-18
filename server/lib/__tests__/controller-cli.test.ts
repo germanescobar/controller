@@ -5,6 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   controllerAgentEnv,
   controllerCliBinDir,
@@ -432,19 +435,65 @@ async function withCliHome(devInstance: boolean, fn: (home: string) => Promise<v
 
 test("a dev instance installs the CLI and runtime file under <home>/dev", async () => {
   await withCliHome(true, async (home) => {
-    assert.equal(controllerCliInstalledPath(), path.join(home, "dev", "bin", "controller"));
+    await fs.mkdir(path.join(home, "bin"));
+    await fs.writeFile(path.join(home, "bin", "controller"), "packaged CLI");
+    await fs.writeFile(path.join(home, "controller-runtime.json"), '{"serverUrl":"http://localhost:4500"}');
+    const devRoot = path.dirname(path.dirname(controllerCliInstalledPath()));
+    assert.equal(path.dirname(devRoot), path.join(home, "dev"));
     await installControllerCli();
     await writeControllerRuntimeFile(3102);
-    await fs.access(path.join(home, "dev", "bin", "controller"));
+    await fs.access(path.join(devRoot, "bin", "controller"));
     const written = JSON.parse(
-      await fs.readFile(path.join(home, "dev", "controller-runtime.json"), "utf-8"),
+      await fs.readFile(path.join(devRoot, "controller-runtime.json"), "utf-8"),
     );
     assert.deepEqual(written, { serverUrl: "http://localhost:3102" });
-    // The app's install and runtime file are untouched.
-    await assert.rejects(fs.access(path.join(home, "bin", "controller")));
-    await assert.rejects(fs.access(path.join(home, "controller-runtime.json")));
+    // Starting or stopping this dev server leaves the packaged CLI and URL intact.
+    assert.equal(await fs.readFile(path.join(home, "bin", "controller"), "utf8"), "packaged CLI");
+    assert.equal(await fs.readFile(path.join(home, "controller-runtime.json"), "utf8"), '{"serverUrl":"http://localhost:4500"}');
     // State stays shared: CONTROLLER_HOME is not redirected.
     assert.equal(controllerAgentEnv().CONTROLLER_HOME, home);
+  });
+});
+
+test("concurrent launches from one checkout keep separate sanitized CLI routes", async () => {
+  await withCliHome(true, async () => {
+    const savedLaunchId = process.env.CONTROLLER_DEV_LAUNCH_ID;
+    const servers = ["first", "second"].map((id) => createServer((_req, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify([{ id, name: id, path: "/tmp", createdAt: "2026-01-01T00:00:00Z" }]));
+    }));
+    try {
+      for (const server of servers) {
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      }
+      const cliPaths: string[] = [];
+      for (const [index, server] of servers.entries()) {
+        process.env.CONTROLLER_DEV_LAUNCH_ID = `launch-${index}`;
+        cliPaths.push(controllerCliInstalledPath());
+        assert.equal(controllerCliInstalledPath(), cliPaths[index], "watch restarts keep the launch path");
+        await installControllerCli();
+        const address = server.address();
+        assert.ok(address && typeof address !== "string");
+        await writeControllerRuntimeFile(address.port);
+      }
+      assert.notEqual(cliPaths[0], cliPaths[1]);
+      const sanitizedEnv = { PATH: process.env.PATH ?? "" };
+      const run = async (cli: string) => {
+        const { stdout, stderr } = await promisify(execFile)(await fs.realpath(cli), ["projects", "list", "--json"], { env: sanitizedEnv });
+        assert.ok(stdout.trim(), `CLI produced no project output: ${stderr}`);
+        return JSON.parse(stdout.trim()).id;
+      };
+      assert.equal(await run(cliPaths[0]), "first");
+      assert.equal(await run(cliPaths[1]), "second");
+      await new Promise<void>((resolve) => servers[1].close(() => resolve()));
+      assert.equal(await run(cliPaths[0]), "first");
+    } finally {
+      if (savedLaunchId === undefined) delete process.env.CONTROLLER_DEV_LAUNCH_ID;
+      else process.env.CONTROLLER_DEV_LAUNCH_ID = savedLaunchId;
+      await Promise.all(servers.map((server) => server.listening
+        ? new Promise<void>((resolve) => server.close(() => resolve()))
+        : Promise.resolve()));
+    }
   });
 });
 
@@ -455,7 +504,7 @@ test("a dev instance puts its CLI bin first on PATH and drops the app's", async 
     process.env.PATH = ["/usr/bin", appBin, "/opt/homebrew/bin"].join(":");
     try {
       assert.deepEqual(controllerAgentEnv().PATH.split(":"), [
-        path.join(home, "dev", "bin"),
+        path.dirname(controllerCliInstalledPath()),
         "/usr/bin",
         "/opt/homebrew/bin",
       ]);
