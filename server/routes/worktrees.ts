@@ -13,8 +13,8 @@ import {
   getWorktree,
   isWorktreeUnavailable,
   isMainWorktreeName,
-  nextPortOffset,
   removeWorktree,
+  reconcileGitWorktrees,
   resolveWorktree,
   updateWorktree,
   worktreeNotFoundPayload,
@@ -245,6 +245,12 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   // the same fix on the per-worktree sessions endpoint at
   // `server/routes/sessions.ts`).
   res.set("Cache-Control", "no-store");
+  try {
+    const added = await reconcileGitWorktrees(project);
+    for (const worktree of added) emitWorktreeAdded(project.id, worktree);
+  } catch (error) {
+    console.error(`Failed to refresh Git worktrees for ${project.path}:`, error);
+  }
   const worktrees = await getProjectWorktrees(project.id);
   refreshWorktreePullRequests(project.path, worktrees, (updated) =>
     emitWorktreeUpdated(project.id, updated)
@@ -1067,15 +1073,13 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
     return;
   }
 
-  const portOffset = await nextPortOffset(project.id);
   const worktree = await addWorktree({
     projectId: project.id,
     name,
     path: targetPath,
     branch,
     isMain: false,
-    portOffset,
-  });
+  }, { adoptDiscovered: true });
 
   emit({ type: "worktree_created", worktree });
   // Notify other clients (sidebar in another window) that a new worktree
@@ -1167,6 +1171,33 @@ worktreesRouter.delete(
     }
     if (worktree.presence === "removed") {
       res.status(409).json({ error: "worktree was already removed" });
+      return;
+    }
+    if (worktree.origin === "external") {
+      const sessions = await getSessions(worktree.path);
+      if (sessions.some((session) => getSessionRuntime(session.id).active)) {
+        res.status(409).json({ error: "worktree has active sessions" });
+        return;
+      }
+      const runningMonitorIds = sessions.flatMap((session) =>
+        listMonitors(session.id).filter((monitor) => monitor.status === "running").map((monitor) => monitor.id)
+      );
+      if (runningMonitorIds.length > 0) {
+        res.status(409).json({ error: "worktree has running processes", runningMonitorIds });
+        return;
+      }
+      const runningTabs = (await getTerminalTabs(project.id, worktree.id))
+        .some((tab) => ptyManager.isCommandRunning(`${project.id}:${worktree.id}:${tab.id}`));
+      if (runningTabs) {
+        res.status(409).json({ error: "worktree has running processes" });
+        return;
+      }
+      ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
+      await removeWorktree(worktree.id);
+      await removeTerminalTabsForWorktree(project.id, worktree.id);
+      const removed = await getWorktree(project.id, worktree.id);
+      if (removed) emitWorktreeUpdated(project.id, removed);
+      res.json({ ok: true });
       return;
     }
 

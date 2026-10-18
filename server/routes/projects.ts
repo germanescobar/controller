@@ -7,7 +7,7 @@ import {
   updateProject,
   deleteProject,
 } from "../lib/projects.js";
-import { ensureMainWorktree } from "../lib/worktrees.js";
+import { ensureMainWorktree, reconcileGitWorktrees } from "../lib/worktrees.js";
 import { emitProjectEvent } from "../lib/events.js";
 
 export const projectsRouter = Router();
@@ -54,6 +54,11 @@ projectsRouter.post("/", async (req, res) => {
     }
     const project = await addProject(name, path, setupCommands, runCommands);
     await ensureMainWorktree(project);
+    try {
+      await reconcileGitWorktrees(project);
+    } catch (error) {
+      console.error(`Failed to discover Git worktrees for ${project.path}:`, error);
+    }
     // Sidebar in other windows refreshes the project list when it sees
     // this (issue #210).
     emitProjectEvent({ type: "project_added", project });

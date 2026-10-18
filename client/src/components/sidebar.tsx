@@ -644,6 +644,7 @@ export function Sidebar({
     projectId: string;
     worktreeId: string;
     name: string;
+    origin?: "controller" | "external";
     // Issue #332: when the orchestrator refuses a delete because the
     // worktree has uncommitted changes, we keep the offending file
     // list on the confirm state so the dialog can show it and offer
@@ -1039,13 +1040,13 @@ export function Sidebar({
     // clicked through to retry — pass `?force=1` so we don't loop on
     // the same 409. A first-time attempt (dirtyFiles === null) uses
     // the safe-by-default path so the user gets the chance to abort.
-    const force = dirtyFiles !== null;
+    const force = dirtyFiles !== null && confirmDeleteWorktree.origin !== "external";
     setDeletingWorktree(true);
     try {
       await deleteWorktree(projectId, worktreeId, { force });
       setConfirmDeleteWorktree(null);
       await loadAll();
-      toast.success("Worktree deleted");
+      toast.success(confirmDeleteWorktree.origin === "external" ? "Stopped tracking worktree" : "Worktree deleted");
     } catch (err) {
       // The orchestrator's safe-by-default gate (issue #332) returns
       // 409 with `dirtyFiles` when the worktree has uncommitted
@@ -1064,6 +1065,7 @@ export function Sidebar({
           projectId,
           worktreeId,
           name: confirmDeleteWorktree.name,
+          origin: confirmDeleteWorktree.origin,
           dirtyFiles: dirty,
         });
         return;
@@ -1584,13 +1586,19 @@ export function Sidebar({
                                       projectId: project.id,
                                       worktreeId: worktree.id,
                                       name: worktree.name,
+                                      origin: worktree.origin,
                                       dirtyFiles: null,
                                     });
                                   }}
-                                  title="Delete worktree"
-                                  className="rounded p-1 text-muted-foreground hover:text-destructive transition-all"
+                                  title={worktree.origin === "external" ? "Stop tracking worktree" : "Delete worktree"}
+                                  className={cn(
+                                    "rounded p-1 text-muted-foreground transition-all",
+                                    worktree.origin === "external" ? "hover:text-sidebar-foreground" : "hover:text-destructive",
+                                  )}
                                 >
-                                  <Trash2 className="h-3.5 w-3.5" />
+                                  {worktree.origin === "external"
+                                    ? <Archive className="h-3.5 w-3.5" />
+                                    : <Trash2 className="h-3.5 w-3.5" />}
                                 </button>
                               )}
                               </div>
@@ -2026,12 +2034,19 @@ export function Sidebar({
         <DialogContent showCloseButton={false} className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {confirmDeleteWorktree?.dirtyFiles
+              {confirmDeleteWorktree?.origin === "external"
+                ? "Stop tracking worktree"
+                : confirmDeleteWorktree?.dirtyFiles
                 ? "Force delete worktree"
                 : "Delete worktree"}
             </DialogTitle>
             <DialogDescription>
-              {confirmDeleteWorktree?.dirtyFiles ? (
+              {confirmDeleteWorktree?.origin === "external" ? (
+                <>
+                  Stop tracking <span className="break-all font-medium text-foreground">{confirmDeleteWorktree.name}</span>?
+                  Its directory and Git worktree stay intact. Existing conversations remain as history.
+                </>
+              ) : confirmDeleteWorktree?.dirtyFiles ? (
                 <>
                   Worktree{" "}
                   <span className="break-all font-medium text-foreground">
@@ -2084,7 +2099,9 @@ export function Sidebar({
               loading={deletingWorktree}
               onClick={confirmDeleteWorktreeAction}
               label={
-                confirmDeleteWorktree?.dirtyFiles ? "Force delete" : undefined
+                confirmDeleteWorktree?.origin === "external"
+                  ? "Stop tracking"
+                  : confirmDeleteWorktree?.dirtyFiles ? "Force delete" : undefined
               }
             />
           </DialogFooter>

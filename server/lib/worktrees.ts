@@ -1,7 +1,9 @@
 import path from "node:path";
 import fs from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { v4 as uuidv4 } from "uuid";
-import { getProject, getProjects, type Project } from "./projects.js";
+import { getProject, getProjectIds, getProjects, type Project } from "./projects.js";
 import {
   RegistryParseError,
   readJsonRegistry,
@@ -17,6 +19,8 @@ export interface Worktree {
   name: string;
   path: string;
   branch?: string;
+  /** Identity of Git's administrative directory, for safe reappearance checks. */
+  gitIdentity?: string;
   isMain: boolean;
   portOffset?: number;
   createdAt: string;
@@ -37,6 +41,7 @@ export function isWorktreeUnavailable(worktree: Worktree): boolean {
 }
 
 const MAIN_WORKTREE_NAME = "main";
+const execFileAsync = promisify(execFile);
 const WORKTREE_CACHE_LIMIT = 64;
 interface WorktreeSnapshot {
   byProject: Map<string, Worktree[]>;
@@ -214,7 +219,7 @@ export async function getProjectWorktrees(
 /** Report missing paths without mutating or reparsing the registry on every read. */
 async function withPresence(worktrees: Worktree[]): Promise<Worktree[]> {
   return Promise.all(worktrees.map(async (worktree) => {
-    if (worktree.presence === "removed") return worktree;
+    if (worktree.presence === "removed" || worktree.presence === "missing") return worktree;
     try {
       await fs.access(worktree.path);
       return { ...worktree, presence: "active" as const };
@@ -222,6 +227,165 @@ async function withPresence(worktrees: Worktree[]): Promise<Worktree[]> {
       return { ...worktree, presence: "missing" as const };
     }
   }));
+}
+
+interface GitWorktree {
+  path: string;
+  branch?: string;
+  prunable: boolean;
+  identity?: string;
+}
+
+/** Parse Git's blank-line-delimited porcelain records without splitting paths on spaces. */
+export function parseGitWorktrees(output: string): GitWorktree[] {
+  return output.trim().split(/\n\n+/).filter(Boolean).map((block) => {
+    const lines = block.split("\n");
+    const first = lines[0];
+    if (!first.startsWith("worktree ")) throw new Error("Invalid git worktree list output");
+    const branch = lines.find((line) => line.startsWith("branch "))?.slice(7);
+    return {
+      path: first.slice(9),
+      branch: branch?.replace(/^refs\/heads\//, ""),
+      prunable: lines.some((line) => line.startsWith("prunable")),
+    };
+  });
+}
+
+async function canonicalPath(value: string): Promise<string> {
+  try {
+    return await fs.realpath(value);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return path.resolve(value);
+    throw error;
+  }
+}
+
+async function gitWorktreeIdentity(worktreePath: string): Promise<string> {
+  const { stdout: gitDir } = await execFileAsync("git", ["rev-parse", "--absolute-git-dir"], { cwd: worktreePath });
+  const canonicalDir = await fs.realpath(gitDir.trim());
+  const stat = await fs.stat(canonicalDir);
+  return `${canonicalDir}:${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+}
+
+/** Register linked Git worktrees without touching their checkouts or running setup. */
+export async function reconcileGitWorktrees(project: Project): Promise<Worktree[]> {
+  const liveProjectIds = new Set(await getProjectIds());
+  const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], {
+    cwd: project.path,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const listed = parseGitWorktrees(stdout);
+  const mainPath = await canonicalPath(project.path);
+  const { stdout: projectCommonDir } = await execFileAsync(
+    "git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: project.path }
+  );
+  const commonDir = await fs.realpath(projectCommonDir.trim());
+  const active = new Map<string, GitWorktree>();
+  for (const item of listed) {
+    const resolved = await canonicalPath(item.path);
+    if (resolved === mainPath || item.prunable) continue;
+    if (active.has(resolved)) throw new Error(`Git reported duplicate worktree path: ${resolved}`);
+    try {
+      if (!(await fs.stat(resolved)).isDirectory()) continue;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    active.set(resolved, item);
+  }
+
+  await Promise.all([...active.entries()].map(async ([resolved, item]) => {
+    try {
+      const { stdout: linkedCommonDir } = await execFileAsync(
+        "git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: resolved }
+      );
+      if (await fs.realpath(linkedCommonDir.trim()) !== commonDir) {
+        active.delete(resolved);
+        return;
+      }
+      item.identity = await gitWorktreeIdentity(resolved);
+    } catch {
+      // A checkout can disappear between list and inspection. It is not
+      // eligible for registration until the next refresh.
+      active.delete(resolved);
+    }
+  }));
+
+  return withWorktreeRegistry(async (registry) => {
+    ensureMainInRegistry(project, registry);
+    const added: Worktree[] = [];
+    const registryPaths = await Promise.all(registry.map((worktree) => canonicalPath(worktree.path)));
+    const knownPaths = new Set(registryPaths);
+    const occupiedOffsets = new Set(registry.flatMap((entry) =>
+      entry.projectId === project.id && entry.portOffset !== undefined ? [entry.portOffset] : []
+    ));
+    let nextOffset = Math.max(0, ...occupiedOffsets);
+    for (const [key, git] of active) {
+      if (registry.some((entry, index) =>
+        registryPaths[index] === key && liveProjectIds.has(entry.projectId))) continue;
+      const orphan = registry.find((entry, index) =>
+        registryPaths[index] === key &&
+        !liveProjectIds.has(entry.projectId) &&
+        !entry.isMain && entry.presence !== "removed" &&
+        entry.gitIdentity === git.identity);
+      if (!orphan) continue;
+      orphan.projectId = project.id;
+      if (orphan.portOffset === undefined || occupiedOffsets.has(orphan.portOffset)) {
+        nextOffset += PORT_OFFSET_STRIDE;
+        orphan.portOffset = nextOffset;
+      }
+      occupiedOffsets.add(orphan.portOffset);
+      nextOffset = Math.max(nextOffset, orphan.portOffset);
+      orphan.branch = git.branch;
+      orphan.presence = "active";
+      added.push({ ...orphan });
+      active.delete(key);
+    }
+    let offset = Math.max(0, ...registry
+      .filter((worktree) => worktree.projectId === project.id)
+      .map((worktree) => worktree.portOffset ?? 0));
+    for (const worktree of registry) {
+      if (worktree.projectId !== project.id || worktree.isMain || worktree.presence === "removed") continue;
+      const key = await canonicalPath(worktree.path);
+      const git = active.get(key);
+      if (!git) {
+        worktree.presence = "missing";
+      } else if (worktree.presence !== "missing" ||
+        (worktree.gitIdentity && worktree.gitIdentity === git.identity)) {
+        worktree.branch = git.branch;
+        worktree.gitIdentity = git.identity;
+        worktree.presence = "active";
+        active.delete(key);
+      } else {
+        // Session storage is keyed by path. A vanished path may have been
+        // recreated as a different checkout, so retain its history safely.
+        active.delete(key);
+      }
+    }
+    for (const [resolved, git] of active) {
+      // Never attach a new checkout to an old path's sessions. This also
+      // prevents duplicate records across projects sharing a repository.
+      if (knownPaths.has(resolved)) continue;
+      offset += PORT_OFFSET_STRIDE;
+      const worktree: Worktree = {
+        id: uuidv4(),
+        projectId: project.id,
+        name: path.basename(resolved),
+        path: git.path,
+        branch: git.branch,
+        gitIdentity: git.identity,
+        isMain: false,
+        portOffset: offset,
+        createdAt: new Date().toISOString(),
+        origin: "external",
+        presence: "active",
+      };
+      registry.push(worktree);
+      knownPaths.add(resolved);
+      added.push(worktree);
+    }
+    return added;
+  });
 }
 
 export async function getWorktree(
@@ -360,7 +524,8 @@ export function worktreeNotFoundMessage(
 }
 
 export async function addWorktree(
-  worktree: Omit<Worktree, "id" | "createdAt"> & { id?: string }
+  worktree: Omit<Worktree, "id" | "createdAt"> & { id?: string },
+  options: { adoptDiscovered?: boolean } = {}
 ): Promise<Worktree> {
   const record: Worktree = {
     id: worktree.id ?? uuidv4(),
@@ -370,6 +535,28 @@ export async function addWorktree(
     ...worktree,
   };
   return withWorktreeRegistry(async (registry) => {
+    const recordPath = await canonicalPath(record.path);
+    for (const existing of registry) {
+      if (await canonicalPath(existing.path) !== recordPath) continue;
+      if (options.adoptDiscovered && existing.projectId === record.projectId &&
+        existing.origin === "external" && existing.presence !== "removed") {
+        if (!existing.gitIdentity || existing.gitIdentity !== await gitWorktreeIdentity(record.path)) {
+          throw new Error(`worktree path belongs to a different checkout: ${record.path}`);
+        }
+        existing.name = record.name;
+        existing.branch = record.branch;
+        existing.origin = "controller";
+        existing.presence = "active";
+        return { ...existing };
+      }
+      throw new Error(`worktree path is already registered: ${record.path}`);
+    }
+    if (!record.isMain && record.portOffset === undefined) {
+      const used = registry
+        .filter((entry) => entry.projectId === record.projectId)
+        .map((entry) => entry.portOffset ?? 0);
+      record.portOffset = Math.max(0, ...used) + PORT_OFFSET_STRIDE;
+    }
     registry.push(record);
     return record;
   });
@@ -405,17 +592,6 @@ export async function removeWorktree(worktreeId: string): Promise<boolean> {
  * responsible for picking free ports at runtime.
  */
 export const PORT_OFFSET_STRIDE = 3;
-
-/** Monotonic per-project port offset: max existing + stride, starting at stride. */
-export async function nextPortOffset(projectId: string): Promise<number> {
-  return withWorktreeRegistry(async (registry) => {
-    const used = registry
-      .filter((w) => w.projectId === projectId && typeof w.portOffset === "number")
-      .map((w) => w.portOffset as number);
-    if (used.length === 0) return PORT_OFFSET_STRIDE;
-    return Math.max(...used) + PORT_OFFSET_STRIDE;
-  });
-}
 
 export function isMainWorktreeName(name: string): boolean {
   return name === MAIN_WORKTREE_NAME;

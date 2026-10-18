@@ -36,6 +36,11 @@ export async function getProjects(): Promise<Project[]> {
   return Promise.all(records.map(hydrate));
 }
 
+/** Read registered IDs without hydrating every project's script files. */
+export async function getProjectIds(): Promise<string[]> {
+  return (await readRecords()).map((record) => record.id);
+}
+
 export async function getProject(id: string): Promise<Project | null> {
   const record = (await readRecords()).find((p) => p.id === id);
   return record ? hydrate(record) : null;
