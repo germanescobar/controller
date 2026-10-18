@@ -1,4 +1,4 @@
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -64,6 +64,7 @@ export function JumpToBottomButton({
   // to `true`), so a freshly-mounted session should *not* flash the
   // button during the first paint.
   const [visible, setVisible] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -85,7 +86,11 @@ export function JumpToBottomButton({
     const update = () => {
       const distanceFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight;
-      setVisible(distanceFromBottom > threshold);
+      const shouldShow = distanceFromBottom > threshold;
+      if (!shouldShow && document.activeElement === buttonRef.current) {
+        buttonRef.current.blur();
+      }
+      setVisible(shouldShow);
     };
 
     // Run once on mount so a container that opens already scrolled
@@ -119,11 +124,13 @@ export function JumpToBottomButton({
       aria-hidden={!visible}
     >
       <button
+        ref={buttonRef}
         type="button"
         aria-label="Jump to bottom"
         title="Jump to bottom"
         data-testid="jump-to-bottom"
-        onClick={onScrollToBottom}
+        onClick={visible ? onScrollToBottom : undefined}
+        disabled={!visible}
         tabIndex={visible ? 0 : -1}
         className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >

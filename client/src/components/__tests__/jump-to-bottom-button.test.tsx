@@ -48,6 +48,7 @@ test("jump button follows scroll distance, stays keyboard inert when hidden, and
     assert.equal(wrapper.getAttribute("data-visible"), "false");
     assert.equal(wrapper.getAttribute("aria-hidden"), "true");
     assert.equal(button.getAttribute("tabindex"), "-1");
+    assert.ok(button.hasAttribute("disabled"));
     assert.ok(wrapper.classList.contains("pointer-events-none"));
 
     await act(async () => {
@@ -57,7 +58,11 @@ test("jump button follows scroll distance, stays keyboard inert when hidden, and
     assert.equal(wrapper.getAttribute("data-visible"), "true");
     assert.equal(wrapper.getAttribute("aria-hidden"), "false");
     assert.equal(button.getAttribute("tabindex"), "0");
+    assert.ok(!button.hasAttribute("disabled"));
     assert.ok(wrapper.classList.contains("pointer-events-auto"));
+
+    (button as unknown as HTMLButtonElement).focus();
+    assert.equal(browserWindow.document.activeElement, button);
 
     await act(async () => {
       button.dispatchEvent(new browserWindow.MouseEvent("click", { bubbles: true }));
@@ -65,6 +70,31 @@ test("jump button follows scroll distance, stays keyboard inert when hidden, and
     assert.equal(clicks, 1);
     assert.equal(wrapper.getAttribute("data-visible"), "false");
     assert.equal(button.getAttribute("tabindex"), "-1");
+    assert.ok(button.hasAttribute("disabled"));
+    assert.notEqual(browserWindow.document.activeElement, button);
+
+    await act(async () => {
+      button.dispatchEvent(new browserWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      button.dispatchEvent(new browserWindow.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+      button.dispatchEvent(new browserWindow.MouseEvent("click", { bubbles: true }));
+    });
+    assert.equal(clicks, 1);
+
+    await act(async () => {
+      scroller.scrollTop = 719;
+      scroller.dispatchEvent(new browserWindow.Event("scroll"));
+    });
+    (button as unknown as HTMLButtonElement).focus();
+    assert.equal(browserWindow.document.activeElement, button);
+
+    await act(async () => {
+      scroller.scrollTop = 800;
+      scroller.dispatchEvent(new browserWindow.Event("scroll"));
+    });
+    assert.ok(button.hasAttribute("disabled"));
+    assert.notEqual(browserWindow.document.activeElement, button);
+    (button as unknown as HTMLButtonElement).click();
+    assert.equal(clicks, 1);
 
     await act(async () => {
       scroller.scrollTop = 720; // exactly 80 px from the bottom
