@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { lock } from "proper-lockfile";
 
 /** Claim the shared Controller home before running schedules, wakes, or goals. */
@@ -9,6 +10,7 @@ export async function tryAcquireSharedLoopOwner(
   await fs.mkdir(home, { recursive: true });
   try {
     return await lock(home, {
+      lockfilePath: path.join(home, ".shared-loop-owner.lock"),
       stale: 30_000,
       update: 5_000,
       onCompromised,

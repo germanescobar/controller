@@ -65,7 +65,7 @@ test("a symlink alias cannot claim the same home twice", async () => {
 
 test("a stale lock left by a crashed owner is reclaimed", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "controller-owner-stale-"));
-  const lockDir = `${home}.lock`;
+  const lockDir = path.join(home, ".shared-loop-owner.lock");
   try {
     await fs.mkdir(lockDir);
     const old = new Date(Date.now() - 60_000);
@@ -76,5 +76,20 @@ test("a stale lock left by a crashed owner is reclaimed", async () => {
   } finally {
     await fs.rm(lockDir, { recursive: true, force: true });
     await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("a writable home needs no write access to its parent", async () => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "controller-owner-parent-"));
+  const home = path.join(parent, "home");
+  try {
+    await fs.mkdir(home, { mode: 0o700 });
+    await fs.chmod(parent, 0o500);
+    const release = await tryAcquireSharedLoopOwner(home, unexpectedCompromise);
+    assert.ok(release);
+    await release();
+  } finally {
+    await fs.chmod(parent, 0o700);
+    await fs.rm(parent, { recursive: true, force: true });
   }
 });
