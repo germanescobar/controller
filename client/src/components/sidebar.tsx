@@ -176,6 +176,20 @@ export interface FocusQueueItem {
    * activity and ordering within the unfinished queue.
    */
   lastVisitedAt?: string;
+  /**
+   * Other per-worktree stores that hold a record for the same
+   * session id (issue #437). Populated by the server when a
+   * collision is detected and folded in by
+   * `dedupeFocusItemsBySessionId`; absent when the session is
+   * unique. The row UI uses this to render a "duplicate copy"
+   * badge and offer a "go to owner" hint.
+   */
+  duplicates?: Array<{
+    worktreeId: string;
+    worktreeName: string;
+    lastActiveAt: string;
+    eventsSize: number;
+  }>;
 }
 
 /**
@@ -278,6 +292,82 @@ export function markFocusItemHandled(
         : item,
     ),
   );
+}
+
+/**
+ * Dedupe focus-queue items by session id (issue #437). A
+ * colliding session id appears once per worktree store that
+ * holds it; without dedupe the focus queue would show the same
+ * conversation in two rows. The kept row follows the same
+ * owner-pick rule the server uses: most-recently-active copy,
+ * ties broken by events-file size, then worktree id lexically. The dropped copies
+ * contribute to the kept row's `duplicates` field so the UI
+ * can still render a "duplicate copy" badge.
+ */
+export function dedupeFocusItemsBySessionId(
+  items: FocusQueueItem[]
+): FocusQueueItem[] {
+  const byId = new Map<string, FocusQueueItem>();
+  for (const item of items) {
+    if (!item || !item.session || typeof item.session.id !== "string") continue;
+    const existing = byId.get(item.session.id);
+    if (!existing) {
+      byId.set(item.session.id, item);
+      continue;
+    }
+    const winner = pickLocalFocusOwner(existing, item);
+    const loser = winner === existing ? item : existing;
+    byId.set(item.session.id, winner);
+    if (loser.worktreeId && loser.worktreeId !== winner.worktreeId) {
+      const list = Array.isArray(winner.duplicates)
+        ? winner.duplicates.slice()
+        : [];
+      list.push({
+        worktreeId: loser.worktreeId,
+        worktreeName: loser.worktreeName,
+        lastActiveAt: loser.session.lastActiveAt,
+        eventsSize: 0,
+      });
+      winner.duplicates = list;
+    }
+  }
+  // Preserve the input order so the focus queue doesn't reshuffle
+  // on every re-render. The first occurrence of each id wins the
+  // ordering slot; subsequent occurrences are folded into the
+  // first's `duplicates`.
+  const seen = new Set<string>();
+  const out: FocusQueueItem[] = [];
+  for (const item of items) {
+    if (!item || !item.session || typeof item.session.id !== "string") continue;
+    if (seen.has(item.session.id)) continue;
+    seen.add(item.session.id);
+    out.push(byId.get(item.session.id)!);
+  }
+  return out;
+}
+
+/**
+ * Local owner-pick used by the focus-queue dedupe. Mirrors the
+ * server's `pickOwner` (most-recently-active, then largest events
+ * file, then lexically smallest worktree id) so the row the user sees on
+ * On Radar matches the row the CLI's `sessions list` would
+ * print.
+ */
+function pickLocalFocusOwner(
+  a: FocusQueueItem,
+  b: FocusQueueItem
+): FocusQueueItem {
+  const aActive = new Date(a.session.lastActiveAt ?? 0).getTime();
+  const bActive = new Date(b.session.lastActiveAt ?? 0).getTime();
+  if (Number.isFinite(aActive) && Number.isFinite(bActive) && aActive !== bActive) {
+    return aActive > bActive ? a : b;
+  }
+  const aSize = b.duplicates?.find((copy) => copy.worktreeId === a.worktreeId)?.eventsSize ?? 0;
+  const bSize = a.duplicates?.find((copy) => copy.worktreeId === b.worktreeId)?.eventsSize ?? 0;
+  if (aSize !== bSize) return aSize > bSize ? a : b;
+  const aId = a.worktreeId ?? "";
+  const bId = b.worktreeId ?? "";
+  return aId <= bId ? a : b;
 }
 
 function CodexLogo({ className }: { className?: string }) {
@@ -599,7 +689,7 @@ export function Sidebar({
   // sorted queue comes back via `focusQueueProp` and is what we
   // render.
   const rawFocusItems = useMemo<FocusQueueItem[]>(() => {
-    return projectData.flatMap((project) =>
+    const items = projectData.flatMap((project) =>
       project.worktrees.flatMap((worktree) =>
         worktree.sessions
           .filter((session) => Boolean(session.focusPinnedAt))
@@ -612,9 +702,18 @@ export function Sidebar({
             session,
             active: activeSessionIds.has(session.id),
             awaitingInput: awaitingInputSessionIds.has(session.id) || undefined,
+            // Issue #437: the server stamps `duplicates` on every
+            // copy of a colliding session id (the field lists the
+            // other worktree stores). We carry it through here so
+            // the focus-queue row can render a "duplicate copy"
+            // badge and offer a "go to owner" hint.
+            duplicates: Array.isArray(session.duplicates)
+              ? session.duplicates
+              : undefined,
           })),
       ),
     );
+    return dedupeFocusItemsBySessionId(items);
   }, [activeSessionIds, awaitingInputSessionIds, projectData]);
 
   // The canonical, sorted queue lives in App (it has the visit

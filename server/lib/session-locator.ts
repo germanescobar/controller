@@ -1,6 +1,11 @@
 import { getProjects, type Project } from "./projects.js";
 import { getProjectWorktrees } from "./worktrees.js";
 import { getSession } from "./sessions.js";
+import {
+  findSessionCollisionsInProject,
+  pickOwner,
+  type CollisionCandidate,
+} from "./session-collision.js";
 
 /*
  * Shared session locator (issue #339 review).
@@ -21,6 +26,17 @@ import { getSession } from "./sessions.js";
  * future UI sidebar would do. Returning the worktree-id alongside the
  * project id lets callers route the queue advance through the
  * `resolveWorktree` plumbing instead of guessing the main worktree.
+ *
+ * Issue #437 owner-pick: when the same session id lives in more than
+ * one per-worktree store (a legacy collision from the #434
+ * "movable conversation" experiment), this helper returns the
+ * deterministic owner via `pickOwner` — the most-recently-active
+ * copy, ties broken by events-file size. Without this, the locator
+ * silently chose whichever store the main-worktree-first walk hit
+ * first, regardless of which copy had the fresher transcript. The
+ * picked owner is exposed as `located.duplicates` so the route
+ * handler can surface a "duplicate copy" diagnostic on the
+ * single-session endpoint.
  */
 
 export interface LocatedSession {
@@ -29,12 +45,26 @@ export interface LocatedSession {
   worktreeId: string;
   /** Absolute filesystem path of the worktree that owns the session. */
   worktreePath: string;
+  /**
+   * Other per-worktree stores that hold a record for the same
+   * session id (issue #437). Populated when a collision is
+   * detected; empty/absent otherwise. The list omits the picked
+   * owner's worktree — it's implicit in `worktreeId` /
+   * `worktreePath` above.
+   */
+  duplicates?: Array<{
+    worktreeId: string;
+    worktreeName: string;
+    worktreePath: string;
+    lastActiveAt: string;
+    eventsSize: number;
+  }>;
 }
 
 /**
- * Walk every project × worktree pair and return the first match for
- * `sessionId`. Returns `null` when the session id is unknown — the
- * session was archived + deleted, or never existed.
+ * Walk every project × worktree pair and return the picked owner
+ * for `sessionId`. Returns `null` when the session id is unknown —
+ * the session was archived + deleted, or never existed.
  */
 export async function locateSessionById(
   sessionId: string
@@ -80,9 +110,10 @@ export async function locateSessionPath(
 
 /**
  * Look up a session within one project by enumerating that project's
- * worktrees (main + non-main). Sessions whose `worktreeId` doesn't
- * match a known worktree also fall back to the main path — legacy
- * resumed sessions or projects with a deleted worktree still resolve.
+ * worktrees (main + non-main). When the session id lives in more
+ * than one per-worktree store, the collisions walk picks the
+ * deterministic owner and exposes the others via
+ * `LocatedSession.duplicates`.
  */
 async function locateSessionInProject(
   project: Project,
@@ -90,7 +121,17 @@ async function locateSessionInProject(
 ): Promise<LocatedSession | null> {
   // First try the main worktree — most legacy sessions live there.
   const mainCandidate = await getSession(project.path, sessionId);
+  // Collision short-circuit: if the main store has the id AND
+  // another worktree in the project also has it, skip the
+  // happy-path return and fall through to the collision-aware
+  // path below. The pre-#437 implementation returned the main
+  // copy here regardless of which store was fresher, so the
+  // collision-aware path is the only place the picked owner
+  // can surface.
   if (mainCandidate) {
+    if (await isCollision(project.id, sessionId)) {
+      return await locateCollidingSession(project, sessionId);
+    }
     return {
       session: mainCandidate,
       projectId: project.id,
@@ -98,12 +139,19 @@ async function locateSessionInProject(
       worktreePath: project.path,
     };
   }
-  // Fall through to non-main worktrees via the registered registry.
+  // Main didn't have it. Fall through to non-main worktrees via
+  // the registered registry. A non-main-only collision is rare
+  // (collisions only happen with the main path) but possible if
+  // a worktree was added after the colliding session was created
+  // — handle it the same way the main-path branch does.
   const worktrees = await getProjectWorktrees(project.id).catch(() => []);
   for (const worktree of worktrees) {
     if (worktree.path === project.path) continue; // already tried main
     const candidate = await getSession(worktree.path, sessionId);
     if (candidate) {
+      if (await isCollision(project.id, sessionId)) {
+        return await locateCollidingSession(project, sessionId);
+      }
       return {
         session: candidate,
         projectId: project.id,
@@ -113,4 +161,55 @@ async function locateSessionInProject(
     }
   }
   return null;
+}
+
+/**
+ * Cheap predicate — used by the happy path to avoid running the full
+ * collision walk when the session is unique. Returns `true` when the
+ * session id has more than one store copy in `projectId`.
+ */
+async function isCollision(projectId: string, sessionId: string): Promise<boolean> {
+  const groups = await findSessionCollisionsInProject(projectId);
+  return groups.has(sessionId);
+}
+
+/**
+ * Build a `LocatedSession` for a colliding session id. Picks the
+ * owner via `pickOwner` and returns the non-owner copies on
+ * `duplicates`. Excludes the owner itself from the duplicates list
+ * — it's implicit in the top-level fields.
+ */
+async function locateCollidingSession(
+  project: Project,
+  sessionId: string
+): Promise<LocatedSession | null> {
+  const groups = await findSessionCollisionsInProject(project.id);
+  const candidates = groups.get(sessionId);
+  if (!candidates || candidates.length === 0) {
+    // Race: a session was deleted between the first-match probe and
+    // the collision walk. Fall through to the caller (no collision
+    // any more, return null so the user gets a clean 404).
+    return null;
+  }
+  const owner = pickOwner(candidates);
+  const duplicates = candidates
+    .filter((c) => c.worktreeId !== owner.worktreeId)
+    .map(duplicateFromCandidate);
+  return {
+    session: owner.session,
+    projectId: project.id,
+    worktreeId: owner.worktreeId,
+    worktreePath: owner.worktreePath,
+    duplicates,
+  };
+}
+
+function duplicateFromCandidate(c: CollisionCandidate) {
+  return {
+    worktreeId: c.worktreeId,
+    worktreeName: c.worktreeName,
+    worktreePath: c.worktreePath,
+    lastActiveAt: c.session.lastActiveAt,
+    eventsSize: c.eventsSize,
+  };
 }
