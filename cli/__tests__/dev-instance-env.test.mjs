@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -127,4 +127,60 @@ test("same-home runtime URL supports older servers without identity", async () =
     await writeFile(path.join(home, "controller-runtime.json"), JSON.stringify({ serverUrl: url }));
     assert.equal((await devServerBaseEnv(env)).CONTROLLER_SHARED_STATE_SECONDARY, "1");
   }, { legacy: true });
+});
+
+test("symlink aliases share a home ID and suppress duplicate loops", async () => {
+  await fixture(async ({ home, url, env }) => {
+    const alias = `${home}-alias`;
+    await symlink(home, alias, "dir");
+    try {
+      assert.equal(controllerHomeId(alias), controllerHomeId(home));
+      const child = await devServerBaseEnv({ ...env, CONTROLLER_HOME: alias, CONTROLLER_SERVER_URL: url });
+      assert.equal(child.CONTROLLER_SHARED_STATE_SECONDARY, "1");
+    } finally {
+      await rm(alias);
+    }
+  });
+});
+
+test("distinct homes have distinct IDs", async () => {
+  const first = await mkdtemp(path.join(os.tmpdir(), "controller-home-first-"));
+  const second = await mkdtemp(path.join(os.tmpdir(), "controller-home-second-"));
+  try {
+    assert.notEqual(controllerHomeId(first), controllerHomeId(second));
+  } finally {
+    await rm(first, { recursive: true, force: true });
+    await rm(second, { recursive: true, force: true });
+  }
+});
+
+test("missing home resolves aliases of its existing ancestor", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "controller-missing-home-"));
+  const real = path.join(parent, "real");
+  const alias = path.join(parent, "alias");
+  await mkdir(real);
+  await symlink(real, alias, "dir");
+  try {
+    assert.equal(controllerHomeId(path.join(real, "new", "home")), controllerHomeId(path.join(alias, "new", "home")));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("case aliases share a home ID on case-insensitive filesystems", async (t) => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "controller-case-home-"));
+  const home = path.join(parent, "HomeCase");
+  const alias = path.join(parent, "homecase");
+  await mkdir(home);
+  try {
+    let sameDirectory = false;
+    try {
+      const [a, b] = await Promise.all([stat(home), stat(alias)]);
+      sameDirectory = a.dev === b.dev && a.ino === b.ino;
+    } catch { /* The filesystem is case-sensitive. */ }
+    if (!sameDirectory) return t.skip("filesystem is case-sensitive");
+    assert.equal(controllerHomeId(home), controllerHomeId(alias));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
 });

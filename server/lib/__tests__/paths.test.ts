@@ -12,14 +12,32 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import {
   orchestratorHome,
+  controllerHomeId,
   defaultHomeForPlatform,
 } from "../paths.js";
+
+test("controllerHomeId identifies a directory through its symlink", () => {
+  const snapshot = captureEnv();
+  const home = makeTempDir("paths-home-id-");
+  const alias = `${home}-alias`;
+  symlinkSync(home, alias, "dir");
+  try {
+    process.env.CONTROLLER_HOME = home;
+    const direct = controllerHomeId();
+    process.env.CONTROLLER_HOME = alias;
+    assert.equal(controllerHomeId(), direct);
+  } finally {
+    restoreEnv(snapshot);
+    rmSync(alias);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 interface EnvSnapshot {
   CONTROLLER_HOME?: string;

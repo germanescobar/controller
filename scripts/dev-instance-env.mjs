@@ -1,13 +1,37 @@
 /* Classify source servers independently of the shell's inherited env. */
 import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const PROBE_TIMEOUT_MS = 1000;
 
 export function controllerHomeId(home) {
-  return createHash("sha256").update(path.resolve(home)).digest("hex");
+  const resolved = path.resolve(home);
+  let identity;
+  try {
+    const stats = statSync(resolved, { bigint: true });
+    if (!stats.isDirectory()) throw new Error(`Controller home is not a directory: ${resolved}`);
+    identity = stats.ino > 0n
+      ? `inode:${stats.dev}:${stats.ino}`
+      : `path:${realpathSync.native(resolved)}`;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    const missing = [];
+    let ancestor = resolved;
+    for (;;) {
+      try {
+        identity = `path:${path.join(realpathSync.native(ancestor), ...missing)}`;
+        break;
+      } catch (ancestorError) {
+        if (ancestorError?.code !== "ENOENT") throw ancestorError;
+        missing.unshift(path.basename(ancestor));
+        ancestor = path.dirname(ancestor);
+      }
+    }
+  }
+  return createHash("sha256").update(identity).digest("hex");
 }
 
 /** Null means this server is unreachable or predates home identity support. */
