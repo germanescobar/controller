@@ -249,7 +249,7 @@ test("the worktree route auto-refreshes and DELETE only stops tracking an extern
       assert.equal((await fs.stat(linked)).isDirectory(), true);
       const { stdout } = await exec("git", ["worktree", "list", "--porcelain"], { cwd: source });
       assert.ok(stdout.includes(linked));
-      const after = await fetch(base);
+      const after = await fetch(`${base}?includeRemoved=1`);
       const history = await after.json() as Array<{ id: string; presence?: string }>;
       assert.equal(history.find((row) => row.id === external.id)?.presence, "removed");
     } finally {

@@ -76,7 +76,16 @@ import { SidebarRefreshQueue, type SidebarRefreshScopes } from "../lib/sidebar-r
 
 const SESSION_BATCH_SIZE = 5;
 
-// Main first, then live worktrees, then removed ones kept for history.
+/**
+ * Compare two worktree rows for sidebar display. Removed worktrees
+ * used to be rendered inline as a "kept for history" row; with the
+ * dedicated archive view they are filtered out at the data layer
+ * before the comparator ever runs, so this helper now only orders
+ * active + missing rows. The rank helper is kept around (with a
+ * `removed` branch returning 2) so a future caller that does opt
+ * to render removed rows again doesn't have to re-derive the
+ * ordering.
+ */
 function compareWorktrees(a: Worktree, b: Worktree): number {
   const rank = (worktree: Worktree) => {
     if (worktree.isMain) return 0;
@@ -103,6 +112,13 @@ interface SidebarProps {
   onEditProject: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSettings: () => void;
+  /**
+   * Open the dedicated archive view for a project. Surfaced as a
+   * "Show archived" link under the worktree list so the user has a
+   * discoverable route to soft-archived worktrees that are no
+   * longer rendered in the sidebar.
+   */
+  onShowArchived: (projectId: string) => void;
   /** Confirm before deleting the active editor's project or worktree. */
   onBeforeRemove?: (target: { projectId: string; worktreeId?: string }) => boolean;
   /**
@@ -512,6 +528,7 @@ export function Sidebar({
   onOpenPullRequest,
   onNewProject,
   onEditProject,
+  onShowArchived,
   onProjectsChanged,
   onSettings,
   onBeforeRemove,
@@ -784,7 +801,15 @@ export function Sidebar({
     }));
 
     const loadProject = async (project: Project): Promise<void> => {
-      const worktrees = await fetchWorktrees(project.id);
+      // The default `fetchWorktrees` response hides removed rows at
+      // the server (see `getProjectWorktrees(projectId, …)`). The
+      // client-side filter below is a belt-and-braces guard so a
+      // mid-upgrade client (old server, new client) can never render
+      // a removed worktree in the sidebar; the dedicated archive
+      // view is the only surface that ever shows them.
+      const worktrees = (await fetchWorktrees(project.id)).filter(
+        (wt) => wt.presence !== "removed"
+      );
       const summaries = await fetchProjectSessionSummaries(project.id);
       setProjectData((prev) => prev.map((current) => {
         if (current.id !== project.id) return current;
@@ -2003,6 +2028,31 @@ export function Sidebar({
                         );
                       })
                     )}
+                    {/* Dedicated archive view lives outside the
+                        sidebar; the inline "Show archived" link
+                        below each project gives the user a
+                        discoverable route to it without making the
+                        user scroll the project list. The handler
+                        is wired in App; on mobile it also closes
+                        the sidebar so the archive view takes the
+                        main area. Always shown — even when the
+                        live worktree list is empty, every project
+                        is a candidate for archived worktrees, and
+                        a project with *only* archived worktrees is
+                        a real state that needs a discoverable
+                        route back. */}
+                    <button
+                      type="button"
+                      data-testid={`show-archived-${project.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onShowArchived(project.id);
+                      }}
+                      className="mx-2 mt-1 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                    >
+                      <Archive className="h-3.5 w-3.5" aria-hidden="true" />
+                      Show archived
+                    </button>
                   </div>
                 )}
               </div>

@@ -164,7 +164,12 @@ test("DELETE allows a clean worktree to be deleted", async () => {
       return true;
     });
     const { getProjectWorktrees } = await import("../worktrees.js");
-    const removed = (await getProjectWorktrees(projectId)).find((worktree) => worktree.id === worktreeId);
+    // The default response hides removed worktrees from the normal
+    // sidebar; the archive view opts in explicitly with
+    // `{ includeRemoved: true }` so it can list the soft-archived
+    // rows. Both shapes carry the same registry data.
+    const removed = (await getProjectWorktrees(projectId, { includeRemoved: true }))
+      .find((worktree) => worktree.id === worktreeId);
     assert.equal(removed?.presence, "removed");
     const { getSessions } = await import("../sessions.js");
     assert.equal((await getSessions(worktreePath))[0]?.id, "historical");

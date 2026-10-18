@@ -31,6 +31,7 @@ import { ProjectSetup } from "./pages/ProjectSetup.tsx";
 import { EditProject } from "./pages/EditProject.tsx";
 import { SessionView } from "./pages/SessionView.tsx";
 import { SettingsPage, type SettingsSection } from "./pages/Settings.tsx";
+import { ArchivedWorktrees } from "./pages/ArchivedWorktrees.tsx";
 import { useResizablePanel } from "./lib/useResizablePanel.ts";
 import { useFocusShortcuts } from "./lib/useFocusShortcuts.ts";
 import { bumpRelationshipsRefresh } from "./lib/session-relationships.ts";
@@ -72,6 +73,7 @@ export type View =
   | { page: "new-project" }
   | { page: "edit-project"; projectId: string }
   | { page: "session"; projectId: string; worktreeId?: string; sessionId?: string }
+  | { page: "archived-worktrees"; projectId: string }
   | { page: "settings"; section: SettingsSection };
 
 class AppErrorBoundary extends Component<
@@ -137,7 +139,14 @@ function AppBody() {
   const [view, setViewState] = useState<View>(loadSavedView);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
     const saved = loadSavedView();
-    return saved.page === "session" ? saved.projectId : null;
+    // The session and archive views are both project-scoped, so
+    // the sidebar's project-events SSE stream needs the active
+    // project id to be set on cold start. Other views (settings,
+    // empty) deliberately start with no active project.
+    if (saved.page === "session" || saved.page === "archived-worktrees") {
+      return saved.projectId;
+    }
+    return null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
@@ -576,6 +585,24 @@ function AppBody() {
     closeSidebar();
   };
 
+  /**
+   * Open the dedicated archive view for a project. Used by the
+   * sidebar's "Show archived" link under the project's worktree
+   * list. The view is project-scoped — there is no cross-project
+   * archive page — so the caller passes the project id and we
+   * keep the navigation self-contained. We also flip
+   * `activeProjectId` so the existing project-events SSE stream
+   * keeps the sidebar in sync with the archive view: a restore
+   * that happens in the archive view should re-add the row to the
+   * sidebar without waiting for a manual refetch.
+   */
+  const handleShowArchived = (projectId: string) => {
+    if (setView({ page: "archived-worktrees", projectId })) {
+      setActiveProjectId(projectId);
+      closeSidebar();
+    }
+  };
+
   const activeView = view;
   const currentFocusIndex =
     activeView.page === "session" && activeView.sessionId
@@ -838,11 +865,14 @@ function AppBody() {
   }, [sessionViewKey, mobileSessionId]);
   const mobileHeaderProjectId =
     activeView.page === "session" ||
-    activeView.page === "edit-project"
+    activeView.page === "edit-project" ||
+    activeView.page === "archived-worktrees"
       ? activeView.projectId
       : null;
   const mobileHeaderTitle =
-    projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Controller";
+    activeView.page === "archived-worktrees"
+      ? `Archived · ${projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "project"}`
+      : projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Controller";
   const showSessionHeading = activeView.page === "session" && Boolean(activeView.sessionId);
   const currentMobileHeading = showSessionHeading && mobileSessionHeading?.sessionId === activeView.sessionId
     ? mobileSessionHeading
@@ -878,6 +908,7 @@ function AppBody() {
           onEditProject={(projectId) => {
             if (setView({ page: "edit-project", projectId })) closeSidebar();
           }}
+          onShowArchived={handleShowArchived}
           onProjectsChanged={loadProjects}
           onSettings={() => {
             if (setView({ page: "settings", section: "agents" })) closeSidebar();
@@ -1047,6 +1078,16 @@ function AppBody() {
             onClose={() => setView(preSettingsViewRef.current)}
             projectId={activeProjectId ?? undefined}
             onOpenSession={handleOpenSessionFromSchedule}
+          />
+        )}
+
+        {activeView.page === "archived-worktrees" && (
+          <ArchivedWorktrees
+            projectId={activeView.projectId}
+            projectName={
+              projects.find((p) => p.id === activeView.projectId)?.name
+            }
+            onClose={() => setView({ page: "session", projectId: activeView.projectId })}
           />
         )}
         </AppErrorBoundary>

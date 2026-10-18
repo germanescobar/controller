@@ -71,6 +71,19 @@ export function getSessionRuntime(sessionId: string): SessionRuntimeState {
   return runtimes.get(sessionId) ?? { active: false };
 }
 
+/**
+ * Drop the in-memory runtime record for a session whose on-disk
+ * artifacts just got purged. Used by the worktree purge flow so a
+ * later `getSessionRuntime` call doesn't surface a phantom "active"
+ * state for a session id that no longer has a JSON file behind it.
+ *
+ * No-op when the session was never registered — the typical case
+ * for archived worktrees whose sessions ended long ago.
+ */
+export function clearSessionRuntime(sessionId: string): void {
+  runtimes.delete(sessionId);
+}
+
 /** Record an approval the live process is blocked on, awaiting a decision. */
 export function recordPendingApproval(
   sessionId: string,

@@ -1872,8 +1872,17 @@ export async function fetchPullRequest(
   return res.json();
 }
 
-export async function fetchWorktrees(projectId: string): Promise<Worktree[]> {
-  const res = await fetch(`${BASE}/projects/${projectId}/worktrees`);
+export async function fetchWorktrees(
+  projectId: string,
+  options: { includeRemoved?: boolean } = {}
+): Promise<Worktree[]> {
+  // `?includeRemoved=1` is the archive-view escape hatch — the
+  // default response hides removed rows so the normal sidebar can
+  // never accidentally render one. Callers that want the full
+  // registry (the dedicated archive view, the worktree-create
+  // collision check) opt in explicitly.
+  const query = options.includeRemoved ? "?includeRemoved=1" : "";
+  const res = await fetch(`${BASE}/projects/${projectId}/worktrees${query}`);
   return res.json();
 }
 
@@ -2110,6 +2119,54 @@ export async function deleteWorktree(
     err.status = res.status;
     throw err;
   }
+}
+
+/**
+ * Restore a previously-archived worktree back to the sidebar. The
+ * server flips the registry row from `removed` to `active`; the
+ * directory on disk is not touched. Resolves with the restored
+ * worktree so the caller can navigate to it without a refetch.
+ *
+ * The dedicated archive view calls this on "Unarchive". Throws when
+ * the server rejects the restore (typically 409 because the worktree
+ * is no longer in the archived state).
+ */
+export async function restoreWorktree(
+  projectId: string,
+  worktreeId: string
+): Promise<Worktree> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/worktrees/${worktreeId}/restore`,
+    { method: "POST" }
+  );
+  await throwIfNotOk(res, "Failed to restore worktree");
+  const body = (await res.json()) as { worktree: Worktree };
+  return body.worktree;
+}
+
+/**
+ * Hard-delete an archived worktree. The user has already confirmed
+ * the consequences in the UI; this call purges the per-worktree
+ * session history, terminal tabs, and registry row. Idempotent: a
+ * second call against an already-purged worktree id returns 404,
+ * which the caller treats as success-or-noop.
+ *
+ * Throws when the server refuses the purge (main worktree, or a
+ * worktree that is still `active` and not yet archived).
+ */
+export async function purgeWorktree(
+  projectId: string,
+  worktreeId: string
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/projects/${projectId}/worktrees/${worktreeId}/purge`,
+    { method: "DELETE" }
+  );
+  // 404 = the row was already gone (concurrent purge, or the user
+  // raced themselves in two tabs). Treat as success so the UI can
+  // stop showing a spinner.
+  if (res.status === 404) return;
+  await throwIfNotOk(res, "Failed to purge worktree");
 }
 
 export async function fetchWorktreeSetupLog(
