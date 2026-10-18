@@ -42,16 +42,14 @@ interface JumpToBottomButtonProps {
 /**
  * Floating "jump to bottom" button for the conversation scroll area.
  *
- * The button is absolutely positioned inside the chat scroll container
- * (the parent must add `relative` for the absolute positioning to
- * anchor against it instead of the page). When the user is more than
- * `threshold` pixels away from the bottom it fades in at
- * bottom-right; when the user is back within the band it fades out
- * and becomes inert (`pointer-events-none`) so it can't intercept
- * clicks meant for the message bubbles underneath.
+ * The button is absolutely positioned in the chat viewport overlay
+ * (the parent must add `relative` for the absolute positioning).
+ * When the user is more than `threshold` pixels away from the bottom
+ * it fades in at bottom-right; within the band it fades out
+ * and becomes inert so it can't intercept clicks or keyboard focus.
  *
- * Intentionally chat-side only: the button is rendered inside the
- * chat scroll container itself, not in the outer panel layout, so the
+ * Intentionally chat-side only: the button is rendered beside the
+ * chat scroll container, inside its viewport wrapper, so the
  * terminal / files / PR / preview panes (which sit to the right of
  * the chat) are unaffected.
  */
@@ -111,13 +109,14 @@ export function JumpToBottomButton({
   return (
     <div
       className={cn(
-        "pointer-events-none absolute bottom-4 right-4 transition-all duration-200",
+        "absolute bottom-4 right-4 transition-all duration-200",
         visible
-          ? "translate-y-0 opacity-100"
-          : "translate-y-2 opacity-0",
+          ? "pointer-events-auto translate-y-0 opacity-100"
+          : "pointer-events-none translate-y-2 opacity-0",
       )}
       data-testid="jump-to-bottom-wrapper"
       data-visible={visible ? "true" : "false"}
+      aria-hidden={!visible}
     >
       <button
         type="button"
@@ -125,9 +124,7 @@ export function JumpToBottomButton({
         title="Jump to bottom"
         data-testid="jump-to-bottom"
         onClick={onScrollToBottom}
-        // The wrapper already owns the pointer-events toggle; we keep
-        // the button itself always interactive so a future host that
-        // drops the wrapper (e.g. a toolbar variant) still works.
+        tabIndex={visible ? 0 : -1}
         className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       >
         <ArrowDown className="h-4 w-4" aria-hidden="true" />

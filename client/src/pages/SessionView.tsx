@@ -7834,21 +7834,12 @@ export function SessionView({
           ) : null}
 
           {/* Messages / Events area */}
-          <div
-            ref={scrollContainerRef}
-            onScroll={handleScroll}
-            // `relative` is the positioning anchor for the
-            // JumpToBottomButton's `absolute bottom-4 right-4`
-            // wrapper. Without it, the button would anchor against
-            // the nearest positioned ancestor (the right panel
-            // layout) and float on top of the terminal / files /
-            // PR / preview panes instead of the chat. Keeping the
-            // anchor local to the chat scroll container also makes
-            // the button inert outside of a conversation, which
-            // matches the rest of the chat-side surfaces
-            // (FocusConversationControls, the composer, etc.).
-            className="relative flex-1 overflow-y-auto min-h-0"
-          >
+          <div className="relative flex flex-1 min-h-0 flex-col">
+            <div
+              ref={scrollContainerRef}
+              onScroll={handleScroll}
+              className="flex-1 overflow-y-auto min-h-0"
+            >
             <ProjectRootContext.Provider value={activeWorktree?.path ?? project?.path}>
             <SelectionAddContext.Provider value={addSelection}>
             <OpenSourceReferenceContext.Provider value={openSourceReference}>
@@ -8242,15 +8233,9 @@ export function SessionView({
             </OpenSourceReferenceContext.Provider>
             </SelectionAddContext.Provider>
             </ProjectRootContext.Provider>
-            {/* Floating "jump to bottom" button. Renders inside the
-                chat scroll container (whose `relative` class is the
-                positioning anchor) so it appears only on the chat
-                side of the layout — the terminal / files / PR /
-                preview panes to the right are intentionally
-                unaffected. The component owns its own visibility
-                based on the container's scroll position, and clicks
-                re-arm `stickToBottomRef` so subsequent new events
-                auto-scroll with the run. */}
+            </div>
+            {/* Keep the overlay outside the scroll content so it stays in
+                the chat viewport, above the composer. */}
             <JumpToBottomButton
               scrollContainerRef={scrollContainerRef}
               onScrollToBottom={scrollToBottom}
