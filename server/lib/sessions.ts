@@ -14,6 +14,11 @@ import {
 import { projectStoreDir } from "./paths.js";
 import { getProjects } from "./projects.js";
 import { getProjectWorktrees } from "./worktrees.js";
+import {
+  findSessionCollisionsInProject,
+  pickOwner,
+  type CollisionCandidate,
+} from "./session-collision.js";
 
 export interface SessionState {
   id: string;
@@ -93,6 +98,16 @@ export interface SessionState {
   // back to the global `AGENT_INACTIVITY_TIMEOUT_MS` env var (and
   // then the 5-minute default) when absent.
   agentInactivityTimeoutMs?: number;
+  /**
+   * Non-owner per-worktree copies of this same session id
+   * (issue #437). Populated by the read paths
+   * (`getSessionSummaries`, `getSession`, `locateSessionById`)
+   * when a collision is detected. Never persisted on the session
+   * file — `saveSession` strips it so the file shape stays
+   * provider-roundtrippable. The list omits this session's own
+   * worktree and the picked owner.
+   */
+  duplicates?: SessionCollisionDuplicate[];
 }
 
 /**
@@ -102,7 +117,30 @@ export interface SessionState {
  * keep the payload small. The full `SessionState` is still served by the
  * single-session endpoint.
  */
-export type SessionSummary = Omit<SessionState, "messages">;
+export type SessionSummary = Omit<SessionState, "messages" | "duplicates"> & {
+  /**
+   * Other per-worktree stores that hold a record for the same
+   * session id (issue #437). Empty/absent when the session is
+   * unique. The list omits the worktree this summary itself came
+   * from and the picked owner — see `getSessionSummaries` for the
+   * shape. Surfaced so the sidebar / focus queue can dedupe by id
+   * and show a "duplicate copy" badge on the non-owner entries.
+   */
+  duplicates?: SessionCollisionDuplicate[];
+};
+
+/**
+ * One non-owner copy of a session that has the same id in another
+ * worktree's store. Carries just enough metadata to render a
+ * "duplicate on worktree X, last active at Y" tooltip without
+ * having to re-fetch the full session.
+ */
+export interface SessionCollisionDuplicate {
+  worktreeId: string;
+  worktreeName: string;
+  lastActiveAt: string;
+  eventsSize: number;
+}
 
 export interface AgentEvent {
   id: string;
@@ -251,36 +289,55 @@ export async function getSessions(
  * provider-specific transcript fields (e.g. `conversationItems`) that are just
  * as large as `messages`, and an allowlist guarantees none of them leak into
  * the response as new fields are added.
+ *
+ * Pass `projectId` to enable the issue #437 collision diagnostic: when the
+ * same session id is present in another worktree of the same project, the
+ * returned summary carries a `duplicates` array listing the other copies
+ * (the picked owner is omitted). When `projectId` is undefined the helper
+ * behaves as before and the `duplicates` field is always absent — preserves
+ * the existing call sites that don't have a project id handy.
  */
 export async function getSessionSummaries(
-  projectPath: string
+  projectPath: string,
+  projectId?: string
 ): Promise<SessionSummary[]> {
   const sessions = await getSessions(projectPath);
-  return sessions.map((s) => ({
-    id: s.id,
-    title: s.title,
-    workingDirectory: s.workingDirectory,
-    worktreeId: s.worktreeId,
-    model: s.model,
-    reasoningEffort: s.reasoningEffort,
-    serviceTier: s.serviceTier,
-    provider: s.provider,
-    mode: s.mode,
-    createdAt: s.createdAt,
-    lastActiveAt: s.lastActiveAt,
-    status: s.status,
-    focusPinnedAt: s.focusPinnedAt,
-    focusDoneAt: s.focusDoneAt,
-    userUnpinned: s.userUnpinned,
-    // `parentId` round-trips through the summary mapping so the CLI's
-    // `sessions list --parent <id>` filter (issue #353) can match
-    // sessions by their declared parent. Without this line the
-    // allowlist would silently drop the field — `SessionSummary`
-    // declares it via `Omit<SessionState, "messages">`, but the
-    // implementation maps fields explicitly so the typing doesn't
-    // save us here.
-    parentId: s.parentId,
-  }));
+  const collisions = projectId
+    ? await findSessionCollisionsInProject(projectId)
+    : new Map<string, CollisionCandidate[]>();
+  return sessions.map((s) => {
+    const duplicates = collisionDuplicatesFor(s, collisions);
+    return {
+      id: s.id,
+      title: s.title,
+      workingDirectory: s.workingDirectory,
+      worktreeId: s.worktreeId,
+      model: s.model,
+      reasoningEffort: s.reasoningEffort,
+      serviceTier: s.serviceTier,
+      provider: s.provider,
+      mode: s.mode,
+      createdAt: s.createdAt,
+      lastActiveAt: s.lastActiveAt,
+      status: s.status,
+      focusPinnedAt: s.focusPinnedAt,
+      focusDoneAt: s.focusDoneAt,
+      userUnpinned: s.userUnpinned,
+      // `parentId` round-trips through the summary mapping so the CLI's
+      // `sessions list --parent <id>` filter (issue #353) can match
+      // sessions by their declared parent. Without this line the
+      // allowlist would silently drop the field — `SessionSummary`
+      // declares it via `Omit<SessionState, "messages">`, but the
+      // implementation maps fields explicitly so the typing doesn't
+      // save us here.
+      parentId: s.parentId,
+      // Issue #437: surface other per-worktree stores that share
+      // this session id. Absent when there is no collision so the
+      // happy-path payload stays byte-identical to the pre-#437
+      // shape. See `collisionDuplicatesFor` for the owner-pick rule.
+      ...(duplicates ? { duplicates } : {}),
+    };
+  });
 }
 
 /**
@@ -352,7 +409,8 @@ export async function listChildSessions(
 
 export async function getSession(
   projectPath: string,
-  sessionId: string
+  sessionId: string,
+  projectId?: string
 ): Promise<SessionState | null> {
   const filePath = path.join(
     storagePaths(projectPath).sessions,
@@ -381,7 +439,18 @@ export async function getSession(
   delete session.focusDoneAt;
   delete session.userUnpinned;
   const focus = await readSessionFocus(sessionId);
-  return applyFocus(session, focus);
+  const merged = applyFocus(session, focus);
+  // Issue #437: when the caller hands us a project id, also
+  // surface other per-worktree stores that hold the same session
+  // id. The `duplicates` array excludes this session's own
+  // worktree and the picked owner (the owner is implicit — it's
+  // the worktree the caller already asked for).
+  if (projectId) {
+    const collisions = await findSessionCollisionsInProject(projectId);
+    const duplicates = collisionDuplicatesFor(merged, collisions);
+    if (duplicates) merged.duplicates = duplicates;
+  }
+  return merged;
 }
 
 export async function archiveSession(
@@ -833,10 +902,13 @@ export async function saveSession(
   // Strip Controller-managed focus fields before writing so the
   // session file stays in a shape any provider can round-trip.
   // Focus state lives separately in `<controllerHome>/focus/<sessionId>.json`.
+  // `duplicates` (issue #437) is the read-path diagnostic, not a
+  // persisted field — strip it for the same round-trip reason.
   const persisted: SessionState = { ...session };
   delete persisted.focusPinnedAt;
   delete persisted.focusDoneAt;
   delete persisted.userUnpinned;
+  delete persisted.duplicates;
   await fs.writeFile(filePath, JSON.stringify(persisted, null, 2));
 }
 
@@ -850,4 +922,48 @@ export async function appendEvent(
   await fs.mkdir(events, { recursive: true });
   const filePath = path.join(events, `${sessionId}.jsonl`);
   await fs.appendFile(filePath, JSON.stringify(event) + "\n");
+}
+
+/**
+ * Build the `duplicates` array a session summary should carry when
+ * `sessionId` is present in another worktree's store (issue #437).
+ *
+ * Semantics:
+ *   - The picked owner sees `duplicates` listing the non-owner
+ *     copies — the owner is the implicit "one true entry" and the
+ *     list names the other stores that have the same id.
+ *   - A non-owner copy sees `duplicates` listing every other copy
+ *     (the owner + the other non-owners), so the user is told
+ *     "this session is also on worktrees X, Y, Z" and can
+ *     navigate to the owner.
+ *
+ * The caller (the sidebar / single-session endpoint) decides what
+ * to do with the field — render a "duplicate" badge, surface a
+ * repair hint, etc. Both shapes carry the same information: the
+ * set of stores holding the id, minus the worktree this summary
+ * itself came from.
+ *
+ * Returns `undefined` when there is no collision at all, so the
+ * happy-path payload stays byte-identical to the pre-#437 shape.
+ */
+function collisionDuplicatesFor(
+  session: SessionState,
+  collisions: Map<string, CollisionCandidate[]>
+): SessionCollisionDuplicate[] | undefined {
+  const candidates = collisions.get(session.id);
+  if (!candidates || candidates.length < 2) return undefined;
+  const ownWorktreeId = session.worktreeId ?? "";
+  const others = candidates.filter((c) => c.worktreeId !== ownWorktreeId);
+  if (others.length === 0) {
+    // A non-owner copy whose worktree id is missing from the
+    // collision map (e.g. a brand-new session whose worktree
+    // hasn't been registered yet). Nothing to surface.
+    return undefined;
+  }
+  return others.map((c) => ({
+    worktreeId: c.worktreeId,
+    worktreeName: c.worktreeName,
+    lastActiveAt: c.session.lastActiveAt,
+    eventsSize: c.eventsSize,
+  }));
 }

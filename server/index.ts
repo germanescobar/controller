@@ -12,6 +12,7 @@ import {
   monitorBySessionIdRouter,
   sendBySessionIdRouter,
   childrenBySessionIdRouter,
+  collisionsRouter,
 } from "./routes/sessions.js";
 import { worktreesRouter } from "./routes/worktrees.js";
 import { eventsRouter } from "./routes/events.js";
@@ -99,6 +100,7 @@ app.use("/api/sessions", goalBySessionIdRouter);
 app.use("/api/sessions", monitorBySessionIdRouter);
 app.use("/api/sessions", sendBySessionIdRouter);
 app.use("/api/sessions", childrenBySessionIdRouter);
+app.use("/api/sessions", collisionsRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/api-keys", apiKeysRouter);
 app.use("/api/agents", agentsRouter);

@@ -312,3 +312,56 @@ test("full queue with visits: awaiting → unvisited → visited → running", (
     "running-newest",
   ]);
 });
+
+/*
+ * Issue #437: dedupe focus-queue items by session id. A colliding
+ * session id appears once per worktree store; the focus queue
+ * must show only the picked owner. The dropped copies contribute
+ * to the kept row's `duplicates` field so the UI can still
+ * render a "duplicate copy" badge.
+ */
+
+import { dedupeFocusItemsBySessionId } from "../sidebar.tsx";
+
+test("dedupeFocusItemsBySessionId keeps the most-recently-active copy and folds the older into duplicates", () => {
+  // The exact on-disk shape from the issue body: a session id
+  // with the same title in two worktrees, with the feature
+  // worktree having a fresher lastActiveAt. The dedupe must
+  // keep the feature copy as the row the user sees and surface
+  // the main copy in `duplicates`.
+  const feature = item("shared", "2026-10-17T19:34:10.000Z", true, undefined);
+  feature.worktreeId = "wt-feature";
+  feature.worktreeName = "feature";
+  const main = item("shared", "2026-10-16T04:15:21.000Z", true, undefined);
+  main.worktreeId = "wt-main";
+  main.worktreeName = "main";
+  const result = dedupeFocusItemsBySessionId([feature, main]);
+  assert.equal(result.length, 1, "colliding id must dedupe to one row");
+  assert.equal(result[0].worktreeId, "wt-feature", "must keep the fresher copy as the owner");
+  assert.ok(Array.isArray(result[0].duplicates));
+  assert.equal(result[0].duplicates!.length, 1);
+  assert.equal(result[0].duplicates![0].worktreeId, "wt-main");
+});
+
+test("dedupeFocusItemsBySessionId leaves single-store sessions untouched", () => {
+  // The happy path: a unique session id is rendered once, with
+  // no `duplicates` field.
+  const solo = item("unique", "2026-10-17T19:34:10.000Z", true, undefined);
+  const result = dedupeFocusItemsBySessionId([solo]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].session.id, "unique");
+  assert.equal(result[0].duplicates, undefined);
+});
+
+test("dedupeFocusItemsBySessionId preserves input order when no collisions are present", () => {
+  // The focus queue shouldn't reshuffle on every re-render just
+  // because we ran the dedupe.
+  const a = item("a", "2026-10-17T10:00:00.000Z", true, undefined);
+  const b = item("b", "2026-10-17T11:00:00.000Z", true, undefined);
+  const c = item("c", "2026-10-17T12:00:00.000Z", true, undefined);
+  const result = dedupeFocusItemsBySessionId([a, b, c]);
+  assert.deepEqual(
+    result.map((r) => r.session.id),
+    ["a", "b", "c"]
+  );
+});

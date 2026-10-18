@@ -5127,4 +5127,261 @@ test("controller --help lists the projects subcommand (issue #370)", async () =>
   assert.match(out, /controller projects list \[--json\]/);
   assert.match(out, /controller worktrees list \[<project>\]/);
   assert.match(out, /controller sessions list \[<project>\]/);
+  assert.match(out, /controller sessions collisions/);
+  assert.match(out, /controller sessions repair/);
+});
+
+/*
+ * Issue #437: the `controller sessions collisions` and
+ * `controller sessions repair <id>` surfaces. Both delegate to
+ * the `/api/sessions/...` routes introduced alongside #437 and
+ * are tested with the same `globalThis.fetch` stub the other
+ * tests use.
+ */
+
+test("runCollisions GETs the collision report and prints one row per collision", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  const stdoutChunks = [];
+  globalThis.fetch = async (url) => {
+    calls.push({ url: String(url) });
+    return {
+      status: 200,
+      json: async () => ({
+        reports: [
+          {
+            sessionId: "shared-1",
+            owner: {
+              worktreeId: "wt-feature",
+              worktreeName: "feature",
+              worktreePath: "/tmp/feature",
+              lastActiveAt: "2026-10-17T19:34:10.000Z",
+              eventsSize: 1024,
+            },
+            candidates: [
+              {
+                worktreeId: "wt-feature",
+                worktreeName: "feature",
+                worktreePath: "/tmp/feature",
+                lastActiveAt: "2026-10-17T19:34:10.000Z",
+                eventsSize: 1024,
+              },
+              {
+                worktreeId: "wt-main",
+                worktreeName: "main",
+                worktreePath: "/tmp/main",
+                lastActiveAt: "2026-10-16T04:15:21.000Z",
+                eventsSize: 800,
+              },
+            ],
+          },
+        ],
+      }),
+    };
+  };
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runCollisions([], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/api\/sessions\/collisions$/);
+  const out = stdoutChunks.join("");
+  assert.match(out, /shared-1/);
+  assert.match(out, /owner=feature/);
+  assert.match(out, /main@/);
+});
+
+test("runCollisions prints 'No collisions.' when the report is empty", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  globalThis.fetch = async () => ({
+    status: 200,
+    json: async () => ({ reports: [] }),
+  });
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runCollisions([], "http://controller.test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.match(stdoutChunks.join(""), /No collisions\./);
+});
+
+test("runRepair validates the --owner worktree id against the server's collision report", async () => {
+  // Pre-flight: the CLI must ask the server for the collision
+  // report before committing, so a typo in --owner is caught
+  // locally with a clear error rather than as a 400 from the
+  // server.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push({ url: String(url) });
+    return {
+      status: 200,
+      json: async () => ({
+        report: {
+          sessionId: "shared-1",
+          owner: { worktreeId: "wt-feature" },
+          candidates: [
+            { worktreeId: "wt-feature" },
+            { worktreeId: "wt-main" },
+          ],
+        },
+      }),
+    };
+  };
+  const stderrChunks = [];
+  process.stderr.write = (chunk) => {
+    stderrChunks.push(String(chunk));
+    return true;
+  };
+  let exitCalled = false;
+  const originalExit = process.exit;
+  process.exit = (code) => {
+    exitCalled = true;
+    throw new Error(`exit(${code})`);
+  };
+  try {
+    await assert.rejects(
+      () =>
+        cli.runRepair(
+          ["shared-1", "--owner", "wt-typo"],
+          "http://controller.test"
+        ),
+      /exit/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stderr.write = originalStderr;
+    process.exit = originalExit;
+  }
+  assert.ok(exitCalled, "CLI must exit non-zero on bad --owner");
+  assert.match(
+    stderrChunks.join(""),
+    /--owner wt-typo is not one of the colliding stores/
+  );
+  assert.equal(calls.length, 1, "preflight must call the diagnostic route exactly once");
+  assert.match(calls[0].url, /\/api\/sessions\/shared-1\/collision$/);
+});
+
+test("runRepair --dry-run preflights but does not POST the repair", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method });
+    return {
+      status: 200,
+      json: async () => ({
+        report: {
+          sessionId: "shared-1",
+          owner: { worktreeId: "wt-feature" },
+          candidates: [
+            { worktreeId: "wt-feature" },
+            { worktreeId: "wt-main" },
+          ],
+        },
+      }),
+    };
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runRepair(
+      ["shared-1", "--owner", "wt-feature", "--dry-run"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(calls.length, 1, "dry-run must only call the diagnostic route");
+  assert.equal(calls[0].method, undefined, "diagnostic route is a GET, not a POST");
+  assert.match(stdoutChunks.join(""), /Would keep wt-feature/);
+});
+
+test("runRepair POSTs the action=pick-owner payload and prints the manifest path", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write.bind(process.stdout);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method, body: init?.body });
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    if (body.action) {
+      return {
+        status: 200,
+        json: async () => ({
+          manifest: {
+            runId: "2026-10-17T19-34-10-abc123",
+            sessionId: "shared-1",
+            ownerWorktreeId: body.ownerWorktreeId,
+            quarantined: [
+              { worktreeId: "wt-main" },
+              { worktreeId: "wt-other" },
+            ],
+            preserved: [{ worktreeId: "wt-feature" }],
+            repairedAt: "2026-10-17T19:34:10.000Z",
+          },
+        }),
+      };
+    }
+    return {
+      status: 200,
+      json: async () => ({
+        report: {
+          sessionId: "shared-1",
+          owner: { worktreeId: "wt-feature" },
+          candidates: [
+            { worktreeId: "wt-feature" },
+            { worktreeId: "wt-main" },
+            { worktreeId: "wt-other" },
+          ],
+        },
+      }),
+    };
+  };
+  const stdoutChunks = [];
+  process.stdout.write = (chunk) => {
+    stdoutChunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await cli.runRepair(
+      ["shared-1", "--owner", "wt-feature"],
+      "http://controller.test"
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+  assert.equal(calls.length, 2, "must preflight + POST the repair");
+  assert.match(calls[0].url, /\/api\/sessions\/shared-1\/collision$/);
+  assert.match(calls[1].url, /\/api\/sessions\/shared-1\/repair$/);
+  const repairBody = JSON.parse(calls[1].body);
+  assert.equal(repairBody.action, "pick-owner");
+  assert.equal(repairBody.ownerWorktreeId, "wt-feature");
+  assert.match(stdoutChunks.join(""), /Repaired shared-1/);
+  assert.match(stdoutChunks.join(""), /kept wt-feature/);
+  assert.match(stdoutChunks.join(""), /quarantined 2 store copies/);
 });

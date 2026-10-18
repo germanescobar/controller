@@ -219,6 +219,27 @@ export function sessionQueueFile(sessionId: string): string {
   return path.join(sessionQueuesDir(), `${sessionId}.json`);
 }
 
+// --- Session Collision Quarantine (issue #437) ---
+
+/**
+ * Directory holding quarantined copies of legacy duplicate session
+ * records. The collision-detection helper walks every per-worktree
+ * store; when the same session id lives in more than one, the user
+ * can pick one owner and have the others archived into a
+ * timestamped folder under here so the unique transcript data is
+ * preserved on disk instead of being silently dropped. Each repair
+ * run produces its own subdirectory so multiple repairs over time
+ * don't clobber each other.
+ */
+export function sessionCollisionQuarantineDir(): string {
+  return path.join(orchestratorHome(), "session-collisions");
+}
+
+/** Manifest describing one quarantine run. */
+export function sessionCollisionQuarantineFile(runId: string): string {
+  return path.join(sessionCollisionQuarantineDir(), `${runId}.json`);
+}
+
 // --- Shortcut Bindings ---
 
 /**
