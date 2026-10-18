@@ -168,8 +168,23 @@ export async function ensureMainWorktree(project: Project): Promise<Worktree> {
   );
 }
 
+export interface GetProjectWorktreesOptions {
+  /**
+   * When `true`, include worktrees with `presence === "removed"` in the
+   * returned list. The sidebar / focus queue deliberately hides these —
+   * archived worktrees are surfaced through the dedicated archive view
+   * instead. The archive view passes `true` so it can list every row
+   * that still owns a session history on disk.
+   *
+   * Defaults to `false` so an accidental API call never leaks the
+   * removed set back into the normal sidebar.
+   */
+  includeRemoved?: boolean;
+}
+
 export async function getProjectWorktrees(
-  projectId: string
+  projectId: string,
+  options: GetProjectWorktreesOptions = {}
 ): Promise<Worktree[]> {
   const project = await getProject(projectId);
   if (!project) return [];
@@ -179,7 +194,7 @@ export async function getProjectWorktrees(
     const hit = cachedRegistry(key);
     if (hit) {
       const found = projectWorktrees(hit, projectId);
-      if (found) return withPresence(found);
+      if (found) return withPresence(found, options);
     }
     const worktrees = await withLock(file, async () => {
       // Another caller may have populated the cache while we waited.
@@ -203,7 +218,7 @@ export async function getProjectWorktrees(
       const snapshot = cacheRegistry(file, currentKey, registry);
       return projectWorktrees(snapshot, projectId) ?? [];
     });
-    return withPresence(worktrees);
+    return withPresence(worktrees, options);
   } catch (err) {
     if (err instanceof RegistryParseError) {
       // Surface the corruption to the operator but do not persist a
@@ -217,8 +232,14 @@ export async function getProjectWorktrees(
 }
 
 /** Report missing paths without mutating or reparsing the registry on every read. */
-async function withPresence(worktrees: Worktree[]): Promise<Worktree[]> {
-  return Promise.all(worktrees.map(async (worktree) => {
+async function withPresence(
+  worktrees: Worktree[],
+  options: GetProjectWorktreesOptions = {}
+): Promise<Worktree[]> {
+  const filtered = options.includeRemoved
+    ? worktrees
+    : worktrees.filter((worktree) => worktree.presence !== "removed");
+  return Promise.all(filtered.map(async (worktree) => {
     if (worktree.presence === "removed" || worktree.presence === "missing") return worktree;
     try {
       await fs.access(worktree.path);
@@ -580,6 +601,54 @@ export async function removeWorktree(worktreeId: string): Promise<boolean> {
     const worktree = registry.find((entry) => entry.id === worktreeId);
     if (!worktree || worktree.presence === "removed") return false;
     worktree.presence = "removed";
+    return true;
+  });
+}
+
+/**
+ * Restore a `removed` worktree back to `active`. The directory on disk
+ * is not touched — only the registry row flips back. This is the
+ * "Unarchive" path in the archive view: a user who archived by mistake
+ * gets their worktree back without us re-running setup or pulling
+ * anything from git.
+ *
+ * Returns `null` when no worktree with that id exists, or when the
+ * worktree is not currently archived (caller asked to restore a row
+ * that was never removed). The route layer maps both to a 404/409
+ * response so the UI can show a useful message.
+ */
+export async function restoreWorktree(
+  worktreeId: string
+): Promise<Worktree | null> {
+  return withWorktreeRegistry(async (registry) => {
+    const worktree = registry.find((entry) => entry.id === worktreeId);
+    if (!worktree) return null;
+    if (worktree.presence !== "removed") return null;
+    worktree.presence = "active";
+    return { ...worktree };
+  });
+}
+
+/**
+ * Hard-delete a worktree row from the registry. This is the
+ * "delete forever" path that follows the soft archive: a user who has
+ * confirmed the destruction loses the worktree entry *and* every
+ * per-worktree session event that lived on disk.
+ *
+ * The caller is responsible for purging on-disk artifacts (session
+ * event files, the worktree directory if it still exists) before
+ * invoking this helper. Concentrating the side effects in the route
+ * keeps this function pure and easy to test.
+ *
+ * Returns `true` when a row was removed, `false` when no worktree
+ * with that id existed. The caller should translate a `false` into a
+ * 404.
+ */
+export async function purgeWorktree(worktreeId: string): Promise<boolean> {
+  return withWorktreeRegistry(async (registry) => {
+    const index = registry.findIndex((entry) => entry.id === worktreeId);
+    if (index === -1) return false;
+    registry.splice(index, 1);
     return true;
   });
 }

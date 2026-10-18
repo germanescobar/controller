@@ -14,16 +14,18 @@ import {
   isWorktreeUnavailable,
   isMainWorktreeName,
   removeWorktree,
+  purgeWorktree,
   reconcileGitWorktrees,
   resolveWorktree,
+  restoreWorktree,
   updateWorktree,
   worktreeNotFoundPayload,
   type Worktree,
 } from "../lib/worktrees.js";
-import { projectWorktreesDir, worktreePath } from "../lib/paths.js";
+import { projectStoreDir, projectWorktreesDir, worktreePath } from "../lib/paths.js";
 import { getSessions } from "../lib/sessions.js";
-import { getSessionRuntime } from "../lib/session-runtime.js";
-import { listMonitors } from "../lib/monitors.js";
+import { clearSessionRuntime, getSessionRuntime } from "../lib/session-runtime.js";
+import { listMonitors, stopMonitorsForSession } from "../lib/monitors.js";
 import { refreshWorktreePullRequests } from "../lib/worktree-pull-requests.js";
 import { ptyManager } from "../lib/pty-manager.js";
 import {
@@ -46,7 +48,7 @@ import {
   MENTION_WALK_MAX_DEPTH,
   MENTION_WALK_MAX_LIMIT,
 } from "../lib/file-index.js";
-import { emitWorktreeAdded, emitWorktreeUpdated } from "../lib/events.js";
+import { emitWorktreeAdded, emitWorktreeRemoved, emitWorktreeUpdated } from "../lib/events.js";
 
 export const worktreesRouter = Router();
 
@@ -245,13 +247,19 @@ worktreesRouter.get("/:projectId/worktrees", async (req, res) => {
   // the same fix on the per-worktree sessions endpoint at
   // `server/routes/sessions.ts`).
   res.set("Cache-Control", "no-store");
+  // `?includeRemoved=1` is the escape hatch used by the dedicated
+  // archive view. The default response stays narrow: removed rows are
+  // never shown in the normal sidebar, so a "removed" entry showing
+  // up there is always a bug, not a feature. The dedicated view
+  // passes the flag explicitly.
+  const includeRemoved = getQueryString(req.query.includeRemoved) === "1";
   try {
     const added = await reconcileGitWorktrees(project);
     for (const worktree of added) emitWorktreeAdded(project.id, worktree);
   } catch (error) {
     console.error(`Failed to refresh Git worktrees for ${project.path}:`, error);
   }
-  const worktrees = await getProjectWorktrees(project.id);
+  const worktrees = await getProjectWorktrees(project.id, { includeRemoved });
   refreshWorktreePullRequests(project.path, worktrees, (updated) =>
     emitWorktreeUpdated(project.id, updated)
   );
@@ -999,7 +1007,14 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
     return;
   }
 
-  const existingWorktrees = await getProjectWorktrees(project.id);
+  // Include the archived rows here: session storage is keyed by
+  // worktree path, so reusing a removed worktree's name would
+  // merge its historical sessions into the new one. The sidebar's
+  // default response already hides these, but the create path
+  // needs the full list to detect the name collision.
+  const existingWorktrees = await getProjectWorktrees(project.id, {
+    includeRemoved: true,
+  });
   // Session storage is keyed by worktree path, so reusing a removed
   // worktree's name would merge its historical sessions into the new one.
   const sameName = existingWorktrees.find((w) => w.name === name);
@@ -1338,6 +1353,165 @@ worktreesRouter.delete(
   }
 );
 
+/*
+ * Restore a previously-archived (soft-removed) worktree back to the
+ * sidebar. The directory on disk is NOT touched — the registry row
+ * flips from `presence: "removed"` to `presence: "active"` and the
+ * worktree reappears in the next `GET /worktrees` response (default
+ * response, since the new state is no longer `removed`).
+ *
+ * The user normally reaches this from the dedicated archive view's
+ * "Unarchive" action. The flow is intentionally minimal: no setup
+ * script runs, no pull, no PTY management — the worktree is treated
+ * as a recoverable row, not as a worktree that just got created.
+ *
+ * Responses:
+ *   200 with the restored worktree on success
+ *   404 when the worktree id is unknown to this project
+ *   409 when the worktree is not in the archived state
+ */
+worktreesRouter.post(
+  "/:projectId/worktrees/:worktreeId/restore",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    // The default `getProjectWorktrees` response hides removed
+    // worktrees (the archive view's whole reason to exist), but the
+    // restore path needs to find the row in its archived state.
+    // Opt in here so we can distinguish "no such id" (404) from
+    // "row exists, but isn't archived" (409).
+    const worktrees = await getProjectWorktrees(project.id, {
+      includeRemoved: true,
+    });
+    const existing = worktrees.find((w) => w.id === req.params.worktreeId);
+    if (!existing) {
+      res.status(404).json(
+        await worktreeNotFoundPayload(project.id, req.params.worktreeId)
+      );
+      return;
+    }
+    if (existing.presence !== "removed") {
+      res.status(409).json({
+        error: "worktree is not archived; nothing to restore",
+        presence: existing.presence ?? "active",
+      });
+      return;
+    }
+    const restored = await restoreWorktree(existing.id);
+    if (!restored) {
+      // Lost a race: another caller already restored or removed the
+      // row. Re-read so the client can reconcile against the truth.
+      const current = (await getProjectWorktrees(project.id, { includeRemoved: true }))
+        .find((w) => w.id === req.params.worktreeId);
+      res.status(409).json({
+        error: current
+          ? `worktree is now ${current.presence ?? "active"}; refresh and retry`
+          : "worktree no longer exists",
+      });
+      return;
+    }
+    // Mirror the canonical updated row to other windows so the
+    // sidebar in another tab re-inserts the worktree without a poll.
+    emitWorktreeUpdated(project.id, restored);
+    res.json({ worktree: restored });
+  }
+);
+
+/*
+ * Hard-delete an archived worktree. The user has already explicitly
+ * confirmed the consequences in the UI (a typed "delete" prompt plus
+ * a destructive button label). The route:
+ *
+ *   1. Refuses to touch the project's main worktree, even if it has
+ *      somehow been marked `removed`. The main row is structural and
+ *      losing it would orphan the rest of the project.
+ *   2. Refuses to purge a worktree that is still `active` — users who
+ *      want to hard-delete a live worktree must archive it first, so
+ *      the soft-archive remains the default. This keeps "removed"
+ *      as the single state where "delete forever" is meaningful.
+ *   3. Tears down the on-disk side: every session/event file under
+ *      `projectStoreDir(worktree.path)`, the per-worktree terminal
+ *      tabs entry, and the per-session runtime record. The
+ *      worktree's actual checkout on disk (if it still exists) is
+ *      left alone — restoring from a clone is up to the user.
+ *   4. Removes the registry row last, after the cleanup, so a
+ *      failure mid-cleanup leaves the archive row intact and the
+ *      user can retry.
+ *
+ * Responses:
+ *   200 on success
+ *   400 when called on the main worktree
+ *   404 when the worktree id is unknown
+ *   409 when the worktree is not in the archived state
+ */
+worktreesRouter.delete(
+  "/:projectId/worktrees/:worktreeId/purge",
+  async (req, res) => {
+    const project = await getProject(req.params.projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    // Same opt-in as the restore route: a removed worktree is the
+    // only kind the purge will accept, and the default response
+    // hides them.
+    const worktrees = await getProjectWorktrees(project.id, {
+      includeRemoved: true,
+    });
+    const worktree = worktrees.find((w) => w.id === req.params.worktreeId);
+    if (!worktree) {
+      res.status(404).json(
+        await worktreeNotFoundPayload(project.id, req.params.worktreeId)
+      );
+      return;
+    }
+    if (worktree.isMain) {
+      res.status(400).json({ error: "cannot purge the main worktree" });
+      return;
+    }
+    if (worktree.presence !== "removed") {
+      res.status(409).json({
+        error: "worktree is not archived; archive it first to enable permanent deletion",
+        presence: worktree.presence ?? "active",
+      });
+      return;
+    }
+
+    // Tear down the on-disk side first so a partial failure leaves
+    // the registry row in a state the user can retry from.
+    try {
+      await purgeWorktreeArtifacts(project, worktree);
+    } catch (err) {
+      console.error(
+        `Failed to purge artifacts for archived worktree ${worktree.id}:`,
+        err,
+      );
+      res.status(500).json({
+        error: `failed to clean up worktree artifacts: ${(err as Error).message}`,
+      });
+      return;
+    }
+
+    const removed = await purgeWorktree(worktree.id);
+    if (!removed) {
+      // The row was already gone — probably a concurrent purge.
+      // The artifacts are still cleaned up; just return 200 so the
+      // client stops waiting.
+      res.json({ ok: true, alreadyGone: true });
+      return;
+    }
+    // Tell the archive view in any open window to drop the row. A
+    // dedicated `worktree_removed` event was already emitted on the
+    // initial soft-archive, but the same id arriving again is a
+    // cheap, idempotent refresh.
+    emitWorktreeRemoved(project.id, worktree.id);
+    res.json({ ok: true });
+  }
+);
+
 // --- helpers ---
 
 /**
@@ -1389,6 +1563,63 @@ function isControllerOwnedPath(relativePath: string): boolean {
   if (normalized === ".coding-agent") return true;
   if (normalized.startsWith(".coding-agent/")) return true;
   return false;
+}
+
+/**
+ * Tear down every per-worktree side that Controller owns, in service
+ * of the hard-delete ("Delete forever") action exposed by the
+ * archive view. The function is intentionally narrow — it touches
+ * only Controller-owned storage, never the user's actual worktree
+ * checkout on disk. The user can `git worktree remove` that
+ * themselves once the orchestrator's bookkeeping is gone.
+ *
+ * Order matters: we stop monitors first so a half-done cleanup
+ * never leaves a child process pointing at a registry row we
+ * already removed. Then we drop the per-worktree terminal tabs,
+ * the per-worktree Controller-owned store directory (sessions,
+ * events, attachments), and finally clear the in-memory session
+ * runtime state for every session that used to live there.
+ *
+ * Failures are wrapped in a single try/catch by the caller so we
+ * can return a useful error to the UI; partial cleanup is the
+ * goal (best effort), not an atomic transaction.
+ */
+async function purgeWorktreeArtifacts(
+  project: { id: string; path: string },
+  worktree: Worktree,
+): Promise<void> {
+  // 1. Per-session monitors: each monitor references a session id
+  //    and lives in an in-process map. Walking the worktree's
+  //    session list before we delete the directory gives us the
+  //    ids we need to reap.
+  for (const session of await getSessions(worktree.path).catch(() => [])) {
+    stopMonitorsForSession(session.id);
+    // The runtime map is keyed by session id. The in-memory record
+    // for a session whose disk artifact just got deleted is now
+    // orphaned — drop it so a later `getSessionRuntime` call
+    // doesn't see a phantom "active" state.
+    clearSessionRuntime(session.id);
+  }
+
+  // 2. Per-worktree terminal tabs. The function already short-circuits
+  //    when the registry has no row for the worktree, so it's safe to
+  //    call unconditionally.
+  await removeTerminalTabsForWorktree(project.id, worktree.id);
+
+  // 3. Per-worktree Controller-owned storage. `projectStoreDir` is
+  //    always under the Controller home (keyed by the worktree's
+  //    absolute path) and never lives in the user's working tree,
+  //    so the path is by definition Controller-owned. Two worktrees
+  //    in different projects that happen to share a path (rare;
+  //    usually only happens across projects sharing a single repo)
+  //    would resolve to the same store dir; deleting it is still
+  //    correct because the registry row for *this* worktree is
+  //    about to vanish, and the other project's row keeps the
+  //    shared path alive in its own registry.
+  const storeDir = projectStoreDir(worktree.path);
+  if (existsSync(storeDir)) {
+    await fs.rm(storeDir, { recursive: true, force: true });
+  }
 }
 
 function runStreamed(
