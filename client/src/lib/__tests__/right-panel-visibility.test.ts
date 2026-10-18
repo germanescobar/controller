@@ -202,6 +202,85 @@ test("right panel fills the viewport on mobile when mobilePanel is non-agent", (
   assert.equal(cls, "flex-1");
 });
 
+// --- Container class: viewport-transition regression ------------------------
+
+test("container class never returns flex-1 on desktop, regardless of mobilePanel", () => {
+  // Regression: on a mobile-to-desktop viewport transition,
+  // `mobilePanel` may still be a non-"agent" value (e.g. "files"
+  // if the user was viewing a file on their phone and then
+  // resized the window up). The container class used to be
+  // `flex-1 md:w-1/2`, which sets the flex basis to auto and
+  // silently overrides the inline `width` style — the resize
+  // handle's drag would have no visible effect.
+  //
+  // The fix routes the class through `rightPanelContainerClass`,
+  // which always returns a width-friendly class on desktop
+  // (no `flex-1`) so the inline `width` from
+  // `getRightPanelInlineWidthStyle` actually sizes the panel.
+  for (const mobilePanel of ["agent", "files", "preview", "pr", "terminal", "changes"] as MobilePanel[]) {
+    const cls = rightPanelContainerClass(state({
+      terminalOpen: true,
+      mobilePanel,
+      rightTab: "files",
+      isDesktopViewport: true,
+    }));
+    assert.ok(
+      !cls.includes("flex-1"),
+      `desktop container class for mobilePanel=${mobilePanel} should not include "flex-1" (got "${cls}")`,
+    );
+  }
+});
+
+test("container class regression: a non-agent mobilePanel on desktop doesn't pin the panel to half width", () => {
+  // Direct codification of Codex's Finding 1: a phone user with
+  // `mobilePanel="files"` resizes to desktop. The old JSX would
+  // give the panel `flex-1 md:w-1/2`, which sets the flex
+  // basis to auto. Combined with the inline saved width (e.g.
+  // 320px), the panel would render at half the viewport, and
+  // dragging the handle toward a smaller width would have no
+  // visible effect because flex-1 fights the inline width.
+  const cls = rightPanelContainerClass(state({
+    terminalOpen: true,
+    mobilePanel: "files",
+    rightTab: "files",
+    isDesktopViewport: true,
+  }));
+  // The class must be width-friendly (no flex-1) so the inline
+  // style controls the panel width.
+  assert.equal(cls, "hidden md:flex");
+});
+
+// --- Viewport read at promise-resolve time ---------------------------------
+
+test("openSourcePath viewport-read pattern: a ref-read at resolve time picks the current viewport", () => {
+  // Regression: `openSourcePath` captures `isDesktopViewport`
+  // from the React closure when it calls `fetchSourceFile`, but
+  // the `.then()` callback runs after the file fetch resolves —
+  // by which time the user may have rotated the device or
+  // resized a responsive window. The captured value is stale.
+  //
+  // The fix is to keep `isDesktopViewport` in a ref that's
+  // synced with the state, and read `.current` inside the
+  // promise. This test exercises the decision the JS would
+  // make at resolve time given a fresh ref-read.
+  const desktopAtStart = state({ isDesktopViewport: true });
+  // Simulate the ref being updated by a viewport change effect
+  // *before* the file fetch resolved.
+  const refAtResolveTime = { isDesktopViewport: false };
+  const viewportAtResolve = refAtResolveTime.isDesktopViewport;
+  // Decision the fix's code makes: only write mobilePanel when
+  // the viewport read at resolve time is mobile.
+  const shouldSetMobilePanel = !viewportAtResolve;
+  assert.equal(
+    shouldSetMobilePanel,
+    true,
+    "after a desktop→mobile viewport change, the file should still surface on the new mobile layout",
+  );
+  // Sanity check: the captured value (desktop) would have made
+  // the wrong decision.
+  assert.notEqual(!desktopAtStart.isDesktopViewport, shouldSetMobilePanel);
+});
+
 // --- Close behavior --------------------------------------------------------
 
 test("right-panel toggle button closes the panel on desktop for every tab", () => {

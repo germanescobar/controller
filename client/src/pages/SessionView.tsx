@@ -44,6 +44,7 @@ import {
   isRightPanelResizeHandleVisible,
   isRightPanelVisible as isRightPanelMounted,
   getRightPanelInlineWidthStyle,
+  rightPanelContainerClass,
   type RightPanelTab,
   type MobilePanel,
 } from "@/lib/right-panel-visibility";
@@ -3780,6 +3781,18 @@ export function SessionView({
   // right panel stayed mounted via the `mobilePanel === "files"`
   // branch.
   const isDesktopViewport = !isMobileComposerViewport;
+  // `isDesktopViewport` is read inside the `openSourcePath`
+  // `.then()` callback, which runs after an async file fetch. The
+  // viewport can change between the request start and the
+  // resolution (the user rotated the device, or resized a
+  // responsive window mid-load), so the captured React state
+  // would be stale. The ref is kept in sync with the state via
+  // the effect below; reading `.current` inside the promise
+  // always returns the viewport value at resolve time.
+  const isDesktopViewportRef = useRef(isDesktopViewport);
+  useEffect(() => {
+    isDesktopViewportRef.current = isDesktopViewport;
+  }, [isDesktopViewport]);
   const composerLayout = getComposerLayout(
     isMobileComposerViewport,
     composerHasFocus,
@@ -7008,7 +7021,17 @@ export function SessionView({
         // resize handle and made the side-panel toggle button a
         // no-op (the right panel stayed mounted via the
         // `mobilePanel === "files"` branch of the render guard).
-        if (!isDesktopViewport) {
+        //
+        // The viewport read here must use the ref, not the captured
+        // closure value: the file fetch is async, and the user can
+        // resize or rotate the window between the request start and
+        // the resolution. The captured `isDesktopViewport` would
+        // then be stale, and on a desktop→mobile transition the
+        // `setMobilePanel("files")` would be skipped — leaving the
+        // right panel mounted (via `terminalOpen=true`) but with the
+        // `mobilePanel === "agent"` container class hidden, so the
+        // successfully loaded file would never become visible.
+        if (!isDesktopViewportRef.current) {
           setMobilePanel("files");
         }
         // Promote `path` to the head of the recent list so the fuzzy
@@ -7023,7 +7046,7 @@ export function SessionView({
       .catch((err) => {
         toast.error(err instanceof Error ? err.message : `Could not open ${errorLabel}`);
       });
-  }, [projectId, worktreeId, isDesktopViewport]);
+  }, [projectId, worktreeId]);
 
   // Open a different source file. Gates on the dirty-check so the
   // user gets a chance to save first. The agent still keeps
@@ -9138,14 +9161,12 @@ export function SessionView({
           />
         ) : null}
 
-        {/* Right panel — desktop: side panel with Terminal/Changes/Files/PR/Preview tabs; mobile: full screen when a panel tab is active */}
+        {/* Right panel — desktop: side panel with Terminal/Changes/Files/PR/Preview tabs; mobile: full screen when a panel tab is active. The container class follows the viewport (not `mobilePanel`) for the same reason the resize-handle gate does: on a mobile-to-desktop transition, `mobilePanel` may still be a non-"agent" value, and the old `flex-1 md:w-1/2` class would set the flex basis to auto and silently override the inline `width` so the drag handle stops controlling the panel. The helper keeps the mobile full-screen mode (`flex-1`) and the desktop split (a width-friendly `hidden md:flex` so the inline width takes effect). */}
         {isRightPanelMounted({ terminalOpen, mobilePanel, rightTab, isDesktopViewport }) && (() => {
           const { added: changesAdded, deleted: changesDeleted } = summarizeDiffFiles(gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles);
           const hasChanges = gitDiffFiles.length > 0 || branchDiffFiles.length > 0;
           return (
-          <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${
-            mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" || mobilePanel === "pr" ? "flex-1 md:w-1/2" : "hidden md:flex"
-          }`}
+          <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${rightPanelContainerClass({ terminalOpen, mobilePanel, rightTab, isDesktopViewport })}`}
           style={getRightPanelInlineWidthStyle(
             { terminalOpen, mobilePanel, rightTab, isDesktopViewport },
             rightPanelResize.width,
