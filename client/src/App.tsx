@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { Archive, ArrowRight, Menu, PanelRight, X } from "lucide-react";
+import { ArrowRight, Menu, PanelRight, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -946,15 +946,6 @@ function AppBody() {
               aria-expanded={sessionSidebarOpen}
             >
               <PanelRight className="h-4 w-4" />
-            </button>
-          )}
-          {activeView.page === "session" && activeView.sessionId && (
-            <button
-              onClick={handleArchiveCurrentSession}
-              className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-              title="Archive session"
-            >
-              <Archive className="h-4 w-4" />
             </button>
           )}
         </div>

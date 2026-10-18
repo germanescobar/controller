@@ -7624,6 +7624,21 @@ export function SessionView({
                           {tab.label}
                         </button>
                       ))}
+                      {onArchive ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onMobileSidebarClose?.();
+                            onArchive();
+                          }}
+                          className="mt-1 flex w-full items-center gap-3 rounded-md border-t border-blue-500/20 px-2 py-2 text-left text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                          title="Archive session"
+                          aria-label="Archive session"
+                        >
+                          <Archive className="h-4 w-4" />
+                          Archive session
+                        </button>
+                      ) : null}
                     </nav>
                   }
                 />
