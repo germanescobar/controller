@@ -210,6 +210,32 @@ const USAGE = `Usage:
   lifetime. The server caps monitors at 8 per session and lines at
   1000 per monitor.
 
+  controller sessions collisions [--json]
+
+  \`sessions collisions\` lists every session id that has more than
+  one per-worktree store copy (issue #437). The same id living in
+  main and a feature worktree produces two records; this command
+  reports each collision with the picked owner (most-recently-
+  active copy, ties broken by events-file size) and the other
+  copies' worktree + lastActiveAt. \`--json\` emits one report per
+  line for pipelines. Use \`controller sessions repair <id> --owner
+  <worktreeId>\` to collapse a collision.
+
+  controller sessions repair <sessionId> --owner <worktreeId> [--dry-run]
+
+  \`sessions repair\` quarantines every non-owner copy of
+  \`<sessionId>\` into a timestamped folder under the Controller
+  home, then deletes the live non-owner records. \`<worktreeId>\`
+  must be one of the colliding stores' worktree ids — use
+  \`sessions collisions\` to discover them. The non-owner session
+  files, events files, and a manifest describing what was moved
+  where are kept under \`~/Library/Application Support/Controller/
+  session-collisions/\` so unique transcript data is preserved on
+  disk until the user decides to delete it. The repair refuses
+  while any of the affected sessions is active (the same
+  strict-archive rule from issue #351). \`--dry-run\` prints what
+  would happen without writing or deleting.
+
   controller schedules list [<project>] [--enabled-only]
   controller schedules show <project> <scheduleId>
   controller schedules add [<project>] --worktree <id> --prompt <text> \\
@@ -1172,6 +1198,38 @@ export function parseSessions(argv) {
         goalArgv: rest,
       };
     }
+    case "collisions": {
+      // `controller sessions collisions [--json]` (issue #437).
+      // Diagnostic-only surface: reports every session id that has
+      // more than one per-worktree store copy. Delegated to
+      // `runCollisions` so the surface is mounted under
+      // `/api/sessions/collisions` — no project id needed because
+      // the route walks every project × worktree itself. JSON mode
+      // emits one `SessionCollisionReport` per line so a follow-up
+      // pipeline can grep / count / pipe into `sessions repair`.
+      return {
+        project: "",
+        action: "collisions",
+        collisionArgv: rest,
+      };
+    }
+    case "repair": {
+      // `controller sessions repair <sessionId> --owner <worktreeId>
+      // [--dry-run]` (issue #437). The session id is the canonical
+      // one (a Controller UUID or provider thread id). The owner
+      // worktree id must be one of the colliding stores' worktree
+      // ids — `runRepair` calls the diagnostic route first and
+      // surfaces a clear error if the supplied id isn't in the
+      // report. `--dry-run` skips the actual quarantine so the user
+      // can see what would happen before committing. Like
+      // `collisions`, this is mounted under `/api/sessions/...` so
+      // no project id is needed.
+      return {
+        project: "",
+        action: "repair",
+        repairArgv: rest,
+      };
+    }
     default:
       fail(`Unknown sessions command: ${command}\n${USAGE}`);
   }
@@ -1391,6 +1449,14 @@ export async function runSessions(argv, serverUrl) {
     await runGoal(parsed.goalArgv, serverUrl);
     return;
   }
+  if (parsed.action === "collisions") {
+    await runCollisions(parsed.collisionArgv, serverUrl);
+    return;
+  }
+  if (parsed.action === "repair") {
+    await runRepair(parsed.repairArgv, serverUrl);
+    return;
+  }
   fail(`Unknown sessions action: ${parsed.action}`);
 }
 
@@ -1431,6 +1497,17 @@ async function runSessionsList(filters, serverUrl, projectId) {
       (row) => row && typeof row === "object" && row.provider === provider
     );
   }
+  // Issue #437: dedupe by session id. A colliding session id
+  // produces one summary per worktree's store; the table should
+  // show the picked owner (most-recently-active copy, ties broken
+  // by events-file size — the same strategy the server uses) and
+  // drop the non-owner copies. We track the deduplicated count so
+  // the human-readable footer can print a one-line warning without
+  // polluting the JSON output (the JSON already carries `duplicates`
+  // on the surviving owner row, so the warning is redundant in
+  // `--json` mode).
+  const { rows: dedupedRows, dropped } = dedupeBySessionId(rows);
+  rows = dedupedRows;
   // Sort by `lastActiveAt` descending to match the server's natural
   // order; the per-worktree walk may have interleaved rows from
   // different worktrees otherwise.
@@ -1464,6 +1541,89 @@ async function runSessionsList(filters, serverUrl, projectId) {
   for (const row of rows) {
     process.stdout.write(`${formatSessionRow(row)}\n`);
   }
+  if (dropped > 0) {
+    // Issue #437 footer: surface the count of dropped non-owner
+    // copies so the user knows collisions exist before they go
+    // hunting for them. The exact shape is intentionally terse —
+    // `controller sessions collisions` is the one-stop surface.
+    process.stdout.write(
+      `(note: ${dropped} duplicate session record${dropped === 1 ? " was" : "s were"} ` +
+        `deduped; run \`controller sessions collisions\` for the full report.)\n`
+    );
+  }
+}
+
+/**
+ * Dedupe a list of session summaries by id, keeping the picked
+ * owner per session (issue #437). The owner-pick rule mirrors
+ * `server/lib/session-collision.ts::pickOwner`: most-recently-
+ * active copy, ties broken by events-file size, then
+ * worktree id lexically. Returns the surviving rows in input
+ * order and the count of dropped non-owner copies.
+ */
+function dedupeBySessionId(rows) {
+  const dropped = new Map(); // sessionId -> count of dropped copies
+  const byId = new Map(); // sessionId -> row
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || typeof row.id !== "string") continue;
+    const existing = byId.get(row.id);
+    if (!existing) {
+      byId.set(row.id, row);
+      continue;
+    }
+    const winner = pickLocalOwner(existing, row);
+    const loser = winner === existing ? row : existing;
+    byId.set(row.id, winner);
+    dropped.set(row.id, (dropped.get(row.id) ?? 0) + 1);
+    // Preserve the loser's metadata on the winner's `duplicates`
+    // so the user can still see "this row is also on worktree X"
+    // even though we dropped the duplicate. The server's own
+    // `duplicates` field is the canonical source when the server
+    // can see every worktree of the project; this client-side
+    // enrichment covers the `--worktree <id>` short-circuit where
+    // the per-worktree endpoint doesn't populate `duplicates`.
+    const duplicateEntry = {
+      worktreeId: loser.worktreeId ?? "",
+      lastActiveAt: loser.lastActiveAt ?? null,
+    };
+    const list = Array.isArray(winner.duplicates)
+      ? winner.duplicates.slice()
+      : [];
+    if (duplicateEntry.worktreeId && duplicateEntry.worktreeId !== winner.worktreeId) {
+      list.push(duplicateEntry);
+    }
+    winner.duplicates = list;
+  }
+  const surviving = [];
+  for (const row of rows) {
+    if (row && typeof row === "object" && byId.get(row.id) === row) {
+      surviving.push(row);
+    }
+  }
+  let totalDropped = 0;
+  for (const count of dropped.values()) totalDropped += count;
+  return { rows: surviving, dropped: totalDropped };
+}
+
+/**
+ * Pick the better of two summaries for the same session id.
+ * Mirrors the server-side `pickOwner` rule (most-recent lastActiveAt,
+ * then events-file size, then lexically smallest worktree id) but
+ * is local to the CLI dedupe path. Returns the winning row
+ * (mutates nothing).
+ */
+function pickLocalOwner(a, b) {
+  const aActive = new Date(a?.lastActiveAt ?? 0).getTime();
+  const bActive = new Date(b?.lastActiveAt ?? 0).getTime();
+  if (Number.isFinite(aActive) && Number.isFinite(bActive) && aActive !== bActive) {
+    return aActive > bActive ? a : b;
+  }
+  const aSize = b.duplicates?.find((copy) => copy.worktreeId === a.worktreeId)?.eventsSize ?? 0;
+  const bSize = a.duplicates?.find((copy) => copy.worktreeId === b.worktreeId)?.eventsSize ?? 0;
+  if (aSize !== bSize) return aSize > bSize ? a : b;
+  const aId = a?.worktreeId ?? "";
+  const bId = b?.worktreeId ?? "";
+  return aId <= bId ? a : b;
 }
 
 /**
@@ -1759,6 +1919,162 @@ export async function runMonitor(argv, serverUrl) {
     fail(serverError(result, `Failed to stop monitor (HTTP ${response.status})`));
   }
   process.stdout.write("Monitor stopped.\n");
+}
+
+// --- sessions collisions / repair surface (issue #437) ---
+
+/**
+ * `controller sessions collisions [--json]` (issue #437). Fetches the
+ * collision report and prints one row per colliding session id. The
+ * human-readable form names the picked owner, the other copies'
+ * worktree ids, and each copy's lastActiveAt. JSON mode emits one
+ * `SessionCollisionReport` per line so a follow-up pipeline can
+ * grep / count / pipe into `sessions repair`.
+ *
+ * The route is mounted at `/api/sessions/collisions` and walks every
+ * project × worktree, so no project id is needed and the surface
+ * stays consistent with the other per-session routes.
+ */
+export async function runCollisions(argv, serverUrl) {
+  const json = argv.includes("--json");
+  if (json) {
+    assertKnownFlags(argv, ["--json"], "sessions collisions");
+  } else {
+    assertKnownFlags(argv, [], "sessions collisions");
+  }
+  const route = "/api/sessions/collisions";
+  const { response, result } = await getJson(serverUrl, route);
+  if (response.status >= 400) {
+    fail(serverError(result, `Failed to list collisions (HTTP ${response.status})`));
+  }
+  const reports = Array.isArray(result?.reports) ? result.reports : [];
+  if (json) {
+    for (const report of reports) {
+      process.stdout.write(`${JSON.stringify(report)}\n`);
+    }
+    return;
+  }
+  if (reports.length === 0) {
+    process.stdout.write("No collisions.\n");
+    return;
+  }
+  for (const report of reports) {
+    process.stdout.write(`${formatCollisionRow(report)}\n`);
+  }
+}
+
+/**
+ * Format one `SessionCollisionReport` for the human-readable
+ * `controller sessions collisions` table. Mirrors
+ * `server/lib/session-collision.ts::formatCollisionRow` so the
+ * CLI's output matches what the route's diagnostic would return
+ * to a UI client. Kept in the CLI rather than imported so the
+ * binary stays dependency-free (the CLI is plain JS shipped via
+ * `cli/copy-cli.mjs`; pulling the server TypeScript module in
+ * would require a build step).
+ */
+function formatCollisionRow(report) {
+  const owner = report?.owner;
+  const ownerName = owner?.worktreeName ?? "?";
+  const candidates = Array.isArray(report?.candidates) ? report.candidates : [];
+  const ownerId = owner?.worktreeId ?? "";
+  const others = candidates
+    .filter((c) => c && c.worktreeId !== ownerId)
+    .map((c) => `${c.worktreeName ?? "?"}@${formatCollisionTimestamp(c.session?.lastActiveAt)}`)
+    .join(", ");
+  return `${report?.sessionId ?? "?"}  owner=${ownerName}  duplicates=[${others}]`;
+}
+
+function formatCollisionTimestamp(iso) {
+  if (typeof iso !== "string" || !iso) return "?";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  return new Date(t).toISOString().replace("T", " ").slice(0, 19);
+}
+
+/**
+ * `controller sessions repair <sessionId> --owner <worktreeId>
+ * [--dry-run]` (issue #437). Quarantines every non-owner copy of
+ * `sessionId` and deletes the live non-owner records. Refuses
+ * while any of the affected sessions is active.
+ *
+ * Implementation: parse the args, call the per-session diagnostic
+ * route first to confirm the session actually has a collision, then
+ * POST to the repair endpoint with the requested action. The
+ * diagnostic-first step is what lets the CLI reject an `--owner`
+ * that isn't a real worktree id BEFORE the server commits to a
+ * repair — without it a typo would land on the server as
+ * `owner-not-found` and the agent would have to read the error.
+ */
+export async function runRepair(argv, serverUrl) {
+  const known = ["--owner", "--dry-run"];
+  assertKnownFlags(argv, known, "sessions repair");
+  const sessionId = argv[0];
+  if (!sessionId || sessionId.startsWith("--")) {
+    fail("sessions repair requires a <sessionId>");
+  }
+  const ownerWorktreeId = flagValue(argv, "--owner");
+  if (!ownerWorktreeId) {
+    fail("sessions repair requires --owner <worktreeId>");
+  }
+  const dryRun = argv.includes("--dry-run");
+  // Preflight: ask the server for the collision report so we can
+  // validate `--owner` locally and surface a precise error before
+  // committing. The server still re-validates; this is purely a
+  // better CLI error.
+  const diagRoute = `/api/sessions/${encodeURIComponent(sessionId)}/collision`;
+  const { response: diagResponse, result: diagResult } = await getJson(
+    serverUrl,
+    diagRoute
+  );
+  if (diagResponse.status >= 400) {
+    fail(serverError(diagResult, `Failed to inspect collision (HTTP ${diagResponse.status})`));
+  }
+  const report = diagResult?.report;
+  if (!report) {
+    fail(
+      `Session ${sessionId} has no collision. Nothing to repair.`
+    );
+  }
+  const knownWorktreeIds = new Set(
+    (Array.isArray(report?.candidates) ? report.candidates : []).map(
+      (c) => c?.worktreeId
+    )
+  );
+  if (!knownWorktreeIds.has(ownerWorktreeId)) {
+    const list = Array.from(knownWorktreeIds).join(", ");
+    fail(
+      `--owner ${ownerWorktreeId} is not one of the colliding stores for ${sessionId}. ` +
+        `Known worktree ids: ${list}.`
+    );
+  }
+  if (dryRun) {
+    const owner = report.candidates.find((candidate) => candidate.worktreeId === ownerWorktreeId);
+    const others = (Array.isArray(report?.candidates) ? report.candidates : [])
+      .filter((c) => c?.worktreeId !== owner?.worktreeId)
+      .map((c) => c?.worktreeId)
+      .join(", ");
+    process.stdout.write(
+      `Would keep ${owner?.worktreeId ?? "?"} as the owner and quarantine [${others}] for session ${sessionId}.\n`
+    );
+    return;
+  }
+  const repairRoute = `/api/sessions/${encodeURIComponent(sessionId)}/repair`;
+  const { response, result } = await postJson(serverUrl, repairRoute, {
+    action: "pick-owner",
+    ownerWorktreeId,
+  });
+  if (response.status >= 400) {
+    fail(serverError(result, `Failed to repair session (HTTP ${response.status})`));
+  }
+  const manifest = result?.manifest;
+  const owner = manifest?.ownerWorktreeId ?? ownerWorktreeId;
+  const count = Array.isArray(manifest?.quarantined) ? manifest.quarantined.length : 0;
+  const runId = manifest?.runId ?? "?";
+  process.stdout.write(
+    `Repaired ${sessionId}: kept ${owner}, quarantined ${count} store copies. ` +
+      `Manifest: ~/Library/Application Support/Controller/session-collisions/${runId}.json\n`
+  );
 }
 
 function formatMonitorRow(monitor) {

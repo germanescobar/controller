@@ -105,6 +105,13 @@ import {
 } from "../lib/session-queue.js";
 import { acceptCodexSteer } from "../lib/codex-steer.js";
 import { locateSessionById } from "../lib/session-locator.js";
+import {
+  CollisionError,
+  findSessionCollisions,
+  listAllCollisions,
+  pickOwner,
+  quarantineCollision,
+} from "../lib/session-collision.js";
 
 // Strip ANSI escape codes (color, cursor, etc.)
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
@@ -1416,6 +1423,38 @@ export async function handleSessionStream(
   if (isWorktreeUnavailable(worktree)) {
     res.status(409).json({ error: `Cannot run a session in a ${worktree.presence} worktree` });
     return;
+  }
+
+  // Check single-store sessions too: waiting for a collision would allow
+  // the first cross-worktree resume to create a second record.
+  const resumeId = req.query.resumeSessionId as string | undefined;
+  if (typeof resumeId === "string" && resumeId.length > 0) {
+    const candidates = await findSessionCollisions(resumeId);
+    if (candidates.length > 0) {
+      const owner = pickOwner(candidates);
+      const resumeWorktreeId = worktree.id;
+      if (owner.projectId !== project.id || owner.worktreeId !== resumeWorktreeId) {
+        res.status(409).json({
+          error:
+            "Cannot resume this session in a different worktree: it already lives in another worktree's store. " +
+            "Resume from the owner worktree, or start a new linked session for cross-worktree continuation.",
+          code: "session-collision",
+          sessionId: resumeId,
+          ownerWorktreeId: owner.worktreeId,
+          ownerWorktreeName: owner.worktreeName,
+          ownerWorktreePath: owner.worktreePath,
+          duplicates: candidates
+            .filter((c) => c.worktreeId !== owner.worktreeId)
+            .map((c) => ({
+              worktreeId: c.worktreeId,
+              worktreeName: c.worktreeName,
+              worktreePath: c.worktreePath,
+              lastActiveAt: c.session.lastActiveAt,
+            })),
+        });
+        return;
+      }
+    }
   }
 
   const message = req.query.message as string;
@@ -4622,7 +4661,10 @@ sessionsRouter.get("/:projectId/sessions", async (req, res) => {
   // which is exactly the bug that hid this session under `issue-353`
   // while the focus queue saw the fresh data.
   res.set("Cache-Control", "no-store");
-  const sessions = await getSessionSummaries(worktree.path);
+  const sessions = await getSessionSummaries(
+    worktree.path,
+    req.params.projectId
+  );
   res.json(sessions);
 });
 
@@ -4646,7 +4688,11 @@ sessionsRouter.get("/:projectId/sessions/:sessionId", async (req, res) => {
     );
     return;
   }
-  const session = await getSession(worktree.path, req.params.sessionId);
+  const session = await getSession(
+    worktree.path,
+    req.params.sessionId,
+    req.params.projectId
+  );
   if (!session) {
     res.status(404).json({ error: "Session not found" });
     return;
@@ -5023,3 +5069,102 @@ function readText(m: Record<string, unknown>): string {
     return "";
   }
 }
+
+/*
+ * Session collision diagnostic + repair surface (issue #437).
+ *
+ * Two routes, both mounted under `/api/sessions` so the CLI can
+ * resolve the project via the same locator it already uses for
+ * `wake` / `goal` / `monitor` / `send` / `children`:
+ *
+ *   GET  /api/sessions/collisions
+ *     -> { reports: SessionCollisionReport[] }
+ *     List every session id that has more than one per-worktree
+ *     store copy. Empty array when no collisions are present.
+ *
+ *   POST /api/sessions/:sessionId/repair
+ *     Body: { action: "pick-owner", ownerWorktreeId: string }
+ *     -> { manifest: CollisionQuarantineManifest }
+ *     Quarantine every non-owner copy of `sessionId` into a
+ *     timestamped folder under the Controller home, then delete the
+ *     live non-owner records. The owner is left in place. The
+ *     response carries the manifest describing what was moved where.
+ *     Refuses with 409 if the session is currently active (mirrors
+ *     the strict-archive rule from issue #351) or with 404 when the
+ *     session id has no collision to repair.
+ *
+ *   GET  /api/sessions/:sessionId/collision
+ *     -> { report: SessionCollisionReport | null }
+ *     Single-session diagnostic: returns the collision report when
+ *     the id has duplicates, null otherwise. Powers the CLI's
+ *     `controller sessions repair <id>` preflight and any future
+ *     UI banner on a session page.
+ */
+export const collisionsRouter = Router();
+
+collisionsRouter.get("/collisions", async (_req, res) => {
+  const reports = await listAllCollisions();
+  res.json({ reports });
+});
+
+collisionsRouter.get("/:sessionId/collision", async (req, res) => {
+  const candidates = await findSessionCollisions(req.params.sessionId);
+  if (candidates.length < 2) {
+    res.json({ report: null });
+    return;
+  }
+  res.json({
+    report: {
+      sessionId: req.params.sessionId,
+      candidates,
+      owner: pickOwner(candidates),
+    },
+  });
+});
+
+collisionsRouter.post("/:sessionId/repair", async (req, res) => {
+  const sessionId = req.params.sessionId;
+  const body = (req.body ?? {}) as { action?: string; ownerWorktreeId?: string };
+  if (body.action !== "pick-owner") {
+    res.status(400).json({
+      error: `Unsupported repair action: ${body.action}. Supported: pick-owner.`,
+    });
+    return;
+  }
+  if (typeof body.ownerWorktreeId !== "string" || !body.ownerWorktreeId.trim()) {
+    res.status(400).json({ error: "ownerWorktreeId is required" });
+    return;
+  }
+  // Refuse to repair a session whose agent is currently streaming
+  // — same shape as the strict-archive rule (issue #351): an
+  // active agent could write into a store we're about to delete.
+  const { getSessionRuntime } = await import("../lib/session-runtime.js");
+  const candidates = await findSessionCollisions(sessionId);
+  if (candidates.length < 2) {
+    res.status(404).json({ error: `Session ${sessionId} has no collision` });
+    return;
+  }
+  for (const c of candidates) {
+    if (getSessionRuntime(sessionId)) {
+      res.status(409).json({
+        error: `Session ${sessionId} is currently active. Stop the agent before running the repair.`,
+        code: "active-session",
+      });
+      return;
+    }
+  }
+  try {
+    const manifest = await quarantineCollision({
+      sessionId,
+      ownerWorktreeId: body.ownerWorktreeId,
+    });
+    res.json({ manifest });
+  } catch (err) {
+    if (err instanceof CollisionError) {
+      const status = err.code === "active-session" ? 409 : 400;
+      res.status(status).json({ error: err.message, code: err.code });
+      return;
+    }
+    throw err;
+  }
+});

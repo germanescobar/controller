@@ -57,6 +57,21 @@ export interface Session {
   // first turn. Cleared by the server on the user's first
   // follow-up resume.
   unstarted?: boolean;
+  /**
+   * Other per-worktree stores that hold a record for the same
+   * session id (issue #437). Populated by the server when a
+   * collision is detected; absent on a healthy store. The
+   * per-worktree session-list endpoint and the single-session
+   * endpoint both carry this when a project id is in scope.
+   * The sidebar's focus-queue dedupe uses it to render a
+   * "duplicate copy" badge on a colliding row.
+   */
+  duplicates?: Array<{
+    worktreeId: string;
+    worktreeName: string;
+    lastActiveAt: string;
+    eventsSize: number;
+  }>;
 }
 
 /**
