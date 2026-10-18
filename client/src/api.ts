@@ -410,6 +410,15 @@ export async function fetchSessions(
   return res.json();
 }
 
+/** Fresh summaries for every registered worktree in a project. */
+export async function fetchProjectSessionSummaries(
+  projectId: string
+): Promise<Record<string, SessionSummary[]>> {
+  const res = await fetch(`${BASE}/projects/${projectId}/sidebar-sessions`);
+  await throwIfNotOk(res, "Failed to fetch project sessions");
+  return res.json();
+}
+
 export async function fetchSession(
   projectId: string,
   sessionId: string,

@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { PullRequestBadge } from "@/components/PullRequestBadge";
 import {
   fetchSessions,
+  fetchProjectSessionSummaries,
   fetchRuntimeSnapshot,
   fetchWorktrees,
   deleteProject,
@@ -771,47 +772,54 @@ export function Sidebar({
   }, [activeProjectId, activeWorktreeId]);
 
   const performLoadAll = useCallback(async () => {
-    const next = await Promise.all(
-        projects.map(async (project) => {
-          const worktrees = await fetchWorktrees(project.id);
-          const wtWithSessions = await Promise.all(
-            worktrees.map(async (wt) => {
-              const sessions = await fetchSessions(project.id, wt.id);
-              const existingProject = projectDataRef.current.find(
-                (p) => p.id === project.id,
-              );
-              const existingWt = existingProject?.worktrees.find(
-                (w) => w.id === wt.id,
-              );
-              const { activeProjectId, activeWorktreeId } =
-                activeLocationRef.current;
-              const isActiveWt =
-                wt.id === activeWorktreeId ||
-                (!activeWorktreeId &&
-                  wt.isMain &&
-                  project.id === activeProjectId);
-              return {
-                ...wt,
-                sessions: sessions.filter((s) => !archivedIds.has(s.id)),
-                isExpanded: existingWt?.isExpanded ?? isActiveWt,
-              } satisfies WorktreeWithSessions;
-            }),
-          );
-          const existing = projectDataRef.current.find(
-            (p) => p.id === project.id,
-          );
-          return {
-            ...project,
-            worktrees: wtWithSessions.sort(compareWorktrees),
-            isExpanded:
-              existing?.isExpanded ??
-              project.id === activeLocationRef.current.activeProjectId,
-          } satisfies ProjectWithWorktrees;
-        }),
-      );
-    projectDataRef.current = next;
-    setProjectData(next);
+    const activeId = activeLocationRef.current.activeProjectId;
+    // Preserve project order and expanded state while each project's data arrives.
+    setProjectData((prev) => projects.map((project) => {
+      const existing = prev.find((item) => item.id === project.id);
+      return {
+        ...project,
+        worktrees: existing?.worktrees ?? [],
+        isExpanded: existing?.isExpanded ?? project.id === activeId,
+      };
+    }));
+
+    const loadProject = async (project: Project): Promise<void> => {
+      const worktrees = await fetchWorktrees(project.id);
+      const summaries = await fetchProjectSessionSummaries(project.id);
+      setProjectData((prev) => prev.map((current) => {
+        if (current.id !== project.id) return current;
+        const { activeProjectId, activeWorktreeId } = activeLocationRef.current;
+        return {
+          ...current,
+          worktrees: worktrees.map((wt) => {
+            const existing = current.worktrees.find((item) => item.id === wt.id);
+            const isActiveWt = wt.id === activeWorktreeId ||
+              (!activeWorktreeId && wt.isMain && project.id === activeProjectId);
+            return {
+              ...wt,
+              sessions: (summaries[wt.id] ?? []).filter((s) => !archivedIds.has(s.id)),
+              isExpanded: existing?.isExpanded ?? isActiveWt,
+            } satisfies WorktreeWithSessions;
+          }).sort(compareWorktrees),
+        };
+      }));
+    };
+
+    const active = projects.find((project) => project.id === activeId);
+    const failures: unknown[] = [];
+    if (active) {
+      try { await loadProject(active); } catch (error) { failures.push(error); }
+    }
+    const remaining = projects.filter((project) => project.id !== activeId);
+    let nextIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(3, remaining.length) }, async () => {
+      while (nextIndex < remaining.length) {
+        const project = remaining[nextIndex++];
+        try { await loadProject(project); } catch (error) { failures.push(error); }
+      }
+    }));
     await refreshActiveSessions();
+    if (failures.length) throw new AggregateError(failures, "Some sidebar projects failed to load");
   }, [projects, archivedIds, refreshActiveSessions]);
 
   const refreshWorktreeSessions = useCallback(
@@ -854,6 +862,7 @@ export function Sidebar({
     // update the worktree added by the same batch.
     const newSessions: Array<{ projectId: string; worktreeId: string }> = [];
     const catchUpIds = new Set(scopes.catchUpProjects);
+    const hydratedProjects = new Set<string>();
     const projectsToFetch = new Set([...scopes.projects, ...scopes.catchUpProjects]);
     for (const { projectId, worktreeId } of scopes.sessions) {
       const current = projectDataRef.current.find((p) => p.id === projectId);
@@ -868,6 +877,12 @@ export function Sidebar({
       const beforeIds = new Set(before?.worktrees.map((w) => w.id) ?? []);
       const worktrees = await fetchWorktrees(projectId).catch(() => null);
       if (!worktrees) continue;
+      // Navigation catch-up covers the whole project. Read its summaries
+      // together so a large project does not rescan collisions per worktree.
+      const summaries = catchUpIds.has(projectId)
+        ? await fetchProjectSessionSummaries(projectId).catch(() => null)
+        : null;
+      if (summaries) hydratedProjects.add(projectId);
       const { activeProjectId, activeWorktreeId } = activeLocationRef.current;
       setProjectData((prev) => {
         const current = prev.find((p) => p.id === projectId);
@@ -881,7 +896,9 @@ export function Sidebar({
           ...project,
           worktrees: worktrees.sort(compareWorktrees).map((wt) => ({
             ...wt,
-            sessions: existing.get(wt.id)?.sessions ?? [],
+            sessions: summaries
+              ? (summaries[wt.id] ?? []).filter((session) => !archivedIds.has(session.id))
+              : existing.get(wt.id)?.sessions ?? [],
             isExpanded: existing.get(wt.id)?.isExpanded ??
               (wt.id === activeWorktreeId ||
                 (!activeWorktreeId && wt.isMain && projectId === activeProjectId)),
@@ -892,17 +909,20 @@ export function Sidebar({
           : [...prev, updated];
       });
       newSessions.push(...worktrees
-        .filter((wt) => catchUpIds.has(projectId) || !beforeIds.has(wt.id))
+        .filter((wt) => !hydratedProjects.has(projectId) &&
+          (catchUpIds.has(projectId) || !beforeIds.has(wt.id)))
         .map((wt) => ({ projectId, worktreeId: wt.id })));
     }
     const seen = new Set<string>();
     for (const { projectId, worktreeId } of [...scopes.sessions, ...newSessions]) {
+      if (hydratedProjects.has(projectId)) continue;
       const key = projectId + "\u0000" + worktreeId;
       if (seen.has(key)) continue;
       seen.add(key);
       await refreshWorktreeSessions(projectId, worktreeId);
     }
-  }, [projects, refreshWorktreeSessions]);
+    if (hydratedProjects.size) refreshActiveSessions().catch(() => {});
+  }, [projects, archivedIds, refreshActiveSessions, refreshWorktreeSessions]);
 
   // The queue instance survives renders; its workers use the latest callbacks.
   const workersRef = useRef({ performLoadAll, performTargetedRefresh });
