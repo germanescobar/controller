@@ -108,7 +108,6 @@ import { locateSessionById } from "../lib/session-locator.js";
 import {
   CollisionError,
   findSessionCollisions,
-  findSessionCollisionsInProject,
   listAllCollisions,
   pickOwner,
   quarantineCollision,
@@ -1426,36 +1425,19 @@ export async function handleSessionStream(
     return;
   }
 
-  // Cross-worktree resume guard (issue #437). If the request is a
-  // resume (`resumeSessionId` is set) and the same session id lives
-  // in a different worktree of this project, refuse — accepting the
-  // resume would silently create a second per-worktree record with
-  // the same id, widening an existing collision. The user must
-  // either resume from the owning worktree or run
-  // `controller sessions repair <id>` to collapse the duplicates.
-  //
-  // The check is naturally inert for brand-new branched sessions:
-  // the branch route mints a fresh UUID, so the id is unique by
-  // construction and `candidates.length` is 1. The check runs
-  // after the worktree is resolved but before the agent is
-  // spawned, so a rejected resume never writes a session file or
-  // appends an event.
+  // Check single-store sessions too: waiting for a collision would allow
+  // the first cross-worktree resume to create a second record.
   const resumeId = req.query.resumeSessionId as string | undefined;
   if (typeof resumeId === "string" && resumeId.length > 0) {
-    const collisions = await findSessionCollisionsInProject(
-      req.params.projectId
-    );
-    const candidates = collisions.get(resumeId);
-    if (candidates && candidates.length > 1) {
+    const candidates = await findSessionCollisions(resumeId);
+    if (candidates.length > 0) {
       const owner = pickOwner(candidates);
       const resumeWorktreeId = worktree.id;
-      if (owner.worktreeId !== resumeWorktreeId) {
+      if (owner.projectId !== project.id || owner.worktreeId !== resumeWorktreeId) {
         res.status(409).json({
           error:
             "Cannot resume this session in a different worktree: it already lives in another worktree's store. " +
-            "Run `controller sessions repair " +
-            resumeId +
-            "` to pick an owner, or resume from the owner worktree.",
+            "Resume from the owner worktree, or start a new linked session for cross-worktree continuation.",
           code: "session-collision",
           sessionId: resumeId,
           ownerWorktreeId: owner.worktreeId,

@@ -1557,7 +1557,7 @@ async function runSessionsList(filters, serverUrl, projectId) {
  * Dedupe a list of session summaries by id, keeping the picked
  * owner per session (issue #437). The owner-pick rule mirrors
  * `server/lib/session-collision.ts::pickOwner`: most-recently-
- * active copy, ties broken by `duplicates`-array length, then
+ * active copy, ties broken by events-file size, then
  * worktree id lexically. Returns the surviving rows in input
  * order and the count of dropped non-owner copies.
  */
@@ -1618,6 +1618,9 @@ function pickLocalOwner(a, b) {
   if (Number.isFinite(aActive) && Number.isFinite(bActive) && aActive !== bActive) {
     return aActive > bActive ? a : b;
   }
+  const aSize = b.duplicates?.find((copy) => copy.worktreeId === a.worktreeId)?.eventsSize ?? 0;
+  const bSize = a.duplicates?.find((copy) => copy.worktreeId === b.worktreeId)?.eventsSize ?? 0;
+  if (aSize !== bSize) return aSize > bSize ? a : b;
   const aId = a?.worktreeId ?? "";
   const bId = b?.worktreeId ?? "";
   return aId <= bId ? a : b;
@@ -1977,7 +1980,7 @@ function formatCollisionRow(report) {
   const ownerId = owner?.worktreeId ?? "";
   const others = candidates
     .filter((c) => c && c.worktreeId !== ownerId)
-    .map((c) => `${c.worktreeName ?? "?"}@${formatCollisionTimestamp(c.lastActiveAt)}`)
+    .map((c) => `${c.worktreeName ?? "?"}@${formatCollisionTimestamp(c.session?.lastActiveAt)}`)
     .join(", ");
   return `${report?.sessionId ?? "?"}  owner=${ownerName}  duplicates=[${others}]`;
 }
@@ -2046,7 +2049,7 @@ export async function runRepair(argv, serverUrl) {
     );
   }
   if (dryRun) {
-    const owner = report?.owner;
+    const owner = report.candidates.find((candidate) => candidate.worktreeId === ownerWorktreeId);
     const others = (Array.isArray(report?.candidates) ? report.candidates : [])
       .filter((c) => c?.worktreeId !== owner?.worktreeId)
       .map((c) => c?.worktreeId)

@@ -365,3 +365,17 @@ test("dedupeFocusItemsBySessionId preserves input order when no collisions are p
     ["a", "b", "c"]
   );
 });
+
+test("focus dedupe uses transcript size before lexical ID for timestamp ties in either input order", () => {
+  for (const reverse of [false, true]) {
+    const small = item("shared", "2026-10-17T10:00:00.000Z", false);
+    const large = item("shared", "2026-10-17T10:00:00.000Z", false);
+    small.worktreeId = "a";
+    large.worktreeId = "z";
+    small.duplicates = [{ worktreeId: "z", worktreeName: "large", lastActiveAt: large.session.lastActiveAt, eventsSize: 900 }];
+    large.duplicates = [{ worktreeId: "a", worktreeName: "small", lastActiveAt: small.session.lastActiveAt, eventsSize: 100 }];
+    const result = dedupeFocusItemsBySessionId(reverse ? [large, small] : [small, large]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].worktreeId, "z");
+  }
+});

@@ -5157,7 +5157,7 @@ test("runCollisions GETs the collision report and prints one row per collision",
               worktreeId: "wt-feature",
               worktreeName: "feature",
               worktreePath: "/tmp/feature",
-              lastActiveAt: "2026-10-17T19:34:10.000Z",
+              session: { lastActiveAt: "2026-10-17T19:34:10.000Z" },
               eventsSize: 1024,
             },
             candidates: [
@@ -5165,14 +5165,14 @@ test("runCollisions GETs the collision report and prints one row per collision",
                 worktreeId: "wt-feature",
                 worktreeName: "feature",
                 worktreePath: "/tmp/feature",
-                lastActiveAt: "2026-10-17T19:34:10.000Z",
+                session: { lastActiveAt: "2026-10-17T19:34:10.000Z" },
                 eventsSize: 1024,
               },
               {
                 worktreeId: "wt-main",
                 worktreeName: "main",
                 worktreePath: "/tmp/main",
-                lastActiveAt: "2026-10-16T04:15:21.000Z",
+                session: { lastActiveAt: "2026-10-16T04:15:21.000Z" },
                 eventsSize: 800,
               },
             ],
@@ -5196,7 +5196,7 @@ test("runCollisions GETs the collision report and prints one row per collision",
   const out = stdoutChunks.join("");
   assert.match(out, /shared-1/);
   assert.match(out, /owner=feature/);
-  assert.match(out, /main@/);
+  assert.match(out, /main@2026-10-16 04:15:21/);
 });
 
 test("runCollisions prints 'No collisions.' when the report is empty", async () => {
@@ -5308,7 +5308,7 @@ test("runRepair --dry-run preflights but does not POST the repair", async () => 
   };
   try {
     await cli.runRepair(
-      ["shared-1", "--owner", "wt-feature", "--dry-run"],
+      ["shared-1", "--owner", "wt-main", "--dry-run"],
       "http://controller.test"
     );
   } finally {
@@ -5317,7 +5317,7 @@ test("runRepair --dry-run preflights but does not POST the repair", async () => 
   }
   assert.equal(calls.length, 1, "dry-run must only call the diagnostic route");
   assert.equal(calls[0].method, undefined, "diagnostic route is a GET, not a POST");
-  assert.match(stdoutChunks.join(""), /Would keep wt-feature/);
+  assert.match(stdoutChunks.join(""), /Would keep wt-main as the owner and quarantine \[wt-feature\]/);
 });
 
 test("runRepair POSTs the action=pick-owner payload and prints the manifest path", async () => {
@@ -5384,4 +5384,35 @@ test("runRepair POSTs the action=pick-owner payload and prints the manifest path
   assert.match(stdoutChunks.join(""), /Repaired shared-1/);
   assert.match(stdoutChunks.join(""), /kept wt-feature/);
   assert.match(stdoutChunks.join(""), /quarantined 2 store copies/);
+});
+
+test("sessions list uses event size before lexical ID for tied timestamps", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  try {
+    for (const reverse of [false, true]) {
+      const chunks = [];
+      process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
+      globalThis.fetch = async (url) => {
+        const route = new URL(url);
+        let result;
+        if (route.pathname === "/api/projects") result = [{ id: "proj", name: "demo" }];
+        else if (route.pathname.endsWith("/worktrees")) result = (reverse ? ["z", "a"] : ["a", "z"]).map((id) => ({ id }));
+        else if (route.pathname.endsWith("/sessions")) {
+          const id = route.searchParams.get("worktreeId");
+          result = [{ id: "shared", worktreeId: id, lastActiveAt: "2026-10-17T10:00:00.000Z",
+            duplicates: [{ worktreeId: id === "a" ? "z" : "a", eventsSize: id === "a" ? 900 : 100 }] }];
+        } else throw new Error(`Unexpected URL: ${url}`);
+        return { status: 200, json: async () => result };
+      };
+      await cli.runSessions(["list", "demo", "--json"], "http://controller.test");
+      const rows = chunks.join("").trim().split("\n").map((line) => JSON.parse(line));
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].worktreeId, "z");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
+  }
 });

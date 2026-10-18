@@ -300,7 +300,7 @@ export function markFocusItemHandled(
  * holds it; without dedupe the focus queue would show the same
  * conversation in two rows. The kept row follows the same
  * owner-pick rule the server uses: most-recently-active copy,
- * ties broken by the worktree id lexically. The dropped copies
+ * ties broken by events-file size, then worktree id lexically. The dropped copies
  * contribute to the kept row's `duplicates` field so the UI
  * can still render a "duplicate copy" badge.
  */
@@ -348,8 +348,8 @@ export function dedupeFocusItemsBySessionId(
 
 /**
  * Local owner-pick used by the focus-queue dedupe. Mirrors the
- * server's `pickOwner` (`most-recently-active` first, then
- * lexically smallest worktree id) so the row the user sees on
+ * server's `pickOwner` (most-recently-active, then largest events
+ * file, then lexically smallest worktree id) so the row the user sees on
  * On Radar matches the row the CLI's `sessions list` would
  * print.
  */
@@ -362,6 +362,9 @@ function pickLocalFocusOwner(
   if (Number.isFinite(aActive) && Number.isFinite(bActive) && aActive !== bActive) {
     return aActive > bActive ? a : b;
   }
+  const aSize = b.duplicates?.find((copy) => copy.worktreeId === a.worktreeId)?.eventsSize ?? 0;
+  const bSize = a.duplicates?.find((copy) => copy.worktreeId === b.worktreeId)?.eventsSize ?? 0;
+  if (aSize !== bSize) return aSize > bSize ? a : b;
   const aId = a.worktreeId ?? "";
   const bId = b.worktreeId ?? "";
   return aId <= bId ? a : b;

@@ -636,3 +636,47 @@ test("isLikelySessionId rejects path-traversal probes (issue #437 regression)", 
     assert.deepEqual(await findSessionCollisions("a".repeat(300)), []);
   });
 });
+
+test("cross-worktree resume rejects the first duplicate without changing either store", async () => {
+  await withTempHome(async (home) => {
+    const mainPath = path.join(home, "main");
+    const featurePath = path.join(home, "feature");
+    mkdirSync(mainPath);
+    mkdirSync(featurePath);
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await plantProjectRegistry(home, [{ id: "proj-1", name: "demo", path: mainPath, createdAt }]);
+    await plantWorktreeRegistry(home, [
+      { id: "wt-main", projectId: "proj-1", name: "main", path: mainPath, isMain: true, createdAt },
+      { id: "wt-feature", projectId: "proj-1", name: "feature", path: featurePath, isMain: false, createdAt },
+    ]);
+    plantSessionInWorktree(mainPath, makeSession({ id: "solo", worktreeId: "wt-main" }));
+    const sourceSession = path.join(projectStoreDir(mainPath), "sessions", "solo.json");
+    const sourceEvents = path.join(projectStoreDir(mainPath), "events", "solo.jsonl");
+    const beforeSession = readFileSync(sourceSession);
+    const beforeEvents = readFileSync(sourceEvents);
+    const { default: express } = await import("express");
+    const { handleSessionStream } = await import("../../routes/sessions.js");
+    const app = express();
+    app.get("/:projectId/resume", handleSessionStream);
+    const server = app.listen(0, "127.0.0.1");
+    const { once } = await import("node:events");
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      const response = await fetch(`http://127.0.0.1:${address.port}/proj-1/resume?worktreeId=wt-feature&resumeSessionId=solo`);
+      assert.equal(response.status, 409);
+      assert.deepEqual(await response.json(), {
+        error: "Cannot resume this session in a different worktree: it already lives in another worktree's store. Resume from the owner worktree, or start a new linked session for cross-worktree continuation.",
+        code: "session-collision", sessionId: "solo", ownerWorktreeId: "wt-main",
+        ownerWorktreeName: "main", ownerWorktreePath: mainPath, duplicates: [],
+      });
+      assert.deepEqual(readFileSync(sourceSession), beforeSession);
+      assert.deepEqual(readFileSync(sourceEvents), beforeEvents);
+      assert.equal(existsSync(path.join(projectStoreDir(featurePath), "sessions", "solo.json")), false);
+      assert.equal(existsSync(path.join(projectStoreDir(featurePath), "events", "solo.jsonl")), false);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+});
