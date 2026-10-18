@@ -769,16 +769,89 @@ test("resolveProjectByCwd returns null when the server has no project for cwd", 
   }
 });
 
-test("resolveProjectByCwd returns null on a network error (caller falls through to a clear error)", async () => {
+test("resolveProjectByCwd surfaces the underlying connection error instead of a misleading miss", async () => {
+  // Regression for the agent-cli-connectivity handoff: a Codex agent
+  // running under `codex exec --sandbox=workspace-write` (network
+  // restricted) couldn't reach `http://localhost:4500`. The fetch
+  // threw EPERM; before this fix, `resolveProjectByCwd` swallowed the
+  // error and returned `null`, which `resolveProjectId` then reported
+  // as "no project owns this path" — pointing the agent at the wrong
+  // remediation. The CLI should instead surface the same connection
+  // diagnostic `fetchProjectList` produces so the agent sees the real
+  // cause (sandbox blocked the request, not a missing project).
   const cli = await loadCli();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async () => {
+    const error = new Error("fetch failed");
+    error.cause = { code: "EPERM" };
+    throw error;
+  };
   try {
-    const project = await cli.resolveProjectByCwd("http://controller.test", "/tmp/whatever");
-    assert.equal(project, null);
+    await assert.rejects(
+      async () => await cli.resolveProjectByCwd("http://controller.test", "/tmp/whatever"),
+      /__exit__/
+    );
   } finally {
     globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
   }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Could not reach Controller at http:\/\/controller\.test/);
+  assert.match(stderrText, /EPERM/);
+  // The misleading "no project owns" hint must NOT be present — that's
+  // the whole point of the fix.
+  assert.doesNotMatch(stderrText, /no project owns this path/i);
+});
+
+test("resolveProjectByCwd surfaces the server's HTTP error instead of a misleading miss", async () => {
+  // Companion to the EPERM case above: a 5xx from the orchestrator is
+  // a real server-side failure, not "no project owns this path". The
+  // CLI should propagate the server's `error`/`hint` payload the same
+  // way other surfaces do (issue #367).
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async () => ({
+    status: 503,
+    json: async () => ({ error: "Controller is starting", hint: "try again in a moment" }),
+  });
+  try {
+    await assert.rejects(
+      async () => await cli.resolveProjectByCwd("http://controller.test", "/tmp/whatever"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Controller is starting/);
+  assert.match(stderrText, /try again in a moment/);
 });
 
 test("resolveProjectId falls back to cwd when no <project> is supplied", async () => {
@@ -852,6 +925,51 @@ test("resolveProjectId falls back to cwd when the supplied <project> doesn't mat
     globalThis.fetch = originalFetch;
     process.chdir(originalCwd);
   }
+});
+
+test("resolveProjectId surfaces the connection error from the cwd lookup instead of a misleading miss (regression for the agent-cli-connectivity handoff)", async () => {
+  // The original failure: a Codex agent running under
+  // `codex exec --sandbox=workspace-write` couldn't reach
+  // `http://localhost:4500` (sandbox blocked the network). The cwd
+  // lookup threw EPERM; before this fix, `resolveProjectByCwd`
+  // swallowed it and `resolveProjectId` then reported "no project
+  // owns this path", which sent the agent down the wrong path. The
+  // CLI should now exit with the same connection diagnostic the
+  // rest of the surfaces use, including the EPERM code.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async () => {
+    const error = new Error("fetch failed");
+    error.cause = { code: "EPERM" };
+    throw error;
+  };
+  try {
+    await assert.rejects(
+      async () => await cli.resolveProjectId("http://controller.test", ""),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Could not reach Controller at http:\/\/controller\.test/);
+  assert.match(stderrText, /EPERM/);
+  assert.match(stderrText, /CONTROLLER_SERVER_URL/);
+  assert.doesNotMatch(stderrText, /no project owns this path/i);
 });
 
 test("resolveProjectId errors with a clear message when no ref and cwd is not part of any project", async () => {
@@ -964,6 +1082,90 @@ test("runWorktrees list with no <project> resolves the project from cwd", async 
   assert.ok(calls.some((c) => c.includes("/api/projects?cwd=")), "expected cwd lookup");
   assert.ok(calls.some((c) => c.endsWith("/api/projects/proj-from-cwd/worktrees")), "expected worktree list");
   assert.match(stdoutChunks.join(""), /wt-1  main  main  \[main\]/);
+});
+
+test("runWorktrees create with no <project> surfaces connection errors from the cwd lookup", async () => {
+  // Regression for the agent-cli-connectivity handoff: `controller
+  // worktrees create --name foo` (no project positional) hit
+  // `resolveProjectByCwd` first; when the orchestrator was unreachable
+  // (Codex exec sandbox blocking localhost:4500), the CLI used to
+  // report "no project owns this path" — pointing the agent at the
+  // wrong fix. The CLI must surface the connection diagnostic so the
+  // user sees the real cause.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async () => {
+    const error = new Error("fetch failed");
+    error.cause = { code: "EPERM" };
+    throw error;
+  };
+  try {
+    await assert.rejects(
+      async () => await cli.runWorktrees(["create", "--name", "foo"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Could not reach Controller at http:\/\/controller\.test/);
+  assert.match(stderrText, /EPERM/);
+  assert.doesNotMatch(stderrText, /no project owns this path/i);
+});
+
+test("runSessions list with no <project> surfaces connection errors from the cwd lookup", async () => {
+  // Companion to the worktrees-create test: `controller sessions list`
+  // with no <project> goes through the same resolver, so the same
+  // "no project owns this path" misleading error used to mask the
+  // real connection failure. The session list must surface the
+  // connection diagnostic too.
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  globalThis.fetch = async () => {
+    const error = new Error("fetch failed");
+    error.cause = { code: "EPERM" };
+    throw error;
+  };
+  try {
+    await assert.rejects(
+      async () => await cli.runSessions(["list"], "http://controller.test"),
+      /__exit__/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Could not reach Controller at http:\/\/controller\.test/);
+  assert.match(stderrText, /EPERM/);
+  assert.doesNotMatch(stderrText, /no project owns this path/i);
 });
 
 test("parseSessions maps start to a session-start payload, including the verbatim message text (issue #355)", async () => {

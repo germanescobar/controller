@@ -617,8 +617,14 @@ export async function fetchProjectList(serverUrl) {
   return projects;
 }
 
-// Hit the cwd-based project lookup. Returns `null` on miss or any error —
-// callers fall through to the user-facing error path with full context.
+// Hit the cwd-based project lookup. Returns `null` only when the server
+// reached responded with `{ project: null }` — the genuine "no project
+// owns this path" case. Network failures and HTTP >= 400 instead
+// `fail()` with the same diagnostic `fetchProjectList` uses
+// (`connectionError` / `serverError`), so `controller worktrees create`
+// run from a Codex exec sandbox that can't reach `localhost:4500`
+// surfaces "Could not reach Controller at … (EPERM)" instead of the
+// misleading "(no project owns this path)" — issue #agent-cli-fix.
 // The shape is `{ project: Project | null }` (see
 // `server/routes/projects.ts`), not the bare-array shape.
 export async function resolveProjectByCwd(serverUrl, cwd) {
@@ -627,15 +633,23 @@ export async function resolveProjectByCwd(serverUrl, cwd) {
   let response;
   try {
     response = await fetch(url);
-  } catch {
-    return null;
+  } catch (error) {
+    fail(connectionError(serverUrl, error));
   }
-  if (response.status >= 400) return null;
+  if (response.status >= 400) {
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      fail(`Failed to look up project by cwd (HTTP ${response.status})`);
+    }
+    fail(serverError(body, `Failed to look up project by cwd (HTTP ${response.status})`));
+  }
   let body;
   try {
     body = await response.json();
   } catch {
-    return null;
+    fail("Unexpected cwd project response");
   }
   if (!body || typeof body !== "object") return null;
   return body.project ?? null;
