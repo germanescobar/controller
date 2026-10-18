@@ -27,6 +27,7 @@
  */
 
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,13 +44,9 @@ function cliSourceDir(): string {
 }
 
 /**
- * True when this server is a development instance started from a checkout
- * (`npm run dev`) next to a running Controller app. Set by
- * `scripts/dev-server-with-port-bump.mjs` only when the dev server was
- * started from inside a live app (see `scripts/dev-instance-env.mjs`); a
- * standalone `npm run dev` is a regular instance.
+ * True for any source dev server, including standalone development.
  *
- * A dev instance shares the app's `CONTROLLER_HOME` (projects, worktrees,
+ * A dev instance shares `CONTROLLER_HOME` state (projects, worktrees,
  * sessions), but must not touch the app's CLI install or runtime file:
  * overwriting `bin/controller` swaps in the branch-under-development's CLI,
  * and overwriting `controller-runtime.json` points every env-less CLI
@@ -61,14 +58,16 @@ export function isDevInstance(): boolean {
 
 /**
  * Root that holds the CLI install (`bin/`) and the runtime file. The app
- * uses the Controller home itself; a dev instance gets a `dev/` subdir so
- * its CLI and URL never clobber the app's. The CLI resolves the runtime
+ * uses the Controller home itself; each dev checkout gets a distinct `dev/`
+ * subdir so its CLI and URL never clobber another server's. The CLI resolves the runtime
  * file as a sibling of its own `bin/` dir first, so agents spawned by the
  * dev server (whose preamble points at `dev/bin/controller`) reach the dev
  * server even when their env is sanitized.
  */
 function controllerCliRoot(): string {
-  return isDevInstance() ? path.join(orchestratorHome(), "dev") : orchestratorHome();
+  if (!isDevInstance()) return orchestratorHome();
+  const checkoutId = createHash("sha256").update(path.resolve(process.cwd())).digest("hex").slice(0, 16);
+  return path.join(orchestratorHome(), "dev", checkoutId);
 }
 
 /** Stable absolute path the unified CLI is installed to. */
