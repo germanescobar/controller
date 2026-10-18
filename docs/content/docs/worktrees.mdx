@@ -18,6 +18,20 @@ start a linked conversation in the new worktree.
 Controller checks out the new worktree and, if the project has a
 [`setup.sh`](/docs/controller-scripts), runs it to install dependencies.
 
+## Existing Git worktrees
+
+When you add a Git project, Controller automatically tracks its existing linked
+worktrees. It also refreshes the list when the sidebar loads the project's
+worktrees. There is no import step. Tracking preserves each checkout's path,
+branch or detached HEAD, and uncommitted files. Controller assigns an ID and
+`PORT_OFFSET` without running setup or changing the checkout.
+
+Worktrees that Git reports as prunable or whose directories are missing are not
+registered. If a tracked worktree disappears, Controller keeps its record and
+conversation history, but disables new work there. A path with prior Controller
+history is not automatically reused for a different checkout, because session
+storage is keyed by path.
+
 ## Pick a worktree when starting a session
 
 Expand a worktree in the sidebar and use **New conversation**. The session's
@@ -43,6 +57,11 @@ as history. They cannot run new turns. Open one and select **Continue on main**
 to create a distinct linked conversation in the main worktree. A removed
 worktree's name stays reserved so its history is never mixed with a new
 worktree's conversations.
+
+For a worktree discovered outside Controller, the sidebar offers **Stop
+tracking** instead. This removes it from active Controller work without
+running `git worktree remove` or deleting its directory. Its conversation
+history remains visible. To remove the checkout itself, use Git directly.
 
 ## Parallel worktrees and PORT_OFFSET
 
