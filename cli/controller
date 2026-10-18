@@ -354,7 +354,7 @@ export function connectionError(serverUrl, error) {
 }
 
 async function getServerUrl() {
-  if (process.env.CONTROLLER_SERVER_URL) return process.env.CONTROLLER_SERVER_URL;
+  const inheritedUrl = process.env.CONTROLLER_SERVER_URL?.trim();
   const os = await import("node:os");
   const path = await import("node:path");
   const fs = await import("node:fs/promises");
@@ -375,13 +375,73 @@ async function getServerUrl() {
   //    Linux `XDG_STATE_HOME`, otherwise the legacy top-level dot-less dir.
   candidates.push(defaultHomeRuntimeFile(os, path));
 
+  let publishedUrl = null;
+  let publishedHome = null;
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(await fs.readFile(candidate, "utf-8"));
-      if (parsed && typeof parsed.serverUrl === "string") return parsed.serverUrl;
+      if (parsed && typeof parsed.serverUrl === "string") {
+        publishedUrl = parsed.serverUrl;
+        publishedHome = path.dirname(candidate);
+        break;
+      }
     } catch {}
   }
-  fail("Could not determine the Controller server URL. Is the Controller app running?");
+  const url = inheritedUrl || publishedUrl;
+  if (!url) fail("Could not determine the Controller server URL. Is the Controller app running?");
+  return resolveLiveServerUrl(url, publishedHome ?? path.dirname(defaultHomeRuntimeFile(os, path)));
+}
+
+/** Recover from a stale published port without connecting to another Controller home. */
+export async function resolveLiveServerUrl(url, home) {
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const fs = await import("node:fs/promises");
+  const { createHash } = await import("node:crypto");
+  const probe = async (candidate) => {
+    try {
+      const response = await fetch(`${candidate.replace(/\/$/, "")}/api/instance`, { signal: AbortSignal.timeout(350) });
+      if (!response.ok) return null;
+      return (await response.json()).homeId ?? null;
+    } catch { return null; }
+  };
+  const isDevRuntime = path.basename(path.dirname(home)) === "dev";
+  const stateHome = isDevRuntime ? path.dirname(path.dirname(home)) : home;
+  let identity;
+  try {
+    const stats = await fs.stat(stateHome, { bigint: true });
+    identity = stats.ino > 0n ? `inode:${stats.dev}:${stats.ino}` : `path:${await fs.realpath(stateHome)}`;
+  } catch { return url; }
+  const expected = createHash("sha256").update(identity).digest("hex");
+  if (await probe(url) === expected) return url;
+  // Only discover local ports. An explicit remote endpoint must never
+  // silently switch to an unrelated local process.
+  let parsed;
+  try { parsed = new URL(url); } catch { return url; }
+  if (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") return url;
+  let installedAppCli = false;
+  if (!isDevRuntime) {
+    try { await fs.access(path.join(home, "bin", "controller")); installedAppCli = true; } catch {}
+  }
+  if (!isDevRuntime && installedAppCli && await probe("http://localhost:4500") === null) {
+    // Older packaged servers predate /api/instance. The app's canonical
+    // port is 4500; prefer it before any same-home dev server nearby.
+    try {
+      const legacy = await fetch("http://localhost:4500/api/agent-providers", {
+        signal: AbortSignal.timeout(350),
+      });
+      if (legacy.ok) return "http://localhost:4500";
+    } catch { /* No packaged server on its canonical port. */ }
+  }
+  const stalePort = Number(parsed.port);
+  const firstPort = isDevRuntime ? Math.max(1, (stalePort || 3102) - 100) : 4500;
+  const lastPort = isDevRuntime ? Math.min(65535, (stalePort || 3102) + 100) : 4600;
+  const ports = Array.from(
+    { length: lastPort - firstPort + 1 },
+    (_, offset) => `http://localhost:${firstPort + offset}`,
+  );
+  const matches = await Promise.all(ports.map(async (candidate) => ({ candidate, id: await probe(candidate) })));
+  return matches.find(({ id }) => id === expected)?.candidate ?? url;
 }
 
 // Mirror of `defaultHomeForPlatform` in `server/lib/paths.ts`. The CLI runs

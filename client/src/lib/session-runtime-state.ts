@@ -4,57 +4,29 @@ import {
   listSessionMonitors,
   type Monitor,
   type QueuedMessage,
+  type SessionGoal,
+  getSessionGoal,
 } from "../api.ts";
 
-/*
- * Session runtime state for the floating bar.
- *
- * Two pieces of information are useful there and neither has a live
- * stream today (issue #339 review):
- *
- *   1. The queue's head's `runAt`. When set, the wakes consumer
- *      is holding the next message until that wall clock — the
- *      bar can render a "next run in Xs" countdown, matching the
- *      existing auto-advance one.
- *
- *   2. The list of running monitors for the session. A user
- *      watching `gh pr checks --watch` should see that watch is
- *      still alive without opening a separate surface.
- *
- * Both are polled on an interval. The delay row needs a 1s tick
- * (it shows a countdown); the monitor list changes far less often
- * and a coarser 5s tick is fine. The hook returns the latest
- * snapshot so the bar can re-render without owning the timer.
- *
- * Errors are swallowed — a missed poll must not blank the panel.
- * 404s on the monitor endpoint also resolve to empty (handled in
- * `listSessionMonitors`).
- */
+/* Poll pending follow-ups, active goal, and monitors for the floating panel. */
 
 export interface SessionRuntimeState {
   /** ISO timestamp from the head queued message's `runAt`, or `null`. */
   delayRunAt: string | null;
-  /**
-   * Short preview of the head queued message's text, or `null`
-   * when no delayed follow-up is queued. The floating panel
-   * surfaces this so the user can tell *what* is going to fire,
-   * not only *when* — otherwise a wake like `wake self "Hello"`
-   * looks identical to any other delayed follow-up, and the
-   * queued-messages strip at the bottom of the chat is the only
-   * place where the actual payload shows up. Truncated here to
-   * keep the floating panel compact (see
-   * `truncateWakePreview`); the full text is still available in
-   * the queued-messages strip below the chat input.
-   */
+  /** Short text preview for the legacy delay row. */
   delayMessagePreview: string | null;
   /** Currently running monitors for the session. */
   monitors: Monitor[];
+  followUps: QueuedMessage[];
+  goal: SessionGoal | null;
 }
 
 const EMPTY_STATE: SessionRuntimeState = {
   delayRunAt: null,
   delayMessagePreview: null,
   monitors: [],
+  followUps: [],
+  goal: null,
 };
 
 /**
@@ -70,45 +42,16 @@ export function truncateWakePreview(value: string): string {
   return `${value.slice(0, MAX_WAKE_PREVIEW_LENGTH)}…`;
 }
 
-/**
- * Filter the queued-messages list for the composer queue strip.
- * Drops only the *head* message if it is a wake (`runAt` in the
- * future), because that is the only wake the floating panel
- * represents — `useSessionRuntimeState` reads `queue[0]` and the
- * desktop panel renders its `runAt` and preview in the delay
- * row. Removing the head wake keeps the strip from
- * double-listing what the panel already shows.
- *
- * Every other queued message — user-typed queue entries,
- * `sessions send`, goal-driven follow-ups, wakes queued behind
- * an ordinary message, additional scheduled wakes beyond the
- * head, and the same wake whose delay has already elapsed but
- * the wakes consumer hasn't drained yet — passes through
- * unchanged so the user can still see and remove them. This is
- * important because the floating panel only surfaces the head:
- * a wake viewed on mobile (no delay row), the second of two
- * stacked wakes, or a wake behind a user-typed message has no
- * other UI surface, and removing it from the strip would erase
- * the only cancel button even though the server still fires it.
- *
- * `now` is parameterized so the helper is unit-testable; the
- * caller passes `Date.now()`. The function is intentionally
- * pure — no React, no side effects.
- */
-export function filterVisibleQueue(
-  queue: readonly QueuedMessage[],
-  now: number = Date.now(),
-): QueuedMessage[] {
-  const head = queue[0];
-  if (
-    head &&
-    typeof head.runAt === "string" &&
-    head.runAt &&
-    new Date(head.runAt).getTime() > now
-  ) {
-    return queue.slice(1);
-  }
-  return queue.slice();
+/** Legacy entries have no origin. A scheduled entry or system marker is a follow-up. */
+export function isUserQueuedMessage(message: QueuedMessage): boolean {
+  if (message.origin) return message.origin === "user";
+  const marked = (text: string) => /^\[\/(?:monitor|from):/.test(text)
+    || text.startsWith("Continue working toward the active goal.");
+  return !message.runAt && !marked(message.visibleText) && !marked(message.text);
+}
+
+export function filterVisibleQueue(queue: readonly QueuedMessage[]): QueuedMessage[] {
+  return queue.filter(isUserQueuedMessage);
 }
 
 /**
@@ -123,6 +66,7 @@ export function filterVisibleQueue(
 export function useSessionRuntimeState(
   projectId: string | null | undefined,
   sessionId: string | null | undefined,
+  worktreeId: string,
   intervalMs: number = 2000
 ): SessionRuntimeState {
   const [state, setState] = useState<SessionRuntimeState>(EMPTY_STATE);
@@ -149,13 +93,12 @@ export function useSessionRuntimeState(
     const tick = async () => {
       if (inFlight) return;
       inFlight = true;
-      // Run the two fetches in parallel — they hit different routes
-      // and the floating bar shows them as separate rows, so neither
-      // should gate the other.
+      // These independent surfaces share the same polling interval.
       try {
-        const [queue, monitors] = await Promise.all([
+        const [queue, monitors, goal] = await Promise.all([
           fetchSessionQueue(projectId, sessionId).catch(() => []),
           listSessionMonitors(sessionId).catch(() => []),
+          getSessionGoal(projectId, sessionId, worktreeId).catch(() => null),
         ]);
         if (cancelled) return;
         const head = queue[0];
@@ -178,7 +121,13 @@ export function useSessionRuntimeState(
               ? head.text.trim()
               : null;
         const delayMessagePreview = delayRunAt && rawPreview ? rawPreview : null;
-        setState({ delayRunAt, delayMessagePreview, monitors });
+        setState({
+          delayRunAt,
+          delayMessagePreview,
+          monitors,
+          goal,
+          followUps: queue.filter((message) => !isUserQueuedMessage(message)),
+        });
       } finally {
         inFlight = false;
       }
@@ -191,7 +140,7 @@ export function useSessionRuntimeState(
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [projectId, sessionId, intervalMs]);
+  }, [projectId, sessionId, worktreeId, intervalMs]);
 
   return state;
 }

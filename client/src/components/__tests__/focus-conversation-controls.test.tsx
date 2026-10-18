@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { FocusConversationControls } from "../focus-conversation-controls.tsx";
 import type {
   Monitor,
+  QueuedMessage,
+  SessionGoal,
   SessionChildSummary,
   SessionSummary,
 } from "../../api.ts";
@@ -25,6 +27,8 @@ function render(
     delayRunAt?: string | null;
     delayMessagePreview?: string | null;
     monitors?: Monitor[];
+    followUps?: QueuedMessage[];
+    goal?: SessionGoal | null;
     navigation?: React.ReactNode;
   } = {},
 ) {
@@ -50,6 +54,8 @@ function render(
       delayRunAt={options.delayRunAt ?? null}
       delayMessagePreview={options.delayMessagePreview ?? null}
       monitors={options.monitors ?? []}
+      followUps={options.followUps ?? []}
+      goal={options.goal ?? null}
       navigation={options.navigation}
     />,
   );
@@ -452,4 +458,19 @@ test("the runtime rows render after the relationships and after the action row",
   assert.ok(parentPos > nextPos, "parent should follow Next");
   assert.ok(delayPos > parentPos, "delay row should follow parent row");
   assert.ok(monitorPos > delayPos, "monitor row should follow delay row");
+});
+
+test("activity rows show every generated follow-up and the active goal compactly", () => {
+  const html = render("desktop", {
+    followUps: [
+      { id: "wake", origin: "wake", text: "Check CI", visibleText: "Check CI", provider: "codex", model: "gpt-6", mode: "default", attachmentIds: [], createdAt: "2026-10-18T00:00:00Z" },
+      { id: "goal", origin: "goal", text: "Continue until green", visibleText: "Continue until green", provider: "codex", model: "gpt-6", mode: "default", attachmentIds: [], createdAt: "2026-10-18T00:00:00Z" },
+    ],
+    goal: { sessionId: "s", condition: "CI is green", setAt: "2026-10-18T00:00:00Z", updatedAt: "2026-10-18T00:00:00Z", turnsEvaluated: 1 },
+  });
+  assert.match(html, /Follow-ups \(2\)/);
+  assert.match(html, /Check CI/);
+  assert.match(html, /Continue until green/);
+  assert.match(html, /Goal: CI is green/);
+  assert.doesNotMatch(html, /Cancel follow-up/);
 });

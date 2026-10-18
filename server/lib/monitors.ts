@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendEvent, type AgentEvent } from "./sessions.js";
+import { escapeFollowUpMarkerLabel } from "../../shared/follow-up-markers.js";
 
 /*
  * Monitor primitive (issue #339).
@@ -221,7 +222,7 @@ export function startMonitor(params: {
       // see the monitor_event first, then enqueue the follow-up, for any
       // given line.
       if (captured && onLine && onLine.test(line) && params.onLineMatch) {
-        const markerLine = `[/monitor: ${monitor.description}] ${line}`;
+        const markerLine = `[/monitor: ${escapeFollowUpMarkerLabel(monitor.description)}] ${line}`;
         active.writeChain = active.writeChain.then(() =>
           params.onLineMatch!({
             monitor: { ...monitor },

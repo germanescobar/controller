@@ -581,6 +581,7 @@ test("evaluateGoal reuses the session's provider/model on continuation enqueue",
     assert.equal(queue.length, 1);
     assert.equal(queue[0].provider, "codex");
     assert.equal(queue[0].model, "gpt-5");
+    assert.equal(queue[0].origin, "goal");
     assert.equal(advanceCalls.length, 1, "evaluator fires the queue advance");
     assert.equal(advanceCalls[0].projectId, "proj-1");
     assert.equal(advanceCalls[0].sessionId, "s1");

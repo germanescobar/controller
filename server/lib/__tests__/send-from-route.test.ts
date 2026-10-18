@@ -48,7 +48,10 @@ interface RoutesEnv {
   }) => Promise<string>;
 }
 
-async function withRoutes<T>(fn: (env: RoutesEnv) => Promise<T>): Promise<T> {
+async function withRoutes<T>(
+  fn: (env: RoutesEnv) => Promise<T>,
+  parentTitle: string = "Coordinator",
+): Promise<T> {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "send-from-"));
   const previousHome = process.env.CONTROLLER_HOME;
   process.env.CONTROLLER_HOME = homeDir;
@@ -113,7 +116,7 @@ async function withRoutes<T>(fn: (env: RoutesEnv) => Promise<T>): Promise<T> {
   const childId = "sess-child";
   await seedSession(worktreePath, projectId, worktreeId, {
     id: parentId,
-    title: "Coordinator",
+    title: parentTitle,
     parentId: undefined,
   });
   await seedSession(featureWorktreePath, projectId, featureWorktreeId, {
@@ -236,6 +239,7 @@ test("POST /send-from enqueues a [/from: title] follow-up on the target", async 
         `[/from: Coordinator] controller://project/proj-1/worktree/wt-main/session/${parentId} ping the child`
       );
       assert.equal(queued[0].visibleText, queued[0].text);
+      assert.equal(queued[0].origin, "send");
       assert.equal(queued[0].provider, "claude");
       assert.deepEqual(queued[0].attachmentIds, []);
     } finally {
@@ -243,6 +247,30 @@ test("POST /send-from enqueues a [/from: title] follow-up on the target", async 
       await queue.clearQueue(childId);
     }
   });
+});
+
+test("POST /send-from escapes closing brackets in parent titles", async () => {
+  await withRoutes(async ({ baseUrl, parentId, childId }) => {
+    const runtime = await import("../session-runtime.js");
+    const queue = await import("../session-queue.js");
+    runtime.markSessionActive(childId);
+    try {
+      const response = await fetch(`${baseUrl}/api/sessions/${childId}/send-from`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromSessionId: parentId, message: "ping" }),
+      });
+      assert.equal(response.status, 201);
+      const queued = await queue.listQueue(childId);
+      assert.equal(
+        queued[0].text,
+        `[/from: Coordinator [CI\\]] controller://project/proj-1/worktree/wt-main/session/${parentId} ping`,
+      );
+    } finally {
+      runtime.markSessionInactive(childId);
+      await queue.clearQueue(childId);
+    }
+  }, "Coordinator [CI]");
 });
 
 test("POST /send-from returns 400 when the message is empty (issue #351)", async () => {
@@ -288,6 +316,7 @@ test("monitor --on-line enqueues matching output on the target session", async (
       }
       assert.equal(queued.length, 1);
       assert.equal(queued[0].text, "[/monitor: CI watcher] [CI] passed");
+      assert.equal(queued[0].origin, "monitor");
       monitors.stopMonitor(body.monitor.id);
     } finally {
       runtime.markSessionInactive(childId);

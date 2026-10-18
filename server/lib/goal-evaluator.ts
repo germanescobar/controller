@@ -249,6 +249,7 @@ export async function evaluateGoal(
   await enqueueMessage(sessionId, {
     text: prompt,
     visibleText: prompt,
+    origin: "goal",
     provider,
     model,
     mode,
