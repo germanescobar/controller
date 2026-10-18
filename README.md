@@ -98,7 +98,7 @@ npm install
 npm run dev
 ```
 
-This starts both the Express server (port 3102 by default) and the Vite dev server concurrently. Each checkout keeps its CLI and runtime under its own `<CONTROLLER_HOME>/dev/` directory, so development does not replace the packaged app's CLI.
+This starts both the Express server (port 3102 by default) and the Vite dev server concurrently. Each dev launch keeps its CLI and runtime under a separate `<CONTROLLER_HOME>/dev/` directory, so development does not replace the packaged app's CLI or another launch from the same checkout. Servers sharing one Controller home claim a single owner for schedules, wakes, goals, and managed-skill installation; a second server still serves requests and takes over shared work when the owner exits.
 
 The Vite dev server listens on port 4500 by default and proxies `/api` and `/ws/terminal` to the Express server. The server remains reachable from other devices when your network allows it, which supports mobile access through trusted LAN, VPN, or secure tunnel setups such as Tailscale.
 

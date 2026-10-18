@@ -21,6 +21,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
@@ -127,10 +128,11 @@ if (port !== requested) {
 }
 
 const baseEnv = await devServerBaseEnv();
-console.log("[dev:server] Using a checkout-specific CLI and runtime under <CONTROLLER_HOME>/dev.");
+const launchId = randomUUID();
+console.log("[dev:server] Using a launch-specific CLI and runtime under <CONTROLLER_HOME>/dev.");
 if (baseEnv.CONTROLLER_SHARED_STATE_SECONDARY === "1") {
   console.log(
-    "[dev:server] Another Controller server is running: skipping managed skills and background loops."
+    "[dev:server] Another Controller server is running; shared-work ownership will be checked at startup."
   );
 }
 
@@ -144,6 +146,7 @@ const child = spawn(
       PORT: String(port),
       API_PORT: String(port),
       VITE_API_PORT: String(port),
+      CONTROLLER_DEV_LAUNCH_ID: launchId,
     },
   }
 );

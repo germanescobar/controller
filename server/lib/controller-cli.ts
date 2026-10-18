@@ -58,7 +58,7 @@ export function isDevInstance(): boolean {
 
 /**
  * Root that holds the CLI install (`bin/`) and the runtime file. The app
- * uses the Controller home itself; each dev checkout gets a distinct `dev/`
+ * uses the Controller home itself; each dev launch gets a distinct `dev/`
  * subdir so its CLI and URL never clobber another server's. The CLI resolves the runtime
  * file as a sibling of its own `bin/` dir first, so agents spawned by the
  * dev server (whose preamble points at `dev/bin/controller`) reach the dev
@@ -67,7 +67,8 @@ export function isDevInstance(): boolean {
 function controllerCliRoot(): string {
   if (!isDevInstance()) return orchestratorHome();
   const checkoutId = createHash("sha256").update(path.resolve(process.cwd())).digest("hex").slice(0, 16);
-  return path.join(orchestratorHome(), "dev", checkoutId);
+  const launchId = process.env.CONTROLLER_DEV_LAUNCH_ID ?? String(process.pid);
+  return path.join(orchestratorHome(), "dev", `${checkoutId}-${launchId}`);
 }
 
 /** Stable absolute path the unified CLI is installed to. */

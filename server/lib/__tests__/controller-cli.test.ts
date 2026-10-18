@@ -5,6 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   controllerAgentEnv,
   controllerCliBinDir,
@@ -449,6 +452,48 @@ test("a dev instance installs the CLI and runtime file under <home>/dev", async 
     assert.equal(await fs.readFile(path.join(home, "controller-runtime.json"), "utf8"), '{"serverUrl":"http://localhost:4500"}');
     // State stays shared: CONTROLLER_HOME is not redirected.
     assert.equal(controllerAgentEnv().CONTROLLER_HOME, home);
+  });
+});
+
+test("concurrent launches from one checkout keep separate sanitized CLI routes", async () => {
+  await withCliHome(true, async () => {
+    const savedLaunchId = process.env.CONTROLLER_DEV_LAUNCH_ID;
+    const servers = ["first", "second"].map((id) => createServer((_req, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify([{ id, name: id, path: "/tmp", createdAt: "2026-01-01T00:00:00Z" }]));
+    }));
+    try {
+      for (const server of servers) {
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      }
+      const cliPaths: string[] = [];
+      for (const [index, server] of servers.entries()) {
+        process.env.CONTROLLER_DEV_LAUNCH_ID = `launch-${index}`;
+        cliPaths.push(controllerCliInstalledPath());
+        assert.equal(controllerCliInstalledPath(), cliPaths[index], "watch restarts keep the launch path");
+        await installControllerCli();
+        const address = server.address();
+        assert.ok(address && typeof address !== "string");
+        await writeControllerRuntimeFile(address.port);
+      }
+      assert.notEqual(cliPaths[0], cliPaths[1]);
+      const sanitizedEnv = { PATH: process.env.PATH ?? "" };
+      const run = async (cli: string) => {
+        const { stdout, stderr } = await promisify(execFile)(await fs.realpath(cli), ["projects", "list", "--json"], { env: sanitizedEnv });
+        assert.ok(stdout.trim(), `CLI produced no project output: ${stderr}`);
+        return JSON.parse(stdout.trim()).id;
+      };
+      assert.equal(await run(cliPaths[0]), "first");
+      assert.equal(await run(cliPaths[1]), "second");
+      await new Promise<void>((resolve) => servers[1].close(() => resolve()));
+      assert.equal(await run(cliPaths[0]), "first");
+    } finally {
+      if (savedLaunchId === undefined) delete process.env.CONTROLLER_DEV_LAUNCH_ID;
+      else process.env.CONTROLLER_DEV_LAUNCH_ID = savedLaunchId;
+      await Promise.all(servers.map((server) => server.listening
+        ? new Promise<void>((resolve) => server.close(() => resolve()))
+        : Promise.resolve()));
+    }
   });
 });
 

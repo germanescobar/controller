@@ -49,6 +49,7 @@ import {
   fireAndForget,
   registerConsumer,
   startScheduler,
+  stopScheduler,
 } from "./lib/scheduler.js";
 import { makeSchedulesConsumer } from "./lib/schedules.js";
 import { makeRouteAdvanceDeps, makeWakesConsumer } from "./lib/wakes.js";
@@ -67,7 +68,8 @@ import {
   writeControllerRuntimeFile,
 } from "./lib/controller-cli.js";
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
-import { controllerHomeId } from "./lib/paths.js";
+import { controllerHomeId, orchestratorHome } from "./lib/paths.js";
+import { tryAcquireSharedLoopOwner } from "./lib/shared-loop-owner.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -306,19 +308,6 @@ async function start(): Promise<void> {
   // server is `import()`-ed from the Electron main process in production,
   // so `import("electron")` here resolves to the real module (issue #280).
   await installDefaultBrowserOpener();
-  // A secondary source server shares state with an existing server. The CLI
-  // install is isolated for every source server by isDevInstance().
-  const secondaryInstance = process.env.CONTROLLER_SHARED_STATE_SECONDARY === "1";
-  // Sync managed skills (browser, controller-scripts, etc.) into each agent's
-  // user skills home so they are available across Anita, Codex, and Claude.
-  // Skipped on secondary instances: the skills homes are global, and the bodies
-  // embed this server's CLI path, so the app's agents would be pointed at the
-  // dev server's CLI (and lose it when the dev server stops).
-  if (!secondaryInstance) {
-    await installManagedSkills().catch((error: unknown) => {
-      console.error("Failed to install managed skills:", error);
-    });
-  }
   // Ensure the Controller-owned memory directory exists (issue #350).
   // The global scope gets an empty directory on first start so the
   // agent's preamble can show `(empty)` placeholders; project scopes
@@ -362,13 +351,53 @@ async function start(): Promise<void> {
     console.log(`Server running on http://localhost:${boundPort}`);
   });
 
-  // The background loops below act on shared state (schedules, wakes, goals).
-  // Running them on a secondary instance too would fire every due item twice — once
-  // per server — so only the first running server owns them.
-  if (secondaryInstance) {
-    console.log("Dev instance: skipping managed skills and background loops (schedules, wakes, goals).");
-    return;
+  // The launcher only offers a liveness hint. Claim ownership here, after
+  // startup, so simultaneous servers cannot both start shared work.
+  let claiming = false;
+  let owner = false;
+  const tryStartSharedWork = async (): Promise<void> => {
+    if (claiming || owner) return;
+    claiming = true;
+    try {
+      const legacyUrl = process.env.CONTROLLER_SHARED_STATE_LEGACY_OWNER_URL;
+      if (legacyUrl && await isLegacyOwnerAlive(legacyUrl)) return;
+      const release = await tryAcquireSharedLoopOwner(orchestratorHome(), (error) => {
+        console.error("Shared-loop ownership lost:", error);
+        stopScheduler();
+        process.exit(1);
+      });
+      if (!release) return;
+      owner = true;
+      clearInterval(retryOwnership);
+      await installManagedSkills().catch((error: unknown) => {
+        console.error("Failed to install managed skills:", error);
+      });
+      await startSharedWork();
+      console.log("This server owns shared schedules, wakes, and goals.");
+    } catch (error) {
+      console.error("Failed to start shared work:", error);
+      process.exit(1);
+    } finally {
+      claiming = false;
+    }
+  };
+  const retryOwnership = setInterval(() => { void tryStartSharedWork(); }, 5_000);
+  retryOwnership.unref?.();
+  await tryStartSharedWork();
+}
+
+async function isLegacyOwnerAlive(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${url.replace(/\/$/, "")}/api/agent-providers`, {
+      signal: AbortSignal.timeout(1_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
   }
+}
+
+async function startSharedWork(): Promise<void> {
 
   // Start the shared wakeup loop (issue #243) and register the schedules
   // consumer. The consumer scans every project for due schedules each tick

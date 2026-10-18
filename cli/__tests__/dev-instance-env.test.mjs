@@ -48,10 +48,11 @@ test("absent inherited env discovers a running app from its runtime", async () =
 test("stale inherited URL falls back to the running app runtime", async () => {
   await fixture(async ({ home, url, env }) => {
     await writeFile(path.join(home, "controller-runtime.json"), JSON.stringify({ serverUrl: url }));
-    const child = await devServerBaseEnv({ ...env, CONTROLLER_SERVER_URL: "http://127.0.0.1:1", CONTROLLER_SESSION_ID: "s1" });
+    const child = await devServerBaseEnv({ ...env, CONTROLLER_SERVER_URL: "http://127.0.0.1:1", CONTROLLER_SESSION_ID: "s1", CONTROLLER_DEV_LAUNCH_ID: "parent-launch" });
     assert.equal(child.CONTROLLER_SHARED_STATE_SECONDARY, "1");
     assert.equal(child.CONTROLLER_SERVER_URL, undefined);
     assert.equal(child.CONTROLLER_SESSION_ID, undefined);
+    assert.equal(child.CONTROLLER_DEV_LAUNCH_ID, undefined);
   });
 });
 
@@ -125,8 +126,27 @@ test("scanned port owned by another home cannot suppress loops", async () => {
 test("same-home runtime URL supports older servers without identity", async () => {
   await fixture(async ({ home, url, env }) => {
     await writeFile(path.join(home, "controller-runtime.json"), JSON.stringify({ serverUrl: url }));
-    assert.equal((await devServerBaseEnv(env)).CONTROLLER_SHARED_STATE_SECONDARY, "1");
+    const child = await devServerBaseEnv(env);
+    assert.equal(child.CONTROLLER_SHARED_STATE_SECONDARY, "1");
+    assert.equal(child.CONTROLLER_SHARED_STATE_LEGACY_OWNER_URL, url);
   }, { legacy: true });
+});
+
+test("a legacy packaged owner wins over a newer secondary's identity", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "controller-legacy-owner-"));
+  const legacyUrl = "http://localhost:4500";
+  const modernUrl = "http://localhost:3102";
+  try {
+    await writeFile(path.join(home, "controller-runtime.json"), JSON.stringify({ serverUrl: legacyUrl }));
+    const child = await devServerBaseEnv(
+      { CONTROLLER_HOME: home, CONTROLLER_SERVER_URL: modernUrl },
+      async (url) => url === modernUrl ? controllerHomeId(home) : null,
+      async (url) => url === legacyUrl,
+    );
+    assert.equal(child.CONTROLLER_SHARED_STATE_LEGACY_OWNER_URL, legacyUrl);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("symlink aliases share a home ID and suppress duplicate loops", async () => {

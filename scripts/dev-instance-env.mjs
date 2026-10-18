@@ -80,7 +80,7 @@ async function runtimeUrl(file) {
 }
 
 /** Find an already running owner of shared schedules, wakes and goals. */
-export async function hasLiveController(
+async function findLiveController(
   env,
   probe = probeControllerHome,
   legacyProbe = isControllerServerAlive,
@@ -98,19 +98,24 @@ export async function hasLiveController(
   } catch { /* No dev runtimes yet. */ }
   const knownUrls = [...new Set(urls.filter(Boolean))];
   const identities = await Promise.all(knownUrls.map((url) => probe(url)));
-  if (identities.includes(expectedHomeId)) {
-    return true;
-  }
   // Older packaged apps have no identity endpoint. Only the exact URL
   // published inside this home is trusted as a legacy binding.
   const runtimeIndex = knownUrls.indexOf(sharedRuntimeUrl);
   if (sharedRuntimeUrl && identities[runtimeIndex] === null && (await legacyProbe(sharedRuntimeUrl))) {
-    return true;
+    return { kind: "legacy", url: sharedRuntimeUrl };
   }
+  if (identities.includes(expectedHomeId)) return { kind: "identified" };
   // Electron walks up to 100 ports from 4500 when its preferred port is busy.
   // An unrelated Controller may occupy any one of them, so require identity.
   const appPorts = Array.from({ length: 101 }, (_, offset) => `http://localhost:${4500 + offset}`);
-  return (await Promise.all(appPorts.map((url) => probe(url)))).includes(expectedHomeId);
+  return (await Promise.all(appPorts.map((url) => probe(url)))).includes(expectedHomeId)
+    ? { kind: "identified" }
+    : null;
+}
+
+/** Preserve the public boolean probe for callers that only need liveness. */
+export async function hasLiveController(env, probe = probeControllerHome, legacyProbe = isControllerServerAlive) {
+  return (await findLiveController(env, probe, legacyProbe)) !== null;
 }
 
 export async function devServerBaseEnv(
@@ -122,8 +127,12 @@ export async function devServerBaseEnv(
   delete next.CONTROLLER_SERVER_URL;
   delete next.CONTROLLER_SESSION_ID;
   delete next.CONTROLLER_SHARED_STATE_SECONDARY;
+  delete next.CONTROLLER_SHARED_STATE_LEGACY_OWNER_URL;
+  delete next.CONTROLLER_DEV_LAUNCH_ID;
   // Every checkout must keep its CLI and runtime away from the packaged app.
   next.CONTROLLER_DEV_INSTANCE = "1";
-  if (await hasLiveController(env, probe, legacyProbe)) next.CONTROLLER_SHARED_STATE_SECONDARY = "1";
+  const owner = await findLiveController(env, probe, legacyProbe);
+  if (owner) next.CONTROLLER_SHARED_STATE_SECONDARY = "1";
+  if (owner?.kind === "legacy") next.CONTROLLER_SHARED_STATE_LEGACY_OWNER_URL = owner.url;
   return next;
 }
