@@ -45,8 +45,9 @@ import {
 } from "../session-collision.js";
 import { projectStoreDir } from "../paths.js";
 import { getProjectWorktrees, invalidateWorktreeCache } from "../worktrees.js";
-import { getSession, saveSession, appendEvent, type SessionState } from "../sessions.js";
+import { getSession, saveSession, appendEvent, getProjectSessionSummaries, type SessionState } from "../sessions.js";
 import { getSessionSummaries } from "../sessions.js";
+import { buildSessionFocus, writeSessionFocus } from "../focus-state.js";
 
 function withTempHome(run: (home: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "session-collision-test-"));
@@ -387,6 +388,40 @@ test("getSessionSummaries populates `duplicates` on every copy of a colliding id
     assert.ok(Array.isArray(mainSummary.duplicates));
     assert.equal(mainSummary.duplicates!.length, 1);
     assert.equal(mainSummary.duplicates![0].worktreeId, "wt-feature");
+  });
+});
+
+test("project sidebar summaries match fresh per-worktree reads for focus, collisions, ordering and archives", async () => {
+  await withTempHome(async (home) => {
+    const mainPath = path.join(home, "main");
+    const featurePath = path.join(home, "feature");
+    mkdirSync(mainPath, { recursive: true });
+    mkdirSync(featurePath, { recursive: true });
+    await plantProjectRegistry(home, [
+      { id: "proj-1", name: "demo", path: mainPath, createdAt: "2026-01-01T00:00:00.000Z" },
+    ]);
+    await plantWorktreeRegistry(home, [
+      { id: "wt-main", projectId: "proj-1", name: "main", path: mainPath, isMain: true, createdAt: "2026-01-01T00:00:00.000Z" },
+      { id: "wt-feature", projectId: "proj-1", name: "feature", path: featurePath, isMain: false, createdAt: "2026-01-01T00:00:00.000Z" },
+    ]);
+    plantSessionInWorktree(mainPath, makeSession({ id: "shared", worktreeId: "wt-main" }));
+    plantSessionInWorktree(featurePath, makeSession({ id: "shared", worktreeId: "wt-feature" }));
+    plantSessionInWorktree(mainPath, makeSession({ id: "recent", worktreeId: "wt-main", lastActiveAt: "2026-10-18T00:00:00.000Z" }));
+    plantSessionInWorktree(featurePath, makeSession({ id: "archived", worktreeId: "wt-feature", status: "archived" }));
+    await writeSessionFocus(buildSessionFocus("shared", {
+      focusPinnedAt: "2026-10-17T00:00:00.000Z",
+      focusDoneAt: undefined,
+      userUnpinned: undefined,
+    }));
+    const worktrees = await getProjectWorktrees("proj-1");
+    const bulk = await getProjectSessionSummaries("proj-1", worktrees);
+    for (const worktree of worktrees) {
+      assert.deepEqual(bulk[worktree.id], await getSessionSummaries(worktree.path, "proj-1"));
+    }
+    assert.deepEqual(bulk["wt-main"].map((session) => session.id), ["recent", "shared"]);
+    assert.equal(bulk["wt-main"][1].focusPinnedAt, "2026-10-17T00:00:00.000Z");
+    assert.equal(bulk["wt-main"][1].duplicates?.[0].worktreeId, "wt-feature");
+    assert.deepEqual(bulk["wt-feature"].map((session) => session.id), ["shared"]);
   });
 });
 

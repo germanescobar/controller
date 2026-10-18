@@ -13,7 +13,7 @@ import {
 } from "./focus-state.js";
 import { projectStoreDir } from "./paths.js";
 import { getProjects } from "./projects.js";
-import { getProjectWorktrees } from "./worktrees.js";
+import { getProjectWorktrees, type Worktree } from "./worktrees.js";
 import {
   findSessionCollisionsInProject,
   pickOwner,
@@ -244,12 +244,13 @@ export async function getAttachments(
 }
 
 export async function getSessions(
-  projectPath: string
+  projectPath: string,
+  focusById?: Map<string, SessionFocus>
 ): Promise<SessionState[]> {
   const dir = storagePaths(projectPath).sessions;
   // Read the focus sidecars in a single pass so we can merge them
   // into the session list without a per-session round trip.
-  const focusById = await listSessionFocuses();
+  const focuses = focusById ?? await listSessionFocuses();
   let files: string[];
   try {
     files = await fs.readdir(dir);
@@ -269,7 +270,7 @@ export async function getSessions(
       // file doesn't take down the whole list.
       continue;
     }
-    applyFocus(session, focusById.get(session.id) ?? null);
+    applyFocus(session, focuses.get(session.id) ?? null);
     sessions.push(session);
   }
   sessions.sort(
@@ -299,12 +300,16 @@ export async function getSessions(
  */
 export async function getSessionSummaries(
   projectPath: string,
-  projectId?: string
+  projectId?: string,
+  context?: {
+    focusById: Map<string, SessionFocus>;
+    collisions: Map<string, CollisionCandidate[]>;
+  }
 ): Promise<SessionSummary[]> {
-  const sessions = await getSessions(projectPath);
-  const collisions = projectId
+  const sessions = await getSessions(projectPath, context?.focusById);
+  const collisions = context?.collisions ?? (projectId
     ? await findSessionCollisionsInProject(projectId)
-    : new Map<string, CollisionCandidate[]>();
+    : new Map<string, CollisionCandidate[]>());
   return sessions.map((s) => {
     const duplicates = collisionDuplicatesFor(s, collisions);
     return {
@@ -338,6 +343,27 @@ export async function getSessionSummaries(
       ...(duplicates ? { duplicates } : {}),
     };
   });
+}
+
+/** One fresh focus and collision snapshot for the sidebar's project-wide read. */
+export async function getProjectSessionSummaries(
+  projectId: string,
+  worktrees: Worktree[]
+): Promise<Record<string, SessionSummary[]>> {
+  const [focusById, collisions] = await Promise.all([
+    listSessionFocuses(),
+    findSessionCollisionsInProject(projectId),
+  ]);
+  const result: Record<string, SessionSummary[]> = {};
+  // Bound filesystem fanout for projects with hundreds of worktrees.
+  for (let index = 0; index < worktrees.length; index += 16) {
+    const batch = await Promise.all(worktrees.slice(index, index + 16).map(async (worktree) => ({
+      id: worktree.id,
+      summaries: await getSessionSummaries(worktree.path, projectId, { focusById, collisions }),
+    })));
+    for (const { id, summaries } of batch) result[id] = summaries;
+  }
+  return result;
 }
 
 /**

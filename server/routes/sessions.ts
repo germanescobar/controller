@@ -23,6 +23,7 @@ const execAsync = promisify(exec);
 import {
   getSessions,
   getSessionSummaries,
+  getProjectSessionSummaries,
   getSession,
   getEvents,
   getEventsTail,
@@ -4639,6 +4640,19 @@ sessionsRouter.post(
     res.json({ ok: true });
   }
 );
+
+// Read the sidebar's session summaries with one focus and collision scan
+// for the project. The per-worktree route below remains the targeted path.
+sessionsRouter.get("/:projectId/sidebar-sessions", async (req, res) => {
+  const project = await getProject(req.params.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  res.set("Cache-Control", "no-store");
+  const worktrees = await getProjectWorktrees(project.id);
+  res.json(await getProjectSessionSummaries(project.id, worktrees));
+});
 
 // List sessions for a project
 sessionsRouter.get("/:projectId/sessions", async (req, res) => {
