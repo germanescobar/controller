@@ -40,6 +40,13 @@ import { useResizablePanel } from "@/lib/useResizablePanel";
 import { isControllerAvailable } from "@/lib/controller";
 import { formatChord, matchesEvent, parseChord } from "@/lib/shortcut-match";
 import { useFilePanelShortcuts } from "@/lib/useFilePanelShortcuts";
+import {
+  isRightPanelResizeHandleVisible,
+  isRightPanelVisible as isRightPanelMounted,
+  getRightPanelInlineWidthStyle,
+  type RightPanelTab,
+  type MobilePanel,
+} from "@/lib/right-panel-visibility";
 import { FileFinderDialog } from "@/components/FileFinderDialog";
 import { SourceEditor } from "@/components/SourceEditor";
 import {
@@ -793,8 +800,10 @@ interface PreviewActions {
   open: (url: string) => void;
 }
 
-type RightPanelTab = "terminal" | "changes" | "files" | "preview" | "pr";
-type MobilePanel = "agent" | RightPanelTab;
+// `RightPanelTab` and `MobilePanel` are imported from
+// `@/lib/right-panel-visibility` above; they're re-exported there
+// so the pure visibility helpers and this component can share a
+// single source of truth.
 
 const OpenSourceReferenceContext = createContext<
   ((reference: OpenSourceReferenceOptions) => void) | undefined
@@ -3755,6 +3764,22 @@ export function SessionView({
       typeof window.matchMedia === "function" &&
       window.matchMedia(MOBILE_COMPOSER_MEDIA_QUERY).matches,
   );
+  // Desktop viewport drives the right-panel split layout (chat +
+  // side panel with the resize handle between them). It's the exact
+  // inverse of `isMobileComposerViewport` — both listen to the same
+  // `(max-width: 767px)` media query via the effect below — but we
+  // keep the value distinct so the right-panel logic never reads
+  // `mobilePanel === "agent"` as a proxy for "we're on desktop".
+  // `mobilePanel` is a mobile-only concept (it picks the full-screen
+  // panel on phones); desktop uses `terminalOpen` and `rightTab` to
+  // drive its side panel. Conflating the two was the source of the
+  // desktop regressions where opening a file in the Files tab, or
+  // surfacing the Preview tab from an agent URL, silently flipped
+  // `mobilePanel` to a non-"agent" value, which in turn hid the
+  // resize handle and made the toggle button a no-op because the
+  // right panel stayed mounted via the `mobilePanel === "files"`
+  // branch.
+  const isDesktopViewport = !isMobileComposerViewport;
   const composerLayout = getComposerLayout(
     isMobileComposerViewport,
     composerHasFocus,
@@ -6974,7 +6999,18 @@ export function SessionView({
         setSourcePreview({ file, line: selectedLine });
         setTerminalOpen(true);
         setRightTab("files");
-        setMobilePanel("files");
+        // `mobilePanel` is a mobile-only concept: on phones it picks
+        // the full-screen panel. On desktop, the right panel is a
+        // side pane whose open/closed state is owned by
+        // `terminalOpen` and whose tab is owned by `rightTab`.
+        // Writing `setMobilePanel("files")` on desktop used to flip
+        // `mobilePanel` away from "agent", which silently hid the
+        // resize handle and made the side-panel toggle button a
+        // no-op (the right panel stayed mounted via the
+        // `mobilePanel === "files"` branch of the render guard).
+        if (!isDesktopViewport) {
+          setMobilePanel("files");
+        }
         // Promote `path` to the head of the recent list so the fuzzy
         // file finder can surface it before the user types anything
         // (issue #313). We dedupe against the existing list and cap
@@ -6987,7 +7023,7 @@ export function SessionView({
       .catch((err) => {
         toast.error(err instanceof Error ? err.message : `Could not open ${errorLabel}`);
       });
-  }, [projectId, worktreeId]);
+  }, [projectId, worktreeId, isDesktopViewport]);
 
   // Open a different source file. Gates on the dirty-check so the
   // user gets a chance to save first. The agent still keeps
@@ -7009,15 +7045,22 @@ export function SessionView({
   // updates without re-prompting.
   //
   // `keepMobile: true` opts out of the `setMobilePanel(next)`
-  // call. Desktop callers (the right-panel tab bar) need this
-  // because the resizable-panel handle and its saved width are
-  // gated on `mobilePanel === "agent"` (lines 8164/8181) — a
-  // desktop tab click must keep `mobilePanel` at "agent" so
-  // the handle keeps rendering. Mobile callers (the header
-  // nav) want the opposite: they expect `mobilePanel` to
-  // follow the chosen tab, so they call without `keepMobile`
-  // and then setMobilePanel(next) themselves. Codex P2 review,
-  // PR #422.
+  // call. Desktop callers (the right-panel tab bar) pass this so
+  // `mobilePanel` stays at "agent" and the resize handle keeps
+  // rendering across tabs. Mobile callers (the header nav) want
+  // the opposite: they expect `mobilePanel` to follow the
+  // chosen tab, so they call without `keepMobile` and then
+  // setMobilePanel(next) themselves. Codex P2 review, PR #422.
+  //
+  // The `mobilePanel` write is also gated on `!isDesktopViewport`
+  // for the non-`keepMobile` callers (e.g. the PR badge in the
+  // desktop header, `useEffect` for `prPanelRequestId`). On
+  // desktop, those callers would otherwise flip `mobilePanel`
+  // away from "agent" — which silently hides the resize handle
+  // and prevents the side-panel toggle from closing the panel
+  // (the render guard matches on `mobilePanel === "files"` too).
+  // The `keepMobile: true` callers are unaffected because the
+  // write is already skipped below.
   const requestRightTab = useCallback(
     (
       next: RightPanelTab,
@@ -7033,18 +7076,18 @@ export function SessionView({
         if (options.alsoClosePanel) {
           setTerminalOpen(false);
         }
-        if (!options.keepMobile && mobilePanel !== "agent") {
+        if (!options.keepMobile && mobilePanel !== "agent" && !isDesktopViewport) {
           setMobilePanel("terminal");
         }
       } else {
         setTerminalOpen(true);
-        if (!options.keepMobile) {
+        if (!options.keepMobile && !isDesktopViewport) {
           setMobilePanel(next);
         }
       }
       return true;
     },
-    [rightTab, confirmLeaveFilesIfDirty, mobilePanel]
+    [rightTab, confirmLeaveFilesIfDirty, mobilePanel, isDesktopViewport]
   );
 
   useEffect(() => {
@@ -7088,13 +7131,25 @@ export function SessionView({
       setTerminalOpen(false);
       if (!confirmLeaveFilesIfDirty()) return;
       setRightTab("terminal");
+      // The close branch resets `mobilePanel` to "agent" so a
+      // future phone-mode render doesn't keep the Files panel
+      // pinned full-screen. On desktop this is a no-op because
+      // `mobilePanel` is already at its default "agent".
       setMobilePanel("agent");
       return;
     }
     setTerminalOpen(true);
     setRightTab("files");
-    setMobilePanel("files");
-  }, [filesPanelVisible, confirmLeaveFilesIfDirty]);
+    // Mobile uses `mobilePanel` to pick the full-screen panel;
+    // desktop owns the right-panel visibility via `terminalOpen`
+    // and the tab via `rightTab`. Setting `mobilePanel` on
+    // desktop would re-introduce the regression where the
+    // resize handle vanishes and the toggle button stops
+    // closing the panel.
+    if (!isDesktopViewport) {
+      setMobilePanel("files");
+    }
+  }, [filesPanelVisible, confirmLeaveFilesIfDirty, isDesktopViewport]);
 
   const handleFilesPanelSearch = useCallback(() => {
     // Open the file finder as a modal overlay; leave the right
@@ -7124,8 +7179,13 @@ export function SessionView({
     if (rightTab === "files" && !confirmLeaveFilesIfDirty()) return;
     setTerminalOpen(true);
     setRightTab("preview");
-    setMobilePanel("preview");
-  }, [rightTab, confirmLeaveFilesIfDirty]);
+    // `mobilePanel` is mobile-only — see `openSourcePath` for the
+    // same pattern. Setting it on desktop would break the resize
+    // handle / close-button invariants.
+    if (!isDesktopViewport) {
+      setMobilePanel("preview");
+    }
+  }, [rightTab, confirmLeaveFilesIfDirty, isDesktopViewport]);
 
   useActivePreviewPane({
     key: browserKey,
@@ -9055,25 +9115,41 @@ export function SessionView({
           </div>
         </div>
 
-        {/* Chat ↔ Right panel resize handle — desktop only */}
-        {terminalOpen && mobilePanel === "agent" && (
+        {/* Chat ↔ Right panel resize handle — desktop only. Driven
+            by a pure helper so the visibility rule can be unit
+            tested in isolation. The handle stays visible across
+            every right-panel tab (Terminal / Changes / Files /
+            PR / Preview); the previous gate
+            `terminalOpen && mobilePanel === "agent"` used
+            `mobilePanel` as a desktop proxy, which silently broke
+            the Files tab (and any other code path that flipped
+            `mobilePanel` to a non-"agent" value on desktop). */}
+        {isRightPanelResizeHandleVisible({
+          terminalOpen,
+          mobilePanel,
+          rightTab,
+          isDesktopViewport,
+        }) ? (
           <div
             {...rightPanelResize.handleProps}
             className={`hidden md:flex w-1.5 cursor-col-resize shrink-0 items-center justify-center bg-transparent hover:bg-border/50 active:bg-border transition-colors ${
               rightPanelResize.dragging ? "bg-border" : ""
             }`}
           />
-        )}
+        ) : null}
 
         {/* Right panel — desktop: side panel with Terminal/Changes/Files/PR/Preview tabs; mobile: full screen when a panel tab is active */}
-        {(terminalOpen || mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" || mobilePanel === "pr") && (() => {
+        {isRightPanelMounted({ terminalOpen, mobilePanel, rightTab, isDesktopViewport }) && (() => {
           const { added: changesAdded, deleted: changesDeleted } = summarizeDiffFiles(gitDiffFiles.length > 0 ? gitDiffFiles : branchDiffFiles);
           const hasChanges = gitDiffFiles.length > 0 || branchDiffFiles.length > 0;
           return (
           <div className={`flex flex-col min-h-0 min-w-0 overflow-hidden ${
             mobilePanel === "terminal" || mobilePanel === "changes" || mobilePanel === "files" || mobilePanel === "preview" || mobilePanel === "pr" ? "flex-1 md:w-1/2" : "hidden md:flex"
           }`}
-          style={terminalOpen && mobilePanel === "agent" ? { width: `${rightPanelResize.width}px`, minWidth: `${rightPanelResize.width}px` } : undefined}
+          style={getRightPanelInlineWidthStyle(
+            { terminalOpen, mobilePanel, rightTab, isDesktopViewport },
+            rightPanelResize.width,
+          )}
           >
             {/* Tab bar — desktop only; mobile uses the header tabs */}
             <div className="hidden md:flex h-9 shrink-0 items-center border-b border-border bg-[#1c1c1e] px-2 gap-1">
