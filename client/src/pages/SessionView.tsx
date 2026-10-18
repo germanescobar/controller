@@ -155,6 +155,7 @@ interface SessionViewProps {
   worktreeId?: string;
   project?: Project;
   mobileSidebarOpen?: boolean;
+  mobileSidebarTriggerRef?: React.RefObject<HTMLButtonElement | null>;
   onMobileSidebarClose?: () => void;
   onMobileHeadingChange?: (heading: { sessionId: string; title: string; context: string }) => void;
   onSessionCreated: (sessionId: string) => void;
@@ -3702,6 +3703,7 @@ export function SessionView({
   worktreeId,
   project,
   mobileSidebarOpen = false,
+  mobileSidebarTriggerRef,
   onMobileSidebarClose,
   onMobileHeadingChange,
   onSessionCreated,
@@ -7523,13 +7525,16 @@ export function SessionView({
     return null;
   }, [streamRenderItems]);
 
+  const mobileSidebarCloseRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!mobileSidebarOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onMobileSidebarClose?.();
+    const desktopViewport = window.matchMedia("(min-width: 768px)");
+    const closeOnDesktop = () => {
+      if (desktopViewport.matches) onMobileSidebarClose?.();
     };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    closeOnDesktop();
+    desktopViewport.addEventListener("change", closeOnDesktop);
+    return () => desktopViewport.removeEventListener("change", closeOnDesktop);
   }, [mobileSidebarOpen, onMobileSidebarClose]);
 
   const mobileSidebarTabs: { id: MobilePanel; label: string; icon: React.ReactNode }[] = [
@@ -7561,13 +7566,17 @@ export function SessionView({
 
   return (
     <>
-      {sessionId && mobileSidebarOpen && (
-        <div className="fixed inset-0 z-50 md:hidden">
-          <button type="button" aria-label="Close session sidebar" className="absolute inset-0 bg-black/50" onClick={onMobileSidebarClose} />
-          <aside role="dialog" aria-modal="true" aria-label="Session sidebar" className="absolute inset-y-0 right-0 flex w-[min(20rem,calc(100vw-2rem))] flex-col border-l border-border bg-sidebar shadow-xl">
+      {sessionId && (
+        <Dialog open={mobileSidebarOpen} onOpenChange={(open) => { if (!open) onMobileSidebarClose?.(); }}>
+          <DialogContent
+            showCloseButton={false}
+            initialFocus={mobileSidebarCloseRef}
+            finalFocus={mobileSidebarTriggerRef ?? true}
+            className="fixed inset-y-0 right-0 left-auto top-0 bottom-0 m-0 flex h-dvh w-[min(20rem,calc(100vw-2rem))] max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-l border-border bg-sidebar p-0 shadow-xl ring-0 md:hidden"
+          >
             <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-              <span className="text-sm font-medium">Session</span>
-              <button type="button" aria-label="Close session sidebar" onClick={onMobileSidebarClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
+              <DialogTitle className="text-sm font-medium">Session</DialogTitle>
+              <button ref={mobileSidebarCloseRef} type="button" aria-label="Close session sidebar" onClick={onMobileSidebarClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
             </div>
             <div className="flex-1 space-y-4 overflow-y-auto p-3">
               {onFocusSkip && onFocusDone && onToggleAutoAdvance && (
@@ -7607,8 +7616,8 @@ export function SessionView({
                 />
               )}
             </div>
-          </aside>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
       {/* Header */}
       <header className="hidden md:flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-3 md:px-4">

@@ -141,6 +141,7 @@ function AppBody() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
+  const sessionSidebarTriggerRef = useRef<HTMLButtonElement>(null);
   const [mobileSessionHeading, setMobileSessionHeading] = useState<{ sessionId: string; title: string; context: string } | null>(null);
   const [prPanelRequest, setPrPanelRequest] = useState<{ worktreeId: string; id: number } | null>(null);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
@@ -934,6 +935,7 @@ function AppBody() {
           )}
           {activeView.page === "session" && activeView.sessionId && (
             <button
+              ref={sessionSidebarTriggerRef}
               onClick={() => {
                 setSidebarOpen(false);
                 setSessionSidebarOpen((open) => !open);
@@ -996,6 +998,7 @@ function AppBody() {
             worktreeId={activeView.worktreeId}
             project={projects.find((p) => p.id === activeView.projectId)}
             mobileSidebarOpen={sessionSidebarOpen}
+            mobileSidebarTriggerRef={sessionSidebarTriggerRef}
             onMobileSidebarClose={() => setSessionSidebarOpen(false)}
             onMobileHeadingChange={setMobileSessionHeading}
             onSessionCreated={(sessionId) => {
