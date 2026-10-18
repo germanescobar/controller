@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
-import { Archive, ArrowRight, Menu, X } from "lucide-react";
+import { Archive, ArrowRight, Menu, PanelRight, X } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -140,6 +140,8 @@ function AppBody() {
     return saved.page === "session" ? saved.projectId : null;
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
+  const [mobileSessionHeading, setMobileSessionHeading] = useState<{ sessionId: string; title: string; context: string } | null>(null);
   const [prPanelRequest, setPrPanelRequest] = useState<{ worktreeId: string; id: number } | null>(null);
   const [focusQueue, setFocusQueue] = useState<FocusQueueItem[]>([]);
   const [focusRefreshKey, setFocusRefreshKey] = useState(0);
@@ -829,6 +831,10 @@ function AppBody() {
     activeView.page === "session"
       ? `${activeView.projectId}:${activeView.worktreeId ?? "main"}`
       : "non-session";
+  const mobileSessionId = activeView.page === "session" ? activeView.sessionId : undefined;
+  useEffect(() => {
+    setSessionSidebarOpen(false);
+  }, [sessionViewKey, mobileSessionId]);
   const mobileHeaderProjectId =
     activeView.page === "session" ||
     activeView.page === "edit-project"
@@ -836,6 +842,10 @@ function AppBody() {
       : null;
   const mobileHeaderTitle =
     projects.find((project) => project.id === mobileHeaderProjectId)?.name ?? "Controller";
+  const showSessionHeading = activeView.page === "session" && Boolean(activeView.sessionId);
+  const currentMobileHeading = showSessionHeading && mobileSessionHeading?.sessionId === activeView.sessionId
+    ? mobileSessionHeading
+    : null;
 
   return (
     <div className="flex h-dvh w-full bg-background text-foreground">
@@ -894,7 +904,10 @@ function AppBody() {
       <main className="flex flex-1 flex-col min-h-0 min-w-0">
         <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border bg-background px-3 md:hidden">
           <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
+            onClick={() => {
+              setSessionSidebarOpen(false);
+              setSidebarOpen(!sidebarOpen);
+            }}
             className="shrink-0 rounded-md border-l border-border p-2 pl-3 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
           >
             {sidebarOpen ? (
@@ -903,14 +916,35 @@ function AppBody() {
               <Menu className="h-5 w-5" />
             )}
           </button>
-          <span className="ml-3 min-w-0 flex-1 truncate text-sm font-medium">
-            {mobileHeaderTitle}
+          <span className="ml-3 min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">
+              {showSessionHeading ? currentMobileHeading?.title ?? "Untitled conversation" : mobileHeaderTitle}
+            </span>
+            {showSessionHeading && (
+              <span className="block truncate text-[11px] text-muted-foreground">
+                {currentMobileHeading?.context ?? mobileHeaderTitle}
+              </span>
+            )}
           </span>
           {mobileDiffSummary && (
             <span className="shrink-0 font-mono text-xs">
               <span className="text-green-400/90">+{mobileDiffSummary.added}</span>{" "}
               <span className="text-red-400/90">-{mobileDiffSummary.deleted}</span>
             </span>
+          )}
+          {activeView.page === "session" && activeView.sessionId && (
+            <button
+              onClick={() => {
+                setSidebarOpen(false);
+                setSessionSidebarOpen((open) => !open);
+              }}
+              className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+              title="Session sidebar"
+              aria-label="Session sidebar"
+              aria-expanded={sessionSidebarOpen}
+            >
+              <PanelRight className="h-4 w-4" />
+            </button>
           )}
           {activeView.page === "session" && activeView.sessionId && (
             <button
@@ -961,6 +995,9 @@ function AppBody() {
             sessionId={activeView.sessionId}
             worktreeId={activeView.worktreeId}
             project={projects.find((p) => p.id === activeView.projectId)}
+            mobileSidebarOpen={sessionSidebarOpen}
+            onMobileSidebarClose={() => setSessionSidebarOpen(false)}
+            onMobileHeadingChange={setMobileSessionHeading}
             onSessionCreated={(sessionId) => {
               setView({
                 page: "session",

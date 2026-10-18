@@ -9,7 +9,7 @@ import type {
 } from "../../api.ts";
 
 function render(
-  variant: "mobile" | "desktop",
+  variant: "sidebar" | "desktop",
   options: {
     isOnRadar?: boolean;
     countdown?: boolean;
@@ -25,6 +25,7 @@ function render(
     delayRunAt?: string | null;
     delayMessagePreview?: string | null;
     monitors?: Monitor[];
+    navigation?: React.ReactNode;
   } = {},
 ) {
   return renderToStaticMarkup(
@@ -49,6 +50,7 @@ function render(
       delayRunAt={options.delayRunAt ?? null}
       delayMessagePreview={options.delayMessagePreview ?? null}
       monitors={options.monitors ?? []}
+      navigation={options.navigation}
     />,
   );
 }
@@ -76,9 +78,9 @@ const CHILD: SessionChildSummary = {
   status: "completed",
 };
 
-test("mobile controls restore the compact radar row with Next and Done", () => {
-  const html = render("mobile");
-  assert.match(html, /focus-conversation-controls-mobile/);
+test("sidebar controls show Auto Advance, Done, and Next", () => {
+  const html = render("sidebar");
+  assert.match(html, /focus-conversation-controls-sidebar/);
   assert.match(html, /md:hidden/);
   assert.match(html, />Next</);
   assert.match(html, />Done</);
@@ -126,8 +128,8 @@ test("the panel replaces normal actions with the auto-advance countdown", () => 
   assert.doesNotMatch(html, />Done</);
 });
 
-test("the mobile countdown keeps only the plain Stay action", () => {
-  const html = render("mobile", { countdown: true });
+test("the sidebar countdown keeps only the plain Stay action", () => {
+  const html = render("sidebar", { countdown: true });
   assert.match(html, /Advancing in 4s/);
   assert.match(html, />Stay</);
   assert.match(html, /lucide-pause/);
@@ -135,8 +137,8 @@ test("the mobile countdown keeps only the plain Stay action", () => {
   assert.doesNotMatch(html, /Ctrl\+S|⌃S/);
 });
 
-test("mobile normal controls do not expose shortcut chips or tooltips", () => {
-  const html = render("mobile");
+test("sidebar controls do not expose shortcut chips or tooltips", () => {
+  const html = render("sidebar");
   assert.doesNotMatch(html, /Ctrl\+[NSTD]|⌃[NSTD]/);
   assert.doesNotMatch(html, /data-slot="kbd"/);
 });
@@ -283,35 +285,23 @@ test("parent and children rows render below the Next/Done action row", () => {
   assert.ok(parentPos > nextPos, "parent row should appear after Next");
 });
 
-test("the mobile variant never renders the relationship rows (issue #384 out-of-scope)", () => {
-  // The mobile header carries this component in a tight
-  // horizontal strip. The multi-line relationship rows would
-  // overflow the strip, so the issue scopes them to desktop
-  // only. The mobile variant receives the same props (the
-  // SessionView mounts both variants with the same data), but
-  // the rows must not appear.
-  const html = render("mobile", {
+test("the sidebar renders relationships below navigation", () => {
+  const html = render("sidebar", {
     parent: PARENT,
-    children: [CHILD, { ...CHILD, id: "child-2" }],
+    children: [CHILD],
     currentProjectId: "proj-main",
     onOpenConversation: () => {},
+    navigation: <nav>Agent Terminal Changes</nav>,
   });
-  assert.doesNotMatch(html, /focus-conversation-relationships-mobile/);
-  assert.doesNotMatch(html, />Parent</);
-  assert.doesNotMatch(html, />Children</);
-  // Existing mobile contract still holds: Next / Done visible.
+  assert.match(html, /focus-conversation-relationships-sidebar/);
+  assert.match(html, />Parent</);
+  assert.match(html, />Children</);
   assert.match(html, />Next</);
-  assert.match(html, />Done</);
+  assert.ok(html.indexOf(">Next<") < html.indexOf("Agent Terminal Changes"));
+  assert.ok(html.indexOf("Agent Terminal Changes") < html.indexOf("focus-conversation-relationship-parent"));
 });
 
 // --- Runtime rows (issue #339) --------------------------------------
-//
-// The panel grows two new desktop-only rows: a `Next run in Xs`
-// delay row sourced from the queue head's `runAt`, and a
-// `Monitors (N)` row sourced from the live monitor list. Mobile
-// stays out of scope (same rationale as the relationship rows).
-// Stop / start actions are not exposed in this issue's slice —
-// the bar is information-only.
 
 const MONITOR: Monitor = {
   id: "mon-1",
@@ -426,22 +416,16 @@ test("monitor descriptions are truncated to keep the panel compact", () => {
   assert.match(html, /title="gh pr checks --watch/);
 });
 
-test("the runtime rows never render on mobile (issue #339 + #384)", () => {
-  // Mobile strip is too tight for vertical rows; this is the
-  // same out-of-scope rule that already excludes the
-  // relationship rows. SessionView passes both new props to
-  // both mounts — the mobile variant must still skip them.
-  const html = render("mobile", {
+test("the sidebar renders delay and monitor information", () => {
+  const html = render("sidebar", {
     delayRunAt: new Date(Date.now() + 5_000).toISOString(),
     delayMessagePreview: "Hello",
     monitors: [MONITOR],
   });
-  assert.doesNotMatch(html, /focus-conversation-runtime-mobile/);
-  assert.doesNotMatch(html, />Next run in</);
-  assert.doesNotMatch(html, />Monitors \(/);
-  // Preview must not leak either — the delay row itself is
-  // desktop-only.
-  assert.doesNotMatch(html, /focus-conversation-runtime-delay-preview/);
+  assert.match(html, /focus-conversation-runtime-sidebar/);
+  assert.match(html, /Next run in/);
+  assert.match(html, /Monitors \(1\)/);
+  assert.match(html, /focus-conversation-runtime-delay-preview/);
 });
 
 test("the runtime rows render after the relationships and after the action row", () => {
