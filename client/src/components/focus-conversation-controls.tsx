@@ -21,7 +21,8 @@ import type {
 } from "../api.ts";
 
 interface FocusConversationControlsProps {
-  variant: "mobile" | "desktop";
+  variant: "sidebar" | "desktop";
+  navigation?: React.ReactNode;
   bindings: ShortcutBindings | null;
   isOnRadar: boolean;
   autoAdvance: boolean;
@@ -67,10 +68,7 @@ interface FocusConversationControlsProps {
   /**
    * ISO timestamp from the head queued message's `runAt`, or
    * `null` when no delayed follow-up is queued (issue #339).
-   * When set, the desktop panel renders a countdown-style row so
-   * the user can see when the next run is scheduled without
-   * opening a separate surface. Mobile out of scope (see issue
-   * #384 — vertical rows don't fit the mobile strip).
+   * When set, the panel renders a countdown-style row.
    */
   delayRunAt?: string | null;
   /**
@@ -80,14 +78,12 @@ interface FocusConversationControlsProps {
    * glance at the queued-messages strip below the chat input.
    * Truncated to ~40 chars upstream (see
    * `truncateWakePreview`) to keep the panel compact.
-   * Desktop only, same scope as `delayRunAt`.
    */
   delayMessagePreview?: string | null;
   /**
    * Live list of monitors running on the current session. When
-   * non-empty, the desktop panel renders a `Monitors` row with
-   * one entry per monitor. Same mobile out-of-scope rule as
-   * `delayRunAt`. Stop / start actions are not exposed here;
+   * non-empty, the panel renders a `Monitors` row with
+   * one entry per monitor. Stop / start actions are not exposed here;
    * that's a future separate surface (issue #339 review).
    */
   monitors?: Monitor[];
@@ -118,6 +114,7 @@ function buildControllerUri(
 
 export function FocusConversationControls({
   variant,
+  navigation,
   bindings,
   isOnRadar,
   autoAdvance,
@@ -159,7 +156,6 @@ export function FocusConversationControls({
   // granularity, so the same 250ms interval covers both.
   const delayTargetMs = delayRunAt ? Date.parse(delayRunAt) : NaN;
   const hasDelay =
-    variant === "desktop" &&
     Number.isFinite(delayTargetMs) &&
     delayTargetMs > now;
 
@@ -191,28 +187,18 @@ export function FocusConversationControls({
   // SessionView has hydrated) — the URI would be malformed
   // otherwise.
   //
-  // Issue #384 explicit out-of-scope: the mobile header carries
-  // this component in a tight horizontal strip, so the multi-line
-  // rows stay desktop-only. The mobile variant still receives
-  // the props (the same component is mounted twice), but the
-  // rows are not rendered there. A future "expandable drawer"
-  // refactor will own the mobile surface.
-  const isDesktop = variant === "desktop";
   const parentTargetProjectId =
     currentProjectId && parent?.id ? currentProjectId : null;
   const parentWorktreeId = parent?.worktreeId ?? "";
   const showParentRow =
-    isDesktop &&
     Boolean(parent && parent.id) &&
     Boolean(parentTargetProjectId);
   const showChildrenRow =
-    isDesktop && Array.isArray(children) && children.length > 0;
+    Array.isArray(children) && children.length > 0;
   const showRelationships = showParentRow || showChildrenRow;
 
-  // Runtime rows (issue #339): delay + monitors, desktop only.
-  // `hasDelay` already enforces desktop + future timestamp.
   const showMonitorRow =
-    isDesktop && Array.isArray(monitors) && monitors.length > 0;
+    Array.isArray(monitors) && monitors.length > 0;
   const showRuntime = hasDelay || showMonitorRow;
 
   const handleOpenTarget = (
@@ -232,8 +218,8 @@ export function FocusConversationControls({
       data-testid={`focus-conversation-controls-${variant}`}
       className={cn(
         "gap-2 overflow-hidden border-blue-500/20 bg-background/95 backdrop-blur",
-        variant === "mobile"
-          ? "relative flex shrink-0 items-center justify-between border-b px-2 py-2 md:hidden"
+        variant === "sidebar"
+          ? "relative flex flex-col items-stretch rounded-lg border px-3 py-2 md:hidden"
           : "absolute right-4 top-4 z-20 hidden flex-col items-stretch rounded-lg border px-3 py-2 shadow-lg md:flex",
       )}
     >
@@ -246,7 +232,7 @@ export function FocusConversationControls({
         <label
           className={cn(
             "flex shrink-0 items-center gap-2 px-1 text-xs text-muted-foreground",
-            variant === "desktop" && "w-full justify-between",
+            "w-full justify-between",
           )}
           title={
             variant === "desktop"
@@ -269,7 +255,7 @@ export function FocusConversationControls({
       <div
         className={cn(
           "flex shrink-0 items-center gap-1",
-          variant === "desktop" && "w-full justify-end",
+          "w-full justify-end",
         )}
       >
         {countdown ? (
@@ -304,7 +290,7 @@ export function FocusConversationControls({
             Add to radar
           </button>
         )}
-        {!countdown || variant === "desktop" ? (
+        {(!countdown || variant === "desktop") ? (
           <button
             type="button"
             onClick={onNext}
@@ -317,6 +303,7 @@ export function FocusConversationControls({
           </button>
         ) : null}
       </div>
+      {navigation}
       {showRelationships ? (
         <div
           data-testid={`focus-conversation-relationships-${variant}`}
