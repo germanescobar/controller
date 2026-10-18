@@ -1079,7 +1079,7 @@ worktreesRouter.post("/:projectId/worktrees", async (req, res) => {
     path: targetPath,
     branch,
     isMain: false,
-  });
+  }, { adoptDiscovered: true });
 
   emit({ type: "worktree_created", worktree });
   // Notify other clients (sidebar in another window) that a new worktree
@@ -1179,12 +1179,20 @@ worktreesRouter.delete(
         res.status(409).json({ error: "worktree has active sessions" });
         return;
       }
+      const runningMonitorIds = sessions.flatMap((session) =>
+        listMonitors(session.id).filter((monitor) => monitor.status === "running").map((monitor) => monitor.id)
+      );
+      if (runningMonitorIds.length > 0) {
+        res.status(409).json({ error: "worktree has running processes", runningMonitorIds });
+        return;
+      }
       const runningTabs = (await getTerminalTabs(project.id, worktree.id))
         .some((tab) => ptyManager.isCommandRunning(`${project.id}:${worktree.id}:${tab.id}`));
       if (runningTabs) {
         res.status(409).json({ error: "worktree has running processes" });
         return;
       }
+      ptyManager.killByPrefix(`${project.id}:${worktree.id}:`);
       await removeWorktree(worktree.id);
       await removeTerminalTabsForWorktree(project.id, worktree.id);
       const removed = await getWorktree(project.id, worktree.id);

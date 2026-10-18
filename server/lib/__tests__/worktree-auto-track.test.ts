@@ -8,6 +8,10 @@ import path from "node:path";
 import express from "express";
 import http from "node:http";
 import { addWorktree, getProjectWorktrees, reconcileGitWorktrees } from "../worktrees.js";
+import { addProject, deleteProject } from "../projects.js";
+import { projectStoreDir } from "../paths.js";
+import { startMonitor, stopMonitor } from "../monitors.js";
+import { ptyManager } from "../pty-manager.js";
 
 const exec = promisify(execFile);
 
@@ -129,6 +133,70 @@ test("adding a project discovers linked worktrees immediately", async () => {
   });
 });
 
+test("creation adopts a checkout discovered before registration", async () => {
+  await withRepo(async (root, source) => {
+    const linked = path.join(root, "created by controller");
+    await git(source, "worktree", "add", "-b", "created", linked);
+    const project = { id: "project", name: "Test", path: source, createdAt: "2026-01-01" };
+    const [discovered] = await reconcileGitWorktrees(project);
+    const adopted = await addWorktree({
+      projectId: project.id, name: "created", path: linked, branch: "created", isMain: false,
+    }, { adoptDiscovered: true });
+    assert.equal(adopted.id, discovered.id);
+    assert.equal(adopted.origin, "controller");
+    assert.equal(adopted.portOffset, discovered.portOffset);
+    assert.equal((await getProjectWorktrees(project.id)).filter((row) => row.path === discovered.path).length, 1);
+  });
+});
+
+test("creation refuses to adopt a different checkout at a previously tracked path", async () => {
+  await withRepo(async (root, source) => {
+    const linked = path.join(root, "reused path");
+    await git(source, "worktree", "add", "-b", "first", linked);
+    const project = { id: "project", name: "Test", path: source, createdAt: "2026-01-01" };
+    const [original] = await reconcileGitWorktrees(project);
+    await git(source, "worktree", "remove", linked);
+    await git(source, "worktree", "add", "-b", "second", linked);
+    await assert.rejects(addWorktree({
+      projectId: project.id, name: "second", path: linked, branch: "second", isMain: false,
+    }, { adoptDiscovered: true }), /different checkout/);
+    const rows = (await getProjectWorktrees(project.id)).filter((row) => row.id === original.id);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].origin, "external");
+  });
+});
+
+test("re-adding a project transfers a matching checkout without changing its ID", async () => {
+  await withRepo(async (root, source) => {
+    const linked = path.join(root, "existing linked");
+    await git(source, "worktree", "add", "-b", "linked", linked);
+    const original = { id: "project", name: "Test", path: source, createdAt: "2026-01-01" };
+    const [tracked] = await reconcileGitWorktrees(original);
+    assert.equal(await deleteProject(original.id), true);
+    const replacement = await addProject("Re-added", source);
+    const transferred = await reconcileGitWorktrees(replacement);
+    assert.equal(transferred.length, 1);
+    assert.equal(transferred[0].id, tracked.id);
+    assert.equal(transferred[0].projectId, replacement.id);
+    assert.equal(transferred[0].portOffset, tracked.portOffset);
+  });
+});
+
+test("re-adoption chooses a free port offset when the previous offset is occupied", async () => {
+  await withRepo(async (root, source) => {
+    const linked = path.join(root, "existing linked");
+    await git(source, "worktree", "add", "-b", "linked", linked);
+    const original = { id: "project", name: "Test", path: source, createdAt: "2026-01-01" };
+    const [tracked] = await reconcileGitWorktrees(original);
+    await deleteProject(original.id);
+    const replacement = await addProject("Re-added", source);
+    await addWorktree({ projectId: replacement.id, name: "other", path: path.join(root, "other"), isMain: false });
+    const [transferred] = await reconcileGitWorktrees(replacement);
+    assert.equal(transferred.id, tracked.id);
+    assert.equal(transferred.portOffset, 6);
+  });
+});
+
 test("the worktree route auto-refreshes and DELETE only stops tracking an external checkout", async () => {
   await withRepo(async (root, source) => {
     const linked = path.join(root, "existing linked");
@@ -149,8 +217,35 @@ test("the worktree route auto-refreshes and DELETE only stops tracking an extern
       const external = rows.find((row) => row.path === linkedReal)!;
       assert.equal(external.origin, "external");
 
-      const removed = await fetch(`${base}/${external.id}?force=1`, { method: "DELETE" });
-      assert.equal(removed.status, 200);
+      const sessionId = "session-with-monitor";
+      const sessionsDir = path.join(projectStoreDir(linkedReal), "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      await fs.writeFile(path.join(sessionsDir, `${sessionId}.json`), JSON.stringify({
+        id: sessionId, title: "Existing session", worktreeId: external.id,
+        workingDirectory: linkedReal, createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(), status: "active", messages: [],
+      }));
+      const monitor = startMonitor({
+        sessionId, worktreePath: linkedReal, description: "running", command: "sleep 30", persistent: true,
+      });
+      try {
+        const blocked = await fetch(`${base}/${external.id}`, { method: "DELETE" });
+        assert.equal(blocked.status, 409);
+        assert.deepEqual((await blocked.json() as { runningMonitorIds: string[] }).runningMonitorIds, [monitor.id]);
+      } finally {
+        stopMonitor(monitor.id);
+      }
+
+      const originalKill = ptyManager.killByPrefix;
+      const killed: string[] = [];
+      ptyManager.killByPrefix = (prefix) => { killed.push(prefix); originalKill.call(ptyManager, prefix); };
+      try {
+        const removed = await fetch(`${base}/${external.id}?force=1`, { method: "DELETE" });
+        assert.equal(removed.status, 200);
+      } finally {
+        ptyManager.killByPrefix = originalKill;
+      }
+      assert.deepEqual(killed, [`project:${external.id}:`]);
       assert.equal((await fs.stat(linked)).isDirectory(), true);
       const { stdout } = await exec("git", ["worktree", "list", "--porcelain"], { cwd: source });
       assert.ok(stdout.includes(linked));
