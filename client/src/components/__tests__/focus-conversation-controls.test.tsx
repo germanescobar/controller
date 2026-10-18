@@ -307,6 +307,24 @@ test("the sidebar renders relationships below navigation", () => {
   assert.ok(html.indexOf("Agent Terminal Changes") < html.indexOf("focus-conversation-relationship-parent"));
 });
 
+test("the sidebar navigation slot renders arbitrary archive-style content", () => {
+  // SessionView injects an Archive action into the navigation slot
+  // (it's not a tab — it just lives at the bottom of the nav list
+  // with a separator above it). Verify the slot forwards arbitrary
+  // content unchanged so the archive action keeps its semantics.
+  const html = render("sidebar", {
+    navigation: (
+      <nav aria-label="Session views">
+        <button type="button" aria-label="Archive session">
+          Archive session
+        </button>
+      </nav>
+    ),
+  });
+  assert.match(html, /aria-label="Archive session"/);
+  assert.match(html, />Archive session</);
+});
+
 // --- Runtime rows (issue #339) --------------------------------------
 
 const MONITOR: Monitor = {

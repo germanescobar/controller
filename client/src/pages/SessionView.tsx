@@ -7583,7 +7583,18 @@ export function SessionView({
             className="fixed inset-y-0 right-0 left-auto top-0 bottom-0 m-0 flex h-dvh w-[min(20rem,calc(100vw-2rem))] max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-l border-border bg-sidebar p-0 shadow-xl ring-0 md:hidden"
           >
             <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-              <DialogTitle className="text-sm font-medium">Session</DialogTitle>
+              <div className="flex min-w-0 items-center gap-2">
+                <DialogTitle className="text-sm font-medium">Session</DialogTitle>
+                {diffSummary ? (
+                  <span
+                    className="shrink-0 font-mono text-xs text-muted-foreground"
+                    aria-label={`${diffSummary.added} lines added, ${diffSummary.deleted} lines deleted`}
+                  >
+                    <span className="text-green-400/90">+{diffSummary.added}</span>{" "}
+                    <span className="text-red-400/90">-{diffSummary.deleted}</span>
+                  </span>
+                ) : null}
+              </div>
               <button ref={mobileSidebarCloseRef} type="button" aria-label="Close session sidebar" onClick={onMobileSidebarClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
             </div>
             <div className="flex-1 space-y-4 overflow-y-auto p-3">
@@ -7624,6 +7635,21 @@ export function SessionView({
                           {tab.label}
                         </button>
                       ))}
+                      {onArchive ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onMobileSidebarClose?.();
+                            onArchive();
+                          }}
+                          className="mt-1 flex w-full items-center gap-3 rounded-md border-t border-blue-500/20 px-2 py-2 text-left text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                          title="Archive session"
+                          aria-label="Archive session"
+                        >
+                          <Archive className="h-4 w-4" />
+                          Archive session
+                        </button>
+                      ) : null}
                     </nav>
                   }
                 />
