@@ -154,6 +154,10 @@ interface SessionViewProps {
   sessionId?: string;
   worktreeId?: string;
   project?: Project;
+  mobileSidebarOpen?: boolean;
+  mobileSidebarTriggerRef?: React.RefObject<HTMLButtonElement | null>;
+  onMobileSidebarClose?: () => void;
+  onMobileHeadingChange?: (heading: { sessionId: string; title: string; context: string }) => void;
   onSessionCreated: (sessionId: string) => void;
   onBackgroundComplete?: (sessionId: string) => void;
   // Navigates to another conversation referenced by a `controller://` link in
@@ -3698,6 +3702,10 @@ export function SessionView({
   sessionId,
   worktreeId,
   project,
+  mobileSidebarOpen = false,
+  mobileSidebarTriggerRef,
+  onMobileSidebarClose,
+  onMobileHeadingChange,
   onSessionCreated,
   onBackgroundComplete,
   onOpenConversation,
@@ -3917,6 +3925,13 @@ export function SessionView({
   const [submittingUserInput, setSubmittingUserInput] = useState(false);
   const [submittingApprovalId, setSubmittingApprovalId] = useState<string | null>(null);
   const [activeWorktree, setActiveWorktree] = useState<Worktree | null>(null);
+  useEffect(() => {
+    onMobileHeadingChange?.({
+      sessionId: sessionId ?? "",
+      title: sessionId ? sessionTitle || "Untitled conversation" : project?.name ?? "Project",
+      context: `${project?.name ?? "Project"}${activeWorktree?.name ? ` / ${activeWorktree.name}` : ""}`,
+    });
+  }, [sessionId, sessionTitle, project?.name, activeWorktree?.name, onMobileHeadingChange]);
   const [continuingOnMain, setContinuingOnMain] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
   // True while the SourceEditor (Files tab) has unsaved edits.
@@ -4699,6 +4714,7 @@ export function SessionView({
     }
 
     if (sessionId) {
+      setSessionTitle(undefined);
       // Show a centered spinner for the duration of the initial event fetch
       // and clear the previous session's events so the user never sees stale
       // transcript content while the new conversation loads. The first page
@@ -7509,31 +7525,102 @@ export function SessionView({
     return null;
   }, [streamRenderItems]);
 
+  const mobileSidebarCloseRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    const desktopViewport = window.matchMedia("(min-width: 768px)");
+    const closeOnDesktop = () => {
+      if (desktopViewport.matches) onMobileSidebarClose?.();
+    };
+    closeOnDesktop();
+    desktopViewport.addEventListener("change", closeOnDesktop);
+    return () => desktopViewport.removeEventListener("change", closeOnDesktop);
+  }, [mobileSidebarOpen, onMobileSidebarClose]);
+
+  const mobileSidebarTabs: { id: MobilePanel; label: string; icon: React.ReactNode }[] = [
+    { id: "agent" as const, label: "Agent", icon: <MessageSquare className="h-4 w-4" /> },
+    { id: "terminal" as const, label: "Terminal", icon: <TerminalSquare className="h-4 w-4" /> },
+    ...(gitDiffFiles.length > 0 || branchDiffFiles.length > 0
+      ? [{ id: "changes" as const, label: "Changes", icon: <Diff className="h-4 w-4" /> }]
+      : []),
+    { id: "files" as const, label: "Files", icon: <FileCode className="h-4 w-4" /> },
+    ...(pullRequest
+      ? [{ id: "pr" as const, label: `PR #${pullRequest.number}`, icon: <PullRequestStateIcon state={pullRequest.state} className="h-4 w-4" /> }]
+      : []),
+    ...(previewAvailable
+      ? [{ id: "preview" as const, label: "Preview", icon: <Globe2 className="h-4 w-4" /> }]
+      : []),
+  ];
+
+  const selectMobilePanel = (panel: MobilePanel) => {
+    if (panel === "agent") {
+      if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
+      setMobilePanel("agent");
+      setTerminalOpen(false);
+    } else {
+      if (!requestRightTab(panel)) return;
+      setMobilePanel(panel);
+    }
+    onMobileSidebarClose?.();
+  };
+
   return (
     <>
-      {sessionId && onFocusSkip && onFocusDone && onToggleAutoAdvance ? (
-        <FocusConversationControls
-          variant="mobile"
-          bindings={shortcutBindings}
-          isOnRadar={isFocusPinned}
-          autoAdvance={autoAdvance}
-          onNext={onFocusSkip}
-          onDone={onFocusDone}
-          onAddToRadar={handleHeaderFocusPin}
-          onToggleAutoAdvance={onToggleAutoAdvance}
-          countdown={conversationFocusCountdown}
-          parent={relationships?.parentSession ?? null}
-          children={relationships?.children ?? []}
-          currentProjectId={projectId}
-          onOpenConversation={onOpenConversation}
-          delayRunAt={sessionRuntime.delayRunAt}
-          delayMessagePreview={sessionRuntime.delayMessagePreview}
-          monitors={sessionRuntime.monitors}
-        />
-      ) : null}
-
+      {sessionId && (
+        <Dialog open={mobileSidebarOpen} onOpenChange={(open) => { if (!open) onMobileSidebarClose?.(); }}>
+          <DialogContent
+            showCloseButton={false}
+            initialFocus={mobileSidebarCloseRef}
+            finalFocus={mobileSidebarTriggerRef ?? true}
+            className="fixed inset-y-0 right-0 left-auto top-0 bottom-0 m-0 flex h-dvh w-[min(20rem,calc(100vw-2rem))] max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none border-l border-border bg-sidebar p-0 shadow-xl ring-0 md:hidden"
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
+              <DialogTitle className="text-sm font-medium">Session</DialogTitle>
+              <button ref={mobileSidebarCloseRef} type="button" aria-label="Close session sidebar" onClick={onMobileSidebarClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="flex-1 space-y-4 overflow-y-auto p-3">
+              {onFocusSkip && onFocusDone && onToggleAutoAdvance && (
+                <FocusConversationControls
+                  variant="sidebar"
+                  bindings={shortcutBindings}
+                  isOnRadar={isFocusPinned}
+                  autoAdvance={autoAdvance}
+                  onNext={() => { onMobileSidebarClose?.(); onFocusSkip(); }}
+                  onDone={() => { onMobileSidebarClose?.(); onFocusDone(); }}
+                  onAddToRadar={handleHeaderFocusPin}
+                  onToggleAutoAdvance={onToggleAutoAdvance}
+                  countdown={conversationFocusCountdown}
+                  parent={relationships?.parentSession ?? null}
+                  children={relationships?.children ?? []}
+                  currentProjectId={projectId}
+                  onOpenConversation={(target) => { onMobileSidebarClose?.(); onOpenConversation?.(target); }}
+                  delayRunAt={sessionRuntime.delayRunAt}
+                  delayMessagePreview={sessionRuntime.delayMessagePreview}
+                  monitors={sessionRuntime.monitors}
+                  navigation={
+                    <nav aria-label="Session views" className="flex flex-col gap-1 border-t border-blue-500/20 pt-2">
+                      {mobileSidebarTabs.map((tab) => (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          onClick={() => selectMobilePanel(tab.id)}
+                          aria-current={mobilePanel === tab.id ? "page" : undefined}
+                          className={`flex w-full items-center gap-3 rounded-md px-2 py-2 text-left text-sm transition-colors ${mobilePanel === tab.id ? "bg-sidebar-accent text-sidebar-foreground" : "text-sidebar-foreground/80 hover:bg-sidebar-accent"}`}
+                        >
+                          {tab.icon}
+                          {tab.label}
+                        </button>
+                      ))}
+                    </nav>
+                  }
+                />
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
       {/* Header */}
-      <header className={`${sessionId ? "flex" : "hidden md:flex"} h-12 md:h-14 shrink-0 items-center justify-end md:justify-between border-b border-border bg-background px-3 md:px-4`}>
+      <header className="hidden md:flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-3 md:px-4">
         <div className="hidden md:flex flex-col justify-center min-w-0">
           {sessionId ? (
             <div className="group/title flex items-center gap-1.5 min-w-0">
@@ -7562,104 +7649,6 @@ export function SessionView({
             </span>
           )}
         </div>
-
-        {/* Mobile: Agent/Terminal/Changes tabs in header */}
-        {sessionId && (
-          <div className="flex items-center gap-1 md:hidden">
-            <button
-              onClick={() => {
-                if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
-                setMobilePanel("agent");
-                // On mobile, returning to Agent means the right
-                // panel is hidden — clear `terminalOpen` so the
-                // PR-tab discovery polling pauses (it would
-                // otherwise continue spawning `gh` calls three
-                // times per cycle because Preview opens the
-                // panel with `setTerminalOpen(true)` and the
-                // mobile Agent button doesn't otherwise flip it
-                // back — issue #387 review feedback).
-                setTerminalOpen(false);
-              }}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                mobilePanel === "agent"
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground"
-              }`}
-            >
-              <MessageSquare className="h-3 w-3" />
-              Agent
-            </button>
-            <button
-              onClick={() => {
-                if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
-                setMobilePanel("terminal");
-                setRightTab("terminal");
-              }}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                mobilePanel === "terminal"
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground"
-              }`}
-            >
-              <TerminalSquare className="h-3 w-3" />
-              Terminal
-            </button>
-            {(gitDiffFiles.length > 0 || branchDiffFiles.length > 0) && (
-              <button
-                onClick={() => {
-                  if (mobilePanel === "files" && !confirmLeaveFilesIfDirty()) return;
-                  setMobilePanel("changes");
-                  setRightTab("changes");
-                }}
-                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                  mobilePanel === "changes"
-                    ? "bg-accent text-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                <Diff className="h-3 w-3" />
-                Changes
-              </button>
-            )}
-            <button
-              onClick={() => requestRightTab("files")}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                mobilePanel === "files"
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground"
-              }`}
-            >
-              <FileCode className="h-3 w-3" />
-              Files
-            </button>
-            {pullRequest && (
-              <button
-                onClick={() => requestRightTab("pr")}
-                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                  mobilePanel === "pr"
-                    ? "bg-accent text-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                <PullRequestStateIcon state={pullRequest.state} className="h-3 w-3" />
-                #{pullRequest.number}
-              </button>
-            )}
-            {previewAvailable && (
-              <button
-                onClick={() => requestRightTab("preview")}
-                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                  mobilePanel === "preview"
-                    ? "bg-accent text-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                <Globe2 className="h-3 w-3" />
-                Preview
-              </button>
-            )}
-          </div>
-        )}
 
         {/* Desktop: terminal toggle */}
         <div className="hidden md:flex items-center gap-2">
