@@ -127,9 +127,10 @@ if (port !== requested) {
 }
 
 const baseEnv = await devServerBaseEnv();
-if (baseEnv.CONTROLLER_DEV_INSTANCE === "1") {
+console.log("[dev:server] Using a checkout-specific CLI and runtime under <CONTROLLER_HOME>/dev.");
+if (baseEnv.CONTROLLER_SHARED_STATE_SECONDARY === "1") {
   console.log(
-    "[dev:server] Started from a running Controller app: dev instance (CLI under <CONTROLLER_HOME>/dev, no skills install, no background loops)."
+    "[dev:server] Another Controller server is running: skipping managed skills and background loops."
   );
 }
 

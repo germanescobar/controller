@@ -12,6 +12,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import os from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +29,33 @@ async function loadCli() {
 test("runIntegrations is defined (regression for issue #178)", async () => {
   const cli = await loadCli();
   assert.equal(typeof cli.runIntegrations, "function");
+});
+
+test("connection diagnostic names the attempted URL and cause without credentials", async () => {
+  const cli = await loadCli();
+  const message = cli.connectionError("http://user:secret@localhost:3171", {
+    cause: { code: "ECONNREFUSED" },
+  });
+  assert.match(message, /http:\/\/localhost:3171/);
+  assert.match(message, /ECONNREFUSED/);
+  assert.match(message, /CONTROLLER_SERVER_URL/);
+  assert.doesNotMatch(message, /user|secret/);
+});
+
+test("CLI reports a stopped dev server using only an isolated runtime", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "controller-cli-diagnostic-"));
+  try {
+    writeFileSync(path.join(home, "controller-runtime.json"), '{"serverUrl":"http://127.0.0.1:65534"}');
+    const result = spawnSync(process.execPath, [path.join(repoRoot, "cli", "controller"), "projects", "list"], {
+      env: { ...process.env, CONTROLLER_HOME: home, CONTROLLER_SERVER_URL: "" },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /http:\/\/127\.0\.0\.1:65534.*ECONNREFUSED/);
+    assert.match(result.stderr, /controller-runtime\.json/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("parseIntegrations maps subcommands to gateway endpoints", async () => {

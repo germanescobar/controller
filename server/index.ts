@@ -63,11 +63,11 @@ import { ensureMemoryDirs } from "./lib/memory.js";
 import {
   installControllerCli,
   controllerCliInstalledPath,
-  isDevInstance,
   setBoundServerPort,
   writeControllerRuntimeFile,
 } from "./lib/controller-cli.js";
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
+import { controllerHomeId } from "./lib/paths.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -115,6 +115,11 @@ app.use("/api", memoryRouter);
 app.get("/api/agent-providers", async (_req, res) => {
   const providers = (await getAvailableAgentProviders()).map((p) => ({ id: p.id, name: p.name }));
   res.json(providers);
+});
+
+// Lets dev launchers verify that a live Controller owns the same state home.
+app.get("/api/instance", (_req, res) => {
+  res.json({ homeId: controllerHomeId() });
 });
 
 // Bulk session runtime snapshot — replaces the per-session /runtime polling
@@ -301,16 +306,15 @@ async function start(): Promise<void> {
   // server is `import()`-ed from the Electron main process in production,
   // so `import("electron")` here resolves to the real module (issue #280).
   await installDefaultBrowserOpener();
-  // A dev instance (`npm run dev` from a checkout) shares the app's state but
-  // must not touch anything the running app owns: the agents' global skills
-  // homes, the CLI install, or the background loops (see `isDevInstance`).
-  const devInstance = isDevInstance();
+  // A secondary source server shares state with an existing server. The CLI
+  // install is isolated for every source server by isDevInstance().
+  const secondaryInstance = process.env.CONTROLLER_SHARED_STATE_SECONDARY === "1";
   // Sync managed skills (browser, controller-scripts, etc.) into each agent's
   // user skills home so they are available across Anita, Codex, and Claude.
-  // Skipped on dev instances: the skills homes are global, and the bodies
+  // Skipped on secondary instances: the skills homes are global, and the bodies
   // embed this server's CLI path, so the app's agents would be pointed at the
   // dev server's CLI (and lose it when the dev server stops).
-  if (!devInstance) {
+  if (!secondaryInstance) {
     await installManagedSkills().catch((error: unknown) => {
       console.error("Failed to install managed skills:", error);
     });
@@ -359,9 +363,9 @@ async function start(): Promise<void> {
   });
 
   // The background loops below act on shared state (schedules, wakes, goals).
-  // Running them on a dev instance too would fire every due item twice — once
-  // per server — so only the app runs them.
-  if (devInstance) {
+  // Running them on a secondary instance too would fire every due item twice — once
+  // per server — so only the first running server owns them.
+  if (secondaryInstance) {
     console.log("Dev instance: skipping managed skills and background loops (schedules, wakes, goals).");
     return;
   }

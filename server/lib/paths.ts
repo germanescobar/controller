@@ -31,6 +31,11 @@ export function orchestratorHome(): string {
   return defaultHomeForPlatform();
 }
 
+/** Opaque identity for comparing Controller homes across local server processes. */
+export function controllerHomeId(): string {
+  return createHash("sha256").update(path.resolve(orchestratorHome())).digest("hex");
+}
+
 /**
  * Platform-appropriate default home. macOS gets `Application Support`,
  * Linux follows `XDG_STATE_HOME`, everything else falls back to the

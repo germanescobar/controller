@@ -432,17 +432,21 @@ async function withCliHome(devInstance: boolean, fn: (home: string) => Promise<v
 
 test("a dev instance installs the CLI and runtime file under <home>/dev", async () => {
   await withCliHome(true, async (home) => {
-    assert.equal(controllerCliInstalledPath(), path.join(home, "dev", "bin", "controller"));
+    await fs.mkdir(path.join(home, "bin"));
+    await fs.writeFile(path.join(home, "bin", "controller"), "packaged CLI");
+    await fs.writeFile(path.join(home, "controller-runtime.json"), '{"serverUrl":"http://localhost:4500"}');
+    const devRoot = path.dirname(path.dirname(controllerCliInstalledPath()));
+    assert.equal(path.dirname(devRoot), path.join(home, "dev"));
     await installControllerCli();
     await writeControllerRuntimeFile(3102);
-    await fs.access(path.join(home, "dev", "bin", "controller"));
+    await fs.access(path.join(devRoot, "bin", "controller"));
     const written = JSON.parse(
-      await fs.readFile(path.join(home, "dev", "controller-runtime.json"), "utf-8"),
+      await fs.readFile(path.join(devRoot, "controller-runtime.json"), "utf-8"),
     );
     assert.deepEqual(written, { serverUrl: "http://localhost:3102" });
-    // The app's install and runtime file are untouched.
-    await assert.rejects(fs.access(path.join(home, "bin", "controller")));
-    await assert.rejects(fs.access(path.join(home, "controller-runtime.json")));
+    // Starting or stopping this dev server leaves the packaged CLI and URL intact.
+    assert.equal(await fs.readFile(path.join(home, "bin", "controller"), "utf8"), "packaged CLI");
+    assert.equal(await fs.readFile(path.join(home, "controller-runtime.json"), "utf8"), '{"serverUrl":"http://localhost:4500"}');
     // State stays shared: CONTROLLER_HOME is not redirected.
     assert.equal(controllerAgentEnv().CONTROLLER_HOME, home);
   });
@@ -455,7 +459,7 @@ test("a dev instance puts its CLI bin first on PATH and drops the app's", async 
     process.env.PATH = ["/usr/bin", appBin, "/opt/homebrew/bin"].join(":");
     try {
       assert.deepEqual(controllerAgentEnv().PATH.split(":"), [
-        path.join(home, "dev", "bin"),
+        path.dirname(controllerCliInstalledPath()),
         "/usr/bin",
         "/opt/homebrew/bin",
       ]);

@@ -281,6 +281,19 @@ export function serverError(result, fallback) {
   return /[.!?]$/.test(base) ? `${base} ${hint}` : `${base}. ${hint}`;
 }
 
+export function connectionError(serverUrl, error) {
+  let target = "[invalid Controller URL]";
+  try {
+    target = new URL(serverUrl).origin;
+  } catch { /* Keep the URL out of the error; it may contain credentials. */ }
+  const causes = [error, error?.cause, ...(error?.cause?.errors ?? [])];
+  const code = causes.map((cause) => cause?.code).find((value) =>
+    typeof value === "string" && /^[A-Z][A-Z0-9_]+$/.test(value)
+  );
+  const cause = code ? ` (${code})` : " (connection failed)";
+  return `Could not reach Controller at ${target}${cause}. Check that Controller is running and that CONTROLLER_SERVER_URL or controller-runtime.json points to its live server.`;
+}
+
 async function getServerUrl() {
   if (process.env.CONTROLLER_SERVER_URL) return process.env.CONTROLLER_SERVER_URL;
   const os = await import("node:os");
@@ -348,7 +361,7 @@ async function postJson(serverUrl, route, body) {
       body: JSON.stringify({ ...body, cwd: process.cwd() }),
     });
   } catch (error) {
-    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    fail(connectionError(serverUrl, error));
   }
   let result;
   try {
@@ -373,7 +386,7 @@ async function putJson(serverUrl, route, body) {
       body: JSON.stringify({ ...body, cwd: process.cwd() }),
     });
   } catch (error) {
-    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    fail(connectionError(serverUrl, error));
   }
   let result;
   try {
@@ -395,7 +408,7 @@ async function deleteJson(serverUrl, route) {
       method: "DELETE",
     });
   } catch (error) {
-    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    fail(connectionError(serverUrl, error));
   }
   let result = null;
   // Some DELETE handlers return no body; treat empty/invalid JSON as
@@ -468,7 +481,7 @@ export async function fetchProjectList(serverUrl) {
   try {
     response = await fetch(url);
   } catch (error) {
-    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    fail(connectionError(serverUrl, error));
   }
   if (response.status >= 400) {
     fail(`Failed to list projects (HTTP ${response.status})`);
@@ -720,7 +733,7 @@ export async function runWorktrees(argv, serverUrl) {
         body: JSON.stringify({ ...parsed.body, cwd: process.cwd() }),
       });
     } catch (error) {
-      fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+      fail(connectionError(serverUrl, error));
     }
     if (!response.body) {
       fail(`Worktree create failed (HTTP ${response.status})`);
@@ -790,7 +803,7 @@ async function getJson(serverUrl, route) {
   try {
     response = await fetch(`${serverUrl.replace(/\/$/, "")}${route}`);
   } catch (error) {
-    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    fail(connectionError(serverUrl, error));
   }
   let result;
   try {
@@ -2611,7 +2624,7 @@ async function runTerminalTail(serverUrl, params) {
       body: JSON.stringify({ action: "tail", params, cwd: process.cwd() }),
     });
   } catch (error) {
-    fail(`Could not reach the orchestrator: ${error?.message ?? error}`);
+    fail(connectionError(serverUrl, error));
   }
   if (response.status >= 400) {
     let message = `Terminal tail failed (HTTP ${response.status})`;
