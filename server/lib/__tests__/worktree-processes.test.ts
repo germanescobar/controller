@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runGitExitCode, runScriptCommands } from "../worktree-processes.js";
@@ -89,6 +89,33 @@ test(
       const sleepPid = Number(output.join("").split("\n")[1]);
       assert.ok(Number.isInteger(sleepPid) && sleepPid > 0, `bad pid in ${output.join("")}`);
       await waitFor(() => !isAlive(sleepPid), 2_000);
+    });
+  }
+);
+
+test(
+  "a timed-out SIGTERM-resistant descendant is SIGKILLed after the grace period",
+  // PR #474 review: the descendant ignores SIGTERM and doesn't hold the
+  // pipes, so 'close' fires right after SIGTERM; the SIGKILL escalation
+  // must still run.
+  { skip: process.platform === "win32", timeout: 10_000 },
+  async () => {
+    await withTempDir(async (dir) => {
+      const pidFile = path.join(dir, "sleep.pid");
+      const result = await runScriptCommands(
+        [scriptCommand(`(trap '' TERM; exec sleep 30) >/dev/null 2>&1 & echo $! > ${pidFile}; wait`)],
+        dir,
+        {},
+        path.join(dir, "setup.log"),
+        () => {},
+        500
+      );
+      assert.equal(result.timedOut, true);
+      assert.notEqual(result.exitCode, 0);
+      const sleepPid = Number(await readFile(pidFile, "utf8"));
+      assert.ok(Number.isInteger(sleepPid) && sleepPid > 0, `bad pid ${sleepPid}`);
+      assert.equal(isAlive(sleepPid), true);
+      await waitFor(() => !isAlive(sleepPid), 4_000);
     });
   }
 );

@@ -109,11 +109,15 @@ function openScriptLog(logPath: string, onData: OutputHandler): WriteStream {
  * process group so the timeout kills everything it spawned (e.g. the
  * `npm install` under a setup script), not just the wrapper.
  *
- * The guard is whether the child's stdio has closed, not whether the
- * leader exited (unlike monitors, #459): a backgrounded descendant that
- * outlives the shell still holds the pipes and keeps the run pending, and
- * while it lives the group exists, so its pgid can't have been recycled.
- * Once 'close' fires nothing is signalled.
+ * The timeout guard is whether the child's stdio has closed, not whether
+ * the leader exited (unlike monitors, #459): a backgrounded descendant
+ * that outlives the shell still holds the pipes, and while it lives the
+ * group exists, so its pgid can't have been recycled. Once SIGTERM has
+ * reached a live group, the SIGKILL escalation always runs, even if
+ * 'close' fires first, so a SIGTERM-resistant descendant that released
+ * the pipes is still reaped. Accepted residual risk: the pgid could only
+ * be reused if every member exits and the pid space wraps around within
+ * the grace window, which is negligible.
  */
 function runOneScriptCommand(
   command: string,
@@ -131,18 +135,19 @@ function runOneScriptCommand(
     });
     let closed = false;
     let timedOut = false;
-    let escalationTimer: NodeJS.Timeout | null = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      signalProcessTree(child, "SIGTERM");
-      escalationTimer = setTimeout(() => {
+      const groupSignalled = signalProcessTree(child, "SIGTERM");
+      const escalationTimer = setTimeout(() => {
+        if (groupSignalled) signalProcessTree(child, "SIGKILL");
         if (closed) return;
-        signalProcessTree(child, "SIGKILL");
+        if (!groupSignalled) child.kill("SIGKILL");
         // A descendant outside the group (e.g. via setsid) can still hold
         // the pipes; drop our ends so the run always resolves.
         child.stdout?.destroy();
         child.stderr?.destroy();
       }, KILL_GRACE_MS);
+      escalationTimer.unref();
     }, timeoutMs);
 
     child.stdout?.on("data", (d: Buffer) => writeScriptOutput(d, "stdout", logStream, onData));
@@ -150,7 +155,6 @@ function runOneScriptCommand(
     child.on("close", (code) => {
       closed = true;
       clearTimeout(timer);
-      if (escalationTimer) clearTimeout(escalationTimer);
       // The leader may have exited 0 before a descendant timed out; a
       // timed-out run is never reported as success.
       const exitCode = code ?? 1;
@@ -159,19 +163,22 @@ function runOneScriptCommand(
     child.on("error", (err) => {
       closed = true;
       clearTimeout(timer);
-      if (escalationTimer) clearTimeout(escalationTimer);
       onData(`spawn error: ${err.message}\n`, "stderr");
       resolve({ exitCode: 1, timedOut });
     });
   });
 }
 
-/** Signal the child's process group, falling back to the child itself. */
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+/**
+ * Signal the child's process group, falling back to the child itself when
+ * the group is gone (ESRCH) or on Windows. Returns whether the group was
+ * signalled.
+ */
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): boolean {
   if (isolateProcessGroup && child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal);
-      return;
+      return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
         console.error(`[worktrees] ${signal} of process group ${child.pid} failed:`, error);
@@ -179,6 +186,7 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
     }
   }
   child.kill(signal);
+  return false;
 }
 
 function writeScriptOutput(
