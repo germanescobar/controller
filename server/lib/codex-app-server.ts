@@ -1,6 +1,7 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   getAgentProvider,
@@ -55,6 +56,46 @@ interface JsonRpcMessage {
 interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+/* The slice of a spawned app-server process the manager depends on.
+ * `ChildProcessWithoutNullStreams` satisfies it; tests supply a fake. */
+export interface AppServerChild {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(event: "close", listener: () => void): this;
+  kill(): boolean;
+}
+
+export type SpawnAppServer = (env: Record<string, string>) => Promise<AppServerChild>;
+
+/* Per-call JSON-RPC timeouts (issue #467). Without them an app-server that
+ * never answers leaves the caller — and the queued turn behind it — waiting
+ * forever. `initialize` should answer almost immediately; `turn/start` gets
+ * more room because the server may load thread state before acknowledging.
+ * The turn itself streams via notifications and is not bounded by these. */
+export const INITIALIZE_TIMEOUT_MS = 30_000;
+export const TURN_START_TIMEOUT_MS = 120_000;
+export const DEFAULT_CALL_TIMEOUT_MS = 60_000;
+
+export interface CallTimeouts {
+  initializeMs: number;
+  turnStartMs: number;
+  defaultMs: number;
+}
+
+const DEFAULT_CALL_TIMEOUTS: CallTimeouts = {
+  initializeMs: INITIALIZE_TIMEOUT_MS,
+  turnStartMs: TURN_START_TIMEOUT_MS,
+  defaultMs: DEFAULT_CALL_TIMEOUT_MS,
+};
+
+export interface CodexAppServerManagerOptions {
+  spawnAppServer?: SpawnAppServer;
+  timeouts?: CallTimeouts;
 }
 
 interface PendingUserInputRequest {
@@ -156,13 +197,20 @@ function firstParsedEvent(result: AgentStreamParseResult): AgentStreamEvent | nu
 }
 
 export class CodexAppServerManager {
-  private child: ChildProcessWithoutNullStreams | null = null;
+  private child: AppServerChild | null = null;
   private parser = new JsonRpcStreamParser();
   private nextRequestId = 1;
   private pendingCalls = new Map<JsonRpcId, PendingCall>();
   private sessions = new Map<string, SessionRuntime>();
   private initializePromise: Promise<void> | null = null;
   private readonly codexProvider = getAgentProvider("codex");
+  private readonly spawnAppServer: SpawnAppServer;
+  private readonly timeouts: CallTimeouts;
+
+  constructor(options: CodexAppServerManagerOptions = {}) {
+    this.spawnAppServer = options.spawnAppServer ?? spawnCodexAppServer;
+    this.timeouts = options.timeouts ?? DEFAULT_CALL_TIMEOUTS;
+  }
 
   async startPlanTurn(
     options: StartPlanTurnOptions,
@@ -496,61 +544,63 @@ export class CodexAppServerManager {
   }
 
   private async ensureStarted(env: Record<string, string>): Promise<void> {
-    if (this.initializePromise) {
-      await this.initializePromise;
-      return;
+    // Assigned synchronously so concurrent callers share one spawn.
+    const initialize = (this.initializePromise ??= this.startAppServer(env));
+    try {
+      await initialize;
+    } catch (error) {
+      // Drop a failed or timed-out initialize so the next turn spawns a fresh
+      // app-server instead of awaiting the same rejection forever (#467).
+      if (this.initializePromise === initialize) {
+        this.resetChild(error instanceof Error ? error : new Error(String(error)));
+      }
+      throw error;
     }
+  }
 
-    // Resolve before spawning so a missing CLI surfaces a clear error rather
-    // than an ENOENT from a packaged build's minimal PATH (issue #65).
-    const codexCommand = await resolveAgentCommand("codex");
+  private async startAppServer(env: Record<string, string>): Promise<void> {
+    const child = await this.spawnAppServer(env);
+    this.child = child;
+    this.parser = new JsonRpcStreamParser();
 
-    this.initializePromise = new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        codexCommand,
-        ["app-server", "--listen", "stdio://", "--enable", "default_mode_request_user_input"],
-        {
-          env: childProcessEnv(env),
-          stdio: ["pipe", "pipe", "pipe"],
-        }
-      );
-
-      this.child = child;
-
-      child.stdout.on("data", (chunk: Buffer) => {
-        const messages = this.parser.push(chunk.toString("utf-8"));
-        for (const message of messages) {
-          this.handleMessage(message);
-        }
-      });
-
-      child.stderr.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf-8").trim();
-        if (text) {
-          console.error(`[codex-app-server] ${text}`);
-        }
-      });
-
-      child.on("error", (error) => {
-        this.failAll(error instanceof Error ? error : new Error(String(error)));
-      });
-
-      child.on("close", () => {
-        this.failAll(new Error("Codex app-server process exited"));
-      });
-
-      this.call("initialize", {
-        clientInfo: { name: "controller", version: APP_VERSION },
-        capabilities: { experimentalApi: true },
-      })
-        .then(() => {
-          this.writeMessage({ method: "initialized" });
-          resolve();
-        })
-        .catch((error) => reject(error));
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (this.child !== child) return;
+      const messages = this.parser.push(chunk.toString("utf-8"));
+      for (const message of messages) {
+        this.handleMessage(message);
+      }
     });
 
-    await this.initializePromise;
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf-8").trim();
+      if (text) {
+        console.error(`[codex-app-server] ${text}`);
+      }
+    });
+
+    // Every handler ignores events from a previous child: a late `close` from
+    // a replaced process must not wipe the healthy current one.
+    child.on("error", (error) => {
+      if (this.child !== child) return;
+      this.resetChild(error);
+    });
+
+    child.on("close", () => {
+      if (this.child !== child) return;
+      this.failAll(new Error("Codex app-server process exited"));
+    });
+
+    // Without a listener, a broken pipe (EPIPE) is an uncaught exception.
+    child.stdin.on("error", (error: Error) => {
+      if (this.child !== child) return;
+      this.resetChild(new Error(`Codex app-server stdin failed: ${error.message}`));
+    });
+
+    await this.call("initialize", {
+      clientInfo: { name: "controller", version: APP_VERSION },
+      capabilities: { experimentalApi: true },
+    });
+    this.writeMessage({ method: "initialized" });
   }
 
   private handleMessage(message: JsonRpcMessage) {
@@ -609,6 +659,7 @@ export class CodexAppServerManager {
     const pending = this.pendingCalls.get(message.id);
     if (!pending) return;
     this.pendingCalls.delete(message.id);
+    clearTimeout(pending.timer);
 
     if (message.error) {
       const errorMessage =
@@ -630,10 +681,27 @@ export class CodexAppServerManager {
 
   private call(method: string, params: Record<string, unknown>): Promise<unknown> {
     const id = this.nextRequestId++;
+    const timeoutMs = this.timeoutFor(method);
     return new Promise((resolve, reject) => {
-      this.pendingCalls.set(id, { resolve, reject });
-      this.sendRequest({ id, method, params });
+      const timer = setTimeout(() => {
+        this.pendingCalls.delete(id);
+        reject(new Error(`Codex app-server did not answer ${method} within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingCalls.set(id, { resolve, reject, timer });
+      try {
+        this.sendRequest({ id, method, params });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingCalls.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
+  }
+
+  private timeoutFor(method: string): number {
+    if (method === "initialize") return this.timeouts.initializeMs;
+    if (method === "turn/start") return this.timeouts.turnStartMs;
+    return this.timeouts.defaultMs;
   }
 
   private sendRequest(payload: { id: JsonRpcId; method: string; params: Record<string, unknown> }) {
@@ -666,11 +734,20 @@ export class CodexAppServerManager {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
+  /* Kill the current child and fail everything bound to it. The child is
+   * detached first, so its eventual `close` is ignored as stale. */
+  private resetChild(error: Error) {
+    const child = this.child;
+    this.failAll(error);
+    child?.kill();
+  }
+
   private failAll(error: Error) {
     this.child = null;
     this.initializePromise = null;
 
     for (const pending of this.pendingCalls.values()) {
+      clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pendingCalls.clear();
@@ -753,6 +830,20 @@ function getThreadFromResponse(value: unknown): { id?: string } | null {
   const thread = raw.thread;
   if (!thread || typeof thread !== "object") return null;
   return thread as { id?: string };
+}
+
+async function spawnCodexAppServer(env: Record<string, string>): Promise<AppServerChild> {
+  // Resolve before spawning so a missing CLI surfaces a clear error rather
+  // than an ENOENT from a packaged build's minimal PATH (issue #65).
+  const codexCommand = await resolveAgentCommand("codex");
+  return spawn(
+    codexCommand,
+    ["app-server", "--listen", "stdio://", "--enable", "default_mode_request_user_input"],
+    {
+      env: childProcessEnv(env),
+      stdio: ["pipe", "pipe", "pipe"],
+    }
+  );
 }
 
 export const codexAppServerManager = new CodexAppServerManager();

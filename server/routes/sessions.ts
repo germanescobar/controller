@@ -3025,11 +3025,33 @@ async function streamCodexPlanSession(
   } catch (error) {
     await eventProcessing;
     if (!finished) {
-      sseSend({
-        type: "error",
-        text: error instanceof Error ? error.message : String(error),
-      });
+      const text = error instanceof Error ? error.message : String(error);
+      sseSend({ type: "error", text });
+      await persistRunFailure(text);
       await finishStream(1);
+    }
+  }
+
+  /* Record a failed turn in the event log. A failure before `run.started`
+   * (e.g. the app-server never initializing) would otherwise leave no trace:
+   * the user message is only written on `run.started` and Codex's
+   * `run.failed` is not persisted (issue #467). */
+  async function persistRunFailure(text: string): Promise<void> {
+    if (!streamSessionId) return;
+    try {
+      if (!userMessageWritten) await persistSessionStart(streamSessionId);
+      await appendEvent(worktreePath, streamSessionId, {
+        id: randomUUID(),
+        sessionId: streamSessionId,
+        timestamp: new Date().toISOString(),
+        type: "error",
+        data: { text },
+      });
+    } catch (persistError) {
+      console.error(
+        `[session] Failed to persist Codex run failure (session=${streamSessionId}):`,
+        persistError
+      );
     }
   }
 }
