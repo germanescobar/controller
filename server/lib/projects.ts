@@ -161,7 +161,7 @@ async function withProjectRegistry<T>(
   return withLock(file, async () => {
     const records = await readRecords();
     const result = await fn(records);
-    await writeJsonRegistry(file, records);
+    await writeJsonRegistry(file, records, { validate: validateRecords });
     return result;
   });
 }

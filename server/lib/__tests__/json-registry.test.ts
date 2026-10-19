@@ -103,6 +103,26 @@ test("writeJsonRegistry keeps a valid .bak when the primary is corrupt", async (
   }
 });
 
+test("writeJsonRegistry keeps a valid .bak when the primary is valid JSON but fails validate", async () => {
+  const { homeDir, cleanup } = await tempHome();
+  try {
+    const file = path.join(homeDir, "registry.json");
+    const backup = `${file}.bak`;
+    await fs.writeFile(file, "{}");
+    await fs.writeFile(backup, JSON.stringify([{ id: "good" }]));
+    const requireArray = (v: unknown): unknown[] => {
+      if (!Array.isArray(v)) throw new Error("not an array");
+      return v;
+    };
+
+    await writeJsonRegistry(file, [{ id: "good" }, { id: "new" }], { validate: requireArray });
+
+    assert.deepEqual(JSON.parse(await fs.readFile(backup, "utf-8")), [{ id: "good" }]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a failed rename while repairing a corrupt primary leaves .bak recoverable", async () => {
   const { homeDir, cleanup } = await tempHome();
   const fsLayer = {

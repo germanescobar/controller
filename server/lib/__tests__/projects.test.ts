@@ -336,3 +336,21 @@ test("reading strips legacy command keys and the next write persists the strippe
     assert.equal((await getProject("a"))?.name, "renamed");
   });
 });
+
+test("repairing a wrong-shape registry from .bak keeps the backup intact", async () => {
+  await withSandbox(async ({ home, projectPath }) => {
+    const first = await addProject("first", projectPath);
+    await addProject("second", projectPath);
+    const registryFile = path.join(home, "projects.json");
+    const backupFile = `${registryFile}.bak`;
+    // Valid JSON, but not a registry — `validateRecords` rejects it.
+    await fs.writeFile(registryFile, "{}");
+
+    await addProject("third", projectPath);
+
+    const backupIds = JSON.parse(await fs.readFile(backupFile, "utf-8")).map(
+      (p: { id: string }) => p.id
+    );
+    assert.deepEqual(backupIds, [first.id]);
+  });
+});

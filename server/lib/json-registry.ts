@@ -191,7 +191,11 @@ export async function readJsonRegistry<T>(
  * — never a half-written file. The mutex mostly protects readers that
  * also need to mutate, e.g. addWorktree.)
  */
-export async function writeJsonRegistry<T>(file: string, value: T): Promise<void> {
+export async function writeJsonRegistry<T>(
+  file: string,
+  value: T,
+  options: { validate?: (v: unknown) => unknown } = {}
+): Promise<void> {
   const dir = path.dirname(file);
   await activeFs.mkdir(dir, { recursive: true });
 
@@ -216,24 +220,31 @@ export async function writeJsonRegistry<T>(file: string, value: T): Promise<void
     await handle.close();
   }
 
-  await mirrorToBackup(file, backup);
+  await mirrorToBackup(file, backup, options.validate);
   await activeFs.rename(tmp, file);
 }
 
 /*
  * Mirror the *previous* primary contents to `.bak` before the tmp file is
- * swapped in. Only a primary that parses is mirrored: when it is corrupt
+ * swapped in. Only a primary that is still readable — it parses and, when
+ * a `validate` is supplied, passes it — is mirrored: when it is corrupt
  * (typically because the caller just recovered from `.bak`), overwriting
  * the backup would destroy the only good copy, and a crash or rename
- * failure before the swap would then leave both files unreadable. On the
- * very first write the primary doesn't exist yet, so there's nothing to
- * mirror. Failures are logged rather than thrown — losing the backup is
- * bad, but not as bad as failing the user's write.
+ * failure before the swap would then leave both files unreadable. Pass the
+ * same throwing validator used for reads so "valid JSON, wrong shape"
+ * counts as corrupt too. On the very first write the primary doesn't
+ * exist yet, so there's nothing to mirror. Failures are logged rather
+ * than thrown — losing the backup is bad, but not as bad as failing the
+ * user's write.
  */
-async function mirrorToBackup(file: string, backup: string): Promise<void> {
+async function mirrorToBackup(
+  file: string,
+  backup: string,
+  validate?: (v: unknown) => unknown
+): Promise<void> {
   try {
     const previous = await activeFs.readFile(file, "utf-8");
-    if (!parsesAsJson(previous)) return;
+    if (!isReadable(previous, validate)) return;
     await activeFs.writeFile(backup, previous, "utf-8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
@@ -241,9 +252,10 @@ async function mirrorToBackup(file: string, backup: string): Promise<void> {
   }
 }
 
-function parsesAsJson(content: string): boolean {
+function isReadable(content: string, validate?: (v: unknown) => unknown): boolean {
   try {
-    JSON.parse(content);
+    const parsed: unknown = JSON.parse(content);
+    validate?.(parsed);
     return true;
   } catch {
     return false;
