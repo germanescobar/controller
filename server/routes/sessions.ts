@@ -88,6 +88,7 @@ import {
   markSessionActive,
   markSessionInactive,
   recordSessionAttentionEvent,
+  releaseSessionRunLease,
   releaseSessionRunStart,
   setSessionAwaitingUserInput,
   stopSessionRuntime,
@@ -1424,14 +1425,17 @@ export async function handleSessionStream(
 ) {
   const sessionId = req.query.resumeSessionId;
   const claimed = typeof sessionId === "string" && sessionId.length > 0;
-  if (claimed && !claimSessionRunStart(sessionId)) {
+  if (claimed && !await claimSessionRunStart(sessionId)) {
     res.status(409).json({ error: "A run is already active for this session" });
     return;
   }
   try {
     await startSessionStream(req, res);
   } finally {
-    if (claimed) releaseSessionRunStart(sessionId);
+    if (claimed) {
+      releaseSessionRunStart(sessionId);
+      if (!getSessionRuntime(sessionId).active) await releaseSessionRunLease(sessionId);
+    }
   }
 }
 
@@ -2422,10 +2426,17 @@ async function startSessionStream(
 
         // Update runtime state and lastActiveAt once the stream closes.
         if (streamSessionId) {
-          if (!pausedForClaudeUserInput && code === 0) {
-            await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+          try {
+            if (!pausedForClaudeUserInput && code === 0) {
+              await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+            }
+          } finally {
+            try {
+              await releaseSessionRunLease(streamSessionId);
+            } finally {
+              markSessionInactive(streamSessionId);
+            }
           }
-          markSessionInactive(streamSessionId);
           getSession(worktreePath, streamSessionId).then((existing) => {
             if (existing) {
               existing.lastActiveAt = new Date().toISOString();
@@ -2451,11 +2462,14 @@ async function startSessionStream(
           !pausedForClaudeUserInput &&
           !runCancelled
         ) {
-          void scheduleSessionQueueAdvance(
-            req.params.projectId,
-            worktreeId,
-            streamSessionId
-          );
+          const queued = await listQueue(streamSessionId);
+          if (queued.length > 0) {
+            void scheduleSessionQueueAdvance(
+              req.params.projectId,
+              worktreeId,
+              streamSessionId
+            );
+          }
         }
       })
       .catch(() => {});
@@ -2464,7 +2478,11 @@ async function startSessionStream(
   child.on("error", (err) => {
     clearStreamTimers();
     if (streamSessionId) {
-      markSessionInactive(streamSessionId);
+      void releaseSessionRunLease(streamSessionId)
+        .catch((error: unknown) => {
+          console.error(`[session] failed to release run lease (session=${streamSessionId}):`, error);
+        })
+        .finally(() => markSessionInactive(streamSessionId));
     }
     sseSend({ type: "error", text: err.message });
     if (clientConnected) res.end();
@@ -2506,7 +2524,8 @@ async function advanceSessionQueue(
   let next: QueuedMessage | null;
   try {
     next = await dequeueFirst(sessionId);
-  } catch {
+  } catch (error) {
+    console.error(`[session] failed to dequeue queued message (session=${sessionId}):`, error);
     return;
   }
   if (!next) return;
@@ -2555,14 +2574,15 @@ function scheduleSessionQueueAdvance(
   const previous = queueAdvanceChains.get(sessionId) ?? Promise.resolve();
   const next = previous
     .then(async () => {
-      while (!claimSessionRunStart(sessionId)) {
-        await waitForSessionRunStart(sessionId);
+      while (!await claimSessionRunStart(sessionId)) {
+        if (!await waitForSessionRunStart(sessionId)) return;
         if (getSessionRuntime(sessionId).active) return;
       }
       try {
         await advanceSessionQueue(projectId, worktreeId, sessionId);
       } finally {
         releaseSessionRunStart(sessionId);
+        if (!getSessionRuntime(sessionId).active) await releaseSessionRunLease(sessionId);
       }
     })
     .catch((error) => {
@@ -2789,10 +2809,17 @@ async function streamCodexPlanSession(
     if (finished) return;
     finished = true;
     if (streamSessionId) {
-      if (exitCode === 0) {
-        await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+      try {
+        if (exitCode === 0) {
+          await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+        }
+      } finally {
+        try {
+          await releaseSessionRunLease(streamSessionId);
+        } finally {
+          markSessionInactive(streamSessionId);
+        }
       }
-      markSessionInactive(streamSessionId);
     }
     await touchSession();
     sseSend({ type: "done", exitCode });
@@ -2806,7 +2833,10 @@ async function streamCodexPlanSession(
     // exit through their own drain handler in the run-completion branch,
     // not here.
     if (streamSessionId && exitCode === 0) {
-      void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
+      const queue = await listQueue(streamSessionId);
+      if (queue.length > 0) {
+        void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
+      }
     } else if (streamSessionId && exitCode !== 0) {
       // Failed run: only drain if there is something in the queue. An
       // empty queue means the agent (or the user) didn't ask for a

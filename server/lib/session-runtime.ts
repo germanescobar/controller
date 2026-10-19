@@ -1,4 +1,9 @@
 import type { ChildProcess } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { lock } from "proper-lockfile";
+import { assertSafeId, ensureOrchestratorHome, sessionQueuesDir } from "./paths.js";
 import {
   signalAgentProcess,
   type AgentStreamEvent,
@@ -36,14 +41,51 @@ export interface SessionRuntimeState {
 const runtimes = new Map<string, SessionRuntimeState>();
 const runStarts = new Map<string, Promise<void>>();
 const releaseRunStarts = new Map<string, () => void>();
+const runLeases = new Map<string, () => Promise<void>>();
+const instanceId = randomUUID();
 
 /** Reserve a resumed session before asynchronous preflight or provider startup. */
-export function claimSessionRunStart(sessionId: string): boolean {
+export async function claimSessionRunStart(sessionId: string): Promise<boolean> {
+  assertSafeId(sessionId, "session");
   if (runStarts.has(sessionId) || getSessionRuntime(sessionId).active) return false;
   let release!: () => void;
   runStarts.set(sessionId, new Promise<void>((resolve) => { release = resolve; }));
   releaseRunStarts.set(sessionId, release);
-  return true;
+  try {
+    await ensureOrchestratorHome();
+    await fs.mkdir(sessionQueuesDir(), { recursive: true });
+    const lockfilePath = path.join(await fs.realpath(sessionQueuesDir()), `${sessionId}.run.lock`);
+    const releaseLease = await lock(lockfilePath, {
+      lockfilePath,
+      realpath: false,
+      stale: 30_000,
+      update: 5_000,
+      onCompromised: (error) => {
+        console.error(`Run lease lost for ${sessionId}:`, error);
+        process.exit(1);
+      },
+    });
+    // The lock directory's mtime is the heartbeat. This sidecar identifies
+    // the owner for diagnosis and is overwritten when a stale lease recovers.
+    try {
+      await fs.writeFile(`${lockfilePath}.json`, JSON.stringify({ pid: process.pid, instanceId }));
+    } catch (error) {
+      await releaseLease();
+      throw error;
+    }
+    runLeases.set(sessionId, async () => {
+      try {
+        await fs.rm(`${lockfilePath}.json`, { force: true });
+      } finally {
+        await releaseLease();
+      }
+    });
+    return true;
+  } catch (error) {
+    releaseSessionRunStart(sessionId);
+    if (error instanceof Error && "code" in error && error.code === "ELOCKED") return false;
+    throw error;
+  }
 }
 
 export function releaseSessionRunStart(sessionId: string): void {
@@ -54,9 +96,20 @@ export function releaseSessionRunStart(sessionId: string): void {
   release();
 }
 
+/** Release the disk lease once the agent has exited or startup failed. */
+export async function releaseSessionRunLease(sessionId: string): Promise<void> {
+  const release = runLeases.get(sessionId);
+  if (!release) return;
+  runLeases.delete(sessionId);
+  await release();
+}
+
 /** Queue consumers wait for an in-progress start before checking active state. */
-export async function waitForSessionRunStart(sessionId: string): Promise<void> {
-  await runStarts.get(sessionId);
+export async function waitForSessionRunStart(sessionId: string): Promise<boolean> {
+  const pending = runStarts.get(sessionId);
+  if (!pending) return false;
+  await pending;
+  return true;
 }
 
 export function markSessionActive(

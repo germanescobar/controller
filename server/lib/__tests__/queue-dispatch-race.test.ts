@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import express from "express";
 import http from "node:http";
@@ -137,6 +137,52 @@ test("two racing queue dispatch attempts start one run", async () => {
     assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
     const events = await getEvents(env.projectPath, env.sessionId);
     assert.equal(events.filter((event) => event.type === "user_message").length, 1);
+  });
+});
+
+test("two server processes sharing a home dispatch one sent message once", async () => {
+  await withDispatchEnv(async (env) => {
+    const childCode = `
+      import express from "express";
+      import http from "node:http";
+      import { advanceSessionQueueFromConsumer } from ${JSON.stringify(new URL("../../routes/sessions.ts", import.meta.url).href)};
+      const app = express();
+      app.post("/advance", async (_req, res) => {
+        await advanceSessionQueueFromConsumer(${JSON.stringify(env.projectId)}, ${JSON.stringify(env.worktreeId)}, ${JSON.stringify(env.sessionId)});
+        res.end();
+      });
+      const server = http.createServer(app);
+      server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+    `;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", childCode], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        let output = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          output += chunk.toString();
+          const line = output.split("\n")[0];
+          if (/^\d+$/.test(line)) resolve(Number(line));
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => reject(new Error(`Second server exited before ready: ${code}`)));
+      });
+      const send = fetch(`${env.baseUrl}/api/sessions/${env.sessionId}/send-from`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fromSessionId: "dispatch-parent", message: "hello" }),
+      });
+      const advance = fetch(`http://127.0.0.1:${port}/advance`, { method: "POST" });
+      const [sent, advanced] = await Promise.all([send, advance]);
+      assert.equal(sent.status, 201);
+      assert.equal(advanced.status, 200);
+      await waitForRun(env.projectPath, env.sessionId);
+      assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+      assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
+    } finally {
+      child.kill();
+    }
   });
 });
 
