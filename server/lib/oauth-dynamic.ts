@@ -53,6 +53,14 @@ interface CachedToken {
 
 const cache = new Map<string, CachedToken>();
 
+/*
+ * In-flight refreshes keyed like `cache`. Concurrent callers share one
+ * refresh: ASes that rotate refresh tokens reject a second refresh with the
+ * same (now consumed) token, which would otherwise mark a freshly refreshed
+ * scheme expired.
+ */
+const inflightRefreshes = new Map<string, Promise<string | null>>();
+
 /** Persisted shape of an `oauth_dynamic` scheme's secret value. */
 export interface OAuthDynamicSecret {
   accessToken: string;
@@ -136,23 +144,9 @@ export async function getValidToken(
 
   // Stale or empty cache — see if we can refresh without user interaction.
   const isExpired = stored.expiresAt <= Date.now();
-  const isAboutToExpire = stored.expiresAt - Date.now() < EXPIRY_SKEW_MS;
   const canRefresh = typeof stored.refreshToken === "string" && stored.refreshToken.length > 0;
-  if ((isExpired || isAboutToExpire) && canRefresh) {
-    try {
-      const refreshed = await refreshAccessToken(stored, fetchImpl);
-      cache.set(key, toCached(refreshed));
-      await saveSecret(connection.id, scheme.id, refreshed);
-      await markAcquired(connection.id, scheme, {
-        status: "connected",
-        expiresAt: new Date(refreshed.expiresAt).toISOString(),
-      });
-      return refreshed.accessToken;
-    } catch {
-      // Refresh failed: mark the scheme expired so the UI offers Reconnect.
-      await markAcquired(connection.id, scheme, { status: "expired" });
-      return null;
-    }
+  if (needsRefresh(stored) && canRefresh) {
+    return refreshSingleFlight(connection.id, scheme, fetchImpl);
   }
 
   if (isExpired) {
@@ -168,6 +162,64 @@ export async function getValidToken(
   const token: CachedToken = toCached(stored);
   cache.set(key, token);
   return token.accessToken;
+}
+
+function needsRefresh(secret: OAuthDynamicSecret): boolean {
+  return secret.expiresAt - Date.now() < EXPIRY_SKEW_MS;
+}
+
+function refreshSingleFlight(
+  connectionId: string,
+  scheme: AuthScheme,
+  fetchImpl: typeof fetch
+): Promise<string | null> {
+  const key = `${connectionId}:${scheme.id}`;
+  const existing = inflightRefreshes.get(key);
+  if (existing) return existing;
+  const refresh = refreshAndPersist(connectionId, scheme, fetchImpl).finally(() => {
+    inflightRefreshes.delete(key);
+  });
+  inflightRefreshes.set(key, refresh);
+  return refresh;
+}
+
+/**
+ * Refresh the scheme's token and persist it. Re-reads the stored secret
+ * first: a caller that loaded the secret just before a previous refresh
+ * settled would otherwise refresh again with an already-rotated token.
+ */
+async function refreshAndPersist(
+  connectionId: string,
+  scheme: AuthScheme,
+  fetchImpl: typeof fetch
+): Promise<string | null> {
+  const key = `${connectionId}:${scheme.id}`;
+  const latest = await loadSecret(connectionId, scheme.id);
+  if (!latest) return null;
+  if (!needsRefresh(latest)) {
+    cache.set(key, toCached(latest));
+    return latest.accessToken;
+  }
+  try {
+    const refreshed = await refreshAccessToken(latest, fetchImpl);
+    cache.set(key, toCached(refreshed));
+    await saveSecret(connectionId, scheme.id, refreshed);
+    await markAcquired(connectionId, scheme, {
+      status: "connected",
+      expiresAt: new Date(refreshed.expiresAt).toISOString(),
+    });
+    return refreshed.accessToken;
+  } catch (err) {
+    // Error messages carry the AS status / OAuth error code, never tokens.
+    const detail = err instanceof OAuthDynamicError ? `${err.code}: ${err.message}` : String(err);
+    console.warn(
+      `[oauth-dynamic] token refresh failed for connection ${connectionId} scheme ${scheme.id} ` +
+        `(${latest.metadata.token_endpoint}): ${detail}`
+    );
+    // Mark the scheme expired so the UI offers Reconnect.
+    await markAcquired(connectionId, scheme, { status: "expired" });
+    return null;
+  }
 }
 
 /** Status of an `oauth_dynamic` scheme for the UI. */
@@ -189,7 +241,7 @@ export async function acquireStatus(
 
   const stored = await loadSecret(connectionId, schemeId);
   if (!stored) return { status: "none" };
-  if (stored.expiresAt - Date.now() < EXPIRY_SKEW_MS) {
+  if (needsRefresh(stored)) {
     return {
       status: "expired",
       expiresAt: new Date(stored.expiresAt).toISOString(),
@@ -862,7 +914,8 @@ async function refreshAccessToken(stored: OAuthDynamicSecret, fetchImpl: typeof 
     REQUEST_TIMEOUT_MS
   );
   if (!res.ok) {
-    throw new OAuthDynamicError(`Token refresh failed (HTTP ${res.status}).`, "refresh_failed");
+    const reason = await readTokenErrorReason(res);
+    throw new OAuthDynamicError(`Token refresh failed (HTTP ${res.status}): ${reason}`, "refresh_failed");
   }
   const json = (await parseTokenResponse(res)) as Record<string, unknown>;
   // Refresh responses don't always include a new refresh_token; keep the
@@ -894,15 +947,31 @@ async function parseTokenResponse(res: Response): Promise<unknown> {
     throw new OAuthDynamicError("Token endpoint returned a non-JSON response.", "as_error");
   }
   if (!res.ok) {
-    const message =
-      typeof body === "object" && body && (body as { error_description?: string }).error_description
-        ? (body as { error_description?: string }).error_description
-        : typeof body === "object" && body && (body as { error?: string }).error
-          ? (body as { error?: string }).error
-          : `HTTP ${res.status}`;
-    throw new OAuthDynamicError(`Token endpoint error: ${message}`, "token_exchange_failed");
+    throw new OAuthDynamicError(
+      `Token endpoint error: ${tokenErrorReason(body, res.status)}`,
+      "token_exchange_failed"
+    );
   }
   return body;
+}
+
+/** Best-effort reason from an error response; falls back to the HTTP status. */
+async function readTokenErrorReason(res: Response): Promise<string> {
+  try {
+    return tokenErrorReason(await res.json(), res.status);
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+/* RFC 6749 §5.2 error body: prefer error_description, then the error code. */
+function tokenErrorReason(body: unknown, status: number): string {
+  if (typeof body === "object" && body) {
+    const { error, error_description } = body as { error?: unknown; error_description?: unknown };
+    if (typeof error_description === "string" && error_description) return error_description;
+    if (typeof error === "string" && error) return error;
+  }
+  return `HTTP ${status}`;
 }
 
 function tokenResponseToSecret(

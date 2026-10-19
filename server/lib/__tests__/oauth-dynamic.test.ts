@@ -19,7 +19,10 @@ import { setTimeout as delay } from "node:timers/promises";
  *     test's own HTTP client.
  *   - getValidToken: returns the access token when fresh; refreshes when
  *     close to expiry; returns null when the scheme has no secret yet.
- *   - getValidToken: marks the scheme expired when refresh fails.
+ *   - getValidToken: marks the scheme expired when refresh fails, and logs
+ *     the reason without secrets.
+ *   - getValidToken: concurrent callers share one refresh (rotating ASes
+ *     reject a reused refresh token).
  *   - getValidToken: persists a refreshed token to the secret store so
  *     the next process restart resumes.
  *   - acquireStatus mirrors what the UI renders.
@@ -908,6 +911,92 @@ test("getValidToken: marks the scheme expired when the access token expires and 
     const freshScheme = schemeOf(fresh);
     const token = await oauth.getValidToken(fresh, freshScheme);
     assert.equal(token, null);
+
+    const final = await integrations.getConnection(connection.id);
+    assert.ok(final);
+    assert.equal(final.auth.schemes[0]?.acquired?.status, "expired");
+  });
+});
+
+async function seedRefreshableSecret(
+  integrations: typeof import("../integrations.js"),
+  connection: import("../integrations.js").IntegrationConnection,
+  refreshToken: string
+): Promise<void> {
+  const secrets = await integrations.getConnectionSecrets(connection.id);
+  secrets[schemeOf(connection).id] = JSON.stringify({
+    accessToken: "AT-OLD",
+    refreshToken,
+    // Inside the 30s refresh skew window.
+    expiresAt: Date.now() + 1_000,
+    clientId: "client",
+    metadata: METADATA,
+  });
+  await integrations.writeConnectionSecrets(connection.id, secrets);
+}
+
+test("getValidToken: concurrent callers share a single refresh (issue #468)", async () => {
+  await withTempHome(async ({ integrations, oauth }) => {
+    const connection = await makeConnection(integrations, "http://127.0.0.1:9999/");
+    await seedRefreshableSecret(integrations, connection, "RT-1");
+
+    // Rotating AS: each refresh token is single-use, so a second refresh
+    // with RT-1 would be rejected with invalid_grant.
+    const consumed = new Set<string>();
+    let tokenCalls = 0;
+    const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      tokenCalls += 1;
+      const refreshToken = new URLSearchParams(String(init?.body)).get("refresh_token") ?? "";
+      await delay(20);
+      if (consumed.has(refreshToken)) {
+        return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      }
+      consumed.add(refreshToken);
+      return new Response(
+        JSON.stringify({ access_token: "AT-NEW", refresh_token: "RT-2", expires_in: 3600 }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const scheme = schemeOf(connection);
+    const tokens = await Promise.all([
+      oauth.getValidToken(connection, scheme, fetchImpl as typeof fetch),
+      oauth.getValidToken(connection, scheme, fetchImpl as typeof fetch),
+    ]);
+    assert.deepEqual(tokens, ["AT-NEW", "AT-NEW"]);
+    assert.equal(tokenCalls, 1);
+
+    const final = await integrations.getConnection(connection.id);
+    assert.ok(final);
+    assert.equal(final.auth.schemes[0]?.acquired?.status, "connected");
+  });
+});
+
+test("getValidToken: logs the refresh failure reason without secrets", async (t) => {
+  await withTempHome(async ({ integrations, oauth }) => {
+    const connection = await makeConnection(integrations, "http://127.0.0.1:9999/");
+    await seedRefreshableSecret(integrations, connection, "RT-SECRET");
+    const warn = t.mock.method(console, "warn", () => {});
+    const fetchImpl = async () =>
+      new Response(
+        JSON.stringify({ error: "invalid_grant", error_description: "Refresh token revoked" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+
+    const token = await oauth.getValidToken(
+      connection,
+      schemeOf(connection),
+      fetchImpl as typeof fetch
+    );
+    assert.equal(token, null);
+
+    assert.equal(warn.mock.callCount(), 1);
+    const message = String(warn.mock.calls[0]?.arguments[0]);
+    assert.match(message, /token refresh failed/);
+    assert.match(message, new RegExp(connection.id));
+    assert.match(message, /HTTP 400/);
+    assert.match(message, /Refresh token revoked/);
+    assert.doesNotMatch(message, /RT-SECRET|AT-OLD/);
 
     const final = await integrations.getConnection(connection.id);
     assert.ok(final);
