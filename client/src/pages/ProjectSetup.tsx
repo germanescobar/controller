@@ -14,19 +14,26 @@ export function ProjectSetup({ onCreated, onCancel }: ProjectSetupProps) {
   const [setupCommands, setSetupCommands] = useState("");
   const [runCommands, setRunCommands] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !path.trim()) return;
     setLoading(true);
-    await createProject(
-      name.trim(),
-      path.trim(),
-      setupCommands.trim() || undefined,
-      runCommands.trim() || undefined,
-    );
-    setLoading(false);
-    onCreated();
+    setError(null);
+    try {
+      await createProject(
+        name.trim(),
+        path.trim(),
+        setupCommands.trim() || undefined,
+        runCommands.trim() || undefined,
+      );
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create project");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleBrowse = async () => {
@@ -127,6 +134,7 @@ export function ProjectSetup({ onCreated, onCancel }: ProjectSetupProps) {
               setup commands.
             </p>
           </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
           <div className="flex gap-2 pt-2">
             <Button type="submit" disabled={loading || !name.trim() || !path.trim()} className="flex-1">
               {loading ? "Creating..." : "Create project"}
