@@ -429,6 +429,41 @@ test("per-session inactivity timeout rejects non-positive values (issue #386)", 
   );
 });
 
+test("oversized inactivity timeout falls back instead of overflowing the watchdog timer", async () => {
+  const sessionId = "sess-oversized-timeout";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId, { silentSecondsAfterStart: 2 });
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const response = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          worktreeId,
+          message: "Oversized timeout",
+          provider: "anita",
+          agentInactivityTimeoutMs: 2_147_483_648,
+        }),
+      });
+      assert.equal(response.status, 200);
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const sessionFile = path.join(projectStoreDir(projectPath), "sessions", `${sessionId}.json`);
+      const session = JSON.parse(await fs.readFile(sessionFile, "utf8")) as {
+        agentInactivityTimeoutMs?: number;
+      };
+      assert.equal(session.agentInactivityTimeoutMs, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const eventFile = path.join(projectStoreDir(projectPath), "events", `${sessionId}.jsonl`);
+      const events = (await fs.readFile(eventFile, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { type: string });
+      assert.ok(!events.some((event) => event.type === "run_failed"));
+    }
+  );
+});
+
 test("a quiet tool call survives the watchdog when the per-session override is large (issue #386, acceptance bullet 2)", async () => {
   // Acceptance bullet 2: "A session whose timeout is e.g. 30 min survives a
   // `gh pr checks --watch` that takes 15 min." We exercise it in seconds

@@ -3567,8 +3567,15 @@ function parseInactivityTimeout(value) {
   const match = /^(\d+)(ms|s|m|h)$/.exec(value);
   const multiplier = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 };
   const milliseconds = match ? Number(match[1]) * multiplier[match[2]] : NaN;
-  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) {
-    fail("sessions start: --inactivity-timeout requires a positive duration (e.g. 20m)");
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds <= 0 ||
+    milliseconds > 2_147_483_647
+  ) {
+    fail(
+      "sessions start: --inactivity-timeout requires a positive duration " +
+        "of at most 2147483647ms (e.g. 20m)"
+    );
   }
   return milliseconds;
 }

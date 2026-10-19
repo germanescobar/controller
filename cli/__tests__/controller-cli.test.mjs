@@ -1693,6 +1693,11 @@ test("sessions start parses an inactivity timeout for persistence (issue #463)",
     "--inactivity-timeout", "20m",
   ]);
   assert.equal(parsed.body.agentInactivityTimeoutMs, 20 * 60 * 1000);
+  const maximum = cli.parseSessions([
+    "start", "Fix the issue", "--worktree", "wt-1",
+    "--inactivity-timeout", "2147483647ms",
+  ]);
+  assert.equal(maximum.body.agentInactivityTimeoutMs, 2_147_483_647);
 });
 
 test("sessions start rejects invalid inactivity durations (issue #463)", async () => {
@@ -1703,7 +1708,7 @@ test("sessions start rejects invalid inactivity durations (issue #463)", async (
   process.exit = () => { throw new Error("__exit__"); };
   process.stderr.write = (chunk) => { stderrText += String(chunk); return true; };
   try {
-    for (const duration of ["0m", "1.5m", "999999999999999h", "wat"]) {
+    for (const duration of ["0m", "1.5m", "2147483648ms", "1000h", "999999999999999h", "wat"]) {
       await assert.rejects(async () => cli.parseSessions([
         "start", "Fix", "--worktree", "wt-1",
         "--inactivity-timeout", duration,

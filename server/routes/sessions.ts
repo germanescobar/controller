@@ -153,9 +153,14 @@ function isBenignProviderStderrLine(line: string): boolean {
 // field on `POST /sessions` (issue #386). The per-session override is
 // persisted on the session file and re-applied on resume so the user does not
 // have to re-pass it on follow-up turns.
+const MAX_AGENT_INACTIVITY_TIMEOUT_MS = 2_147_483_647;
 const DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS = (() => {
   const parsed = Number(process.env.AGENT_INACTIVITY_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 60 * 1000;
+  return Number.isSafeInteger(parsed) &&
+    parsed > 0 &&
+    parsed <= MAX_AGENT_INACTIVITY_TIMEOUT_MS
+    ? parsed
+    : 10 * 60 * 1000;
 })();
 // Comment-line ping so idle proxies don't drop a quiet SSE connection.
 const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
@@ -200,7 +205,12 @@ function resolveAgentInactivityTimeoutMs(args: {
   if (fromQuery !== undefined) {
     return { ms: fromQuery, explicitlySupplied: true };
   }
-  if (typeof args.persistedValue === "number" && args.persistedValue > 0) {
+  if (
+    args.persistedValue !== undefined &&
+    Number.isSafeInteger(args.persistedValue) &&
+    args.persistedValue > 0 &&
+    args.persistedValue <= MAX_AGENT_INACTIVITY_TIMEOUT_MS
+  ) {
     return { ms: args.persistedValue, explicitlySupplied: true };
   }
   return { ms: DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS, explicitlySupplied: false };
@@ -213,7 +223,11 @@ function parsePositiveInt(
   const text = Array.isArray(raw) ? raw[0] : raw;
   if (typeof text !== "string") return undefined;
   const parsed = Number(text);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  return Number.isSafeInteger(parsed) &&
+    parsed > 0 &&
+    parsed <= MAX_AGENT_INACTIVITY_TIMEOUT_MS
+    ? parsed
+    : undefined;
 }
 
 const MAX_ATTACHMENT_COUNT = 5;
