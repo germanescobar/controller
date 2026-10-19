@@ -140,7 +140,8 @@ function mutexFor(file: string): Mutex {
  *
  * Parse errors throw a `RegistryParseError` after the backup fallback
  * has been tried — the caller is expected to log them, not to
- * silently treat them as "the registry is empty".
+ * silently treat them as "the registry is empty". I/O errors other than
+ * ENOENT, on either the primary or the backup, are rethrown as-is.
  */
 export async function readJsonRegistry<T>(
   file: string,
@@ -162,23 +163,42 @@ export async function readJsonRegistry<T>(
     return { value, fromBackup: false };
   } catch (parseErr) {
     if (options.backup) {
-      try {
-        const backupContent = await activeFs.readFile(options.backup, "utf-8");
-        const parsed = JSON.parse(backupContent);
-        const value = options.validate
-          ? options.validate(parsed)
-          : (parsed as T);
-        return { value, fromBackup: true };
-      } catch {
-        // Fall through — backup is also unreadable. Throw the original
-        // parse error so the caller sees the actual corruption.
-      }
+      const recovered = await readBackup(options.backup, options.validate);
+      if (recovered) return { value: recovered.value, fromBackup: true };
     }
+    // Backup is missing or corrupt too. Throw the original parse error so
+    // the caller sees the actual corruption.
     throw new RegistryParseError(
       file,
       parseErr as Error,
       false
     );
+  }
+}
+
+/*
+ * Read and validate the backup. Resolves to null when it is missing (ENOENT)
+ * or corrupt (unparseable / rejected by `validate`), so the caller reports the
+ * primary's corruption. Any other I/O error (EACCES, EISDIR, …) is rethrown:
+ * it says nothing about the data, and treating it as corruption would let
+ * callers discard a store they merely failed to read.
+ */
+async function readBackup<T>(
+  backup: string,
+  validate?: (v: unknown) => T
+): Promise<{ value: T } | null> {
+  let content: string;
+  try {
+    content = await activeFs.readFile(backup, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  try {
+    const parsed: unknown = JSON.parse(content);
+    return { value: validate ? validate(parsed) : (parsed as T) };
+  } catch {
+    return null;
   }
 }
 

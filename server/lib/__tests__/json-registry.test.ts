@@ -156,6 +156,35 @@ test("a failed rename while repairing a corrupt primary leaves .bak recoverable"
   }
 });
 
+test("readJsonRegistry rethrows a non-ENOENT backup read error instead of reporting corruption", async () => {
+  const { homeDir, cleanup } = await tempHome();
+  const file = path.join(homeDir, "registry.json");
+  const backup = `${file}.bak`;
+  const fsLayer = {
+    readFile: async (target: string, encoding: "utf-8") => {
+      if (target === backup) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return fs.readFile(target, encoding);
+    },
+    open: fs.open,
+    writeFile: fs.writeFile,
+    rename: fs.rename,
+    mkdir: fs.mkdir,
+  };
+  const previous = _setJsonRegistryFs(fsLayer);
+  try {
+    await fs.writeFile(file, "{ truncated");
+    await assert.rejects(
+      readJsonRegistry(file, { defaultValue: [], backup, validate: validateArray }),
+      (err: unknown) => !(err instanceof RegistryParseError) && (err as NodeJS.ErrnoException).code === "EACCES"
+    );
+  } finally {
+    _setJsonRegistryFs(previous);
+    await cleanup();
+  }
+});
+
 test("readJsonRegistry returns the defaultValue when the file is missing (ENOENT)", async () => {
   const { homeDir, cleanup } = await tempHome();
   try {

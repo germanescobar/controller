@@ -784,12 +784,11 @@ test("getValidToken: refreshes proactively on a near-expiry access token", async
 
       // Force the stored token to be inside the refresh window by
       // rewriting its expiresAt.
-      const { writeConnectionSecrets } = await import("../integrations.js");
       const secrets = await integrations.getConnectionSecrets(updated.id);
       const stored = JSON.parse(secrets[schemeNow.id] ?? "{}");
       stored.expiresAt = Date.now() + 1_000; // 1s from now, well inside the 30s skew
       secrets[schemeNow.id] = JSON.stringify(stored);
-      await writeConnectionSecrets(updated.id, secrets);
+      await integrations.updateConnectionSecrets(updated.id, () => secrets);
 
       updated = await integrations.getConnection(updated.id);
       assert.ok(updated);
@@ -862,12 +861,11 @@ test("getValidToken: marks the scheme expired when refresh fails", async () => {
       const updated = await integrations.getConnection(connection.id);
       assert.ok(updated);
       const schemeNow = schemeOf(updated);
-      const { writeConnectionSecrets } = await import("../integrations.js");
       const secrets = await integrations.getConnectionSecrets(updated.id);
       const stored = JSON.parse(secrets[schemeNow.id] ?? "{}");
       stored.expiresAt = Date.now();
       secrets[schemeNow.id] = JSON.stringify(stored);
-      await writeConnectionSecrets(updated.id, secrets);
+      await integrations.updateConnectionSecrets(updated.id, () => secrets);
 
       // getValidToken should fail to refresh and return null.
       const fresh = await integrations.getConnection(updated.id);
@@ -892,7 +890,6 @@ test("getValidToken: marks the scheme expired when the access token expires and 
   await withTempHome(async ({ integrations, oauth }) => {
     const connection = await makeConnection(integrations, "http://127.0.0.1:9999/");
     const scheme = schemeOf(connection);
-    const { writeConnectionSecrets } = await import("../integrations.js");
     const secrets = await integrations.getConnectionSecrets(connection.id);
     secrets[scheme.id] = JSON.stringify({
       accessToken: "EXPIRED",
@@ -901,7 +898,7 @@ test("getValidToken: marks the scheme expired when the access token expires and 
       clientId: "client",
       metadata: METADATA,
     });
-    await writeConnectionSecrets(connection.id, secrets);
+    await integrations.updateConnectionSecrets(connection.id, () => secrets);
 
     const fresh = await integrations.getConnection(connection.id);
     assert.ok(fresh);
@@ -935,7 +932,6 @@ test("refreshAccessToken: preserves clientSecret, scopes, and resource on the pe
       };
       const connection = await makeConnection(integrations, `${baseUrl}/mcp`);
       const scheme = schemeOf(connection);
-      const { writeConnectionSecrets } = await import("../integrations.js");
       const secrets = await integrations.getConnectionSecrets(connection.id);
       // Inject a stored secret whose expiry is already in the past so
       // the next `getValidToken` call will refresh it.
@@ -949,7 +945,7 @@ test("refreshAccessToken: preserves clientSecret, scopes, and resource on the pe
         scopes: "files:read mcp:connect",
         resource: "https://mcp.figma.com/mcp",
       });
-      await writeConnectionSecrets(connection.id, secrets);
+      await integrations.updateConnectionSecrets(connection.id, () => secrets);
 
       const tokenCalls: { body: string; contentType: string | null }[] = [];
       const fetchImpl: typeof fetch = async (input, init) => {
@@ -1010,7 +1006,6 @@ test("clearDynamicOauth: removes the stored token and resets the scheme", async 
     const connection = await makeConnection(integrations, "http://127.0.0.1:9999/");
     const scheme = schemeOf(connection);
     // Inject a fake stored secret so we can assert it gets wiped.
-    const { writeConnectionSecrets } = await import("../integrations.js");
     const fake = {
       accessToken: "X",
       refreshToken: "Y",
@@ -1019,7 +1014,7 @@ test("clearDynamicOauth: removes the stored token and resets the scheme", async 
       metadata: METADATA,
     };
     const secrets = { [scheme.id]: JSON.stringify(fake) };
-    await writeConnectionSecrets(connection.id, secrets);
+    await integrations.updateConnectionSecrets(connection.id, () => secrets);
     await integrations.updateConnection(connection.id, {
       auth: {
         schemes: [

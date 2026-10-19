@@ -158,9 +158,31 @@ test("concurrent secret writes for different connections all persist", async () 
   // later write dropped the earlier connection's credentials.
   await withTempHome(async (mod) => {
     const ids = ["a", "b", "c", "d", "e"];
-    await Promise.all(ids.map((id) => mod.writeConnectionSecrets(id, { scheme: `tok-${id}` })));
+    await Promise.all(
+      ids.map((id) => mod.updateConnectionSecrets(id, () => ({ scheme: `tok-${id}` })))
+    );
     for (const id of ids) {
       assert.deepEqual(await mod.getConnectionSecrets(id), { scheme: `tok-${id}` });
     }
+  });
+});
+
+test("concurrent secret updates to different schemes of one connection all persist", async () => {
+  // Each update must apply to the secrets read under the lock, not to a
+  // snapshot taken before it — otherwise a token refresh for one scheme
+  // reverts a concurrent save of a sibling scheme.
+  await withTempHome(async (mod) => {
+    const schemes = ["s1", "s2", "s3", "s4"];
+    await Promise.all(
+      schemes.map((schemeId) =>
+        mod.updateConnectionSecrets("conn", (current) => ({ ...current, [schemeId]: `tok-${schemeId}` }))
+      )
+    );
+    assert.deepEqual(await mod.getConnectionSecrets("conn"), {
+      s1: "tok-s1",
+      s2: "tok-s2",
+      s3: "tok-s3",
+      s4: "tok-s4",
+    });
   });
 });
