@@ -16,7 +16,11 @@ import {
   type SchedulesConsumerDeps,
   type ScheduleRun,
 } from "../schedules.js";
-import { projectSchedulesIndexFile, projectScheduleRunsFile } from "../paths.js";
+import {
+  projectScheduleFile,
+  projectSchedulesIndexFile,
+  projectScheduleRunsFile,
+} from "../paths.js";
 
 /*
  * Issue #243: the schedule store and tick consumer. The race test is the
@@ -357,6 +361,56 @@ test("an empty index next to existing schedule files is rebuilt (issue #470)", a
     };
     await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
     assert.deepEqual(fired.sort(), ["first", "second"]);
+  });
+});
+
+test("a partial index is reconciled with the schedule files (issue #470)", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    const created = [];
+    for (const prompt of ["first", "second", "third"]) {
+      created.push(await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt, runAt }));
+    }
+    // What the pre-#470 code left behind: an index holding just one entry.
+    const indexFile = projectSchedulesIndexFile(projectPath);
+    const fullIndex = JSON.parse(await fs.readFile(indexFile, "utf-8"));
+    await fs.writeFile(indexFile, JSON.stringify(fullIndex.slice(0, 1)));
+
+    const prompts = (await listSchedules(projectPath)).map((s) => s.prompt).sort();
+    assert.deepEqual(prompts, ["first", "second", "third"]);
+
+    await fs.writeFile(indexFile, JSON.stringify(fullIndex.slice(0, 1)));
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: `sess-${params.prompt}` };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired.sort(), ["first", "second", "third"]);
+
+    const rebuilt = JSON.parse(await fs.readFile(indexFile, "utf-8"));
+    assert.deepEqual(
+      rebuilt.map((entry: { id: string }) => entry.id).sort(),
+      created.map((s) => s.id).sort(),
+      "the reconciled index is persisted"
+    );
+  });
+});
+
+test("an index entry whose schedule file is gone is dropped", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    const kept = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "kept", runAt });
+    const gone = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "gone", runAt });
+    await fs.rm(projectScheduleFile(projectPath, gone.id));
+
+    assert.deepEqual((await listSchedules(projectPath)).map((s) => s.id), [kept.id]);
+    const index = JSON.parse(await fs.readFile(projectSchedulesIndexFile(projectPath), "utf-8"));
+    assert.deepEqual(index.map((entry: { id: string }) => entry.id), [kept.id]);
   });
 });
 

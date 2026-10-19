@@ -168,12 +168,9 @@ export async function createSchedule(
     createdBy: input.createdBy ?? null,
   };
 
-  // Index first: writing the file first would make an empty index look stale
-  // (see `readIndex`) and trigger a needless rebuild. A crash in between only
-  // leaves an index entry whose file is missing, which readers skip.
   await withLock(projectPath, async () => {
-    await upsertIndexEntry(projectPath, schedule);
     await writeSchedule(projectPath, schedule);
+    await upsertIndexEntry(projectPath, schedule);
   });
   return schedule;
 }
@@ -422,11 +419,12 @@ const INDEX_FILE_NAME = "index.json";
 const RUNS_FILE_SUFFIX = ".runs.json";
 
 /*
- * Index reads take the project lock so a rebuilt corrupt index (see
- * `readIndex`) is persisted without racing a concurrent read-modify-write.
+ * Index reads take the project lock so a rebuilt index (see
+ * `readReconciledIndex`) is persisted without racing a concurrent
+ * read-modify-write.
  */
 async function listDueScheduleIds(projectPath: string, now: Date): Promise<string[]> {
-  const index = await withLock(projectPath, () => readIndex(projectPath));
+  const index = await withLock(projectPath, () => readReconciledIndex(projectPath));
   return index
     .filter((entry) => entry.enabled && new Date(entry.nextRunAt).getTime() <= now.getTime())
     .map((entry) => entry.id);
@@ -467,16 +465,38 @@ async function appendRun(
 }
 
 async function readScheduleIds(projectPath: string): Promise<string[]> {
-  const index = await withLock(projectPath, () => readIndex(projectPath));
+  const index = await withLock(projectPath, () => readReconciledIndex(projectPath));
   return index.map((entry) => entry.id);
 }
 
 /*
- * The index is a cache of the per-schedule files, so when it is missing,
- * unreadable, or empty while schedule files exist, it is rebuilt from a
- * directory scan — never trusted as empty. Treating it as empty let the next upsert write back an index
- * holding only one entry, silently dropping every other schedule from listing
- * and firing (issue #470). Must be called under the project lock.
+ * Index for the list and due-check reads. The index is only a cache of the
+ * `<id>.json` files, so its ids are checked against a directory listing (a
+ * cheap readdir) and, if they differ, it is rebuilt from the files. That
+ * repairs an index the pre-#470 code truncated to a subset of the schedules
+ * after a failed read, and drops entries whose file is gone. Every tick runs
+ * this, so a stale index self-heals within one tick. Must be called under
+ * the project lock.
+ */
+async function readReconciledIndex(projectPath: string): Promise<ScheduleIndexEntry[]> {
+  const index = await readIndex(projectPath);
+  const fileIds = await scanScheduleIds(projectPath);
+  if (sameIds(index, fileIds)) return index;
+  return rebuildIndex(projectPath, "out of sync with the schedule files");
+}
+
+function sameIds(index: ScheduleIndexEntry[], fileIds: string[]): boolean {
+  if (index.length !== fileIds.length) return false;
+  const files = new Set(fileIds);
+  return index.every((entry) => files.has(entry.id));
+}
+
+/*
+ * Index as stored, for read-modify-write updates. A missing index falls back
+ * to the directory scan and an unreadable one is rebuilt from it — never
+ * treated as empty, which let the next upsert write back an index holding
+ * only one entry and silently drop every other schedule (issue #470). Must
+ * be called under the project lock.
  */
 async function readIndex(projectPath: string): Promise<ScheduleIndexEntry[]> {
   const file = projectSchedulesIndexFile(projectPath);
@@ -489,18 +509,11 @@ async function readIndex(projectPath: string): Promise<ScheduleIndexEntry[]> {
     // scan is authoritative and the caller's next write persists it.
     return indexFromScheduleFiles(projectPath);
   }
-  let index: ScheduleIndexEntry[];
   try {
-    index = parseIndex(JSON.parse(content));
+    return parseIndex(JSON.parse(content));
   } catch (error) {
     return rebuildIndex(projectPath, `unreadable (${(error as Error).message})`);
   }
-  // An empty index next to schedule files is stale (e.g. a pre-#470 store
-  // that persisted `[]` after a failed read), so the files win.
-  if (index.length === 0 && (await scanScheduleIds(projectPath)).length > 0) {
-    return rebuildIndex(projectPath, "empty but schedule files exist");
-  }
-  return index;
 }
 
 /** Throws unless `value` is an array of well-formed index entries. */
