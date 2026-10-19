@@ -31,6 +31,7 @@ test("dismissing user input clears the runtime attention flag", async () => {
   assert.ok(worktree);
 
   const { saveSession } = await import("../sessions.js");
+  const { getQueuePause, pauseQueue } = await import("../session-queue.js");
   await saveSession(projectPath, {
     id: sessionId,
     workingDirectory: projectPath,
@@ -52,6 +53,7 @@ test("dismissing user input clears the runtime attention flag", async () => {
   markSessionActive(sessionId, { provider: "claude" });
   setSessionAwaitingUserInput(sessionId, true);
   markSessionInactive(sessionId);
+  await pauseQueue(sessionId, "user_input");
 
   const { sessionsRouter } = await import("../../routes/sessions.js");
   const app = express();
@@ -72,6 +74,7 @@ test("dismissing user input clears the runtime attention flag", async () => {
       (entry) => entry.sessionId === sessionId,
     );
     assert.equal(runtime?.awaitingInput, undefined);
+    assert.equal(await getQueuePause(sessionId), "user_input");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previousHome === undefined) delete process.env.CONTROLLER_HOME;

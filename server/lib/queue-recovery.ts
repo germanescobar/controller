@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { isSafeId, sessionQueuesDir } from "./paths.js";
-import { listQueue } from "./session-queue.js";
+import { getQueuePause, listQueue } from "./session-queue.js";
 import { hasLiveSessionRunLease } from "./session-runtime.js";
 import { locateSessionPath } from "./session-locator.js";
 
@@ -37,6 +37,7 @@ export async function runQueueRecovery(deps: QueueRecoveryDeps): Promise<void> {
     try {
       const head = (await listQueue(sessionId))[0];
       if (!head || head.runAt) return;
+      if (await getQueuePause(sessionId)) return;
       if (await hasLiveSessionRunLease(sessionId)) return;
       const located = await locateSessionPath(sessionId);
       if (!located) return;

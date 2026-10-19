@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { clearCommandResolverCache } from "../command-resolver.js";
 import { getEvents } from "../sessions.js";
-import { enqueue, listQueue } from "../session-queue.js";
+import { enqueue, getQueuePause, listQueue, pauseQueue } from "../session-queue.js";
 import {
   claimSessionRunStart,
   getSessionRuntime,
@@ -125,6 +125,21 @@ test("idle send and a concurrent consumer tick dispatch one run and one user mes
     assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
     const events = await getEvents(env.projectPath, env.sessionId);
     assert.equal(events.filter((event) => event.type === "user_message").length, 1);
+    assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
+test("sending a new message resumes a paused queue", async () => {
+  await withDispatchEnv(async (env) => {
+    await pauseQueue(env.sessionId, "cancelled");
+    const response = await fetch(`${env.baseUrl}/api/sessions/${env.sessionId}/send-from`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fromSessionId: "dispatch-parent", message: "resume" }),
+    });
+    assert.equal(response.status, 201);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal(await getQueuePause(env.sessionId), null);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
     assert.deepEqual(await listQueue(env.sessionId), []);
   });
 });
@@ -264,5 +279,75 @@ test("owner recovery tick leaves a live lease alone", async () => {
       releaseSessionRunStart(env.sessionId);
       await releaseSessionRunLease(env.sessionId);
     }
+  });
+});
+
+for (const reason of ["cancelled", "user_input"] as const) {
+  test(`${reason} pauses queued work until an explicit resume`, async () => {
+    await withDispatchEnv(async (env) => {
+      const firstEvent = reason === "cancelled"
+        ? "{\"type\":\"run.cancelled\",\"sessionId\":\"dispatch-target\",\"reason\":\"user_interrupt\"}"
+        : "{\"type\":\"user.input_requested\",\"id\":\"request-1\",\"questions\":[]}";
+      await fs.writeFile(path.join(path.dirname(env.startsFile), "bin", "anita"), `#!/usr/bin/env bash
+set -e
+printf 'start\\n' >> '${env.startsFile}'
+printf '%s\\n' '{"type":"run.started","sessionId":"${env.sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+if [ "$(wc -l < '${env.startsFile}')" -eq 1 ]; then
+  printf '%s\\n' '${firstEvent}'
+else
+  printf '%s\\n' '{"type":"run.completed","sessionId":"${env.sessionId}","timestamp":"2026-01-01T00:00:01.000Z"}'
+fi
+`, { mode: 0o755 });
+      clearCommandResolverCache();
+      await enqueue(env.sessionId, {
+        text: "queued", visibleText: "queued", provider: "anita",
+        model: "", mode: "default", attachmentIds: [],
+      });
+      const url = new URL(`${env.baseUrl}/api/projects/${env.projectId}/sessions/stream`);
+      url.searchParams.set("worktreeId", env.worktreeId);
+      url.searchParams.set("resumeSessionId", env.sessionId);
+      url.searchParams.set("provider", "anita");
+      url.searchParams.set("message", "first");
+      const first = await fetch(url);
+      assert.equal(first.status, 200);
+      await first.text();
+      assert.equal(await getQueuePause(env.sessionId), reason);
+      await runQueueRecovery({ advanceSessionQueue: advanceSessionQueueFromConsumer });
+      assert.equal((await listQueue(env.sessionId)).length, 1);
+      assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+
+      url.searchParams.set("message", "resume");
+      const resumed = await fetch(url);
+      assert.equal(resumed.status, 200);
+      await resumed.text();
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const starts = (await fs.readFile(env.startsFile, "utf-8")).trim().split("\n").length;
+        if (starts === 3 && (await listQueue(env.sessionId)).length === 0 && !getSessionRuntime(env.sessionId).active) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(await getQueuePause(env.sessionId), null);
+      assert.deepEqual(await listQueue(env.sessionId), []);
+      assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim().split("\n").length, 3);
+      const events = await getEvents(env.projectPath, env.sessionId);
+      assert.equal(events.filter((event) => event.type === "user_message" && event.data.text === "queued").length, 1);
+    });
+  });
+}
+
+test("a malformed queue does not keep a completed stream open", async () => {
+  await withDispatchEnv(async (env) => {
+    const url = new URL(`${env.baseUrl}/api/projects/${env.projectId}/sessions/stream`);
+    url.searchParams.set("worktreeId", env.worktreeId);
+    url.searchParams.set("resumeSessionId", env.sessionId);
+    url.searchParams.set("provider", "anita");
+    url.searchParams.set("message", "finish despite broken queue");
+    const response = await fetch(url);
+    assert.equal(response.status, 200);
+    await fs.mkdir(sessionQueuesDir(), { recursive: true });
+    await fs.writeFile(path.join(sessionQueuesDir(), `${env.sessionId}.json`), "{truncated");
+    const stream = await response.text();
+    assert.match(stream, /"type":"done"/);
+    assert.equal(getSessionRuntime(env.sessionId).active, false);
   });
 });
