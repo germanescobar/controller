@@ -22,6 +22,7 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { integrationsFile, integrationSecretsFile, ensureOrchestratorHome } from "./paths.js";
+import { withLock } from "./json-registry.js";
 import { readSecretJson, writeSecretJson } from "./secret-store.js";
 
 /** How Controller reaches the backend. See the UI descriptor for fields. */
@@ -354,21 +355,31 @@ async function readSecrets(): Promise<SecretStore> {
   return readSecretJson<SecretStore>(integrationSecretsFile(), {});
 }
 
+/*
+ * Secret mutations are read-modify-write over one shared file, called from
+ * both OAuth token refresh and the integrations UI. They hold the per-file
+ * lock so concurrent updates to different connections can't drop each
+ * other's credentials (issue #469).
+ */
 async function writeConnectionSecrets(
   connectionId: string,
   secrets: Record<string, string>
 ): Promise<void> {
-  const store = await readSecrets();
-  if (Object.keys(secrets).length === 0) delete store[connectionId];
-  else store[connectionId] = secrets;
-  await writeSecretJson(integrationSecretsFile(), store);
+  await withLock(integrationSecretsFile(), async () => {
+    const store = await readSecrets();
+    if (Object.keys(secrets).length === 0) delete store[connectionId];
+    else store[connectionId] = secrets;
+    await writeSecretJson(integrationSecretsFile(), store);
+  });
 }
 
 export { writeConnectionSecrets };
 
 async function removeConnectionSecrets(connectionId: string): Promise<void> {
-  const store = await readSecrets();
-  if (!(connectionId in store)) return;
-  delete store[connectionId];
-  await writeSecretJson(integrationSecretsFile(), store);
+  await withLock(integrationSecretsFile(), async () => {
+    const store = await readSecrets();
+    if (!(connectionId in store)) return;
+    delete store[connectionId];
+    await writeSecretJson(integrationSecretsFile(), store);
+  });
 }

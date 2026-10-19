@@ -151,3 +151,16 @@ test("delete removes the connection and its secrets", async () => {
     assert.equal(await mod.deleteConnection(created.id), false);
   });
 });
+
+test("concurrent secret writes for different connections all persist", async () => {
+  // Issue #469: OAuth refresh for one connection racing a UI save for
+  // another used to read-modify-write the shared store unlocked, so the
+  // later write dropped the earlier connection's credentials.
+  await withTempHome(async (mod) => {
+    const ids = ["a", "b", "c", "d", "e"];
+    await Promise.all(ids.map((id) => mod.writeConnectionSecrets(id, { scheme: `tok-${id}` })));
+    for (const id of ids) {
+      assert.deepEqual(await mod.getConnectionSecrets(id), { scheme: `tok-${id}` });
+    }
+  });
+});

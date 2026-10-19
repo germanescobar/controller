@@ -52,7 +52,11 @@ export interface JsonRegistryFs {
     sync(): Promise<void>;
     close(): Promise<void>;
   }>;
-  writeFile(path: string, data: string, encoding: "utf-8"): Promise<void>;
+  writeFile(
+    path: string,
+    data: string,
+    options: { encoding: "utf-8"; mode: number }
+  ): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   mkdir(path: string, options: { recursive: boolean }): Promise<unknown>;
 }
@@ -182,7 +186,9 @@ export async function readJsonRegistry<T>(
  * Atomically write JSON to `file`. Writes to `<file>.tmp-<rand>` first,
  * fsyncs the descriptor, then renames over the target. On success the
  * previous contents are mirrored to `<file>.bak` so a future parse
- * failure can recover.
+ * failure can recover. Both the tmp file (and therefore the renamed
+ * primary) and a newly created `.bak` are 0600, so the helper is safe
+ * for files holding secrets (see secret-store.ts).
  *
  * Serializes via the per-file mutex — callers must invoke this from
  * inside a `withLock` block so a concurrent reader can't observe the
@@ -245,7 +251,7 @@ async function mirrorToBackup(
   try {
     const previous = await activeFs.readFile(file, "utf-8");
     if (!isReadable(previous, validate)) return;
-    await activeFs.writeFile(backup, previous, "utf-8");
+    await activeFs.writeFile(backup, previous, { encoding: "utf-8", mode: 0o600 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     console.warn(`Failed to back up ${file} to ${backup}: ${(err as Error).message}`);

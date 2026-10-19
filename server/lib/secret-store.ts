@@ -27,15 +27,27 @@
  * OS-level encryption. A future notarized build can opt back into the
  * encrypted envelope by setting `CONTROLLER_ENCRYPT_SECRETS=1`.
  *
- * Recovery from a corrupt (un-decryptable) encrypted file: on read we
- * rename the existing file to `<file>.broken-<iso>` and return the
- * fallback, so the rest of the app keeps working. The user re-
+ * Durability (issue #469): writes go through `writeJsonRegistry` — a 0600
+ * tmp file, fsync, then an atomic rename — and the previous valid envelope
+ * is mirrored to `<file>.bak`. Callers doing read-modify-write must hold
+ * `withLock(file)` (see integrations.ts).
+ *
+ * Recovery on read:
+ *   - Unparseable or malformed envelope (e.g. a truncated file): warn and
+ *     use `<file>.bak`. If the backup is unusable too, quarantine the file
+ *     and return the fallback.
+ *   - Un-decryptable encrypted envelope: quarantine and return the fallback.
+ * Quarantine renames the file to `<file>.broken-<iso>` so the bytes are kept
+ * for manual recovery while the rest of the app keeps working; the user re-
  * authorizes affected connections. The connections themselves live in
- * `integrations.json` (plaintext) and are preserved.
+ * `integrations.json` (plaintext) and are preserved. Any other I/O error
+ * (other than a missing file) is thrown rather than read as "empty", so a
+ * following write can't wipe the store. Warnings never include file contents
+ * or parse-error messages, which can quote secret bytes.
  */
 
 import fs from "node:fs/promises";
-import path from "node:path";
+import { readJsonRegistry, RegistryParseError, writeJsonRegistry } from "./json-registry.js";
 
 interface EncryptedEnvelope {
   v: 1;
@@ -92,29 +104,17 @@ async function getSafeStorage(): Promise<SafeStorage | null> {
 
 /**
  * Read and parse a JSON value, returning `fallback` when the file is absent,
- * unreadable, or encrypted with a key the current process can't access.
+ * corrupt beyond backup recovery, or encrypted with a key the current process
+ * can't access. Unexpected I/O errors are thrown.
  *
- * The decrypt-failure path is the important one: when `safeStorage.decryptString`
+ * The decrypt-failure path matters in practice: when `safeStorage.decryptString`
  * throws, the file on disk was written by a build whose keychain identity the
  * current process no longer has (typical when the Electron app has been
- * rebuilt and re-signed). Renaming the file aside and returning the fallback
- * keeps the rest of the app functional; the user re-authorizes any affected
- * OAuth schemes.
+ * rebuilt and re-signed).
  */
 export async function readSecretJson<T>(file: string, fallback: T): Promise<T> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(file, "utf-8");
-  } catch {
-    return fallback;
-  }
-
-  let envelope: Envelope;
-  try {
-    envelope = JSON.parse(raw) as Envelope;
-  } catch {
-    return fallback;
-  }
+  const envelope = await readEnvelope(file);
+  if (!envelope) return fallback;
 
   if (!envelope.enc) {
     return envelope.data as T;
@@ -137,37 +137,29 @@ export async function readSecretJson<T>(file: string, fallback: T): Promise<T> {
   } catch (error) {
     // Most common cause: the file was written by a different (rebuilt /
     // re-signed) Electron binary whose keychain entry the current
-    // process can't access. Quarantine the file so we don't keep
-    // tripping on it, and return the fallback.
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const broken = `${file}.broken-${stamp}`;
-    console.warn(
-      `[secret-store] Failed to decrypt ${file} (${error instanceof Error ? error.message : String(error)}). ` +
-        `Moving it aside to ${broken} and treating secrets as empty. ` +
-        "Affected connections will need to be re-authorized."
+    // process can't access.
+    await quarantine(
+      file,
+      `could not be decrypted (${error instanceof Error ? error.message : String(error)})`
     );
-    try {
-      await fs.rename(file, broken);
-    } catch {
-      // Best-effort: if rename fails (permission, etc.) we still want
-      // the read to succeed and the next write to overwrite.
-    }
     return fallback;
   }
 }
 
-/** Encrypt (when possible) and persist a JSON value, creating parent dirs. */
+/** Encrypt (when possible) and atomically persist a JSON value as a 0600 file. */
 export async function writeSecretJson(file: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true });
+  await writeJsonRegistry(file, await buildEnvelope(file, value), {
+    validate: validateEnvelope,
+  });
+}
 
+async function buildEnvelope(file: string, value: unknown): Promise<Envelope> {
   if (preferEncryption()) {
     const safeStorage = await getSafeStorage();
     if (safeStorage) {
       try {
         const blob = safeStorage.encryptString(JSON.stringify(value)).toString("base64");
-        const envelope: EncryptedEnvelope = { v: 1, enc: true, blob };
-        await fs.writeFile(file, JSON.stringify(envelope), { mode: 0o600 });
-        return;
+        return { v: 1, enc: true, blob };
       } catch (error) {
         // If the keychain is in a weird state (just-rebuilt binary,
         // locked keychain, etc.) the encrypt call can throw. Fall
@@ -179,7 +171,65 @@ export async function writeSecretJson(file: string, value: unknown): Promise<voi
       }
     }
   }
+  return { v: 1, enc: false, data: value };
+}
 
-  const envelope: PlaintextEnvelope = { v: 1, enc: false, data: value };
-  await fs.writeFile(file, JSON.stringify(envelope, null, 2), { mode: 0o600 });
+/*
+ * Read the on-disk envelope, falling back to `<file>.bak` when the primary is
+ * corrupt. Returns null when the file is missing or was quarantined because
+ * neither copy is usable.
+ */
+async function readEnvelope(file: string): Promise<Envelope | null> {
+  const backup = `${file}.bak`;
+  try {
+    const { value, fromBackup } = await readJsonRegistry<Envelope | null>(file, {
+      defaultValue: null,
+      backup,
+      validate: validateEnvelope,
+    });
+    if (fromBackup) {
+      console.warn(`[secret-store] ${file} is corrupt; recovered secrets from ${backup}.`);
+    }
+    return value;
+  } catch (error) {
+    // RegistryParseError's message quotes the JSON.parse error, which can
+    // echo file contents — never log it.
+    if (!(error instanceof RegistryParseError)) throw error;
+    await quarantine(file, `is corrupt and ${backup} is missing or unusable`);
+    return null;
+  }
+}
+
+/** Throws unless `value` is a well-formed envelope. Used as a read/backup validator. */
+function validateEnvelope(value: unknown): Envelope {
+  if (typeof value === "object" && value !== null && "v" in value && value.v === 1) {
+    if ("enc" in value && value.enc === true && "blob" in value && typeof value.blob === "string") {
+      return { v: 1, enc: true, blob: value.blob };
+    }
+    if ("enc" in value && value.enc === false && "data" in value) {
+      return { v: 1, enc: false, data: value.data };
+    }
+  }
+  throw new Error("not a secret-store envelope");
+}
+
+/*
+ * Move an unusable secrets file aside to `<file>.broken-<iso>` so we stop
+ * tripping on it while keeping its bytes for manual recovery.
+ */
+async function quarantine(file: string, reason: string): Promise<void> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const broken = `${file}.broken-${stamp}`;
+  console.warn(
+    `[secret-store] ${file} ${reason}. Moving it aside to ${broken} and treating secrets as empty. ` +
+      "Affected connections will need to be re-authorized."
+  );
+  try {
+    await fs.rename(file, broken);
+  } catch (error) {
+    // Best-effort: the read still succeeds and the next write replaces the file.
+    console.warn(
+      `[secret-store] Failed to move ${file} aside: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
