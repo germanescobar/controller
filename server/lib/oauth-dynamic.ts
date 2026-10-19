@@ -31,7 +31,7 @@ import {
   updateSchemeAcquired,
   writeConnectionSecrets,
 } from "./integrations.js";
-import { fetchWithTimeout } from "./http-fetch.js";
+import { fetchAndReadWithTimeout, fetchWithTimeout } from "./http-fetch.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -900,7 +900,7 @@ async function refreshAccessToken(stored: OAuthDynamicSecret, fetchImpl: typeof 
   if (stored.scopes) body.set("scope", stored.scopes);
   if (stored.resource) body.set("resource", stored.resource);
 
-  const res = await fetchWithTimeout(
+  const json = await fetchAndReadWithTimeout(
     fetchImpl,
     stored.metadata.token_endpoint,
     {
@@ -911,13 +911,9 @@ async function refreshAccessToken(stored: OAuthDynamicSecret, fetchImpl: typeof 
       },
       body,
     },
-    REQUEST_TIMEOUT_MS
+    REQUEST_TIMEOUT_MS,
+    readRefreshResponse
   );
-  if (!res.ok) {
-    const reason = await readTokenErrorReason(res);
-    throw new OAuthDynamicError(`Token refresh failed (HTTP ${res.status}): ${reason}`, "refresh_failed");
-  }
-  const json = (await parseTokenResponse(res)) as Record<string, unknown>;
   // Refresh responses don't always include a new refresh_token; keep the
   // existing one when the AS omits it.
   if (!json.refresh_token && stored.refreshToken) json.refresh_token = stored.refreshToken;
@@ -947,31 +943,37 @@ async function parseTokenResponse(res: Response): Promise<unknown> {
     throw new OAuthDynamicError("Token endpoint returned a non-JSON response.", "as_error");
   }
   if (!res.ok) {
-    throw new OAuthDynamicError(
-      `Token endpoint error: ${tokenErrorReason(body, res.status)}`,
-      "token_exchange_failed"
-    );
+    const message =
+      typeof body === "object" && body && (body as { error_description?: string }).error_description
+        ? (body as { error_description?: string }).error_description
+        : typeof body === "object" && body && (body as { error?: string }).error
+          ? (body as { error?: string }).error
+          : `HTTP ${res.status}`;
+    throw new OAuthDynamicError(`Token endpoint error: ${message}`, "token_exchange_failed");
   }
   return body;
 }
 
-/** Best-effort reason from an error response; falls back to the HTTP status. */
-async function readTokenErrorReason(res: Response): Promise<string> {
-  try {
-    return tokenErrorReason(await res.json(), res.status);
-  } catch {
-    return `HTTP ${res.status}`;
+/*
+ * Refresh failures end up in logs, so the error message carries only the
+ * HTTP status and the RFC 6749 §5.2 `error` code. `error_description` and any
+ * other server-controlled text are dropped: an AS may echo the submitted
+ * refresh token or client secret there.
+ */
+async function readRefreshResponse(res: Response): Promise<Record<string, unknown>> {
+  if (!res.ok) {
+    const code = oauthErrorCode(await res.json().catch(() => null));
+    const suffix = code ? `: ${code}` : "";
+    throw new OAuthDynamicError(`Token refresh failed (HTTP ${res.status})${suffix}.`, "refresh_failed");
   }
+  return (await parseTokenResponse(res)) as Record<string, unknown>;
 }
 
-/* RFC 6749 §5.2 error body: prefer error_description, then the error code. */
-function tokenErrorReason(body: unknown, status: number): string {
-  if (typeof body === "object" && body) {
-    const { error, error_description } = body as { error?: unknown; error_description?: unknown };
-    if (typeof error_description === "string" && error_description) return error_description;
-    if (typeof error === "string" && error) return error;
-  }
-  return `HTTP ${status}`;
+// Only accept a plain snake_case code so a free-form value can't smuggle secrets in.
+function oauthErrorCode(body: unknown): string | null {
+  if (typeof body !== "object" || !body) return null;
+  const { error } = body as { error?: unknown };
+  return typeof error === "string" && /^[a-z_]{1,64}$/.test(error) ? error : null;
 }
 
 function tokenResponseToSecret(

@@ -979,7 +979,11 @@ test("getValidToken: logs the refresh failure reason without secrets", async (t)
     const warn = t.mock.method(console, "warn", () => {});
     const fetchImpl = async () =>
       new Response(
-        JSON.stringify({ error: "invalid_grant", error_description: "Refresh token revoked" }),
+        JSON.stringify({
+          error: "invalid_grant",
+          // An AS may echo the submitted credential back in free-form text.
+          error_description: "refresh token RT-SECRET was revoked",
+        }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
 
@@ -995,12 +999,55 @@ test("getValidToken: logs the refresh failure reason without secrets", async (t)
     assert.match(message, /token refresh failed/);
     assert.match(message, new RegExp(connection.id));
     assert.match(message, /HTTP 400/);
-    assert.match(message, /Refresh token revoked/);
-    assert.doesNotMatch(message, /RT-SECRET|AT-OLD/);
+    assert.match(message, /invalid_grant/);
+    assert.doesNotMatch(message, /RT-SECRET|AT-OLD|revoked/);
 
     const final = await integrations.getConnection(connection.id);
     assert.ok(final);
     assert.equal(final.auth.schemes[0]?.acquired?.status, "expired");
+  });
+});
+
+test("getValidToken: a stalled error body times out and does not wedge later refreshes", async (t) => {
+  await withTempHome(async ({ integrations, oauth }) => {
+    const connection = await makeConnection(integrations, "http://127.0.0.1:9999/");
+    await seedRefreshableSecret(integrations, connection, "RT-1");
+    t.mock.method(console, "warn", () => {});
+
+    let tokenCalls = 0;
+    let signalFetchCalled: () => void = () => {};
+    const fetchCalled = new Promise<void>((resolve) => (signalFetchCalled = resolve));
+    const fetchImpl = async () => {
+      tokenCalls += 1;
+      signalFetchCalled();
+      // Headers arrive, but the body never does.
+      return new Response(new ReadableStream({ start() {} }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const scheme = schemeOf(connection);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const stalled = oauth.getValidToken(connection, scheme, fetchImpl as typeof fetch);
+    await fetchCalled;
+    // Let the response settle so the refresh is blocked on the body, not headers.
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(15_000);
+    assert.equal(await stalled, null);
+    t.mock.timers.reset();
+
+    // The single-flight entry settled, so the next caller starts a new refresh.
+    const okFetch = async () => {
+      tokenCalls += 1;
+      return new Response(JSON.stringify({ access_token: "AT-NEW", expires_in: 3600 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    const token = await oauth.getValidToken(connection, scheme, okFetch as typeof fetch);
+    assert.equal(token, "AT-NEW");
+    assert.equal(tokenCalls, 2);
   });
 });
 
