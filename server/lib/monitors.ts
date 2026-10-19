@@ -27,6 +27,12 @@ import { escapeFollowUpMarkerLabel } from "../../shared/follow-up-markers.js";
 
 export const MAX_MONITORS_PER_SESSION = 8;
 export const MAX_LINE_BUFFER = 1000;
+/**
+ * Longest partial line (in UTF-16 code units) buffered while waiting for
+ * a newline. Longer runs are emitted in chunks of this size so output
+ * like a progress bar without `\n` cannot grow server memory unbounded.
+ */
+export const MAX_PARTIAL_LINE_LENGTH = 64 * 1024;
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -82,6 +88,8 @@ interface ActiveMonitor {
   leaderExited: boolean;
   /** Deadline auto-kill timer; cleared on leader exit and on stop. */
   deadlineTimer: NodeJS.Timeout | null;
+  /** Pending SIGKILL escalation after a stop; cleared on leader exit. */
+  escalationTimer: NodeJS.Timeout | null;
   /** Pending event-log writes — chained so they serialize per monitor. */
   writeChain: Promise<unknown>;
 }
@@ -188,6 +196,7 @@ export function startMonitor(params: {
     child,
     leaderExited: false,
     deadlineTimer: null,
+    escalationTimer: null,
     writeChain: Promise.resolve(),
   };
   monitors.set(id, active);
@@ -341,7 +350,9 @@ export function stopAllMonitors(): number {
 
 /**
  * Split a stream into newline-delimited lines. A trailing partial line
- * is flushed when the stream ends so `printf done` still yields `done`.
+ * is flushed when the stream ends so `printf done` still yields `done`,
+ * and a partial line longer than `MAX_PARTIAL_LINE_LENGTH` is emitted in
+ * chunks of that size.
  */
 function pipeLines(stream: Readable, onLine: (line: string) => void): void {
   let buffer = "";
@@ -354,6 +365,10 @@ function pipeLines(stream: Readable, onLine: (line: string) => void): void {
       buffer = buffer.slice(newlineIndex + 1);
       newlineIndex = buffer.indexOf("\n");
     }
+    while (buffer.length > MAX_PARTIAL_LINE_LENGTH) {
+      onLine(buffer.slice(0, MAX_PARTIAL_LINE_LENGTH));
+      buffer = buffer.slice(MAX_PARTIAL_LINE_LENGTH);
+    }
   });
   stream.on("end", () => {
     if (buffer.length > 0) onLine(buffer);
@@ -365,6 +380,8 @@ function markLeaderExited(active: ActiveMonitor): void {
   active.leaderExited = true;
   if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
   active.deadlineTimer = null;
+  if (active.escalationTimer) clearTimeout(active.escalationTimer);
+  active.escalationTimer = null;
 }
 
 /**
@@ -372,22 +389,23 @@ function markLeaderExited(active: ActiveMonitor): void {
  * the group after `KILL_GRACE_MS`. The escalation timer is unref'd so it
  * never holds the server open during shutdown.
  *
- * Once the leader has exited the monitor sends no signals at all: the
- * pgid may already belong to an unrelated group. Descendants that
- * outlive a naturally exited leader are out of scope.
+ * Once the leader has exited the monitor sends no signals at all, and a
+ * pending SIGKILL escalation is cancelled: the pgid may already belong
+ * to an unrelated group. Trade-off: a descendant that ignores SIGTERM
+ * can survive its leader; we accept that rather than risk signalling a
+ * recycled pgid.
  */
 function terminateMonitorProcess(active: ActiveMonitor): void {
   // Test-only seeded entries from `__seedMonitorForTests` have no child.
   const { child } = active;
   if (!child || active.leaderExited) return;
+  // A deadline-triggered termination is already in its grace period.
+  if (active.escalationTimer) return;
   // Only escalate when SIGTERM reached a live group.
   if (!signalMonitorProcess(child, "SIGTERM") || child.pid === undefined) return;
   const pid = child.pid;
-  // The leader may exit during the grace period. That is still safe: a
-  // surviving group member keeps the pgid reserved, and an empty group
-  // returns ESRCH. The only reuse window is an empty group whose id is
-  // recycled within KILL_GRACE_MS.
-  setTimeout(() => {
+  active.escalationTimer = setTimeout(() => {
+    active.escalationTimer = null;
     try {
       process.kill(-pid, "SIGKILL");
     } catch (error) {
@@ -396,7 +414,8 @@ function terminateMonitorProcess(active: ActiveMonitor): void {
         console.error(`[monitors] SIGKILL of process group ${pid} failed:`, error);
       }
     }
-  }, KILL_GRACE_MS).unref?.();
+  }, KILL_GRACE_MS);
+  active.escalationTimer.unref?.();
 }
 
 /**
@@ -461,6 +480,7 @@ export function __seedMonitorForTests(monitor: Monitor): void {
     child: null,
     leaderExited: false,
     deadlineTimer: null,
+    escalationTimer: null,
     writeChain: Promise.resolve(),
   };
   monitors.set(monitor.id, active);

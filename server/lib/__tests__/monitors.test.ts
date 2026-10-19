@@ -19,6 +19,7 @@ import {
   stopMonitorsForSession,
   __resetMonitorsForTests,
   monitorCount,
+  MAX_PARTIAL_LINE_LENGTH,
 } from "../monitors.js";
 import { getEvents } from "../sessions.js";
 
@@ -495,6 +496,65 @@ test("a naturally exited monitor never signals its process group", async (t) => 
     // Earlier tests' SIGKILL escalations may land in this window, so only
     // this monitor's group id is asserted on.
     assert.equal(signalledPids.includes(-pgid), false);
+  });
+});
+
+// PR #459 review: when the leader dies from the stop's SIGTERM, the
+// pending SIGKILL escalation must be cancelled rather than sent to a
+// pgid that may have been recycled during the grace period.
+test("stopMonitor cancels the SIGKILL escalation once the leader exits", async (t) => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals | number }> = [];
+    const originalKill = process.kill.bind(process);
+    t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push({ pid, signal });
+      return originalKill(pid, signal);
+    });
+    const monitor = startMonitor({
+      sessionId: "s-escalation",
+      worktreePath: proj,
+      description: "dies on SIGTERM",
+      // `$$` is the shell's pid, which is also the monitor's pgid.
+      command: "echo $$; sleep 30",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-escalation", 1);
+    const [pgidLine] = await monitorLines(proj, "s-escalation");
+    const pgid = Number(pgidLine);
+    assert.ok(Number.isInteger(pgid) && pgid > 0, `bad pgid ${pgidLine}`);
+    stopMonitor(monitor.id);
+    assert.ok(signals.some((s) => s.pid === -pgid && s.signal === "SIGTERM"));
+    // Outlive the 2s grace period.
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    assert.equal(
+      signals.some((s) => s.pid === -pgid && s.signal === "SIGKILL"),
+      false
+    );
+  });
+});
+
+test("a partial line longer than the cap is emitted in bounded chunks", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const total = MAX_PARTIAL_LINE_LENGTH * 2 + 100;
+    const monitor = startMonitor({
+      sessionId: "s-long-line",
+      worktreePath: proj,
+      description: "no newline ever",
+      command: `head -c ${total} /dev/zero | tr '\\0' a`,
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-long-line", 3);
+    const lines = await monitorLines(proj, "s-long-line");
+    assert.deepEqual(
+      lines.map((line) => line.length),
+      [MAX_PARTIAL_LINE_LENGTH, MAX_PARTIAL_LINE_LENGTH, 100]
+    );
+    assert.ok(lines.every((line) => /^a+$/.test(line)));
+    stopMonitor(monitor.id);
   });
 });
 
