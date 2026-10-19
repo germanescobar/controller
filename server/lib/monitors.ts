@@ -366,8 +366,15 @@ function pipeLines(stream: Readable, onLine: (line: string) => void): void {
       newlineIndex = buffer.indexOf("\n");
     }
     while (buffer.length > MAX_PARTIAL_LINE_LENGTH) {
-      onLine(buffer.slice(0, MAX_PARTIAL_LINE_LENGTH));
-      buffer = buffer.slice(MAX_PARTIAL_LINE_LENGTH);
+      // Keep a surrogate pair together: if the cut would land after a
+      // high surrogate, move it back one code unit.
+      const lastCode = buffer.charCodeAt(MAX_PARTIAL_LINE_LENGTH - 1);
+      const splitAt =
+        lastCode >= 0xd800 && lastCode <= 0xdbff
+          ? MAX_PARTIAL_LINE_LENGTH - 1
+          : MAX_PARTIAL_LINE_LENGTH;
+      onLine(buffer.slice(0, splitAt));
+      buffer = buffer.slice(splitAt);
     }
   });
   stream.on("end", () => {

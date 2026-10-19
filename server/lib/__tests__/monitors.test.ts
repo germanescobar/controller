@@ -558,6 +558,29 @@ test("a partial line longer than the cap is emitted in bounded chunks", async ()
   });
 });
 
+test("the partial-line cap never splits a surrogate pair", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    // U+1F600 is UTF-8 F0 9F 98 80; place it straddling the cap.
+    const expected = "a".repeat(MAX_PARTIAL_LINE_LENGTH - 1) + "\u{1F600}" + "b".repeat(10);
+    const monitor = startMonitor({
+      sessionId: "s-surrogate",
+      worktreePath: proj,
+      description: "emoji at the boundary",
+      command: `head -c ${MAX_PARTIAL_LINE_LENGTH - 1} /dev/zero | tr '\\0' a; printf '\\360\\237\\230\\200bbbbbbbbbb'`,
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-surrogate", 2);
+    const lines = await monitorLines(proj, "s-surrogate");
+    assert.equal(lines.join(""), expected);
+    for (const line of lines) {
+      assert.equal(line.isWellFormed(), true, "chunk contains a lone surrogate");
+    }
+    stopMonitor(monitor.id);
+  });
+});
+
 test("a final stdout line without a trailing newline is flushed on exit", async () => {
   await withTempHome(async (home) => {
     const proj = projectPath(home);
