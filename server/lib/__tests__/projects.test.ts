@@ -18,7 +18,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { addProject, findProjectByPath, getProject, updateProject } from "../projects.js";
+import { addProject, findProjectByPath, getProject, getProjects, updateProject } from "../projects.js";
+import { RegistryParseError } from "../json-registry.js";
 import { addWorktree } from "../worktrees.js";
 import { worktreePath } from "../paths.js";
 
@@ -273,5 +274,65 @@ test("findProjectByPath picks the most specific project (longest-prefix match)",
     } finally {
       rmSync(outer, { recursive: true, force: true });
     }
+  });
+});
+
+test("addProject refuses to overwrite a corrupt registry with a single entry", async () => {
+  await withSandbox(async ({ home, projectPath }) => {
+    // Simulates a crash mid-write that left `projects.json` truncated
+    // with no backup to recover from (issue #454).
+    const registryFile = path.join(home, "projects.json");
+    const truncated = '[{"id":"a","name":"kept","path":"/tmp/kept","createdAt":"2026-01-01"},{"id":';
+    await fs.writeFile(registryFile, truncated);
+
+    await assert.rejects(addProject("demo", projectPath), RegistryParseError);
+    assert.equal(await fs.readFile(registryFile, "utf-8"), truncated);
+  });
+});
+
+test("addProject recovers a corrupt registry from its backup", async () => {
+  await withSandbox(async ({ home, projectPath }) => {
+    const first = await addProject("first", projectPath);
+    // The second write mirrors the one-project registry into `.bak`.
+    const second = await addProject("second", projectPath);
+    const registryFile = path.join(home, "projects.json");
+    await fs.writeFile(registryFile, "{ not json");
+
+    const third = await addProject("third", projectPath);
+
+    const ids = JSON.parse(await fs.readFile(registryFile, "utf-8")).map(
+      (p: { id: string }) => p.id
+    );
+    assert.deepEqual(ids, [first.id, third.id]);
+    assert.ok(!ids.includes(second.id));
+  });
+});
+
+test("concurrent addProject calls all persist", async () => {
+  await withSandbox(async ({ projectPath }) => {
+    const added = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => addProject(`p${i}`, projectPath))
+    );
+
+    const ids = (await getProjects()).map((p) => p.id).sort();
+    assert.deepEqual(ids, added.map((p) => p.id).sort());
+  });
+});
+
+test("reading strips legacy command keys and the next write persists the stripped shape", async () => {
+  await withSandbox(async ({ home, projectPath }) => {
+    const registryFile = path.join(home, "projects.json");
+    await fs.writeFile(
+      registryFile,
+      JSON.stringify([
+        { id: "a", name: "legacy", path: projectPath, createdAt: "2026-01-01", setupCommands: "npm i" },
+      ])
+    );
+
+    await updateProject("a", { name: "renamed" });
+
+    const registry = await fs.readFile(registryFile, "utf-8");
+    assert.ok(!registry.includes("setupCommands"));
+    assert.equal((await getProject("a"))?.name, "renamed");
   });
 });
