@@ -123,6 +123,18 @@ test("removeSchedule deletes the file, runs, and index entry", async () => {
     assert.equal(await getSchedule(projectPath, schedule.id), null);
     assert.equal((await listSchedules(projectPath)).length, 0);
     assert.equal(await removeSchedule(projectPath, schedule.id), false);
+
+    // Recreating after the index drained to `[]` must not look like a stale index.
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await createSchedule(projectPath, "p", { worktreeId: "w", prompt: "b", runAt: "2026-06-26T08:00:00.000Z" });
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.deepEqual(warnings, []);
+    assert.equal((await listSchedules(projectPath)).length, 1);
   });
 });
 
@@ -314,6 +326,37 @@ test("a corrupt index is rebuilt from the schedule files instead of dropping sch
     };
     await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
     assert.deepEqual(fired.sort(), ["first", "second", "third"]);
+  });
+});
+
+test("an empty index next to existing schedule files is rebuilt (issue #470)", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    const first = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "first", runAt });
+    const second = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "second", runAt });
+    await fs.writeFile(projectSchedulesIndexFile(projectPath), "[]");
+
+    const prompts = (await listSchedules(projectPath)).map((s) => s.prompt).sort();
+    assert.deepEqual(prompts, ["first", "second"]);
+
+    const index = JSON.parse(await fs.readFile(projectSchedulesIndexFile(projectPath), "utf-8"));
+    assert.deepEqual(
+      index.map((entry: { id: string }) => entry.id).sort(),
+      [first.id, second.id].sort(),
+      "the rebuilt index is persisted"
+    );
+
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: `sess-${params.prompt}` };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired.sort(), ["first", "second"]);
   });
 });
 

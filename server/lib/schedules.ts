@@ -168,9 +168,12 @@ export async function createSchedule(
     createdBy: input.createdBy ?? null,
   };
 
+  // Index first: writing the file first would make an empty index look stale
+  // (see `readIndex`) and trigger a needless rebuild. A crash in between only
+  // leaves an index entry whose file is missing, which readers skip.
   await withLock(projectPath, async () => {
-    await writeSchedule(projectPath, schedule);
     await upsertIndexEntry(projectPath, schedule);
+    await writeSchedule(projectPath, schedule);
   });
   return schedule;
 }
@@ -469,8 +472,9 @@ async function readScheduleIds(projectPath: string): Promise<string[]> {
 }
 
 /*
- * The index is a cache of the per-schedule files, so when it is missing or
- * unreadable it is rebuilt from a directory scan — never treated as empty. Treating it as empty let the next upsert write back an index
+ * The index is a cache of the per-schedule files, so when it is missing,
+ * unreadable, or empty while schedule files exist, it is rebuilt from a
+ * directory scan — never trusted as empty. Treating it as empty let the next upsert write back an index
  * holding only one entry, silently dropping every other schedule from listing
  * and firing (issue #470). Must be called under the project lock.
  */
@@ -485,11 +489,18 @@ async function readIndex(projectPath: string): Promise<ScheduleIndexEntry[]> {
     // scan is authoritative and the caller's next write persists it.
     return indexFromScheduleFiles(projectPath);
   }
+  let index: ScheduleIndexEntry[];
   try {
-    return parseIndex(JSON.parse(content));
+    index = parseIndex(JSON.parse(content));
   } catch (error) {
-    return rebuildCorruptIndex(projectPath, error as Error);
+    return rebuildIndex(projectPath, `unreadable (${(error as Error).message})`);
   }
+  // An empty index next to schedule files is stale (e.g. a pre-#470 store
+  // that persisted `[]` after a failed read), so the files win.
+  if (index.length === 0 && (await scanScheduleIds(projectPath)).length > 0) {
+    return rebuildIndex(projectPath, "empty but schedule files exist");
+  }
+  return index;
 }
 
 /** Throws unless `value` is an array of well-formed index entries. */
@@ -521,15 +532,15 @@ async function indexFromScheduleFiles(projectPath: string): Promise<ScheduleInde
 
 /*
  * Persist the rebuilt index so every subsequent tick doesn't rescan the
- * directory and log the same corruption again.
+ * directory and log the same problem again.
  */
-async function rebuildCorruptIndex(
+async function rebuildIndex(
   projectPath: string,
-  cause: Error
+  reason: string
 ): Promise<ScheduleIndexEntry[]> {
   const index = await indexFromScheduleFiles(projectPath);
   console.warn(
-    `[schedules] index ${projectSchedulesIndexFile(projectPath)} was unreadable (${cause.message}); rebuilt it from ${index.length} schedule file(s)`
+    `[schedules] index ${projectSchedulesIndexFile(projectPath)} was ${reason}; rebuilt it from ${index.length} schedule file(s)`
   );
   await writeIndex(projectPath, index);
   return index;
