@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { writeJsonRegistry } from "./json-registry.js";
 import {
+  isSafeId,
   projectSchedulesDir,
   projectScheduleFile,
   projectSchedulesIndexFile,
@@ -238,11 +240,17 @@ export async function removeSchedule(
   return withLock(projectPath, async () => {
     const schedule = await readSchedule(projectPath, scheduleId);
     if (!schedule) return false;
-    await fs.rm(projectScheduleFile(projectPath, scheduleId), { force: true });
-    await fs.rm(projectScheduleRunsFile(projectPath, scheduleId), { force: true });
+    await removeWithBackup(projectScheduleFile(projectPath, scheduleId));
+    await removeWithBackup(projectScheduleRunsFile(projectPath, scheduleId));
     await removeIndexEntry(projectPath, scheduleId);
     return true;
   });
+}
+
+/** Remove a file written by `writeJsonRegistry` along with its `.bak` mirror. */
+async function removeWithBackup(file: string): Promise<void> {
+  await fs.rm(file, { force: true });
+  await fs.rm(`${file}.bak`, { force: true });
 }
 
 /** Read the materialized run history for a schedule (newest last). */
@@ -400,8 +408,23 @@ function advanceAfterFire(schedule: Schedule, now: Date): Schedule {
 
 // --- Storage primitives ---
 
+/*
+ * Run history is rewritten whole on every fire, so a schedule firing every
+ * minute would otherwise grow its runs file (and each rewrite) without bound.
+ * Only the newest runs are kept.
+ */
+export const MAX_SCHEDULE_RUNS = 200;
+
+const INDEX_FILE_NAME = "index.json";
+const RUNS_FILE_SUFFIX = ".runs.json";
+
+/*
+ * Index reads take the project lock so a rebuilt index (see
+ * `readReconciledIndex`) is persisted without racing a concurrent
+ * read-modify-write.
+ */
 async function listDueScheduleIds(projectPath: string, now: Date): Promise<string[]> {
-  const index = await readIndex(projectPath);
+  const index = await withLock(projectPath, () => readReconciledIndex(projectPath));
   return index
     .filter((entry) => entry.enabled && new Date(entry.nextRunAt).getTime() <= now.getTime())
     .map((entry) => entry.id);
@@ -423,11 +446,7 @@ export async function readSchedule(
 }
 
 async function writeSchedule(projectPath: string, schedule: Schedule): Promise<void> {
-  await fs.mkdir(projectSchedulesDir(projectPath), { recursive: true });
-  await fs.writeFile(
-    projectScheduleFile(projectPath, schedule.id),
-    JSON.stringify(schedule, null, 2)
-  );
+  await writeJsonRegistry(projectScheduleFile(projectPath, schedule.id), schedule);
 }
 
 async function appendRun(
@@ -438,46 +457,139 @@ async function appendRun(
   await withLock(projectPath, async () => {
     const runs = await listScheduleRuns(projectPath, scheduleId);
     runs.push(run);
-    await fs.mkdir(projectSchedulesDir(projectPath), { recursive: true });
-    await fs.writeFile(
+    await writeJsonRegistry(
       projectScheduleRunsFile(projectPath, scheduleId),
-      JSON.stringify(runs, null, 2)
+      runs.slice(-MAX_SCHEDULE_RUNS)
     );
   });
 }
 
 async function readScheduleIds(projectPath: string): Promise<string[]> {
-  const index = await readIndex(projectPath);
-  if (index.length > 0) return index.map((entry) => entry.id);
-  // Cold path: no index yet (or it was deleted). Fall back to scanning the
-  // directory so a missing index never hides schedules.
-  try {
-    const files = await fs.readdir(projectSchedulesDir(projectPath));
-    return files
-      .filter((file) => file.endsWith(".json") && file !== "index.json" && !file.endsWith(".runs.json"))
-      .map((file) => file.slice(0, -".json".length));
-  } catch {
-    return [];
-  }
+  const index = await withLock(projectPath, () => readReconciledIndex(projectPath));
+  return index.map((entry) => entry.id);
 }
 
+/*
+ * Index for the list and due-check reads. The index is only a cache of the
+ * `<id>.json` files, so its ids are checked against a directory listing (a
+ * cheap readdir) and, if they differ, it is rebuilt from the files. That
+ * repairs an index the pre-#470 code truncated to a subset of the schedules
+ * after a failed read, and drops entries whose file is gone. Every tick runs
+ * this, so a stale index self-heals within one tick. Must be called under
+ * the project lock.
+ */
+async function readReconciledIndex(projectPath: string): Promise<ScheduleIndexEntry[]> {
+  const index = await readIndex(projectPath);
+  const fileIds = await scanScheduleIds(projectPath);
+  if (sameIds(index, fileIds)) return index;
+  return rebuildIndex(projectPath, "out of sync with the schedule files");
+}
+
+function sameIds(index: ScheduleIndexEntry[], fileIds: string[]): boolean {
+  if (index.length !== fileIds.length) return false;
+  const files = new Set(fileIds);
+  return index.every((entry) => files.has(entry.id));
+}
+
+/*
+ * Index as stored, for read-modify-write updates. A missing index falls back
+ * to the directory scan and an unreadable one is rebuilt from it — never
+ * treated as empty, which let the next upsert write back an index holding
+ * only one entry and silently drop every other schedule (issue #470). Must
+ * be called under the project lock.
+ */
 async function readIndex(projectPath: string): Promise<ScheduleIndexEntry[]> {
+  const file = projectSchedulesIndexFile(projectPath);
+  let content: string;
   try {
-    const content = await fs.readFile(projectSchedulesIndexFile(projectPath), "utf-8");
-    const parsed = JSON.parse(content) as unknown;
-    return Array.isArray(parsed) ? (parsed as ScheduleIndexEntry[]) : [];
-  } catch {
-    return [];
+    content = await fs.readFile(file, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // No index yet (first schedule being created) or it was deleted: the
+    // scan is authoritative and the caller's next write persists it.
+    return indexFromScheduleFiles(projectPath);
+  }
+  try {
+    return parseIndex(JSON.parse(content));
+  } catch (error) {
+    return rebuildIndex(projectPath, `unreadable (${(error as Error).message})`);
   }
 }
 
-async function upsertIndexEntry(projectPath: string, schedule: Schedule): Promise<void> {
-  const index = await readIndex(projectPath);
-  const entry: ScheduleIndexEntry = {
+/** Throws unless `value` is an array of well-formed index entries. */
+function parseIndex(value: unknown): ScheduleIndexEntry[] {
+  if (!Array.isArray(value) || !value.every(isIndexEntry)) {
+    throw new Error("index is not an array of schedule entries");
+  }
+  return value;
+}
+
+function isIndexEntry(value: unknown): value is ScheduleIndexEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    typeof entry.id === "string" &&
+    typeof entry.nextRunAt === "string" &&
+    typeof entry.enabled === "boolean"
+  );
+}
+
+async function indexFromScheduleFiles(projectPath: string): Promise<ScheduleIndexEntry[]> {
+  const index: ScheduleIndexEntry[] = [];
+  for (const id of await scanScheduleIds(projectPath)) {
+    const schedule = await readSchedule(projectPath, id);
+    if (schedule) index.push(toIndexEntry(schedule));
+  }
+  return index;
+}
+
+/*
+ * Persist the rebuilt index so every subsequent tick doesn't rescan the
+ * directory and log the same problem again.
+ */
+async function rebuildIndex(
+  projectPath: string,
+  reason: string
+): Promise<ScheduleIndexEntry[]> {
+  const index = await indexFromScheduleFiles(projectPath);
+  console.warn(
+    `[schedules] index ${projectSchedulesIndexFile(projectPath)} was ${reason}; rebuilt it from ${index.length} schedule file(s)`
+  );
+  await writeIndex(projectPath, index);
+  return index;
+}
+
+/** Schedule ids from the `<id>.json` files in the schedules directory. */
+async function scanScheduleIds(projectPath: string): Promise<string[]> {
+  let files: string[];
+  try {
+    files = await fs.readdir(projectSchedulesDir(projectPath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  return files
+    .filter(
+      (file) =>
+        file.endsWith(".json") &&
+        file !== INDEX_FILE_NAME &&
+        !file.endsWith(RUNS_FILE_SUFFIX)
+    )
+    .map((file) => file.slice(0, -".json".length))
+    .filter(isSafeId);
+}
+
+function toIndexEntry(schedule: Schedule): ScheduleIndexEntry {
+  return {
     id: schedule.id,
     nextRunAt: schedule.nextRunAt,
     enabled: schedule.enabled,
   };
+}
+
+async function upsertIndexEntry(projectPath: string, schedule: Schedule): Promise<void> {
+  const index = await readIndex(projectPath);
+  const entry = toIndexEntry(schedule);
   const idx = index.findIndex((e) => e.id === schedule.id);
   if (idx === -1) index.push(entry);
   else index[idx] = entry;
@@ -491,11 +603,9 @@ async function removeIndexEntry(projectPath: string, scheduleId: string): Promis
 }
 
 async function writeIndex(projectPath: string, index: ScheduleIndexEntry[]): Promise<void> {
-  await fs.mkdir(projectSchedulesDir(projectPath), { recursive: true });
-  await fs.writeFile(
-    projectSchedulesIndexFile(projectPath),
-    JSON.stringify(index, null, 2)
-  );
+  await writeJsonRegistry(projectSchedulesIndexFile(projectPath), index, {
+    validate: parseIndex,
+  });
 }
 
 /*

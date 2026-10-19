@@ -8,12 +8,19 @@ import {
   getSchedule,
   listSchedules,
   listScheduleRuns,
+  MAX_SCHEDULE_RUNS,
   removeSchedule,
   runDueSchedules,
   setScheduleEnabled,
   tryFireSchedule,
   type SchedulesConsumerDeps,
+  type ScheduleRun,
 } from "../schedules.js";
+import {
+  projectScheduleFile,
+  projectSchedulesIndexFile,
+  projectScheduleRunsFile,
+} from "../paths.js";
 
 /*
  * Issue #243: the schedule store and tick consumer. The race test is the
@@ -120,6 +127,18 @@ test("removeSchedule deletes the file, runs, and index entry", async () => {
     assert.equal(await getSchedule(projectPath, schedule.id), null);
     assert.equal((await listSchedules(projectPath)).length, 0);
     assert.equal(await removeSchedule(projectPath, schedule.id), false);
+
+    // Recreating after the index drained to `[]` must not look like a stale index.
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      await createSchedule(projectPath, "p", { worktreeId: "w", prompt: "b", runAt: "2026-06-26T08:00:00.000Z" });
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.deepEqual(warnings, []);
+    assert.equal((await listSchedules(projectPath)).length, 1);
   });
 });
 
@@ -284,5 +303,168 @@ test("getSchedule/removeSchedule reject traversal ids without touching files out
     assert.equal(await removeSchedule(projectPath, "../../../decoy"), false);
     assert.deepEqual(await listScheduleRuns(projectPath, "../../../decoy"), []);
     assert.equal(await fs.readFile(decoy, "utf-8"), JSON.stringify({ id: "decoy" }));
+  });
+});
+
+test("a corrupt index is rebuilt from the schedule files instead of dropping schedules (issue #470)", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "first", runAt });
+    await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "second", runAt });
+    // Simulate a torn write of the index.
+    await fs.writeFile(projectSchedulesIndexFile(projectPath), '[{"id": "trunc');
+
+    await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "third", runAt });
+
+    const prompts = (await listSchedules(projectPath)).map((s) => s.prompt).sort();
+    assert.deepEqual(prompts, ["first", "second", "third"]);
+
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: `sess-${params.prompt}` };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired.sort(), ["first", "second", "third"]);
+  });
+});
+
+test("an empty index next to existing schedule files is rebuilt (issue #470)", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    const first = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "first", runAt });
+    const second = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "second", runAt });
+    await fs.writeFile(projectSchedulesIndexFile(projectPath), "[]");
+
+    const prompts = (await listSchedules(projectPath)).map((s) => s.prompt).sort();
+    assert.deepEqual(prompts, ["first", "second"]);
+
+    const index = JSON.parse(await fs.readFile(projectSchedulesIndexFile(projectPath), "utf-8"));
+    assert.deepEqual(
+      index.map((entry: { id: string }) => entry.id).sort(),
+      [first.id, second.id].sort(),
+      "the rebuilt index is persisted"
+    );
+
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: `sess-${params.prompt}` };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired.sort(), ["first", "second"]);
+  });
+});
+
+test("a partial index is reconciled with the schedule files (issue #470)", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    const created = [];
+    for (const prompt of ["first", "second", "third"]) {
+      created.push(await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt, runAt }));
+    }
+    // What the pre-#470 code left behind: an index holding just one entry.
+    const indexFile = projectSchedulesIndexFile(projectPath);
+    const fullIndex = JSON.parse(await fs.readFile(indexFile, "utf-8"));
+    await fs.writeFile(indexFile, JSON.stringify(fullIndex.slice(0, 1)));
+
+    const prompts = (await listSchedules(projectPath)).map((s) => s.prompt).sort();
+    assert.deepEqual(prompts, ["first", "second", "third"]);
+
+    await fs.writeFile(indexFile, JSON.stringify(fullIndex.slice(0, 1)));
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: `sess-${params.prompt}` };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired.sort(), ["first", "second", "third"]);
+
+    const rebuilt = JSON.parse(await fs.readFile(indexFile, "utf-8"));
+    assert.deepEqual(
+      rebuilt.map((entry: { id: string }) => entry.id).sort(),
+      created.map((s) => s.id).sort(),
+      "the reconciled index is persisted"
+    );
+  });
+});
+
+test("an index entry whose schedule file is gone is dropped", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    const kept = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "kept", runAt });
+    const gone = await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "gone", runAt });
+    await fs.rm(projectScheduleFile(projectPath, gone.id));
+
+    assert.deepEqual((await listSchedules(projectPath)).map((s) => s.id), [kept.id]);
+    const index = JSON.parse(await fs.readFile(projectSchedulesIndexFile(projectPath), "utf-8"));
+    assert.deepEqual(index.map((entry: { id: string }) => entry.id), [kept.id]);
+  });
+});
+
+test("a missing index falls back to the schedule files so the tick still sees them", async () => {
+  await withHome(async (projectPath) => {
+    const schedule = await createSchedule(projectPath, "proj-1", {
+      worktreeId: "wt-1",
+      prompt: "orphaned",
+      runAt: "2026-06-26T08:00:00.000Z",
+    });
+    await fs.rm(projectSchedulesIndexFile(projectPath));
+
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: "sess-1" };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired, ["orphaned"]);
+    assert.deepEqual((await listSchedules(projectPath)).map((s) => s.id), [schedule.id]);
+  });
+});
+
+test("run history is capped at MAX_SCHEDULE_RUNS, keeping the newest", async () => {
+  await withHome(async (projectPath) => {
+    const schedule = await createSchedule(projectPath, "proj-1", {
+      worktreeId: "wt-1",
+      prompt: "every minute",
+      runAt: "2026-06-26T08:00:00.000Z",
+    });
+    const seeded: ScheduleRun[] = Array.from({ length: MAX_SCHEDULE_RUNS }, (_, i) => ({
+      firedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+      sessionId: `old-${i}`,
+      error: null,
+    }));
+    await fs.writeFile(
+      projectScheduleRunsFile(projectPath, schedule.id),
+      JSON.stringify(seeded)
+    );
+
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async () => ({ sessionId: "newest" }),
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await tryFireSchedule(projectPath, "proj-1", schedule.id, deps);
+
+    const runs = await listScheduleRuns(projectPath, schedule.id);
+    assert.equal(runs.length, MAX_SCHEDULE_RUNS);
+    assert.equal(runs[0].sessionId, "old-1", "the oldest run is dropped");
+    assert.equal(runs[runs.length - 1].sessionId, "newest");
   });
 });
