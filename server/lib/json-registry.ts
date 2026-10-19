@@ -216,20 +216,38 @@ export async function writeJsonRegistry<T>(file: string, value: T): Promise<void
     await handle.close();
   }
 
-  // Mirror the *previous* contents to .bak BEFORE we swap the tmp file
-  // in place of `file`. On the very first write the primary doesn't
-  // exist yet, so skip — a `.bak` for a first-run is noise.
+  await mirrorToBackup(file, backup);
+  await activeFs.rename(tmp, file);
+}
+
+/*
+ * Mirror the *previous* primary contents to `.bak` before the tmp file is
+ * swapped in. Only a primary that parses is mirrored: when it is corrupt
+ * (typically because the caller just recovered from `.bak`), overwriting
+ * the backup would destroy the only good copy, and a crash or rename
+ * failure before the swap would then leave both files unreadable. On the
+ * very first write the primary doesn't exist yet, so there's nothing to
+ * mirror. Failures are logged rather than thrown — losing the backup is
+ * bad, but not as bad as failing the user's write.
+ */
+async function mirrorToBackup(file: string, backup: string): Promise<void> {
   try {
     const previous = await activeFs.readFile(file, "utf-8");
+    if (!parsesAsJson(previous)) return;
     await activeFs.writeFile(backup, previous, "utf-8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      // best-effort — losing the backup is bad but not as bad as
-      // failing the user's write.
-    }
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    console.warn(`Failed to back up ${file} to ${backup}: ${(err as Error).message}`);
   }
+}
 
-  await activeFs.rename(tmp, file);
+function parsesAsJson(content: string): boolean {
+  try {
+    JSON.parse(content);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
