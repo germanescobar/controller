@@ -650,6 +650,14 @@ test("second turn on a branched session resumes providerThreadId, not the Contro
         });
         assert.equal(res.status, 200, `turn "${message}" should succeed`);
         await res.json();
+        // The POST resolves at run.started; wait for termination before
+        // resuming the same Controller session on the next turn.
+        const { getSessionRuntime } = await import("../session-runtime.js");
+        const deadline = Date.now() + 5_000;
+        while (getSessionRuntime(controllerId).active && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.equal(getSessionRuntime(controllerId).active, false);
       }
 
       const invocations = await readArgvInvocations(
