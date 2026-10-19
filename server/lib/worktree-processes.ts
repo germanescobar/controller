@@ -21,6 +21,9 @@ export interface ScriptRunResult {
 
 const isolateProcessGroup = process.platform !== "win32";
 
+/** Grace period between the timeout's SIGTERM and the SIGKILL escalation. */
+const KILL_GRACE_MS = 2_000;
+
 export function runStreamed(
   command: string,
   args: string[],
@@ -104,9 +107,13 @@ function openScriptLog(logPath: string, onData: OutputHandler): WriteStream {
 /**
  * Run one command under `bash -lc`. On POSIX the shell leads its own
  * process group so the timeout kills everything it spawned (e.g. the
- * `npm install` under a setup script), not just the wrapper. Once the
- * leader has exited we never signal the group: its pgid may have been
- * recycled by an unrelated process group (same rule as monitors, #459).
+ * `npm install` under a setup script), not just the wrapper.
+ *
+ * The guard is whether the child's stdio has closed, not whether the
+ * leader exited (unlike monitors, #459): a backgrounded descendant that
+ * outlives the shell still holds the pipes and keeps the run pending, and
+ * while it lives the group exists, so its pgid can't have been recycled.
+ * Once 'close' fires nothing is signalled.
  */
 function runOneScriptCommand(
   command: string,
@@ -122,43 +129,56 @@ function runOneScriptCommand(
       env: childProcessEnv(env),
       detached: isolateProcessGroup,
     });
-    let leaderExited = false;
+    let closed = false;
     let timedOut = false;
+    let escalationTimer: NodeJS.Timeout | null = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      if (!leaderExited) killProcessTree(child);
+      signalProcessTree(child, "SIGTERM");
+      escalationTimer = setTimeout(() => {
+        if (closed) return;
+        signalProcessTree(child, "SIGKILL");
+        // A descendant outside the group (e.g. via setsid) can still hold
+        // the pipes; drop our ends so the run always resolves.
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }, KILL_GRACE_MS);
     }, timeoutMs);
 
     child.stdout?.on("data", (d: Buffer) => writeScriptOutput(d, "stdout", logStream, onData));
     child.stderr?.on("data", (d: Buffer) => writeScriptOutput(d, "stderr", logStream, onData));
-    child.on("exit", () => {
-      leaderExited = true;
-    });
     child.on("close", (code) => {
+      closed = true;
       clearTimeout(timer);
-      resolve({ exitCode: code ?? 1, timedOut });
+      if (escalationTimer) clearTimeout(escalationTimer);
+      // The leader may have exited 0 before a descendant timed out; a
+      // timed-out run is never reported as success.
+      const exitCode = code ?? 1;
+      resolve({ exitCode: timedOut && exitCode === 0 ? 1 : exitCode, timedOut });
     });
     child.on("error", (err) => {
+      closed = true;
       clearTimeout(timer);
+      if (escalationTimer) clearTimeout(escalationTimer);
       onData(`spawn error: ${err.message}\n`, "stderr");
       resolve({ exitCode: 1, timedOut });
     });
   });
 }
 
-/** SIGKILL the child's process group, falling back to the child itself. */
-function killProcessTree(child: ChildProcess): void {
+/** Signal the child's process group, falling back to the child itself. */
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   if (isolateProcessGroup && child.pid !== undefined) {
     try {
-      process.kill(-child.pid, "SIGKILL");
+      process.kill(-child.pid, signal);
       return;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-        console.error(`[worktrees] SIGKILL of process group ${child.pid} failed:`, error);
+        console.error(`[worktrees] ${signal} of process group ${child.pid} failed:`, error);
       }
     }
   }
-  child.kill("SIGKILL");
+  child.kill(signal);
 }
 
 function writeScriptOutput(

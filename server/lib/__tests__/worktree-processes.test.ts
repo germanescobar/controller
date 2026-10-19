@@ -68,6 +68,31 @@ test(
   }
 );
 
+test(
+  "a timed-out command whose shell already exited still kills its descendants",
+  // PR #474 review: the shell exits 0 right away but the backgrounded
+  // `sleep` keeps the pipes open; the timeout must still reap the group.
+  { skip: process.platform === "win32", timeout: 10_000 },
+  async () => {
+    await withTempDir(async (dir) => {
+      const output: string[] = [];
+      const result = await runScriptCommands(
+        [scriptCommand("sleep 30 & echo $!; exit 0")],
+        dir,
+        {},
+        path.join(dir, "setup.log"),
+        (chunk) => output.push(chunk),
+        500
+      );
+      assert.equal(result.timedOut, true);
+      assert.notEqual(result.exitCode, 0);
+      const sleepPid = Number(output.join("").split("\n")[1]);
+      assert.ok(Number.isInteger(sleepPid) && sleepPid > 0, `bad pid in ${output.join("")}`);
+      await waitFor(() => !isAlive(sleepPid), 2_000);
+    });
+  }
+);
+
 test("a log stream error is surfaced without crashing the run", async () => {
   await withTempDir(async (dir) => {
     const stderr: string[] = [];
