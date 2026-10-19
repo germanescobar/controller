@@ -430,4 +430,106 @@ test("startMonitor without an --on-line filter does NOT re-inject user messages 
   });
 });
 
+// Issue #455: monitors run in their own process group, so stopping one
+// reaps the shell's children too — not just the `/bin/sh -c` wrapper.
+test("stopMonitor kills the whole process group", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const monitor = startMonitor({
+      sessionId: "s-pgroup",
+      worktreePath: proj,
+      description: "background child",
+      command: "sleep 30 & echo $!; wait",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitFor(
+      () => listMonitors("s-pgroup").some((m) => m.lineCount >= 1),
+      2_000
+    );
+    await waitForEvents(proj, "s-pgroup", 1);
+    const [pidLine] = await monitorLines(proj, "s-pgroup");
+    const sleepPid = Number(pidLine);
+    assert.ok(Number.isInteger(sleepPid) && sleepPid > 0, `bad pid ${pidLine}`);
+    assert.equal(isAlive(sleepPid), true);
+    stopMonitor(monitor.id);
+    await waitFor(() => !isAlive(sleepPid), 2_000);
+  });
+});
+
+test("a final stdout line without a trailing newline is flushed on exit", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const delivered: string[] = [];
+    const monitor = startMonitor({
+      sessionId: "s-flush",
+      worktreePath: proj,
+      description: "no newline",
+      command: "printf abc",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+      onLine: /^abc$/,
+      onLinePattern: "^abc$",
+      onLineMatch: async ({ line }) => {
+        delivered.push(line);
+      },
+    });
+    await waitFor(() => delivered.length === 1, 2_000);
+    assert.deepEqual(await monitorLines(proj, "s-flush"), ["abc"]);
+    assert.deepEqual(delivered, ["abc"]);
+    stopMonitor(monitor.id);
+  });
+});
+
+test("a multi-line stderr chunk yields one monitor_event per line", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const monitor = startMonitor({
+      sessionId: "s-stderr",
+      worktreePath: proj,
+      description: "stderr lines",
+      command: "printf 'one\\ntwo\\nthree' >&2",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-stderr", 3);
+    assert.deepEqual(await monitorLines(proj, "s-stderr"), [
+      "[stderr] one",
+      "[stderr] two",
+      "[stderr] three",
+    ]);
+    stopMonitor(monitor.id);
+  });
+});
+
+async function monitorLines(proj: string, sessionId: string): Promise<string[]> {
+  const events = await getEvents(proj, sessionId);
+  return events
+    .filter((e) => e.type === "monitor_event")
+    .map((e) => String(e.data.line));
+}
+
+async function waitForEvents(
+  proj: string,
+  sessionId: string,
+  count: number
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while ((await monitorLines(proj, sessionId)).length < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${count} monitor_event records`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 void existsSync; // keep imports used even when guards add nothing
