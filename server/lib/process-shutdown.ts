@@ -1,4 +1,4 @@
-import { stopAllMonitors } from "./monitors.js";
+import { killAllMonitorsNow } from "./monitors.js";
 import { stopAllSessionRuntimes } from "./session-runtime.js";
 
 type ShutdownProcess = Pick<
@@ -18,7 +18,7 @@ const TERMINATION_SIGNALS = ["SIGINT", "SIGTERM"] as const;
 export function installSessionRuntimeShutdownHandlers(
   target: ShutdownProcess = process,
   stopRuntimes: () => number = stopAllSessionRuntimes,
-  stopMonitors: () => number = stopAllMonitors
+  stopMonitors: () => number = killAllMonitorsNow
 ): void {
   const stopAll = (): void => {
     stopRuntimes();

@@ -337,8 +337,8 @@ export function stopMonitorsForSession(sessionId: string): number {
 }
 
 /**
- * Reap every running monitor. Used on graceful shutdown. Mirrors
- * `stopMonitorsForSession` but iterates the full map.
+ * Reap every running monitor with the normal SIGTERM-then-SIGKILL stop.
+ * Mirrors `stopMonitorsForSession` but iterates the full map.
  */
 export function stopAllMonitors(): number {
   let stopped = 0;
@@ -450,6 +450,27 @@ function signalMonitorProcess(child: ChildProcess, signal: NodeJS.Signals): bool
     // Already exited.
   }
   return false;
+}
+
+/**
+ * SIGKILL every monitor's process group synchronously and drop all
+ * entries. Used on server shutdown, where the process exits before a
+ * `KILL_GRACE_MS` escalation timer could fire. Monitors are watchers,
+ * so they need no graceful stop when the server goes down. Groups
+ * whose leader already exited are still never signalled.
+ */
+export function killAllMonitorsNow(): number {
+  let killed = 0;
+  for (const [id, active] of monitors.entries()) {
+    monitors.delete(id);
+    if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+    if (active.escalationTimer) clearTimeout(active.escalationTimer);
+    if (active.child && !active.leaderExited) {
+      signalMonitorProcess(active.child, "SIGKILL");
+    }
+    killed += 1;
+  }
+  return killed;
 }
 
 /** Test-only helper to count the in-process monitor map. */

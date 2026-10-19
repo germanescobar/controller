@@ -17,6 +17,7 @@ import {
   listMonitors,
   stopAllMonitors,
   stopMonitorsForSession,
+  killAllMonitorsNow,
   __resetMonitorsForTests,
   monitorCount,
   MAX_PARTIAL_LINE_LENGTH,
@@ -578,6 +579,44 @@ test("the partial-line cap never splits a surrogate pair", async () => {
       assert.equal(line.isWellFormed(), true, "chunk contains a lone surrogate");
     }
     stopMonitor(monitor.id);
+  });
+});
+
+// PR #459 review: shutdown exits before a grace-period timer could fire,
+// so the shutdown path must SIGKILL the group synchronously.
+test("killAllMonitorsNow SIGKILLs the process group without scheduling a timer", async (t) => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    startMonitor({
+      sessionId: "s-shutdown",
+      worktreePath: proj,
+      description: "killed on shutdown",
+      // `$$` is the shell's pid, which is also the monitor's pgid.
+      command: "echo $$; sleep 30",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-shutdown", 1);
+    const [pgidLine] = await monitorLines(proj, "s-shutdown");
+    const pgid = Number(pgidLine);
+    assert.ok(Number.isInteger(pgid) && pgid > 0, `bad pgid ${pgidLine}`);
+
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals | number }> = [];
+    const originalKill = process.kill.bind(process);
+    const killMock = t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push({ pid, signal });
+      return originalKill(pid, signal);
+    });
+    const timerMock = t.mock.method(globalThis, "setTimeout");
+    assert.equal(killAllMonitorsNow(), 1);
+    const timersScheduled = timerMock.mock.callCount();
+    timerMock.mock.restore();
+    killMock.mock.restore();
+
+    assert.deepEqual(signals, [{ pid: -pgid, signal: "SIGKILL" }]);
+    assert.equal(timersScheduled, 0);
+    assert.equal(monitorCount(), 0);
+    await waitFor(() => !isAlive(pgid), 2_000);
   });
 });
 
