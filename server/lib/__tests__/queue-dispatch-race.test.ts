@@ -10,9 +10,15 @@ import path from "node:path";
 import { clearCommandResolverCache } from "../command-resolver.js";
 import { getEvents } from "../sessions.js";
 import { enqueue, listQueue } from "../session-queue.js";
-import { getSessionRuntime } from "../session-runtime.js";
+import {
+  claimSessionRunStart,
+  getSessionRuntime,
+  releaseSessionRunLease,
+  releaseSessionRunStart,
+} from "../session-runtime.js";
+import { runQueueRecovery } from "../queue-recovery.js";
 import { getProjectWorktrees } from "../worktrees.js";
-import { projectStoreDir } from "../paths.js";
+import { projectStoreDir, sessionQueuesDir } from "../paths.js";
 import {
   advanceSessionQueueFromConsumer,
   handleSessionStream,
@@ -201,5 +207,62 @@ test("a direct resume refuses a second concurrent run", async () => {
     await first.text();
     await waitForRun(env.projectPath, env.sessionId);
     assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+  });
+});
+
+test("a direct resume that fails preflight drains a message queued behind its lease", async () => {
+  await withDispatchEnv(async (env) => {
+    await enqueue(env.sessionId, {
+      text: "after failure", visibleText: "after failure", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    const url = new URL(`${env.baseUrl}/api/projects/${env.projectId}/sessions/stream`);
+    url.searchParams.set("worktreeId", env.worktreeId);
+    url.searchParams.set("resumeSessionId", env.sessionId);
+    url.searchParams.set("provider", "unavailable-provider");
+    url.searchParams.set("message", "fails preflight");
+    const response = await fetch(url);
+    assert.equal(response.status, 400);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+    assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
+    assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
+test("owner recovery tick dispatches a plain queue behind a stale lease once", async () => {
+  await withDispatchEnv(async (env) => {
+    await enqueue(env.sessionId, {
+      text: "recover", visibleText: "recover", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    const lockDir = path.join(sessionQueuesDir(), `${env.sessionId}.run.lock`);
+    await fs.mkdir(lockDir);
+    const stale = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, stale, stale);
+    const deps = { advanceSessionQueue: advanceSessionQueueFromConsumer };
+    await Promise.all([runQueueRecovery(deps), runQueueRecovery(deps)]);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+    assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
+    assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
+test("owner recovery tick leaves a live lease alone", async () => {
+  await withDispatchEnv(async (env) => {
+    await enqueue(env.sessionId, {
+      text: "wait", visibleText: "wait", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    assert.equal(await claimSessionRunStart(env.sessionId), true);
+    try {
+      await runQueueRecovery({ advanceSessionQueue: advanceSessionQueueFromConsumer });
+      assert.equal((await listQueue(env.sessionId)).length, 1);
+      await assert.rejects(fs.readFile(env.startsFile), { code: "ENOENT" });
+    } finally {
+      releaseSessionRunStart(env.sessionId);
+      await releaseSessionRunLease(env.sessionId);
+    }
   });
 });

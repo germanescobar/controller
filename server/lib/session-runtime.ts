@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { lock } from "proper-lockfile";
+import { check, lock } from "proper-lockfile";
 import { assertSafeId, ensureOrchestratorHome, sessionQueuesDir } from "./paths.js";
 import {
   signalAgentProcess,
@@ -43,6 +43,7 @@ const runStarts = new Map<string, Promise<void>>();
 const releaseRunStarts = new Map<string, () => void>();
 const runLeases = new Map<string, () => Promise<void>>();
 const instanceId = randomUUID();
+const RUN_LEASE_STALE_MS = 30_000;
 
 /** Reserve a resumed session before asynchronous preflight or provider startup. */
 export async function claimSessionRunStart(sessionId: string): Promise<boolean> {
@@ -58,7 +59,7 @@ export async function claimSessionRunStart(sessionId: string): Promise<boolean> 
     const releaseLease = await lock(lockfilePath, {
       lockfilePath,
       realpath: false,
-      stale: 30_000,
+      stale: RUN_LEASE_STALE_MS,
       update: 5_000,
       onCompromised: (error) => {
         console.error(`Run lease lost for ${sessionId}:`, error);
@@ -97,11 +98,24 @@ export function releaseSessionRunStart(sessionId: string): void {
 }
 
 /** Release the disk lease once the agent has exited or startup failed. */
-export async function releaseSessionRunLease(sessionId: string): Promise<void> {
+export async function releaseSessionRunLease(sessionId: string): Promise<boolean> {
   const release = runLeases.get(sessionId);
-  if (!release) return;
+  if (!release) return false;
   runLeases.delete(sessionId);
   await release();
+  return true;
+}
+
+/** A stale heartbeat is reclaimable by the next dispatcher. */
+export async function hasLiveSessionRunLease(sessionId: string): Promise<boolean> {
+  assertSafeId(sessionId, "session");
+  const directory = await fs.realpath(sessionQueuesDir());
+  const lockfilePath = path.join(directory, `${sessionId}.run.lock`);
+  return check(lockfilePath, {
+    lockfilePath,
+    realpath: false,
+    stale: RUN_LEASE_STALE_MS,
+  });
 }
 
 /** Queue consumers wait for an in-progress start before checking active state. */

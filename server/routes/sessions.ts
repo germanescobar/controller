@@ -1434,7 +1434,7 @@ export async function handleSessionStream(
   } finally {
     if (claimed) {
       releaseSessionRunStart(sessionId);
-      if (!getSessionRuntime(sessionId).active) await releaseSessionRunLease(sessionId);
+      if (!getSessionRuntime(sessionId).active) await releaseRunLeaseAndDrain(sessionId);
     }
   }
 }
@@ -2431,11 +2431,7 @@ async function startSessionStream(
               await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
             }
           } finally {
-            try {
-              await releaseSessionRunLease(streamSessionId);
-            } finally {
-              markSessionInactive(streamSessionId);
-            }
+            await releaseRunLeaseAndDrain(streamSessionId, !controllerSessionId);
           }
           getSession(worktreePath, streamSessionId).then((existing) => {
             if (existing) {
@@ -2448,41 +2444,19 @@ async function startSessionStream(
         sseSend({ type: "done", exitCode: effectiveExitCode });
         if (clientConnected) res.end();
 
-        // On a run termination, run the next enqueued message (if any).
-        // This happens server-side so the queue drains regardless of
-        // whether any client is connected (see issue #113). Draining on
-        // `run.failed` as well as `run.completed` is required by the
-        // same-session goal loop (issue #339): a follow-up enqueued by
-        // the goal evaluator after a failed turn would otherwise be
-        // silently ignored. We do *not* drain after a user-initiated
-        // cancellation — pausing the queue there matches the existing UX
-        // where a cancelled turn waits for the user to act.
-        if (
-          streamSessionId &&
-          !pausedForClaudeUserInput &&
-          !runCancelled
-        ) {
-          const queued = await listQueue(streamSessionId);
-          if (queued.length > 0) {
-            void scheduleSessionQueueAdvance(
-              req.params.projectId,
-              worktreeId,
-              streamSessionId
-            );
-          }
-        }
       })
-      .catch(() => {});
+      .catch((error: unknown) => {
+        console.error(`[session] run finalization failed (session=${streamSessionId}):`, error);
+      });
   });
 
   child.on("error", (err) => {
     clearStreamTimers();
     if (streamSessionId) {
-      void releaseSessionRunLease(streamSessionId)
+      void releaseRunLeaseAndDrain(streamSessionId)
         .catch((error: unknown) => {
           console.error(`[session] failed to release run lease (session=${streamSessionId}):`, error);
-        })
-        .finally(() => markSessionInactive(streamSessionId));
+        });
     }
     sseSend({ type: "error", text: err.message });
     if (clientConnected) res.end();
@@ -2582,7 +2556,7 @@ function scheduleSessionQueueAdvance(
         await advanceSessionQueue(projectId, worktreeId, sessionId);
       } finally {
         releaseSessionRunStart(sessionId);
-        if (!getSessionRuntime(sessionId).active) await releaseSessionRunLease(sessionId);
+        if (!getSessionRuntime(sessionId).active) await releaseRunLeaseAndDrain(sessionId);
       }
     })
     .catch((error) => {
@@ -2598,6 +2572,28 @@ function scheduleSessionQueueAdvance(
     }
   });
   return next;
+}
+
+/** A competing process may have abandoned its advance while we held the lease. */
+async function releaseRunLeaseAndDrain(
+  sessionId: string,
+  drainWithoutLease = false
+): Promise<void> {
+  let released: boolean;
+  try {
+    released = await releaseSessionRunLease(sessionId);
+  } catch (error) {
+    markSessionInactive(sessionId);
+    throw error;
+  }
+  if (released || drainWithoutLease) markSessionInactive(sessionId);
+  if (!released && !drainWithoutLease) return;
+
+  const head = (await listQueue(sessionId))[0];
+  if (!head || (head.runAt && Date.parse(head.runAt) > Date.now())) return;
+  const located = await locateSessionById(sessionId);
+  if (!located) return;
+  void scheduleSessionQueueAdvance(located.projectId, located.worktreeId, sessionId);
 }
 
 /**
@@ -2814,39 +2810,13 @@ async function streamCodexPlanSession(
           await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
         }
       } finally {
-        try {
-          await releaseSessionRunLease(streamSessionId);
-        } finally {
-          markSessionInactive(streamSessionId);
-        }
+        await releaseRunLeaseAndDrain(streamSessionId, !controllerSessionId);
       }
     }
     await touchSession();
     sseSend({ type: "done", exitCode });
     if (clientConnected) res.end();
 
-    // Drain the next enqueued message on a run termination (server-side,
-    // independent of any client; see issue #113). Draining on non-zero
-    // exits as well is required by the same-session goal loop (issue
-    // #339): a follow-up enqueued by the goal evaluator after a failed
-    // turn would otherwise be silently ignored. Cancelled runs already
-    // exit through their own drain handler in the run-completion branch,
-    // not here.
-    if (streamSessionId && exitCode === 0) {
-      const queue = await listQueue(streamSessionId);
-      if (queue.length > 0) {
-        void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
-      }
-    } else if (streamSessionId && exitCode !== 0) {
-      // Failed run: only drain if there is something in the queue. An
-      // empty queue means the agent (or the user) didn't ask for a
-      // follow-up, so we leave the session idle rather than auto-firing
-      // a confusing turn.
-      const queue = await listQueue(streamSessionId).catch(() => []);
-      if (queue.length > 0) {
-        void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
-      }
-    }
   }
 
   /** Controller-id-stamped event forward; see the SSE-stream twin
