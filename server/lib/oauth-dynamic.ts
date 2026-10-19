@@ -31,7 +31,7 @@ import {
   updateSchemeAcquired,
   writeConnectionSecrets,
 } from "./integrations.js";
-import { fetchWithTimeout } from "./http-fetch.js";
+import { fetchAndReadWithTimeout, fetchWithTimeout } from "./http-fetch.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -52,6 +52,14 @@ interface CachedToken {
 }
 
 const cache = new Map<string, CachedToken>();
+
+/*
+ * In-flight refreshes keyed like `cache`. Concurrent callers share one
+ * refresh: ASes that rotate refresh tokens reject a second refresh with the
+ * same (now consumed) token, which would otherwise mark a freshly refreshed
+ * scheme expired.
+ */
+const inflightRefreshes = new Map<string, Promise<string | null>>();
 
 /** Persisted shape of an `oauth_dynamic` scheme's secret value. */
 export interface OAuthDynamicSecret {
@@ -136,23 +144,9 @@ export async function getValidToken(
 
   // Stale or empty cache — see if we can refresh without user interaction.
   const isExpired = stored.expiresAt <= Date.now();
-  const isAboutToExpire = stored.expiresAt - Date.now() < EXPIRY_SKEW_MS;
   const canRefresh = typeof stored.refreshToken === "string" && stored.refreshToken.length > 0;
-  if ((isExpired || isAboutToExpire) && canRefresh) {
-    try {
-      const refreshed = await refreshAccessToken(stored, fetchImpl);
-      cache.set(key, toCached(refreshed));
-      await saveSecret(connection.id, scheme.id, refreshed);
-      await markAcquired(connection.id, scheme, {
-        status: "connected",
-        expiresAt: new Date(refreshed.expiresAt).toISOString(),
-      });
-      return refreshed.accessToken;
-    } catch {
-      // Refresh failed: mark the scheme expired so the UI offers Reconnect.
-      await markAcquired(connection.id, scheme, { status: "expired" });
-      return null;
-    }
+  if (needsRefresh(stored) && canRefresh) {
+    return refreshSingleFlight(connection.id, scheme, fetchImpl);
   }
 
   if (isExpired) {
@@ -168,6 +162,64 @@ export async function getValidToken(
   const token: CachedToken = toCached(stored);
   cache.set(key, token);
   return token.accessToken;
+}
+
+function needsRefresh(secret: OAuthDynamicSecret): boolean {
+  return secret.expiresAt - Date.now() < EXPIRY_SKEW_MS;
+}
+
+function refreshSingleFlight(
+  connectionId: string,
+  scheme: AuthScheme,
+  fetchImpl: typeof fetch
+): Promise<string | null> {
+  const key = `${connectionId}:${scheme.id}`;
+  const existing = inflightRefreshes.get(key);
+  if (existing) return existing;
+  const refresh = refreshAndPersist(connectionId, scheme, fetchImpl).finally(() => {
+    inflightRefreshes.delete(key);
+  });
+  inflightRefreshes.set(key, refresh);
+  return refresh;
+}
+
+/**
+ * Refresh the scheme's token and persist it. Re-reads the stored secret
+ * first: a caller that loaded the secret just before a previous refresh
+ * settled would otherwise refresh again with an already-rotated token.
+ */
+async function refreshAndPersist(
+  connectionId: string,
+  scheme: AuthScheme,
+  fetchImpl: typeof fetch
+): Promise<string | null> {
+  const key = `${connectionId}:${scheme.id}`;
+  const latest = await loadSecret(connectionId, scheme.id);
+  if (!latest) return null;
+  if (!needsRefresh(latest)) {
+    cache.set(key, toCached(latest));
+    return latest.accessToken;
+  }
+  try {
+    const refreshed = await refreshAccessToken(latest, fetchImpl);
+    cache.set(key, toCached(refreshed));
+    await saveSecret(connectionId, scheme.id, refreshed);
+    await markAcquired(connectionId, scheme, {
+      status: "connected",
+      expiresAt: new Date(refreshed.expiresAt).toISOString(),
+    });
+    return refreshed.accessToken;
+  } catch (err) {
+    // Error messages carry the AS status / OAuth error code, never tokens.
+    const detail = err instanceof OAuthDynamicError ? `${err.code}: ${err.message}` : String(err);
+    console.warn(
+      `[oauth-dynamic] token refresh failed for connection ${connectionId} scheme ${scheme.id} ` +
+        `(${latest.metadata.token_endpoint}): ${detail}`
+    );
+    // Mark the scheme expired so the UI offers Reconnect.
+    await markAcquired(connectionId, scheme, { status: "expired" });
+    return null;
+  }
 }
 
 /** Status of an `oauth_dynamic` scheme for the UI. */
@@ -189,7 +241,7 @@ export async function acquireStatus(
 
   const stored = await loadSecret(connectionId, schemeId);
   if (!stored) return { status: "none" };
-  if (stored.expiresAt - Date.now() < EXPIRY_SKEW_MS) {
+  if (needsRefresh(stored)) {
     return {
       status: "expired",
       expiresAt: new Date(stored.expiresAt).toISOString(),
@@ -848,7 +900,7 @@ async function refreshAccessToken(stored: OAuthDynamicSecret, fetchImpl: typeof 
   if (stored.scopes) body.set("scope", stored.scopes);
   if (stored.resource) body.set("resource", stored.resource);
 
-  const res = await fetchWithTimeout(
+  const json = await fetchAndReadWithTimeout(
     fetchImpl,
     stored.metadata.token_endpoint,
     {
@@ -859,12 +911,9 @@ async function refreshAccessToken(stored: OAuthDynamicSecret, fetchImpl: typeof 
       },
       body,
     },
-    REQUEST_TIMEOUT_MS
+    REQUEST_TIMEOUT_MS,
+    readRefreshResponse
   );
-  if (!res.ok) {
-    throw new OAuthDynamicError(`Token refresh failed (HTTP ${res.status}).`, "refresh_failed");
-  }
-  const json = (await parseTokenResponse(res)) as Record<string, unknown>;
   // Refresh responses don't always include a new refresh_token; keep the
   // existing one when the AS omits it.
   if (!json.refresh_token && stored.refreshToken) json.refresh_token = stored.refreshToken;
@@ -903,6 +952,28 @@ async function parseTokenResponse(res: Response): Promise<unknown> {
     throw new OAuthDynamicError(`Token endpoint error: ${message}`, "token_exchange_failed");
   }
   return body;
+}
+
+/*
+ * Refresh failures end up in logs, so the error message carries only the
+ * HTTP status and the RFC 6749 §5.2 `error` code. `error_description` and any
+ * other server-controlled text are dropped: an AS may echo the submitted
+ * refresh token or client secret there.
+ */
+async function readRefreshResponse(res: Response): Promise<Record<string, unknown>> {
+  if (!res.ok) {
+    const code = oauthErrorCode(await res.json().catch(() => null));
+    const suffix = code ? `: ${code}` : "";
+    throw new OAuthDynamicError(`Token refresh failed (HTTP ${res.status})${suffix}.`, "refresh_failed");
+  }
+  return (await parseTokenResponse(res)) as Record<string, unknown>;
+}
+
+// Only accept a plain snake_case code so a free-form value can't smuggle secrets in.
+function oauthErrorCode(body: unknown): string | null {
+  if (typeof body !== "object" || !body) return null;
+  const { error } = body as { error?: unknown };
+  return typeof error === "string" && /^[a-z_]{1,64}$/.test(error) ? error : null;
 }
 
 function tokenResponseToSecret(
