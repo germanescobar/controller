@@ -1686,6 +1686,41 @@ test("parseSessions rejects an unknown flag with a clear error listing valid fla
   assert.match(stderrText, /--agent/);
 });
 
+test("sessions start parses an inactivity timeout for persistence (issue #463)", async () => {
+  const cli = await loadCli();
+  const parsed = cli.parseSessions([
+    "start", "Fix the issue", "--worktree", "wt-1",
+    "--inactivity-timeout", "20m",
+  ]);
+  assert.equal(parsed.body.agentInactivityTimeoutMs, 20 * 60 * 1000);
+  const maximum = cli.parseSessions([
+    "start", "Fix the issue", "--worktree", "wt-1",
+    "--inactivity-timeout", "2147483647ms",
+  ]);
+  assert.equal(maximum.body.agentInactivityTimeoutMs, 2_147_483_647);
+});
+
+test("sessions start rejects invalid inactivity durations (issue #463)", async () => {
+  const cli = await loadCli();
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let stderrText = "";
+  process.exit = () => { throw new Error("__exit__"); };
+  process.stderr.write = (chunk) => { stderrText += String(chunk); return true; };
+  try {
+    for (const duration of ["0m", "1.5m", "2147483648ms", "1000h", "999999999999999h", "wat"]) {
+      await assert.rejects(async () => cli.parseSessions([
+        "start", "Fix", "--worktree", "wt-1",
+        "--inactivity-timeout", duration,
+      ]), /__exit__/);
+    }
+  } finally {
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  assert.match(stderrText, /requires a positive duration/);
+});
+
 test("parseSessions accepts --agent as an alias of --provider (issue #306, #355)", async () => {
   const cli = await loadCli();
   const parsed = cli.parseSessions([
@@ -1893,6 +1928,8 @@ test("runSessions start POSTs to the new sessions endpoint and prints the URL", 
         "work on issue 190",
         "--worktree",
         "wt-1",
+        "--inactivity-timeout",
+        "20m",
       ],
       "http://controller.test"
     );
@@ -1906,6 +1943,7 @@ test("runSessions start POSTs to the new sessions endpoint and prints the URL", 
   assert.equal(body.cwd, process.cwd());
   assert.equal(body.worktreeId, "wt-1");
   assert.equal(body.message, "work on issue 190");
+  assert.equal(body.agentInactivityTimeoutMs, 20 * 60 * 1000);
   const out = stdoutChunks.join("");
   assert.match(out, /Started session sess-xyz/);
   assert.match(out, /controller:\/\/project\/proj-uuid-1\/worktree\/wt-1\/session\/sess-xyz/);

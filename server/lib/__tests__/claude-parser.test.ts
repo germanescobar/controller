@@ -124,3 +124,25 @@ test("ExitPlanMode tool_use surfaces only the plan text (approval drives the gat
   assert.equal(events.length, 1);
   assert.deepEqual(events[0], { type: "assistant.text", text: "Step 1\nStep 2" });
 });
+
+test("parallel Claude tool results emit every completed tool ID", () => {
+  const parse = createParser();
+  const calls = emit(parse(JSON.stringify({
+    type: "assistant",
+    message: { content: [
+      { type: "tool_use", id: "tool-1", name: "Bash", input: { command: "one" } },
+      { type: "tool_use", id: "tool-2", name: "Bash", input: { command: "two" } },
+    ] },
+  })));
+  assert.deepEqual(calls.map((event) => event.type === "tool.call" ? event.id : null), ["tool-1", "tool-2"]);
+
+  const results = emit(parse(JSON.stringify({
+    type: "user",
+    message: { content: [
+      { type: "tool_result", tool_use_id: "tool-1", content: "one done" },
+      { type: "text", text: "other content" },
+      { type: "tool_result", tool_use_id: "tool-2", content: "two done" },
+    ] },
+  })));
+  assert.deepEqual(results.map((event) => event.type === "tool.result" ? event.id : null), ["tool-1", "tool-2"]);
+});

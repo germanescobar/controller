@@ -1112,10 +1112,13 @@ function mapClaudeEvent(
   if (type === "user") {
     const message = event.message as Record<string, unknown> | undefined;
     const content = Array.isArray(message?.content) ? message.content : [];
+    const events: AgentStreamEvent[] = [];
     for (const part of content) {
       const normalized = mapClaudeToolResultPart(part);
-      if (normalized) return normalized;
+      if (normalized) events.push(normalized);
     }
+    if (events.length === 1) return events[0];
+    if (events.length > 1) return events;
   }
 
   if (type === "result") {
