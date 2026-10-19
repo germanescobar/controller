@@ -1,7 +1,6 @@
 import { Router, type Request, type Response } from "express";
-import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
-import { existsSync, createWriteStream } from "node:fs";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getProject } from "../lib/projects.js";
@@ -39,7 +38,13 @@ import {
   resolveProjectScripts,
   type ProjectScriptCommand,
 } from "../lib/project-scripts.js";
-import { childProcessEnv } from "../lib/shell-env.js";
+import {
+  SETUP_TIMEOUT_MS,
+  runGitCapture,
+  runGitExitCode,
+  runScriptCommands,
+  runStreamed,
+} from "../lib/worktree-processes.js";
 import {
   buildFileIndex,
   clampInt,
@@ -52,7 +57,6 @@ import { emitWorktreeAdded, emitWorktreeRemoved, emitWorktreeUpdated } from "../
 
 export const worktreesRouter = Router();
 
-const SETUP_TIMEOUT_MS = 5 * 60 * 1000;
 const RUN_TERMINAL_ID = "run";
 
 // Track worktrees that currently have an in-flight setup run so we can refuse
@@ -1620,112 +1624,6 @@ async function purgeWorktreeArtifacts(
   if (existsSync(storeDir)) {
     await fs.rm(storeDir, { recursive: true, force: true });
   }
-}
-
-function runStreamed(
-  command: string,
-  args: string[],
-  cwd: string,
-  onData: (chunk: string, stream: "stdout" | "stderr") => void
-): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd });
-    child.stdout?.on("data", (d: Buffer) => onData(d.toString(), "stdout"));
-    child.stderr?.on("data", (d: Buffer) => onData(d.toString(), "stderr"));
-    child.on("close", (code) => resolve(code ?? 0));
-    child.on("error", () => resolve(1));
-  });
-}
-
-function runGitCapture(cwd: string, args: string[]): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd });
-    let out = "";
-    child.stdout?.on("data", (d: Buffer) => {
-      out += d.toString();
-    });
-    child.on("close", (code) => {
-      resolve(code === 0 ? out.trim() : undefined);
-    });
-    child.on("error", () => resolve(undefined));
-  });
-}
-
-function runGitExitCode(cwd: string, args: string[]): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd });
-    child.stdout?.on("data", () => {});
-    child.stderr?.on("data", () => {});
-    child.on("close", (code) => resolve(code ?? 0));
-    child.on("error", () => resolve(1));
-  });
-}
-
-async function runScriptCommands(
-  commands: ProjectScriptCommand[],
-  cwd: string,
-  env: Record<string, string>,
-  logPath: string,
-  onData: (chunk: string, stream: "stdout" | "stderr") => void
-): Promise<{ exitCode: number; timedOut: boolean }> {
-  const logStream = createWriteStream(logPath, { flags: "w" });
-  for (const command of commands) {
-    const prompt = `$ ${command.command}\n`;
-    logStream.write(prompt);
-    onData(prompt, "stdout");
-
-    const result = await runOneScriptCommand(command.command, cwd, env, logStream, onData);
-    if (result.timedOut || result.exitCode !== 0) {
-      logStream.end();
-      return result;
-    }
-  }
-
-  logStream.end();
-  return { exitCode: 0, timedOut: false };
-}
-
-function runOneScriptCommand(
-  command: string,
-  cwd: string,
-  env: Record<string, string>,
-  logStream: ReturnType<typeof createWriteStream>,
-  onData: (chunk: string, stream: "stdout" | "stderr") => void
-): Promise<{ exitCode: number; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", command], {
-      cwd,
-      env: childProcessEnv(env),
-    });
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, SETUP_TIMEOUT_MS);
-
-    child.stdout?.on("data", (d: Buffer) => writeScriptOutput(d, "stdout", logStream, onData));
-    child.stderr?.on("data", (d: Buffer) => writeScriptOutput(d, "stderr", logStream, onData));
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ exitCode: code ?? 1, timedOut });
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      onData(`spawn error: ${err.message}\n`, "stderr");
-      resolve({ exitCode: 1, timedOut });
-    });
-  });
-}
-
-function writeScriptOutput(
-  data: Buffer,
-  stream: "stdout" | "stderr",
-  logStream: ReturnType<typeof createWriteStream>,
-  onData: (chunk: string, stream: "stdout" | "stderr") => void
-): void {
-  const text = data.toString();
-  logStream.write(text);
-  onData(text, stream);
 }
 
 function formatScriptLabels(commands: ProjectScriptCommand[]): string {
