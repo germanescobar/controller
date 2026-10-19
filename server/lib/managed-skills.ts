@@ -538,7 +538,7 @@ conversation on it.
 - \`${cliPath} worktrees list [<project>]\` — list the worktrees on a project. \`<project>\` is optional: if omitted, the CLI resolves the project from the current working directory.
 - \`${cliPath} worktrees create [<project>] --name <name> [--branch <branch>] [--base <baseBranch>]\` — create a new worktree. Streams the setup-script output as it runs; the new worktree's id is printed on success. \`<project>\` is optional and falls back to the project that owns cwd.
 - \`${cliPath} worktrees delete <project> <worktreeId>\` — delete a worktree. The worktree must not have an active session.
-- \`${cliPath} sessions start [<project>] <message> --worktree <worktreeId> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>]\` — kick off a new agent turn on a worktree and print the session URL. \`<message>\` is a positional argument in the new shape (issue #355) and \`<project>\` is optional and falls back to the project that owns cwd.
+- \`${cliPath} sessions start [<project>] <message> --worktree <worktreeId> [--provider codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>] [--inactivity-timeout <duration>]\` — kick off a new agent turn on a worktree and print the session URL. \`<message>\` is positional and \`<project>\` defaults to the project that owns cwd. A duration such as \`20m\` persists on the session and applies to later turns.
 
 ## Picking a project
 
@@ -667,6 +667,7 @@ exists and you need to locate it, message it, or watch it.
 - \`${cliPath} sessions list [<project>] [--worktree <worktreeId>] [--parent <sessionId|self>] [--provider <id>] [--json] [--limit <n>]\` — enumerate sessions in a project. Filters compose. \`--json\` emits NDJSON (one object per line); \`--limit\` defaults to 100. Prints \`No sessions match.\` when the filters exclude everything.
 - \`${cliPath} sessions children <parentId|self>\` — list the children of a session across every project × worktree.
 - \`${cliPath} sessions send <targetSessionId> <message> --from <parentId|self>\` — enqueue a durable user turn on an existing session without spawning a new one.
+- \`${cliPath} sessions start <message> --worktree <worktreeId> [--inactivity-timeout <duration>]\` — start a session with an optional idle window such as \`20m\`. The setting persists on the session and applies to resumed turns.
 - \`${cliPath} sessions wake <sessionId|self> <message> [--delay <duration>] [--run-at <iso>]\` — enqueue a follow-up on a session, optionally held until a wall-clock deadline. Durations are \`30s\`, \`5m\`, \`1h\`, \`2d\`.
 - \`${cliPath} sessions goal set <sessionId|self> --condition <text> [--max-turns <n>] [--expires-at <iso>]\` — attach a completion condition the server re-evaluates after every turn.
 - \`${cliPath} sessions goal show <sessionId|self>\` — read the current goal and the evaluator's turn count.

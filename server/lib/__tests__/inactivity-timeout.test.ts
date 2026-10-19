@@ -8,9 +8,9 @@ import os from "node:os";
 import path from "node:path";
 
 /*
- * Issue #386: long CI waits (e.g. `gh pr checks --watch`) trip the 5-minute
+ * Issue #386: long CI waits (e.g. `gh pr checks --watch`) trip the
  * agent-inactivity watchdog. The endpoint exposes a per-session
- * `agentInactivityTimeoutMs` knob (5 min default; clients can extend it for
+ * `agentInactivityTimeoutMs` knob (10 min default; clients can extend it for
  * runs expected to wait on a synchronous tool call). The value persists on
  * the session file and re-applies on resume, so follow-up turns do not have
  * to re-pass it.
@@ -66,7 +66,7 @@ async function withSessionStartEnv<T>(
   const previousPath = process.env.PATH;
   const previousAgent = process.env.AGENT_INACTIVITY_TIMEOUT_MS;
   const previousPing = process.env.RUN_IDLE_PING_INTERVAL_MS;
-  // Force the default back to a known value (5 min) so a developer's
+  // Force the default back to a known value (10 min) so a developer's
   // shell env var does not bleed into the test.
   delete process.env.AGENT_INACTIVITY_TIMEOUT_MS;
   if (typeof options.runIdlePingIntervalMs === "number") {
@@ -211,6 +211,8 @@ interface InstallFakeAgentOptions {
   /** Sleep this many seconds after run.started before emitting run.completed.
    *  Used to test that the watchdog is respected on quiet tool calls */
   silentSecondsAfterStart?: number;
+  toolCall?: boolean;
+  grandchildPidFile?: string;
 }
 
 /**
@@ -225,16 +227,28 @@ async function installFakeAgent(
   options: InstallFakeAgentOptions = {}
 ): Promise<void> {
   const silentAfter = options.silentSecondsAfterStart ?? 0;
+  const toolCall = options.toolCall
+    ? `printf '%s\\n' '{"type":"tool.call","id":"long-tool","name":"exec","input":{}}'`
+    : "";
+  const toolResult = options.toolCall
+    ? `printf '%s\\n' '{"type":"tool.result","id":"long-tool","name":"exec","content":"done"}'`
+    : "";
+  const grandchild = options.grandchildPidFile
+    ? `node -e 'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(options.grandchildPidFile)}, String(process.pid)); setInterval(() => {}, 1000)' &\nwait`
+    : "";
   const script = `#!/usr/bin/env bash
 set -e
 # Emit run.started so the persistence layer + shim flush the sessionId
 # response back to the client.
 printf '%s\\n' '{"type":"run.started","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+${toolCall}
+${grandchild}
 if [ ${silentAfter} -gt 0 ]; then
   # Quiet stretch — the watchdog must NOT fire if the per-session
   # override exceeds the runtime of this silent window.
   sleep ${silentAfter}
 fi
+${toolResult}
 # Then a run.completed so the SSE handler's close path runs cleanly.
 printf '%s\\n' '{"type":"run.completed","sessionId":"${sessionId}","timestamp":"2026-01-01T00:00:01.000Z"}'
 # Drain stdin so we exit promptly when the orchestrator closes it.
@@ -323,14 +337,14 @@ test("per-session inactivity timeout is omitted from the session file when not s
 
 test("explicit opt-in at a value equal to the current default is persisted (issue #388 codex review)", async () => {
   // Regression: a user who explicitly opts in at exactly the
-  // current global default (5 min) used to be silently treated as
+  // current global default (10 min) used to be silently treated as
   // the default-fallback path, which meant a future deployment
   // changing `AGENT_INACTIVITY_TIMEOUT_MS` would silently rebind
   // the session to the new global value. Now we track
   // `explicitlySupplied` separately from the resolved value, so a
   // user opt-in is always persisted (codex review on PR #388).
   const sessionId = "sess-issue-388-explicit-default";
-  const atDefault = 5 * 60 * 1000;
+  const atDefault = 10 * 60 * 1000;
   await withSessionStartEnv(
     async ({ binDir }) => {
       await installFakeAgent(binDir, sessionId);
@@ -589,5 +603,140 @@ test("SSE handler emits run.idle events while the child is alive and quiet (issu
       );
     },
     { runIdlePingIntervalMs: 1000 }
+  );
+});
+
+test("watchdog allows a foreground tool call longer than the idle window (issue #463)", async () => {
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, "sess-tool-call", {
+        toolCall: true,
+        silentSecondsAfterStart: 3,
+      });
+    },
+    async ({ baseUrl, worktreeId }) => {
+      const params = new URLSearchParams({
+        worktreeId,
+        message: "Long tool call",
+        provider: "anita",
+        agentInactivityTimeoutMs: "1000",
+      });
+      const response = await fetch(`${baseUrl}/sessions/stream?${params}`);
+      assert.equal(response.status, 200);
+      const events = await readSse(response);
+      const types = events.flatMap((item) => {
+        if (typeof item !== "object" || item === null) return [];
+        const event = (item as { event?: { type?: string } }).event;
+        return event?.type ? [event.type] : [];
+      });
+      assert.ok(types.includes("tool.call"), `events: ${types.join(", ")}`);
+      assert.ok(types.includes("tool.result"));
+      assert.ok(types.includes("run.completed"));
+      assert.ok(!types.includes("run.failed"));
+    }
+  );
+});
+
+test("watchdog reaps a run silent outside a tool call (issue #463)", async () => {
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, "sess-silent", {
+        silentSecondsAfterStart: 3,
+      });
+    },
+    async ({ baseUrl, worktreeId }) => {
+      const params = new URLSearchParams({
+        worktreeId,
+        message: "Silent run",
+        provider: "anita",
+        agentInactivityTimeoutMs: "250",
+      });
+      const response = await fetch(`${baseUrl}/sessions/stream?${params}`);
+      assert.equal(response.status, 200);
+      const events = await readSse(response);
+      assert.ok(events.some((item) =>
+        typeof item === "object" && item !== null &&
+        (item as { event?: { type?: string } }).event?.type === "run.failed"
+      ));
+    }
+  );
+});
+
+test("resumed sessions use the persisted inactivity timeout (issue #463)", async () => {
+  const sessionId = "sess-resume-timeout";
+  await withSessionStartEnv(
+    async ({ binDir }) => {
+      await installFakeAgent(binDir, sessionId, { silentSecondsAfterStart: 3 });
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const { projectStoreDir } = await import("../../lib/paths.js");
+      const storeDir = projectStoreDir(projectPath);
+      const sessionDir = path.join(storeDir, "sessions");
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.mkdir(path.join(storeDir, "events"), { recursive: true });
+      await fs.mkdir(path.join(storeDir, "focus"), { recursive: true });
+      await fs.writeFile(path.join(sessionDir, `${sessionId}.json`), JSON.stringify({
+        id: sessionId,
+        workingDirectory: projectPath,
+        worktreeId,
+        model: "sonnet",
+        provider: "anita",
+        mode: "default",
+        messages: [],
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        status: "active",
+        agentInactivityTimeoutMs: 250,
+      }));
+      const params = new URLSearchParams({
+        worktreeId,
+        message: "Resume",
+        provider: "anita",
+        resumeSessionId: sessionId,
+      });
+      const response = await fetch(`${baseUrl}/sessions/stream?${params}`);
+      assert.equal(response.status, 200);
+      const events = await readSse(response);
+      assert.ok(events.some((item) =>
+        typeof item === "object" && item !== null &&
+        (item as { event?: { type?: string } }).event?.type === "run.failed"
+      ));
+    }
+  );
+});
+
+test("watchdog kills an agent's surviving grandchild (issue #463)", async () => {
+  if (process.platform === "win32") return;
+  let grandchildPid = 0;
+  await withSessionStartEnv(
+    async ({ binDir, homeDir }) => {
+      await installFakeAgent(binDir, "sess-grandchild", {
+        grandchildPidFile: path.join(homeDir, "grandchild.pid"),
+      });
+    },
+    async ({ baseUrl, worktreeId, homeDir }) => {
+      const params = new URLSearchParams({
+        worktreeId,
+        message: "Grandchild run",
+        provider: "anita",
+        agentInactivityTimeoutMs: "500",
+      });
+      const response = await fetch(`${baseUrl}/sessions/stream?${params}`);
+      assert.equal(response.status, 200);
+      const pidFile = path.join(homeDir, "grandchild.pid");
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        try {
+          grandchildPid = Number(await fs.readFile(pidFile, "utf8"));
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      assert.ok(grandchildPid > 0, "grandchild did not start");
+      await readSse(response);
+      await new Promise((resolve) => setTimeout(resolve, 2300));
+      assert.throws(() => process.kill(grandchildPid, 0), { code: "ESRCH" });
+    }
   );
 });

@@ -142,17 +142,16 @@ function isBenignProviderStderrLine(line: string): boolean {
   return false;
 }
 
-// Kill a spawned agent that produces no stdout for this long — catches hangs
-// where the process is alive but stalled (e.g. an upstream request that never
-// streams). Long-running tool calls (builds, tests) still emit start/finish
-// events, so a multi-minute window avoids false positives. Override per-deploy
+// Kill a spawned agent that produces no output between tool calls for this
+// long — catches hangs such as an upstream request that never streams.
+// Tool calls can be silent for their entire duration. Override per-deploy
 // (this constant) or per-session via the `agentInactivityTimeoutMs` query/body
 // field on `POST /sessions` (issue #386). The per-session override is
 // persisted on the session file and re-applied on resume so the user does not
 // have to re-pass it on follow-up turns.
 const DEFAULT_AGENT_INACTIVITY_TIMEOUT_MS = (() => {
   const parsed = Number(process.env.AGENT_INACTIVITY_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5 * 60 * 1000;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10 * 60 * 1000;
 })();
 // Comment-line ping so idle proxies don't drop a quiet SSE connection.
 const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
@@ -161,7 +160,7 @@ const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
 // UI's "still running" indicator so users see progress during long
 // synchronous tool calls instead of a frozen transcript. Not persisted;
 // purely a liveness signal. Cadence is shorter than the default inactivity
-// window (5 min) but long enough that the SSE stays quiet under normal
+// window (10 min) but long enough that the SSE stays quiet under normal
 // traffic. Read from the `RUN_IDLE_PING_INTERVAL_MS` env var on each call
 // so test suites can shrink the cadence without restarting the process;
 // production deployments leave the var unset (defaults to 30s).
@@ -178,7 +177,7 @@ function resolveRunIdlePingIntervalMs(): number {
  * Resolve the per-session inactivity timeout (issue #386). The query-param
  * value (when a positive integer) wins; otherwise we honor an override
  * previously persisted on the session file; otherwise we fall back to the
- * global `AGENT_INACTIVITY_TIMEOUT_MS` env var, then the 5-minute default.
+ * global `AGENT_INACTIVITY_TIMEOUT_MS` env var, then the 10-minute default.
  *
  * `explicitlySupplied` is `true` only when the caller passed a positive
  * `agentInactivityTimeoutMs` on this turn — even if the value happens to
@@ -782,9 +781,9 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     parentId?: string;
     // Optional per-session agent-inactivity timeout in ms (issue
     // #386). When the session is expected to run a long synchronous
-    // tool call (e.g. `gh pr checks --watch` waiting on CI), the
-    // client can extend the watchdog window above the 5-minute
-    // default here. Persisted on the session file and re-applied on
+    // run with long quiet periods between tool calls, the client can
+    // extend the watchdog window above the 10-minute default here.
+    // Persisted on the session file and re-applied on
     // resume so the user does not need to re-pass it on follow-up
     // turns. Negative or zero values are rejected by the SSE
     // handler; non-integers are ignored and the default applies.
@@ -2055,6 +2054,7 @@ export async function handleSessionStream(
   let heartbeat: NodeJS.Timeout | undefined;
   let watchdog: NodeJS.Timeout | undefined;
   let watchdogFired = false;
+  const activeToolCalls = new Set<string>();
   // In-memory liveness ping (issue #386). Sends a lightweight `run.idle`
   // event every RUN_IDLE_PING_INTERVAL_MS while the child is alive and no
   // terminal event has fired, so the UI can render a visible "still
@@ -2080,8 +2080,8 @@ export async function handleSessionStream(
   function resetWatchdog() {
     if (watchdogFired) return;
     if (watchdog) clearTimeout(watchdog);
-    // A pending approval is a deliberate wait on the user, not a stalled run.
-    if (awaitingApproval) {
+    // Approvals and foreground tool calls can wait silently by design.
+    if (awaitingApproval || activeToolCalls.size > 0) {
       watchdog = undefined;
       return;
     }
@@ -2101,7 +2101,7 @@ export async function handleSessionStream(
       if (child.exitCode === null && !child.killed) {
         signalAgentProcess(child, "SIGTERM");
         setTimeout(() => {
-          if (child.exitCode === null) signalAgentProcess(child, "SIGKILL");
+          signalAgentProcess(child, "SIGKILL");
         }, 2000);
       }
       return;
@@ -2123,7 +2123,7 @@ export async function handleSessionStream(
     if (child.exitCode === null && !child.killed) {
       signalAgentProcess(child, "SIGTERM");
       setTimeout(() => {
-        if (child.exitCode === null) signalAgentProcess(child, "SIGKILL");
+        signalAgentProcess(child, "SIGKILL");
       }, 2000);
     }
   }
@@ -2206,6 +2206,13 @@ export async function handleSessionStream(
           const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
           for (const event of events) {
             if (pausedForClaudeUserInput) break;
+            if (event.type === "tool.call") {
+              activeToolCalls.add(event.id);
+              resetWatchdog();
+            } else if (event.type === "tool.result") {
+              activeToolCalls.delete(event.id);
+              resetWatchdog();
+            }
             eventProcessing = eventProcessing
               .then(async () => {
                 // Persist session metadata on run.started so
