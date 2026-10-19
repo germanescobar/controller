@@ -13,6 +13,7 @@ import {
   setScheduleEnabled,
   type ScheduleInput,
 } from "../lib/schedules.js";
+import { rejectUnsafeIdParam } from "./safe-id-param.js";
 
 /*
  * REST surface for schedules (issue #243), mirroring the `controller
@@ -20,6 +21,7 @@ import {
  * Mounted under `/api/projects`.
  */
 export const schedulesRouter = Router();
+rejectUnsafeIdParam(schedulesRouter, "scheduleId", "schedule");
 
 schedulesRouter.get("/:projectId/schedules", async (req, res) => {
   try {

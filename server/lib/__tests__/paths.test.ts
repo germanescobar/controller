@@ -20,6 +20,11 @@ import {
   orchestratorHome,
   controllerHomeId,
   defaultHomeForPlatform,
+  assertSafeId,
+  InvalidIdError,
+  isSafeId,
+  projectScheduleFile,
+  sessionQueueFile,
 } from "../paths.js";
 
 test("controllerHomeId identifies a directory through its symlink", () => {
@@ -199,6 +204,29 @@ test("whitespace-only CONTROLLER_HOME is ignored", () => {
   } finally {
     restoreEnv(snapshot);
   }
+});
+
+test("isSafeId accepts real session and schedule id formats (issue #453)", () => {
+  for (const id of [
+    "2055adeb-d615-419d-a490-a133c8253fb8",
+    "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+    "sess-issue-376-synthetic-run-failed",
+    "Run_1",
+  ]) {
+    assert.equal(isSafeId(id), true, id);
+  }
+});
+
+test("isSafeId rejects traversal, separators, dots and empty ids (issue #453)", () => {
+  for (const id of ["", ".", "..", "../../x", "a/b", "a\\b", "a.b", "x".repeat(129), "a b"]) {
+    assert.equal(isSafeId(id), false, id);
+  }
+});
+
+test("id-keyed path builders throw InvalidIdError on traversal ids (issue #453)", () => {
+  assert.throws(() => assertSafeId("../x", "schedule"), InvalidIdError);
+  assert.throws(() => projectScheduleFile("/tmp/project", "../../../api-keys"), InvalidIdError);
+  assert.throws(() => sessionQueueFile("..\\x"), InvalidIdError);
 });
 
 test("cleanup: each test's temp dir is removed", () => {
