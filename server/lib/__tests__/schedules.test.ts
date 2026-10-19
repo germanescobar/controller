@@ -271,3 +271,18 @@ test("runDueSchedules fires only schedules whose nextRunAt has passed", async ()
     assert.equal((await getSchedule(projectPath, future.id))?.enabled, true);
   });
 });
+
+test("getSchedule/removeSchedule reject traversal ids without touching files outside the store (issue #453)", async () => {
+  await withHome(async (projectPath) => {
+    // The schedules dir is `<home>/projects/<key>/schedules`, so three `..`
+    // segments land on `<home>/decoy.json`.
+    const home = process.env.CONTROLLER_HOME as string;
+    const decoy = path.join(home, "decoy.json");
+    await fs.writeFile(decoy, JSON.stringify({ id: "decoy" }));
+
+    assert.equal(await getSchedule(projectPath, "../../../decoy"), null);
+    assert.equal(await removeSchedule(projectPath, "../../../decoy"), false);
+    assert.deepEqual(await listScheduleRuns(projectPath, "../../../decoy"), []);
+    assert.equal(await fs.readFile(decoy, "utf-8"), JSON.stringify({ id: "decoy" }));
+  });
+});

@@ -26,6 +26,32 @@ import { realpathSync, statSync } from "node:fs";
  * lands the contents at the new location, the server picks them up.
  */
 
+/*
+ * Ids used as file-name components (sessions, schedules, queues, focus and
+ * goal sidecars) must never escape their store directory (issue #453).
+ * Express decodes route params, so `..%2F..%2Fx` would otherwise resolve
+ * outside the store. Real ids are uuids (Claude, Codex, schedules) or
+ * slug-like strings, so dots and separators are rejected outright.
+ */
+const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Thrown when an id is not safe to use as a file-name component. */
+export class InvalidIdError extends Error {
+  constructor(kind: string, id: string) {
+    super(`Invalid ${kind} id: ${JSON.stringify(id)}`);
+    this.name = "InvalidIdError";
+  }
+}
+
+export function isSafeId(id: string): boolean {
+  return SAFE_ID_PATTERN.test(id);
+}
+
+/** Throws `InvalidIdError` unless `id` is safe to embed in a file name. */
+export function assertSafeId(id: string, kind = "resource"): void {
+  if (!isSafeId(id)) throw new InvalidIdError(kind, id);
+}
+
 export function orchestratorHome(): string {
   const override = process.env.CONTROLLER_HOME?.trim();
   if (override) return override;
@@ -155,6 +181,7 @@ export function sessionFocusDir(): string {
 
 /** Per-session focus sidecar, keyed by the session id. */
 export function sessionFocusFile(sessionId: string): string {
+  assertSafeId(sessionId, "session");
   return path.join(sessionFocusDir(), `${sessionId}.json`);
 }
 
@@ -175,6 +202,7 @@ export function sessionGoalsDir(): string {
 
 /** Per-session goal sidecar, keyed by the session id. */
 export function sessionGoalFile(sessionId: string): string {
+  assertSafeId(sessionId, "session");
   return path.join(sessionGoalsDir(), `${sessionId}.json`);
 }
 
@@ -218,6 +246,7 @@ export function projectSchedulesDir(projectPath: string): string {
 
 /** Per-schedule JSON file, keyed by the schedule's uuid. */
 export function projectScheduleFile(projectPath: string, scheduleId: string): string {
+  assertSafeId(scheduleId, "schedule");
   return path.join(projectSchedulesDir(projectPath), `${scheduleId}.json`);
 }
 
@@ -231,6 +260,7 @@ export function projectSchedulesIndexFile(projectPath: string): string {
 
 /** Per-schedule run history (materialized sessions), keyed by schedule id. */
 export function projectScheduleRunsFile(projectPath: string, scheduleId: string): string {
+  assertSafeId(scheduleId, "schedule");
   return path.join(projectSchedulesDir(projectPath), `${scheduleId}.runs.json`);
 }
 
@@ -249,6 +279,7 @@ export function sessionQueuesDir(): string {
 
 /** Per-session queue file, keyed by the provider-generated session id. */
 export function sessionQueueFile(sessionId: string): string {
+  assertSafeId(sessionId, "session");
   return path.join(sessionQueuesDir(), `${sessionId}.json`);
 }
 

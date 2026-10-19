@@ -13,6 +13,7 @@ import {
   worktreeNotFoundPayload,
 } from "../lib/worktrees.js";
 import { projectStoreDir } from "../lib/paths.js";
+import { rejectUnsafeIdParam } from "./safe-id-param.js";
 import {
   sharedDedupeUserMessageEvents as dedupeUserMessageEvents,
   sharedParseSkillMarker as parseSkillMarker,
@@ -425,6 +426,8 @@ async function persistRunDiffEvent(
 }
 
 export const sessionsRouter = Router();
+rejectUnsafeIdParam(sessionsRouter, "sessionId", "session");
+rejectUnsafeIdParam(sessionsRouter, "attachmentId", "attachment");
 
 sessionsRouter.post("/:projectId/attachments", async (req, res) => {
   const project = await getProject(req.params.projectId);
@@ -3490,6 +3493,7 @@ sessionsRouter.post(
 // for those. The shared `locateSessionById` helper below enumerates every
 // project × worktree pair.
 export const wakeBySessionIdRouter = Router();
+rejectUnsafeIdParam(wakeBySessionIdRouter, "sessionId", "session");
 wakeBySessionIdRouter.post("/:sessionId/wake", async (req, res) => {
   const located = await locateSessionById(req.params.sessionId);
   if (!located) {
@@ -3564,6 +3568,7 @@ wakeBySessionIdRouter.post("/:sessionId/wake", async (req, res) => {
 // message after their current turn completes.
 
 export const sendBySessionIdRouter = Router();
+rejectUnsafeIdParam(sendBySessionIdRouter, "sessionId", "session");
 
 type FollowUpTarget = {
   session: NonNullable<Awaited<ReturnType<typeof getSession>>>;
@@ -3683,6 +3688,7 @@ sendBySessionIdRouter.post(
 // neither the CLI nor the sidebar has to thread a project id.
 
 export const childrenBySessionIdRouter = Router();
+rejectUnsafeIdParam(childrenBySessionIdRouter, "sessionId", "session");
 
 childrenBySessionIdRouter.get(
   "/:sessionId/children",
@@ -3910,6 +3916,7 @@ sessionsRouter.put(
 // `show` and `clear` stay unguarded — they're idempotent and safe to
 // run against a missing session id (the goal file just doesn't exist).
 export const goalBySessionIdRouter = Router();
+rejectUnsafeIdParam(goalBySessionIdRouter, "sessionId", "session");
 goalBySessionIdRouter.get("/:sessionId/goal", async (req, res) => {
   const { readSessionGoal } = await import("../lib/goal-state.js");
   const goal = await readSessionGoal(req.params.sessionId);
@@ -4104,6 +4111,7 @@ sessionsRouter.delete(
 // wake + goal surfaces walk it (issue #339 review: enumerates every
 // worktree, not just the main one).
 export const monitorBySessionIdRouter = Router();
+rejectUnsafeIdParam(monitorBySessionIdRouter, "sessionId", "session");
 monitorBySessionIdRouter.post(
   "/:sessionId/monitors",
   async (req, res) => {
@@ -5125,6 +5133,7 @@ function readText(m: Record<string, unknown>): string {
  *     UI banner on a session page.
  */
 export const collisionsRouter = Router();
+rejectUnsafeIdParam(collisionsRouter, "sessionId", "session");
 
 collisionsRouter.get("/collisions", async (_req, res) => {
   const reports = await listAllCollisions();

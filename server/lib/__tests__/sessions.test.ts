@@ -22,7 +22,7 @@ import {
   writeSessionFocus,
   type SessionFocus,
 } from "../focus-state.js";
-import { projectStoreDir } from "../paths.js";
+import { InvalidIdError, projectStoreDir } from "../paths.js";
 
 /*
  * Runs `run` against a fresh temp project directory and an isolated
@@ -657,5 +657,21 @@ test("updateSessionTitle returns null for a malformed session file (PR #142 revi
     writeSessionFile(projectPath, "session-1", "{ not valid json");
     const updated = await updateSessionTitle(projectPath, "session-1", "new title");
     assert.equal(updated, null, "title update on a malformed file must report failure, not throw");
+  });
+});
+
+test("session file accessors reject traversal ids without touching files outside the store (issue #453)", async () => {
+  await withTempProject(async (projectPath) => {
+    // The sessions dir is `<home>/projects/<key>/sessions`, so three `..`
+    // segments land on `<home>/decoy.json`.
+    const home = process.env.CONTROLLER_HOME as string;
+    const decoy = path.join(home, "decoy.json");
+    const original = JSON.stringify(makeSession({ id: "decoy" }));
+    writeFileSync(decoy, original);
+
+    await assert.rejects(getSession(projectPath, "../../../decoy"), InvalidIdError);
+    await assert.rejects(archiveSession(projectPath, "../../../decoy"), InvalidIdError);
+    await assert.rejects(updateSessionTitle(projectPath, "../../../decoy", "pwned"), InvalidIdError);
+    assert.equal(readFileSync(decoy, "utf-8"), original);
   });
 });

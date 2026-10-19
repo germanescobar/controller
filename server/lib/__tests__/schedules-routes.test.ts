@@ -149,3 +149,18 @@ test("schedule routes 404 on unknown project and schedule", async () => {
     assert.equal(unknownSchedule.status, 404);
   });
 });
+
+test("schedule routes return 400 for an encoded traversal id (issue #453)", async () => {
+  await withRoutes(async ({ baseUrl }) => {
+    const home = process.env.CONTROLLER_HOME as string;
+    const projectsFile = path.join(home, "projects.json");
+    const before = await fs.readFile(projectsFile, "utf-8");
+    const traversal = encodeURIComponent("../../../projects");
+
+    const getRes = await fetch(`${baseUrl}/schedules/${traversal}`);
+    assert.equal(getRes.status, 400);
+    const deleteRes = await fetch(`${baseUrl}/schedules/${traversal}`, { method: "DELETE" });
+    assert.equal(deleteRes.status, 400);
+    assert.equal(await fs.readFile(projectsFile, "utf-8"), before);
+  });
+});
