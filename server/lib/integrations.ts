@@ -22,6 +22,7 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { integrationsFile, integrationSecretsFile, ensureOrchestratorHome } from "./paths.js";
+import { withLock } from "./json-registry.js";
 import { readSecretJson, writeSecretJson } from "./secret-store.js";
 
 /** How Controller reaches the backend. See the UI descriptor for fields. */
@@ -197,7 +198,7 @@ export async function createConnection(
 
   registry.push(connection);
   await writeRegistry(registry);
-  if (Object.keys(secrets).length > 0) await writeConnectionSecrets(id, secrets);
+  if (Object.keys(secrets).length > 0) await updateConnectionSecrets(id, () => secrets);
   return connection;
 }
 
@@ -256,7 +257,7 @@ export async function deleteConnection(id: string): Promise<boolean> {
   const next = registry.filter((c) => c.id !== id);
   if (next.length === registry.length) return false;
   await writeRegistry(next);
-  await removeConnectionSecrets(id);
+  await updateConnectionSecrets(id, () => ({}));
   return true;
 }
 
@@ -281,33 +282,32 @@ async function reconcileSchemes(
   current: AuthScheme[],
   inputs: AuthSchemeInput[]
 ): Promise<AuthScheme[]> {
-  const store = await readSecrets();
-  const secrets = { ...(store[connectionId] ?? {}) };
   const byId = new Map(current.map((s) => [s.id, s]));
-  const kept = new Set<string>();
-
-  const schemes = inputs.map((input) => {
+  const planned = inputs.map((input) => {
     const prior = input.id ? byId.get(input.id) : undefined;
-    const schemeId = prior ? prior.id : randomUUID();
-    kept.add(schemeId);
+    return { input, prior, schemeId: prior ? prior.id : randomUUID() };
+  });
+  const kept = new Set(planned.map((p) => p.schemeId));
 
-    if (input.secret !== undefined) {
+  const secrets = await updateConnectionSecrets(connectionId, (next) => {
+    for (const { input, schemeId } of planned) {
+      if (input.secret === undefined) continue;
       const value = input.secret.trim();
-      if (value === "") delete secrets[schemeId];
-      else secrets[schemeId] = value;
+      if (value === "") delete next[schemeId];
+      else next[schemeId] = value;
     }
+    for (const schemeId of Object.keys(next)) {
+      if (!kept.has(schemeId)) delete next[schemeId];
+    }
+    return next;
+  });
 
+  return planned.map(({ input, prior, schemeId }) => {
     // Preserve acquired state only when the acquisition kind is unchanged.
     const priorAcquired =
       prior && prior.acquisition === input.acquisition ? prior.acquired : undefined;
     return buildScheme(schemeId, input, !!secrets[schemeId], priorAcquired);
   });
-
-  for (const schemeId of Object.keys(secrets)) {
-    if (!kept.has(schemeId)) delete secrets[schemeId];
-  }
-  await writeConnectionSecrets(connectionId, secrets);
-  return schemes;
 }
 
 function buildScheme(
@@ -354,21 +354,29 @@ async function readSecrets(): Promise<SecretStore> {
   return readSecretJson<SecretStore>(integrationSecretsFile(), {});
 }
 
-async function writeConnectionSecrets(
+/**
+ * Atomically update one connection's secrets: read the store, apply `mutate`
+ * to a copy of the connection's current secrets, and write the result, all
+ * under the per-file lock. Secrets are shared by OAuth token refresh and the
+ * integrations UI, so callers must express changes as a mutation of the
+ * current value rather than writing a record computed before the lock was
+ * held — otherwise concurrent updates drop each other's credentials
+ * (issue #469). Returning an empty record removes the connection's entry.
+ * Resolves to the connection's secrets as written.
+ */
+export async function updateConnectionSecrets(
   connectionId: string,
-  secrets: Record<string, string>
-): Promise<void> {
-  const store = await readSecrets();
-  if (Object.keys(secrets).length === 0) delete store[connectionId];
-  else store[connectionId] = secrets;
-  await writeSecretJson(integrationSecretsFile(), store);
-}
-
-export { writeConnectionSecrets };
-
-async function removeConnectionSecrets(connectionId: string): Promise<void> {
-  const store = await readSecrets();
-  if (!(connectionId in store)) return;
-  delete store[connectionId];
-  await writeSecretJson(integrationSecretsFile(), store);
+  mutate: (current: Record<string, string>) => Record<string, string>
+): Promise<Record<string, string>> {
+  return withLock(integrationSecretsFile(), async () => {
+    const store = await readSecrets();
+    const next = mutate({ ...(store[connectionId] ?? {}) });
+    const empty = Object.keys(next).length === 0;
+    // Nothing stored and nothing to store: skip the write.
+    if (empty && !(connectionId in store)) return next;
+    if (empty) delete store[connectionId];
+    else store[connectionId] = next;
+    await writeSecretJson(integrationSecretsFile(), store);
+    return next;
+  });
 }

@@ -29,7 +29,7 @@ import {
   getConnection,
   getConnectionSecrets,
   updateSchemeAcquired,
-  writeConnectionSecrets,
+  updateConnectionSecrets,
 } from "./integrations.js";
 import { fetchAndReadWithTimeout, fetchWithTimeout } from "./http-fetch.js";
 
@@ -387,9 +387,10 @@ export async function startInteractiveOauth(
 
 /** Clear an `oauth_dynamic` scheme's stored token + state. */
 export async function clearDynamicOauth(connectionId: string, schemeId: string): Promise<void> {
-  const secrets = await getConnectionSecrets(connectionId);
-  delete secrets[schemeId];
-  await writeConnectionSecrets(connectionId, secrets);
+  await updateConnectionSecrets(connectionId, (secrets) => {
+    delete secrets[schemeId];
+    return secrets;
+  });
   for (const key of Array.from(cache.keys())) {
     if (key === `${connectionId}:${schemeId}`) cache.delete(key);
   }
@@ -1028,9 +1029,10 @@ async function saveSecret(
   schemeId: string,
   value: OAuthDynamicSecret
 ): Promise<void> {
-  const secrets = await getConnectionSecrets(connectionId);
-  secrets[schemeId] = JSON.stringify(value);
-  await writeConnectionSecrets(connectionId, secrets);
+  await updateConnectionSecrets(connectionId, (secrets) => ({
+    ...secrets,
+    [schemeId]: JSON.stringify(value),
+  }));
 }
 
 function toCached(secret: OAuthDynamicSecret): CachedToken {
