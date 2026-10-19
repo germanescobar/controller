@@ -457,6 +457,47 @@ test("stopMonitor kills the whole process group", async () => {
   });
 });
 
+// PR #459 review: once the shell exits, its pgid can be recycled by an
+// unrelated process group, so neither the deadline nor a later stop may
+// signal it.
+test("a naturally exited monitor never signals its process group", async (t) => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const signalledPids: number[] = [];
+    const originalKill = process.kill.bind(process);
+    t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+      signalledPids.push(pid);
+      return originalKill(pid, signal);
+    });
+    const monitor = startMonitor({
+      sessionId: "s-recycled",
+      worktreePath: proj,
+      description: "exits immediately",
+      // `$$` is the shell's pid, which is also the monitor's pgid.
+      command: "echo $$",
+      persistent: false,
+      timeoutMs: 1_000,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitFor(
+      () => listMonitors("s-recycled")[0]?.status === "exited",
+      2_000
+    );
+    await waitForEvents(proj, "s-recycled", 1);
+    const [pgidLine] = await monitorLines(proj, "s-recycled");
+    const pgid = Number(pgidLine);
+    assert.ok(Number.isInteger(pgid) && pgid > 0, `bad pgid ${pgidLine}`);
+    // Outlive the deadline, then stop explicitly.
+    await new Promise((resolve) =>
+      setTimeout(resolve, monitor.deadlineAt! - Date.now() + 200)
+    );
+    assert.equal(stopMonitor(monitor.id)?.status, "exited");
+    // Earlier tests' SIGKILL escalations may land in this window, so only
+    // this monitor's group id is asserted on.
+    assert.equal(signalledPids.includes(-pgid), false);
+  });
+});
+
 test("a final stdout line without a trailing newline is flushed on exit", async () => {
   await withTempHome(async (home) => {
     const proj = projectPath(home);

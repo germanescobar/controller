@@ -72,10 +72,16 @@ interface ActiveMonitor {
    * The live child process. `null` for test-only entries
    * seeded via `__seedMonitorForTests` — production code
    * always populates this with the spawned `ChildProcess`.
-   * `stopMonitor` guards the `kill` call so a `null` here
-   * is safe (the SIGTERM is a no-op).
+   * `stopMonitor` skips signalling when this is `null`.
    */
   child: ChildProcess | null;
+  /**
+   * Set once the shell (process-group leader) exits or fails to spawn.
+   * After that the pgid may be recycled, so the monitor never signals it.
+   */
+  leaderExited: boolean;
+  /** Deadline auto-kill timer; cleared on leader exit and on stop. */
+  deadlineTimer: NodeJS.Timeout | null;
   /** Pending event-log writes — chained so they serialize per monitor. */
   writeChain: Promise<unknown>;
 }
@@ -180,6 +186,8 @@ export function startMonitor(params: {
   const active: ActiveMonitor = {
     monitor,
     child,
+    leaderExited: false,
+    deadlineTimer: null,
     writeChain: Promise.resolve(),
   };
   monitors.set(id, active);
@@ -248,6 +256,7 @@ export function startMonitor(params: {
   }
   child.on("exit", () => {
     monitor.status = "exited";
+    markLeaderExited(active);
     // Mark the monitor as exited in-place rather than removing the
     // entry — a process that finishes naturally (e.g. `printf`) is
     // still a meaningful record: the agent can read its lineCount
@@ -258,13 +267,15 @@ export function startMonitor(params: {
   });
   child.on("error", (error) => {
     monitor.status = "exited";
+    markLeaderExited(active);
     emitLine(`[error] ${error.message}`, false);
   });
   if (deadlineAt != null) {
     const remaining = deadlineAt - Date.now();
-    setTimeout(() => {
-      if (monitors.has(id)) terminateMonitorProcess(child);
-    }, Math.max(0, remaining)).unref?.();
+    active.deadlineTimer = setTimeout(() => {
+      if (monitors.has(id)) terminateMonitorProcess(active);
+    }, Math.max(0, remaining));
+    active.deadlineTimer.unref?.();
   }
   return { ...monitor };
 }
@@ -295,9 +306,8 @@ export function stopMonitor(monitorIdId: string): Monitor | null {
   const active = monitors.get(monitorIdId);
   if (!active) return null;
   monitors.delete(monitorIdId);
-  // Test-only seeded entries from `__seedMonitorForTests` have
-  // `child: null`; the map entry is gone either way.
-  if (active.child) terminateMonitorProcess(active.child);
+  if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+  terminateMonitorProcess(active);
   return { ...active.monitor };
 }
 
@@ -351,16 +361,32 @@ function pipeLines(stream: Readable, onLine: (line: string) => void): void {
   });
 }
 
+function markLeaderExited(active: ActiveMonitor): void {
+  active.leaderExited = true;
+  if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+  active.deadlineTimer = null;
+}
+
 /**
  * SIGTERM the monitor's process tree, then SIGKILL whatever is left of
  * the group after `KILL_GRACE_MS`. The escalation timer is unref'd so it
  * never holds the server open during shutdown.
+ *
+ * Once the leader has exited the monitor sends no signals at all: the
+ * pgid may already belong to an unrelated group. Descendants that
+ * outlive a naturally exited leader are out of scope.
  */
-function terminateMonitorProcess(child: ChildProcess): void {
-  // Only escalate when the group was alive: re-signalling a vanished
-  // group id later could hit an unrelated group that reused the pid.
+function terminateMonitorProcess(active: ActiveMonitor): void {
+  // Test-only seeded entries from `__seedMonitorForTests` have no child.
+  const { child } = active;
+  if (!child || active.leaderExited) return;
+  // Only escalate when SIGTERM reached a live group.
   if (!signalMonitorProcess(child, "SIGTERM") || child.pid === undefined) return;
   const pid = child.pid;
+  // The leader may exit during the grace period. That is still safe: a
+  // surviving group member keeps the pgid reserved, and an empty group
+  // returns ESRCH. The only reuse window is an empty group whose id is
+  // recycled within KILL_GRACE_MS.
   setTimeout(() => {
     try {
       process.kill(-pid, "SIGKILL");
@@ -433,6 +459,8 @@ export function __seedMonitorForTests(monitor: Monitor): void {
     monitor,
     // Keeping this null makes the test-only intent explicit.
     child: null,
+    leaderExited: false,
+    deadlineTimer: null,
     writeChain: Promise.resolve(),
   };
   monitors.set(monitor.id, active);
