@@ -8,12 +8,15 @@ import {
   getSchedule,
   listSchedules,
   listScheduleRuns,
+  MAX_SCHEDULE_RUNS,
   removeSchedule,
   runDueSchedules,
   setScheduleEnabled,
   tryFireSchedule,
   type SchedulesConsumerDeps,
+  type ScheduleRun,
 } from "../schedules.js";
+import { projectSchedulesIndexFile, projectScheduleRunsFile } from "../paths.js";
 
 /*
  * Issue #243: the schedule store and tick consumer. The race test is the
@@ -284,5 +287,87 @@ test("getSchedule/removeSchedule reject traversal ids without touching files out
     assert.equal(await removeSchedule(projectPath, "../../../decoy"), false);
     assert.deepEqual(await listScheduleRuns(projectPath, "../../../decoy"), []);
     assert.equal(await fs.readFile(decoy, "utf-8"), JSON.stringify({ id: "decoy" }));
+  });
+});
+
+test("a corrupt index is rebuilt from the schedule files instead of dropping schedules (issue #470)", async () => {
+  await withHome(async (projectPath) => {
+    const runAt = "2026-06-26T08:00:00.000Z";
+    await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "first", runAt });
+    await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "second", runAt });
+    // Simulate a torn write of the index.
+    await fs.writeFile(projectSchedulesIndexFile(projectPath), '[{"id": "trunc');
+
+    await createSchedule(projectPath, "proj-1", { worktreeId: "wt-1", prompt: "third", runAt });
+
+    const prompts = (await listSchedules(projectPath)).map((s) => s.prompt).sort();
+    assert.deepEqual(prompts, ["first", "second", "third"]);
+
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: `sess-${params.prompt}` };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired.sort(), ["first", "second", "third"]);
+  });
+});
+
+test("a missing index falls back to the schedule files so the tick still sees them", async () => {
+  await withHome(async (projectPath) => {
+    const schedule = await createSchedule(projectPath, "proj-1", {
+      worktreeId: "wt-1",
+      prompt: "orphaned",
+      runAt: "2026-06-26T08:00:00.000Z",
+    });
+    await fs.rm(projectSchedulesIndexFile(projectPath));
+
+    const fired: string[] = [];
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async (params) => {
+        fired.push(params.prompt);
+        return { sessionId: "sess-1" };
+      },
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await runDueSchedules(new Date("2026-06-26T08:05:00.000Z"), deps);
+    assert.deepEqual(fired, ["orphaned"]);
+    assert.deepEqual((await listSchedules(projectPath)).map((s) => s.id), [schedule.id]);
+  });
+});
+
+test("run history is capped at MAX_SCHEDULE_RUNS, keeping the newest", async () => {
+  await withHome(async (projectPath) => {
+    const schedule = await createSchedule(projectPath, "proj-1", {
+      worktreeId: "wt-1",
+      prompt: "every minute",
+      runAt: "2026-06-26T08:00:00.000Z",
+    });
+    const seeded: ScheduleRun[] = Array.from({ length: MAX_SCHEDULE_RUNS }, (_, i) => ({
+      firedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+      sessionId: `old-${i}`,
+      error: null,
+    }));
+    await fs.writeFile(
+      projectScheduleRunsFile(projectPath, schedule.id),
+      JSON.stringify(seeded)
+    );
+
+    const deps: SchedulesConsumerDeps = {
+      listProjects: async () => [{ id: "proj-1", path: projectPath }],
+      startSession: async () => ({ sessionId: "newest" }),
+      now: () => new Date("2026-06-26T08:05:00.000Z"),
+    };
+    await tryFireSchedule(projectPath, "proj-1", schedule.id, deps);
+
+    const runs = await listScheduleRuns(projectPath, schedule.id);
+    assert.equal(runs.length, MAX_SCHEDULE_RUNS);
+    assert.equal(runs[0].sessionId, "old-1", "the oldest run is dropped");
+    assert.equal(runs[runs.length - 1].sessionId, "newest");
   });
 });
