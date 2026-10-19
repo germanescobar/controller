@@ -34,6 +34,30 @@ export interface SessionRuntimeState {
 }
 
 const runtimes = new Map<string, SessionRuntimeState>();
+const runStarts = new Map<string, Promise<void>>();
+const releaseRunStarts = new Map<string, () => void>();
+
+/** Reserve a resumed session before asynchronous preflight or provider startup. */
+export function claimSessionRunStart(sessionId: string): boolean {
+  if (runStarts.has(sessionId) || getSessionRuntime(sessionId).active) return false;
+  let release!: () => void;
+  runStarts.set(sessionId, new Promise<void>((resolve) => { release = resolve; }));
+  releaseRunStarts.set(sessionId, release);
+  return true;
+}
+
+export function releaseSessionRunStart(sessionId: string): void {
+  const release = releaseRunStarts.get(sessionId);
+  if (!release) return;
+  releaseRunStarts.delete(sessionId);
+  runStarts.delete(sessionId);
+  release();
+}
+
+/** Queue consumers wait for an in-progress start before checking active state. */
+export async function waitForSessionRunStart(sessionId: string): Promise<void> {
+  await runStarts.get(sessionId);
+}
 
 export function markSessionActive(
   sessionId: string,

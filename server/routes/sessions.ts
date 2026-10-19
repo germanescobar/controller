@@ -82,13 +82,16 @@ import {
 } from "../lib/mentions.js";
 import { encodeSelectionsWire } from "../../shared/diff-selection.js";
 import {
+  claimSessionRunStart,
   consumePendingApproval,
   getSessionRuntime,
   markSessionActive,
   markSessionInactive,
   recordSessionAttentionEvent,
+  releaseSessionRunStart,
   setSessionAwaitingUserInput,
   stopSessionRuntime,
+  waitForSessionRunStart,
 } from "../lib/session-runtime.js";
 import {
   emitSessionAdded,
@@ -1406,6 +1409,23 @@ export async function handleSessionStream(
   req: Request<{ projectId: string }>,
   res: Response
 ) {
+  const sessionId = req.query.resumeSessionId;
+  const claimed = typeof sessionId === "string" && sessionId.length > 0;
+  if (claimed && !claimSessionRunStart(sessionId)) {
+    res.status(409).json({ error: "A run is already active for this session" });
+    return;
+  }
+  try {
+    await startSessionStream(req, res);
+  } finally {
+    if (claimed) releaseSessionRunStart(sessionId);
+  }
+}
+
+async function startSessionStream(
+  req: Request<{ projectId: string }>,
+  res: Response
+) {
   const project = await getProject(req.params.projectId);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
@@ -1797,6 +1817,13 @@ export async function handleSessionStream(
     autoApprove,
     systemPrompt: usesSystemPrompt ? controllerPreamble : undefined,
   });
+  if (controllerSessionId) {
+    markSessionActive(controllerSessionId, {
+      provider: providerId,
+      child,
+      metadata: { projectId: req.params.projectId, worktreeId: worktree.id },
+    });
+  }
   const parseProviderEvent =
     provider.createParser?.(autoApprove) ?? provider.parseEvent.bind(provider);
 
@@ -2466,7 +2493,7 @@ async function advanceSessionQueue(
   const sink = makeHeadlessStreamResponse();
   let threw = false;
   try {
-    await handleSessionStream(
+    await startSessionStream(
       makeHeadlessStreamRequest(projectId, worktreeId, sessionId, next),
       sink.res
     );
@@ -2507,8 +2534,15 @@ function scheduleSessionQueueAdvance(
   const previous = queueAdvanceChains.get(sessionId) ?? Promise.resolve();
   const next = previous
     .then(async () => {
-      if (getSessionRuntime(sessionId).active) return;
-      await advanceSessionQueue(projectId, worktreeId, sessionId);
+      while (!claimSessionRunStart(sessionId)) {
+        await waitForSessionRunStart(sessionId);
+        if (getSessionRuntime(sessionId).active) return;
+      }
+      try {
+        await advanceSessionQueue(projectId, worktreeId, sessionId);
+      } finally {
+        releaseSessionRunStart(sessionId);
+      }
     })
     .catch((error) => {
       console.error(
