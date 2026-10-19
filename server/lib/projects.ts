@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { v4 as uuidv4 } from "uuid";
-import { projectsFile, ensureOrchestratorHome } from "./paths.js";
+import { projectsFile } from "./paths.js";
+import { readJsonRegistry, withLock, writeJsonRegistry } from "./json-registry.js";
 import { resolveNativeScriptDir } from "./project-scripts.js";
 
 export interface Project {
@@ -104,16 +105,15 @@ export async function addProject(
   setupCommands?: string,
   runCommands?: string
 ): Promise<Project> {
-  await ensureOrchestratorHome();
-  const records = await readRecords();
   const record: ProjectRecord = {
     id: uuidv4(),
     name,
     path: projectPath,
     createdAt: new Date().toISOString(),
   };
-  records.push(record);
-  await writeRecords(records);
+  await withProjectRegistry(async (records) => {
+    records.push(record);
+  });
   // Only write supplied commands. A blank field on creation means "leave it
   // alone" — never the delete branch of syncScript, which would clobber a
   // script that already exists in an onboarded repo.
@@ -126,45 +126,72 @@ export async function updateProject(
   id: string,
   patch: { name?: string; setupCommands?: string; runCommands?: string }
 ): Promise<Project | null> {
-  const records = await readRecords();
-  const idx = records.findIndex((p) => p.id === id);
-  if (idx === -1) return null;
-  if (patch.name !== undefined) records[idx].name = patch.name;
-  await ensureOrchestratorHome();
-  await writeRecords(records);
+  const record = await withProjectRegistry(async (records) => {
+    const found = records.find((p) => p.id === id);
+    if (found && patch.name !== undefined) found.name = patch.name;
+    return found ? { ...found } : null;
+  });
+  if (!record) return null;
   if (patch.setupCommands !== undefined) {
-    await syncScript(records[idx].path, "setup.sh", patch.setupCommands);
+    await syncScript(record.path, "setup.sh", patch.setupCommands);
   }
   if (patch.runCommands !== undefined) {
-    await syncScript(records[idx].path, "run.sh", patch.runCommands);
+    await syncScript(record.path, "run.sh", patch.runCommands);
   }
-  return hydrate(records[idx]);
+  return hydrate(record);
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
-  const records = await readRecords();
-  const filtered = records.filter((p) => p.id !== id);
-  if (filtered.length === records.length) return false;
-  await ensureOrchestratorHome();
-  await writeRecords(filtered);
-  return true;
+  return withProjectRegistry(async (records) => {
+    const idx = records.findIndex((p) => p.id === id);
+    if (idx === -1) return false;
+    records.splice(idx, 1);
+    return true;
+  });
 }
 
-/* Reads the persisted registry, tolerating a missing file. Older registries
- * may still carry `setupCommands`/`runCommands` keys; they are ignored since
- * the script files are authoritative and a later write drops them. */
+/* Runs a read-modify-write against `projects.json` while holding the
+ * per-file registry lock (issue #454), so concurrent mutations can't drop
+ * each other's records. `fn` mutates the loaded array in place and the
+ * result is persisted atomically. */
+async function withProjectRegistry<T>(
+  fn: (records: ProjectRecord[]) => Promise<T>
+): Promise<T> {
+  const file = projectsFile();
+  return withLock(file, async () => {
+    const records = await readRecords();
+    const result = await fn(records);
+    await writeJsonRegistry(file, records, { validate: validateRecords });
+    return result;
+  });
+}
+
+/* Reads the persisted registry. Only a missing file yields `[]`; a corrupt
+ * one falls back to `projects.json.bak` and otherwise throws
+ * `RegistryParseError`, so a bad write can never be mistaken for "no
+ * projects" and overwritten by the next mutation. */
 async function readRecords(): Promise<ProjectRecord[]> {
-  try {
-    const content = await fs.readFile(projectsFile(), "utf-8");
-    const parsed = JSON.parse(content) as ProjectRecord[];
-    return parsed.map((p) => ({ id: p.id, name: p.name, path: p.path, createdAt: p.createdAt }));
-  } catch {
-    return [];
-  }
+  const file = projectsFile();
+  const { value } = await readJsonRegistry<ProjectRecord[]>(file, {
+    defaultValue: [],
+    backup: `${file}.bak`,
+    validate: validateRecords,
+  });
+  return value;
 }
 
-async function writeRecords(records: ProjectRecord[]): Promise<void> {
-  await fs.writeFile(projectsFile(), JSON.stringify(records, null, 2));
+/* Older registries may still carry `setupCommands`/`runCommands` keys; they
+ * are dropped since the script files are authoritative, and the next write
+ * persists the stripped shape. Throws on a non-array so `readJsonRegistry`
+ * reports it as corruption rather than an empty registry. */
+function validateRecords(value: unknown): ProjectRecord[] {
+  if (!Array.isArray(value)) throw new Error("projects registry is not an array");
+  return (value as ProjectRecord[]).map((p) => ({
+    id: p.id,
+    name: p.name,
+    path: p.path,
+    createdAt: p.createdAt,
+  }));
 }
 
 /* Builds the public `Project` by reading the commands back from the script
