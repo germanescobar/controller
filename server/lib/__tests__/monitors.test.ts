@@ -17,8 +17,10 @@ import {
   listMonitors,
   stopAllMonitors,
   stopMonitorsForSession,
+  killAllMonitorsNow,
   __resetMonitorsForTests,
   monitorCount,
+  MAX_PARTIAL_LINE_LENGTH,
 } from "../monitors.js";
 import { getEvents } from "../sessions.js";
 
@@ -429,5 +431,268 @@ test("startMonitor without an --on-line filter does NOT re-inject user messages 
     stopMonitor(monitor.id);
   });
 });
+
+// Issue #455: monitors run in their own process group, so stopping one
+// reaps the shell's children too — not just the `/bin/sh -c` wrapper.
+test("stopMonitor kills the whole process group", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const monitor = startMonitor({
+      sessionId: "s-pgroup",
+      worktreePath: proj,
+      description: "background child",
+      command: "sleep 30 & echo $!; wait",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitFor(
+      () => listMonitors("s-pgroup").some((m) => m.lineCount >= 1),
+      2_000
+    );
+    await waitForEvents(proj, "s-pgroup", 1);
+    const [pidLine] = await monitorLines(proj, "s-pgroup");
+    const sleepPid = Number(pidLine);
+    assert.ok(Number.isInteger(sleepPid) && sleepPid > 0, `bad pid ${pidLine}`);
+    assert.equal(isAlive(sleepPid), true);
+    stopMonitor(monitor.id);
+    await waitFor(() => !isAlive(sleepPid), 2_000);
+  });
+});
+
+// PR #459 review: once the shell exits, its pgid can be recycled by an
+// unrelated process group, so neither the deadline nor a later stop may
+// signal it.
+test("a naturally exited monitor never signals its process group", async (t) => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const signalledPids: number[] = [];
+    const originalKill = process.kill.bind(process);
+    t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+      signalledPids.push(pid);
+      return originalKill(pid, signal);
+    });
+    const monitor = startMonitor({
+      sessionId: "s-recycled",
+      worktreePath: proj,
+      description: "exits immediately",
+      // `$$` is the shell's pid, which is also the monitor's pgid.
+      command: "echo $$",
+      persistent: false,
+      timeoutMs: 1_000,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitFor(
+      () => listMonitors("s-recycled")[0]?.status === "exited",
+      2_000
+    );
+    await waitForEvents(proj, "s-recycled", 1);
+    const [pgidLine] = await monitorLines(proj, "s-recycled");
+    const pgid = Number(pgidLine);
+    assert.ok(Number.isInteger(pgid) && pgid > 0, `bad pgid ${pgidLine}`);
+    // Outlive the deadline, then stop explicitly.
+    await new Promise((resolve) =>
+      setTimeout(resolve, monitor.deadlineAt! - Date.now() + 200)
+    );
+    assert.equal(stopMonitor(monitor.id)?.status, "exited");
+    // Earlier tests' SIGKILL escalations may land in this window, so only
+    // this monitor's group id is asserted on.
+    assert.equal(signalledPids.includes(-pgid), false);
+  });
+});
+
+// PR #459 review: when the leader dies from the stop's SIGTERM, the
+// pending SIGKILL escalation must be cancelled rather than sent to a
+// pgid that may have been recycled during the grace period.
+test("stopMonitor cancels the SIGKILL escalation once the leader exits", async (t) => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals | number }> = [];
+    const originalKill = process.kill.bind(process);
+    t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push({ pid, signal });
+      return originalKill(pid, signal);
+    });
+    const monitor = startMonitor({
+      sessionId: "s-escalation",
+      worktreePath: proj,
+      description: "dies on SIGTERM",
+      // `$$` is the shell's pid, which is also the monitor's pgid.
+      command: "echo $$; sleep 30",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-escalation", 1);
+    const [pgidLine] = await monitorLines(proj, "s-escalation");
+    const pgid = Number(pgidLine);
+    assert.ok(Number.isInteger(pgid) && pgid > 0, `bad pgid ${pgidLine}`);
+    stopMonitor(monitor.id);
+    assert.ok(signals.some((s) => s.pid === -pgid && s.signal === "SIGTERM"));
+    // Outlive the 2s grace period.
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    assert.equal(
+      signals.some((s) => s.pid === -pgid && s.signal === "SIGKILL"),
+      false
+    );
+  });
+});
+
+test("a partial line longer than the cap is emitted in bounded chunks", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const total = MAX_PARTIAL_LINE_LENGTH * 2 + 100;
+    const monitor = startMonitor({
+      sessionId: "s-long-line",
+      worktreePath: proj,
+      description: "no newline ever",
+      command: `head -c ${total} /dev/zero | tr '\\0' a`,
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-long-line", 3);
+    const lines = await monitorLines(proj, "s-long-line");
+    assert.deepEqual(
+      lines.map((line) => line.length),
+      [MAX_PARTIAL_LINE_LENGTH, MAX_PARTIAL_LINE_LENGTH, 100]
+    );
+    assert.ok(lines.every((line) => /^a+$/.test(line)));
+    stopMonitor(monitor.id);
+  });
+});
+
+test("the partial-line cap never splits a surrogate pair", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    // U+1F600 is UTF-8 F0 9F 98 80; place it straddling the cap.
+    const expected = "a".repeat(MAX_PARTIAL_LINE_LENGTH - 1) + "\u{1F600}" + "b".repeat(10);
+    const monitor = startMonitor({
+      sessionId: "s-surrogate",
+      worktreePath: proj,
+      description: "emoji at the boundary",
+      command: `head -c ${MAX_PARTIAL_LINE_LENGTH - 1} /dev/zero | tr '\\0' a; printf '\\360\\237\\230\\200bbbbbbbbbb'`,
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-surrogate", 2);
+    const lines = await monitorLines(proj, "s-surrogate");
+    assert.equal(lines.join(""), expected);
+    for (const line of lines) {
+      assert.equal(line.isWellFormed(), true, "chunk contains a lone surrogate");
+    }
+    stopMonitor(monitor.id);
+  });
+});
+
+// PR #459 review: shutdown exits before a grace-period timer could fire,
+// so the shutdown path must SIGKILL the group synchronously.
+test("killAllMonitorsNow SIGKILLs the process group without scheduling a timer", async (t) => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    startMonitor({
+      sessionId: "s-shutdown",
+      worktreePath: proj,
+      description: "killed on shutdown",
+      // `$$` is the shell's pid, which is also the monitor's pgid.
+      command: "echo $$; sleep 30",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-shutdown", 1);
+    const [pgidLine] = await monitorLines(proj, "s-shutdown");
+    const pgid = Number(pgidLine);
+    assert.ok(Number.isInteger(pgid) && pgid > 0, `bad pgid ${pgidLine}`);
+
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals | number }> = [];
+    const originalKill = process.kill.bind(process);
+    const killMock = t.mock.method(process, "kill", (pid: number, signal?: NodeJS.Signals | number) => {
+      signals.push({ pid, signal });
+      return originalKill(pid, signal);
+    });
+    const timerMock = t.mock.method(globalThis, "setTimeout");
+    assert.equal(killAllMonitorsNow(), 1);
+    const timersScheduled = timerMock.mock.callCount();
+    timerMock.mock.restore();
+    killMock.mock.restore();
+
+    assert.deepEqual(signals, [{ pid: -pgid, signal: "SIGKILL" }]);
+    assert.equal(timersScheduled, 0);
+    assert.equal(monitorCount(), 0);
+    await waitFor(() => !isAlive(pgid), 2_000);
+  });
+});
+
+test("a final stdout line without a trailing newline is flushed on exit", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const delivered: string[] = [];
+    const monitor = startMonitor({
+      sessionId: "s-flush",
+      worktreePath: proj,
+      description: "no newline",
+      command: "printf abc",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+      onLine: /^abc$/,
+      onLinePattern: "^abc$",
+      onLineMatch: async ({ line }) => {
+        delivered.push(line);
+      },
+    });
+    await waitFor(() => delivered.length === 1, 2_000);
+    assert.deepEqual(await monitorLines(proj, "s-flush"), ["abc"]);
+    assert.deepEqual(delivered, ["abc"]);
+    stopMonitor(monitor.id);
+  });
+});
+
+test("a multi-line stderr chunk yields one monitor_event per line", async () => {
+  await withTempHome(async (home) => {
+    const proj = projectPath(home);
+    const monitor = startMonitor({
+      sessionId: "s-stderr",
+      worktreePath: proj,
+      description: "stderr lines",
+      command: "printf 'one\\ntwo\\nthree' >&2",
+      persistent: true,
+      limits: { maxPerSession: 8, maxLines: 100 },
+    });
+    await waitForEvents(proj, "s-stderr", 3);
+    assert.deepEqual(await monitorLines(proj, "s-stderr"), [
+      "[stderr] one",
+      "[stderr] two",
+      "[stderr] three",
+    ]);
+    stopMonitor(monitor.id);
+  });
+});
+
+async function monitorLines(proj: string, sessionId: string): Promise<string[]> {
+  const events = await getEvents(proj, sessionId);
+  return events
+    .filter((e) => e.type === "monitor_event")
+    .map((e) => String(e.data.line));
+}
+
+async function waitForEvents(
+  proj: string,
+  sessionId: string,
+  count: number
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while ((await monitorLines(proj, sessionId)).length < count) {
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${count} monitor_event records`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 void existsSync; // keep imports used even when guards add nothing

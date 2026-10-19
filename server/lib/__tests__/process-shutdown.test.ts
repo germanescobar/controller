@@ -19,25 +19,37 @@ function fakeProcess() {
   return { emitter, signals, target };
 }
 
-test("normal process exit stops active session runtimes", () => {
+test("normal process exit stops active session runtimes and monitors", () => {
   const { emitter, target } = fakeProcess();
   let stops = 0;
-  installSessionRuntimeShutdownHandlers(target, () => ++stops);
+  let monitorStops = 0;
+  installSessionRuntimeShutdownHandlers(
+    target,
+    () => ++stops,
+    () => ++monitorStops
+  );
 
   emitter.emit("exit");
 
   assert.equal(stops, 1);
+  assert.equal(monitorStops, 1);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  test(`${signal} stops runtimes and then restores default signal behavior`, () => {
+  test(`${signal} stops runtimes and monitors, then restores default signal behavior`, () => {
     const { emitter, signals, target } = fakeProcess();
     let stops = 0;
-    installSessionRuntimeShutdownHandlers(target, () => ++stops);
+    let monitorStops = 0;
+    installSessionRuntimeShutdownHandlers(
+      target,
+      () => ++stops,
+      () => ++monitorStops
+    );
 
     emitter.emit(signal);
 
     assert.equal(stops, 1);
+    assert.equal(monitorStops, 1);
     assert.equal(emitter.listenerCount(signal), 0);
     assert.deepEqual(signals, [[1234, signal]]);
   });

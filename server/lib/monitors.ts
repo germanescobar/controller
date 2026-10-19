@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { appendEvent, type AgentEvent } from "./sessions.js";
 import { escapeFollowUpMarkerLabel } from "../../shared/follow-up-markers.js";
@@ -26,6 +27,12 @@ import { escapeFollowUpMarkerLabel } from "../../shared/follow-up-markers.js";
 
 export const MAX_MONITORS_PER_SESSION = 8;
 export const MAX_LINE_BUFFER = 1000;
+/**
+ * Longest partial line (in UTF-16 code units) buffered while waiting for
+ * a newline. Longer runs are emitted in chunks of this size so output
+ * like a progress bar without `\n` cannot grow server memory unbounded.
+ */
+export const MAX_PARTIAL_LINE_LENGTH = 64 * 1024;
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -71,16 +78,28 @@ interface ActiveMonitor {
    * The live child process. `null` for test-only entries
    * seeded via `__seedMonitorForTests` — production code
    * always populates this with the spawned `ChildProcess`.
-   * `stopMonitor` guards the `kill` call so a `null` here
-   * is safe (the SIGTERM is a no-op).
+   * `stopMonitor` skips signalling when this is `null`.
    */
   child: ChildProcess | null;
-  buffer: string;
+  /**
+   * Set once the shell (process-group leader) exits or fails to spawn.
+   * After that the pgid may be recycled, so the monitor never signals it.
+   */
+  leaderExited: boolean;
+  /** Deadline auto-kill timer; cleared on leader exit and on stop. */
+  deadlineTimer: NodeJS.Timeout | null;
+  /** Pending SIGKILL escalation after a stop; cleared on leader exit. */
+  escalationTimer: NodeJS.Timeout | null;
   /** Pending event-log writes — chained so they serialize per monitor. */
   writeChain: Promise<unknown>;
 }
 
 const monitors = new Map<string, ActiveMonitor>();
+
+const isolateProcessGroup = process.platform !== "win32";
+
+/** Grace period between SIGTERM and the SIGKILL escalation on stop. */
+const KILL_GRACE_MS = 2_000;
 
 /**
  * Start a monitor. The route layer passes through the parsed request
@@ -167,12 +186,17 @@ export function startMonitor(params: {
     cwd: params.worktreePath,
     shell: true,
     stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
+    // POSIX: make the shell the leader of its own process group so a stop
+    // can signal the whole pipeline (`tail -f log | grep ERROR`), not just
+    // the `/bin/sh -c` wrapper. Windows keeps the direct-child lifecycle.
+    detached: isolateProcessGroup,
   });
   const active: ActiveMonitor = {
     monitor,
     child,
-    buffer: "",
+    leaderExited: false,
+    deadlineTimer: null,
+    escalationTimer: null,
     writeChain: Promise.resolve(),
   };
   monitors.set(id, active);
@@ -180,86 +204,68 @@ export function startMonitor(params: {
   // reference so the per-line closure avoids re-reading
   // `params.onLine` on every chunk.
   const onLine = params.onLine ?? null;
-  child.stdout?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk: string) => {
-    active.buffer += chunk;
-    let newlineIndex = active.buffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = active.buffer.slice(0, newlineIndex);
-      active.buffer = active.buffer.slice(newlineIndex + 1);
-      // Synchronously increment the line counter so listMonitors sees
-      // the latest count even before the disk write resolves, then
-      // chain the event-log append onto the monitor's write chain so
-      // on-disk order matches emission order.
-      const captured = monitor.lineCount < limits.maxLines;
-      if (captured) {
-        monitor.lineCount += 1;
-        const event: AgentEvent = {
-          id: randomUUID(),
-          sessionId: monitor.sessionId,
-          timestamp: new Date().toISOString(),
-          type: "monitor_event",
-          data: { monitorId: monitor.id, line },
-        };
-        active.writeChain = active.writeChain.then(() =>
-          appendEvent(monitor.worktreePath, monitor.sessionId, event).catch(
-            () => {
-              // Best-effort: an event-log write failure must not kill
-              // the monitor's process. The line counter has already
-              // advanced.
-            }
-          )
-        );
-      }
-      // Issue #351: when the monitor has an `--on-line` regex, also
-      // deliver a queued follow-up for matching lines. The text
-      // is the canonical `[/monitor: <description>] <line>` marker
-      // — same shape as the `[/from: …]` marker from `sessions
-      // send`, so the existing client-side dedupe + linkifier logic
-      // handles both. We deliberately throttle the write onto the
-      // same write chain as the monitor_event so on-disk order
-      // matches emission order: an agent reading its event log will
-      // see the monitor_event first, then enqueue the follow-up, for any
-      // given line.
-      if (captured && onLine && onLine.test(line) && params.onLineMatch) {
-        const markerLine = `[/monitor: ${escapeFollowUpMarkerLabel(monitor.description)}] ${line}`;
-        active.writeChain = active.writeChain.then(() =>
-          params.onLineMatch!({
-            monitor: { ...monitor },
-            line,
-            text: markerLine,
-          }).catch(() => {
-            // Best-effort: a failed enqueue must not interrupt the
-            // monitor process. The monitor_event remains the audit trail.
-          })
-        );
-      }
-      newlineIndex = active.buffer.indexOf("\n");
-    }
-  });
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk: string) => {
-    // Surface stderr as a separate event so the agent can distinguish
-    // command output from shell diagnostics. We don't roll stderr into
-    // stdout because that would conflate data with errors.
-    if (monitor.lineCount < limits.maxLines) {
-      monitor.lineCount += 1;
-      const event: AgentEvent = {
-        id: randomUUID(),
-        sessionId: monitor.sessionId,
-        timestamp: new Date().toISOString(),
-        type: "monitor_event",
-        data: { monitorId: monitor.id, line: `[stderr] ${chunk.replace(/\n+$/, "")}` },
-      };
+
+  const emitLine = (line: string, matchOnLine: boolean): void => {
+    // Synchronously increment the line counter so listMonitors sees
+    // the latest count even before the disk write resolves, then
+    // chain the event-log append onto the monitor's write chain so
+    // on-disk order matches emission order.
+    if (monitor.lineCount >= limits.maxLines) return;
+    monitor.lineCount += 1;
+    const event: AgentEvent = {
+      id: randomUUID(),
+      sessionId: monitor.sessionId,
+      timestamp: new Date().toISOString(),
+      type: "monitor_event",
+      data: { monitorId: monitor.id, line },
+    };
+    active.writeChain = active.writeChain.then(() =>
+      appendEvent(monitor.worktreePath, monitor.sessionId, event).catch(
+        () => {
+          // Best-effort: an event-log write failure must not kill
+          // the monitor's process. The line counter has already
+          // advanced.
+        }
+      )
+    );
+    // Issue #351: when the monitor has an `--on-line` regex, also
+    // deliver a queued follow-up for matching lines. The text
+    // is the canonical `[/monitor: <description>] <line>` marker
+    // — same shape as the `[/from: …]` marker from `sessions
+    // send`, so the existing client-side dedupe + linkifier logic
+    // handles both. We deliberately throttle the write onto the
+    // same write chain as the monitor_event so on-disk order
+    // matches emission order: an agent reading its event log will
+    // see the monitor_event first, then enqueue the follow-up, for any
+    // given line.
+    if (matchOnLine && onLine && onLine.test(line) && params.onLineMatch) {
+      const markerLine = `[/monitor: ${escapeFollowUpMarkerLabel(monitor.description)}] ${line}`;
       active.writeChain = active.writeChain.then(() =>
-        appendEvent(monitor.worktreePath, monitor.sessionId, event).catch(
-          () => undefined
-        )
+        params.onLineMatch!({
+          monitor: { ...monitor },
+          line,
+          text: markerLine,
+        }).catch(() => {
+          // Best-effort: a failed enqueue must not interrupt the
+          // monitor process. The monitor_event remains the audit trail.
+        })
       );
     }
-  });
+  };
+
+  if (child.stdout) {
+    pipeLines(child.stdout, (line) => emitLine(line, true));
+  }
+  if (child.stderr) {
+    // Surface stderr as separate, prefixed lines so the agent can
+    // distinguish command output from shell diagnostics. We don't roll
+    // stderr into stdout because that would conflate data with errors,
+    // and stderr lines never trigger `--on-line` delivery.
+    pipeLines(child.stderr, (line) => emitLine(`[stderr] ${line}`, false));
+  }
   child.on("exit", () => {
     monitor.status = "exited";
+    markLeaderExited(active);
     // Mark the monitor as exited in-place rather than removing the
     // entry — a process that finishes naturally (e.g. `printf`) is
     // still a meaningful record: the agent can read its lineCount
@@ -270,39 +276,18 @@ export function startMonitor(params: {
   });
   child.on("error", (error) => {
     monitor.status = "exited";
-    if (monitor.lineCount < limits.maxLines) {
-      monitor.lineCount += 1;
-      const event: AgentEvent = {
-        id: randomUUID(),
-        sessionId: monitor.sessionId,
-        timestamp: new Date().toISOString(),
-        type: "monitor_event",
-        data: { monitorId: monitor.id, line: `[error] ${error.message}` },
-      };
-      active.writeChain = active.writeChain.then(() =>
-        appendEvent(monitor.worktreePath, monitor.sessionId, event).catch(
-          () => undefined
-        )
-      );
-    }
+    markLeaderExited(active);
+    emitLine(`[error] ${error.message}`, false);
   });
   if (deadlineAt != null) {
     const remaining = deadlineAt - Date.now();
-    setTimeout(() => {
-      if (monitors.has(id)) {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // Already exited.
-        }
-      }
-    }, Math.max(0, remaining)).unref?.();
+    active.deadlineTimer = setTimeout(() => {
+      if (monitors.has(id)) terminateMonitorProcess(active);
+    }, Math.max(0, remaining));
+    active.deadlineTimer.unref?.();
   }
   return { ...monitor };
 }
-
-// Append-line logic was inlined into the stdout / stderr / error
-// handlers above so each monitor owns a single write chain.
 
 function countMonitorsForSession(sessionId: string): number {
   let count = 0;
@@ -330,13 +315,8 @@ export function stopMonitor(monitorIdId: string): Monitor | null {
   const active = monitors.get(monitorIdId);
   if (!active) return null;
   monitors.delete(monitorIdId);
-  try {
-    active.child?.kill("SIGTERM");
-  } catch {
-    // Already exited, or no child handle (test-only seeded
-    // entries from `__seedMonitorForTests` have `child: null`).
-    // Either way, the map entry is gone; the SIGTERM is moot.
-  }
+  if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+  terminateMonitorProcess(active);
   return { ...active.monitor };
 }
 
@@ -357,8 +337,8 @@ export function stopMonitorsForSession(sessionId: string): number {
 }
 
 /**
- * Reap every running monitor. Used on graceful shutdown. Mirrors
- * `stopMonitorsForSession` but iterates the full map.
+ * Reap every running monitor with the normal SIGTERM-then-SIGKILL stop.
+ * Mirrors `stopMonitorsForSession` but iterates the full map.
  */
 export function stopAllMonitors(): number {
   let stopped = 0;
@@ -366,6 +346,131 @@ export function stopAllMonitors(): number {
     if (stopMonitor(id)) stopped += 1;
   }
   return stopped;
+}
+
+/**
+ * Split a stream into newline-delimited lines. A trailing partial line
+ * is flushed when the stream ends so `printf done` still yields `done`,
+ * and a partial line longer than `MAX_PARTIAL_LINE_LENGTH` is emitted in
+ * chunks of that size.
+ */
+function pipeLines(stream: Readable, onLine: (line: string) => void): void {
+  let buffer = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      onLine(buffer.slice(0, newlineIndex));
+      buffer = buffer.slice(newlineIndex + 1);
+      newlineIndex = buffer.indexOf("\n");
+    }
+    while (buffer.length > MAX_PARTIAL_LINE_LENGTH) {
+      // Keep a surrogate pair together: if the cut would land after a
+      // high surrogate, move it back one code unit.
+      const lastCode = buffer.charCodeAt(MAX_PARTIAL_LINE_LENGTH - 1);
+      const splitAt =
+        lastCode >= 0xd800 && lastCode <= 0xdbff
+          ? MAX_PARTIAL_LINE_LENGTH - 1
+          : MAX_PARTIAL_LINE_LENGTH;
+      onLine(buffer.slice(0, splitAt));
+      buffer = buffer.slice(splitAt);
+    }
+  });
+  stream.on("end", () => {
+    if (buffer.length > 0) onLine(buffer);
+    buffer = "";
+  });
+}
+
+function markLeaderExited(active: ActiveMonitor): void {
+  active.leaderExited = true;
+  if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+  active.deadlineTimer = null;
+  if (active.escalationTimer) clearTimeout(active.escalationTimer);
+  active.escalationTimer = null;
+}
+
+/**
+ * SIGTERM the monitor's process tree, then SIGKILL whatever is left of
+ * the group after `KILL_GRACE_MS`. The escalation timer is unref'd so it
+ * never holds the server open during shutdown.
+ *
+ * Once the leader has exited the monitor sends no signals at all, and a
+ * pending SIGKILL escalation is cancelled: the pgid may already belong
+ * to an unrelated group. Trade-off: a descendant that ignores SIGTERM
+ * can survive its leader; we accept that rather than risk signalling a
+ * recycled pgid.
+ */
+function terminateMonitorProcess(active: ActiveMonitor): void {
+  // Test-only seeded entries from `__seedMonitorForTests` have no child.
+  const { child } = active;
+  if (!child || active.leaderExited) return;
+  // A deadline-triggered termination is already in its grace period.
+  if (active.escalationTimer) return;
+  // Only escalate when SIGTERM reached a live group.
+  if (!signalMonitorProcess(child, "SIGTERM") || child.pid === undefined) return;
+  const pid = child.pid;
+  active.escalationTimer = setTimeout(() => {
+    active.escalationTimer = null;
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch (error) {
+      // ESRCH: the whole group already exited after SIGTERM.
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        console.error(`[monitors] SIGKILL of process group ${pid} failed:`, error);
+      }
+    }
+  }, KILL_GRACE_MS);
+  active.escalationTimer.unref?.();
+}
+
+/**
+ * Signal every process in the monitor's POSIX process group, falling
+ * back to the direct child when the group is gone (ESRCH) or on Windows.
+ * Returns whether the process group itself was signalled.
+ */
+function signalMonitorProcess(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  if (isolateProcessGroup && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        console.error(
+          `[monitors] ${signal} of process group ${child.pid} failed:`,
+          error
+        );
+      }
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Already exited.
+  }
+  return false;
+}
+
+/**
+ * SIGKILL every monitor's process group synchronously and drop all
+ * entries. Used on server shutdown, where the process exits before a
+ * `KILL_GRACE_MS` escalation timer could fire. Monitors are watchers,
+ * so they need no graceful stop when the server goes down. Groups
+ * whose leader already exited are still never signalled.
+ */
+export function killAllMonitorsNow(): number {
+  let killed = 0;
+  for (const [id, active] of monitors.entries()) {
+    monitors.delete(id);
+    if (active.deadlineTimer) clearTimeout(active.deadlineTimer);
+    if (active.escalationTimer) clearTimeout(active.escalationTimer);
+    if (active.child && !active.leaderExited) {
+      signalMonitorProcess(active.child, "SIGKILL");
+    }
+    killed += 1;
+  }
+  return killed;
 }
 
 /** Test-only helper to count the in-process monitor map. */
@@ -401,7 +506,9 @@ export function __seedMonitorForTests(monitor: Monitor): void {
     monitor,
     // Keeping this null makes the test-only intent explicit.
     child: null,
-    buffer: "",
+    leaderExited: false,
+    deadlineTimer: null,
+    escalationTimer: null,
     writeChain: Promise.resolve(),
   };
   monitors.set(monitor.id, active);
