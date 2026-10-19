@@ -17,6 +17,7 @@ import path from "node:path";
 
 import {
   RegistryParseError,
+  _setJsonRegistryFs,
   readJsonRegistry,
   validateArray,
   validateRecord,
@@ -78,6 +79,79 @@ test("writeJsonRegistry mirrors the previous contents to <file>.bak", async () =
     const backup = await fs.readFile(`${file}.bak`, "utf-8");
     assert.deepEqual(JSON.parse(backup), { v: 1 });
   } finally {
+    await cleanup();
+  }
+});
+
+test("writeJsonRegistry keeps a valid .bak when the primary is corrupt", async () => {
+  const { homeDir, cleanup } = await tempHome();
+  try {
+    const file = path.join(homeDir, "registry.json");
+    const backup = `${file}.bak`;
+    await fs.writeFile(file, "{ truncated");
+    await fs.writeFile(backup, JSON.stringify([{ id: "good" }]));
+
+    await writeJsonRegistry(file, [{ id: "good" }, { id: "new" }]);
+
+    assert.deepEqual(JSON.parse(await fs.readFile(backup, "utf-8")), [{ id: "good" }]);
+    assert.deepEqual(JSON.parse(await fs.readFile(file, "utf-8")), [
+      { id: "good" },
+      { id: "new" },
+    ]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("writeJsonRegistry keeps a valid .bak when the primary is valid JSON but fails validate", async () => {
+  const { homeDir, cleanup } = await tempHome();
+  try {
+    const file = path.join(homeDir, "registry.json");
+    const backup = `${file}.bak`;
+    await fs.writeFile(file, "{}");
+    await fs.writeFile(backup, JSON.stringify([{ id: "good" }]));
+    const requireArray = (v: unknown): unknown[] => {
+      if (!Array.isArray(v)) throw new Error("not an array");
+      return v;
+    };
+
+    await writeJsonRegistry(file, [{ id: "good" }, { id: "new" }], { validate: requireArray });
+
+    assert.deepEqual(JSON.parse(await fs.readFile(backup, "utf-8")), [{ id: "good" }]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a failed rename while repairing a corrupt primary leaves .bak recoverable", async () => {
+  const { homeDir, cleanup } = await tempHome();
+  const fsLayer = {
+    readFile: fs.readFile,
+    open: fs.open,
+    writeFile: fs.writeFile,
+    rename: async () => {
+      throw new Error("simulated crash before rename");
+    },
+    mkdir: fs.mkdir,
+  };
+  const previous = _setJsonRegistryFs(fsLayer);
+  try {
+    const file = path.join(homeDir, "registry.json");
+    const backup = `${file}.bak`;
+    await fs.writeFile(file, "{ truncated");
+    await fs.writeFile(backup, JSON.stringify([{ id: "good" }]));
+
+    await assert.rejects(writeJsonRegistry(file, [{ id: "new" }]), /simulated crash/);
+
+    const { value, fromBackup } = await readJsonRegistry<{ id: string }[]>(file, {
+      defaultValue: [],
+      backup,
+      validate: validateArray<{ id: string }>,
+    });
+    assert.deepEqual(value, [{ id: "good" }]);
+    assert.equal(fromBackup, true);
+  } finally {
+    _setJsonRegistryFs(previous);
     await cleanup();
   }
 });

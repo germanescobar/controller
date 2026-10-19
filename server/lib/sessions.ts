@@ -11,7 +11,7 @@ import {
   type ResolvedFocusState,
   type SessionFocus,
 } from "./focus-state.js";
-import { projectStoreDir } from "./paths.js";
+import { assertSafeId, isSafeId, projectStoreDir } from "./paths.js";
 import { getProjects } from "./projects.js";
 import { getProjectWorktrees, type Worktree } from "./worktrees.js";
 import {
@@ -173,6 +173,18 @@ function storagePaths(projectPath: string) {
   };
 }
 
+/** Session JSON file; rejects ids that would escape the store (issue #453). */
+function sessionFilePath(projectPath: string, sessionId: string): string {
+  assertSafeId(sessionId, "session");
+  return path.join(storagePaths(projectPath).sessions, `${sessionId}.json`);
+}
+
+/** Session JSONL events file; rejects ids that would escape the store. */
+function eventsFilePath(projectPath: string, sessionId: string): string {
+  assertSafeId(sessionId, "session");
+  return path.join(storagePaths(projectPath).events, `${sessionId}.jsonl`);
+}
+
 /**
  * Merge a sidecar focus record into a session-state object. The
  * session-state fields are the public API; the sidecar is internal
@@ -219,7 +231,7 @@ export async function getAttachment(
   projectPath: string,
   attachmentId: string
 ): Promise<AttachmentMetadata | null> {
-  if (!/^[a-zA-Z0-9._-]+$/.test(attachmentId)) return null;
+  if (!isSafeId(attachmentId)) return null;
   const metadataPath = path.join(
     storagePaths(projectPath).attachments,
     attachmentId,
@@ -438,10 +450,7 @@ export async function getSession(
   sessionId: string,
   projectId?: string
 ): Promise<SessionState | null> {
-  const filePath = path.join(
-    storagePaths(projectPath).sessions,
-    `${sessionId}.json`
-  );
+  const filePath = sessionFilePath(projectPath, sessionId);
   // Read and parse in the same try block. The session file can
   // be rewritten mid-run (e.g. for legacy resumed sessions the
   // agent still co-writes it via the `.coding-agent/sessions/`
@@ -483,10 +492,7 @@ export async function archiveSession(
   projectPath: string,
   sessionId: string
 ): Promise<boolean> {
-  const filePath = path.join(
-    storagePaths(projectPath).sessions,
-    `${sessionId}.json`
-  );
+  const filePath = sessionFilePath(projectPath, sessionId);
   try {
     const content = await fs.readFile(filePath, "utf-8");
     const session = JSON.parse(content) as SessionState;
@@ -569,10 +575,7 @@ export async function updateSessionTitle(
   sessionId: string,
   title: string
 ): Promise<SessionState | null> {
-  const filePath = path.join(
-    storagePaths(projectPath).sessions,
-    `${sessionId}.json`
-  );
+  const filePath = sessionFilePath(projectPath, sessionId);
   // Read and parse in the same try block: the session file can be
   // rewritten mid-run (e.g. for legacy resumed sessions the agent
   // still co-writes it via the `.coding-agent/sessions/` fallback),
@@ -642,10 +645,7 @@ export async function getEvents(
   projectPath: string,
   sessionId: string
 ): Promise<AgentEvent[]> {
-  const filePath = path.join(
-    storagePaths(projectPath).events,
-    `${sessionId}.jsonl`
-  );
+  const filePath = eventsFilePath(projectPath, sessionId);
   try {
     const content = await fs.readFile(filePath, "utf-8");
     return content
@@ -694,10 +694,7 @@ export async function getEventsTail(
   if (before !== undefined && before.length === 0) {
     throw new Error("getEventsTail `before` must be a non-empty event id");
   }
-  const filePath = path.join(
-    storagePaths(projectPath).events,
-    `${sessionId}.jsonl`
-  );
+  const filePath = eventsFilePath(projectPath, sessionId);
   let size: number;
   try {
     size = statSync(filePath).size;
@@ -922,9 +919,8 @@ export async function saveSession(
   projectPath: string,
   session: SessionState
 ): Promise<void> {
-  const { sessions } = storagePaths(projectPath);
-  await fs.mkdir(sessions, { recursive: true });
-  const filePath = path.join(sessions, `${session.id}.json`);
+  const filePath = sessionFilePath(projectPath, session.id);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
   // Strip Controller-managed focus fields before writing so the
   // session file stays in a shape any provider can round-trip.
   // Focus state lives separately in `<controllerHome>/focus/<sessionId>.json`.
@@ -944,9 +940,8 @@ export async function appendEvent(
   sessionId: string,
   event: AgentEvent
 ): Promise<void> {
-  const { events } = storagePaths(projectPath);
-  await fs.mkdir(events, { recursive: true });
-  const filePath = path.join(events, `${sessionId}.jsonl`);
+  const filePath = eventsFilePath(projectPath, sessionId);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.appendFile(filePath, JSON.stringify(event) + "\n");
 }
 

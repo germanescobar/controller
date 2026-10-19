@@ -355,6 +355,7 @@ export async function createProject(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, path, setupCommands, runCommands }),
   });
+  await throwIfNotOk(res, "Failed to create project");
   return res.json();
 }
 
@@ -367,11 +368,13 @@ export async function updateProject(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+  await throwIfNotOk(res, "Failed to update project");
   return res.json();
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  await fetch(`${BASE}/projects/${id}`, { method: "DELETE" });
+  const res = await fetch(`${BASE}/projects/${id}`, { method: "DELETE" });
+  await throwIfNotOk(res, "Failed to delete project");
 }
 
 function withWorktree(worktreeId?: string, extra?: URLSearchParams): string {
@@ -407,6 +410,7 @@ export async function fetchSessions(
   const res = await fetch(
     `${BASE}/projects/${projectId}/sessions${withWorktree(worktreeId)}`
   );
+  await throwIfNotOk(res, "Failed to fetch sessions");
   return res.json();
 }
 
@@ -708,10 +712,7 @@ export async function stopSession(
     `${BASE}/projects/${projectId}/sessions/${sessionId}/stop${withWorktree(worktreeId)}`,
     { method: "POST" }
   );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string };
-    throw new Error(body.error ?? "Failed to stop session");
-  }
+  await throwIfNotOk(res, "Failed to stop session");
 }
 
 export async function steerSession(
@@ -729,10 +730,7 @@ export async function steerSession(
       body: JSON.stringify({ message, queuedMessageId }),
     }
   );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string };
-    throw new Error(body.error ?? "Failed to steer session");
-  }
+  await throwIfNotOk(res, "Failed to steer session");
   return await res.json() as {
     disposition: "steered" | "queued";
     message?: QueuedMessage;
@@ -920,19 +918,7 @@ export async function submitSessionUserInput(
     }
   );
 
-  if (!res.ok) {
-    let message = "Failed to submit user input";
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) {
-        message = body.error;
-      }
-    } catch {
-      // Ignore JSON parsing errors and use the default message.
-    }
-
-    throw new Error(message);
-  }
+  await throwIfNotOk(res, "Failed to submit user input");
 
   return (await res.json()) as { resumeMessage?: string; resumeMode?: "default" | "plan" };
 }
@@ -960,19 +946,7 @@ export async function submitToolApproval(
     }
   );
 
-  if (!res.ok) {
-    let message = "Failed to submit approval";
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) {
-        message = body.error;
-      }
-    } catch {
-      // Ignore JSON parsing errors and use the default message.
-    }
-
-    throw new Error(message);
-  }
+  await throwIfNotOk(res, "Failed to submit approval");
 }
 
 export async function dismissSessionUserInput(
@@ -988,19 +962,7 @@ export async function dismissSessionUserInput(
     }
   );
 
-  if (!res.ok) {
-    let message = "Failed to dismiss user input";
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) {
-        message = body.error;
-      }
-    } catch {
-      // Ignore JSON parsing errors and use the default message.
-    }
-
-    throw new Error(message);
-  }
+  await throwIfNotOk(res, "Failed to dismiss user input");
 }
 
 export interface ModelCapabilities {
@@ -1056,6 +1018,7 @@ export interface AgentProviderInfo {
 
 export async function fetchAgentProviders(): Promise<AgentProviderInfo[]> {
   const res = await fetch(`${BASE}/agent-providers`);
+  await throwIfNotOk(res, "Failed to fetch agent providers");
   return res.json();
 }
 
@@ -1368,6 +1331,7 @@ export interface AgentStatus {
 
 export async function fetchAgents(): Promise<AgentStatus[]> {
   const res = await fetch(`${BASE}/agents`);
+  await throwIfNotOk(res, "Failed to fetch agents");
   return res.json();
 }
 
@@ -1392,11 +1356,13 @@ export async function updateAgent(
 export async function fetchModels(agent?: string): Promise<Model[]> {
   const params = agent ? `?agent=${encodeURIComponent(agent)}` : "";
   const res = await fetch(`${BASE}/models${params}`);
+  await throwIfNotOk(res, "Failed to fetch models");
   return res.json();
 }
 
 export async function fetchProviders(): Promise<ProviderStatus[]> {
   const res = await fetch(`${BASE}/api-keys`);
+  await throwIfNotOk(res, "Failed to fetch providers");
   return res.json();
 }
 
@@ -1835,6 +1801,7 @@ export async function fetchBranches(
   projectId: string
 ): Promise<{ branches: string[]; head: string | null; defaultBranch: string | null }> {
   const res = await fetch(`${BASE}/projects/${projectId}/branches`);
+  await throwIfNotOk(res, "Failed to fetch branches");
   return res.json();
 }
 
@@ -1844,6 +1811,7 @@ export async function fetchGitDiff(
 ): Promise<{ diff: string }> {
   const params = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : "";
   const res = await fetch(`${BASE}/projects/${projectId}/git/diff${params}`);
+  await throwIfNotOk(res, "Failed to fetch diff");
   return res.json();
 }
 
@@ -1853,6 +1821,7 @@ export async function fetchBranchDiff(
 ): Promise<{ diff: string }> {
   const params = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : "";
   const res = await fetch(`${BASE}/projects/${projectId}/git/branch-diff${params}`);
+  await throwIfNotOk(res, "Failed to fetch branch diff");
   return res.json();
 }
 
@@ -1869,6 +1838,7 @@ export async function fetchPullRequest(
 ): Promise<PrResponse> {
   const params = worktreeId ? `?worktreeId=${encodeURIComponent(worktreeId)}` : "";
   const res = await fetch(`${BASE}/projects/${projectId}/git/pr${params}`);
+  await throwIfNotOk(res, "Failed to fetch pull request");
   return res.json();
 }
 
@@ -1883,6 +1853,7 @@ export async function fetchWorktrees(
   // collision check) opt in explicitly.
   const query = options.includeRemoved ? "?includeRemoved=1" : "";
   const res = await fetch(`${BASE}/projects/${projectId}/worktrees${query}`);
+  await throwIfNotOk(res, "Failed to fetch worktrees");
   return res.json();
 }
 
@@ -2465,6 +2436,7 @@ export function runWorktreeSetup(
 
 export async function fetchShortcutBindings(): Promise<ShortcutBindings> {
   const res = await fetch(`${BASE}/shortcuts`);
+  await throwIfNotOk(res, "Failed to fetch shortcuts");
   return res.json();
 }
 
@@ -2476,11 +2448,13 @@ export async function saveShortcutBindings(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(overrides),
   });
+  await throwIfNotOk(res, "Failed to save shortcuts");
   return res.json();
 }
 
 export async function resetShortcutBindings(): Promise<ShortcutBindings> {
   const res = await fetch(`${BASE}/shortcuts`, { method: "DELETE" });
+  await throwIfNotOk(res, "Failed to reset shortcuts");
   return res.json();
 }
 

@@ -870,6 +870,15 @@ export async function runWorktrees(argv, serverUrl) {
     } catch (error) {
       fail(connectionError(serverUrl, error));
     }
+    // The server validates (404 project, 400 name, 409 exists) before it
+    // opens the SSE stream, so those rejections arrive as JSON bodies.
+    if (response.status >= 400) {
+      let result = null;
+      try {
+        result = await response.json();
+      } catch { /* Non-JSON body: the status-only fallback below is all we have. */ }
+      fail(serverError(result, `Worktree create failed (HTTP ${response.status})`));
+    }
     if (!response.body) {
       fail(`Worktree create failed (HTTP ${response.status})`);
     }
@@ -879,37 +888,41 @@ export async function runWorktrees(argv, serverUrl) {
     let exitCode = 0;
     let worktree = null;
     let errorText = null;
+    const handleBlock = (block) => {
+      const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
+      if (!dataLine) return;
+      let event;
+      try {
+        event = JSON.parse(dataLine.slice(6));
+      } catch {
+        return;
+      }
+      if (event.type === "log" && typeof event.text === "string") {
+        process.stdout.write(event.text.endsWith("\n") ? event.text : `${event.text}\n`);
+      } else if (event.type === "worktree_created" && event.worktree) {
+        worktree = event.worktree;
+      } else if (event.type === "error" && typeof event.text === "string") {
+        errorText = event.text;
+        process.stderr.write(`${event.text}\n`);
+      } else if (event.type === "done") {
+        exitCode = typeof event.exitCode === "number" ? event.exitCode : 0;
+        if (event.worktree) worktree = event.worktree;
+      }
+    };
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let idx = buffer.indexOf("\n\n");
       while (idx !== -1) {
-        const block = buffer.slice(0, idx);
+        handleBlock(buffer.slice(0, idx));
         buffer = buffer.slice(idx + 2);
-        const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
-        if (dataLine) {
-          let event;
-          try {
-            event = JSON.parse(dataLine.slice(6));
-          } catch {
-            continue;
-          }
-          if (event.type === "log" && typeof event.text === "string") {
-            process.stdout.write(event.text.endsWith("\n") ? event.text : `${event.text}\n`);
-          } else if (event.type === "worktree_created" && event.worktree) {
-            worktree = event.worktree;
-          } else if (event.type === "error" && typeof event.text === "string") {
-            errorText = event.text;
-            process.stderr.write(`${event.text}\n`);
-          } else if (event.type === "done") {
-            exitCode = typeof event.exitCode === "number" ? event.exitCode : 0;
-            if (event.worktree) worktree = event.worktree;
-          }
-        }
         idx = buffer.indexOf("\n\n");
       }
     }
+    // A final event without the trailing blank line is still an event.
+    buffer += decoder.decode();
+    if (buffer.trim()) handleBlock(buffer);
     if (exitCode !== 0) {
       fail(errorText ?? `Worktree create failed (exit ${exitCode})`);
     }
@@ -2771,7 +2784,8 @@ export function parseSchedules(argv) {
       if (!cron && (every || onDay != null)) {
         cron = presetToCron({
           every,
-          onDay: onDay != null ? Number(onDay) : undefined,
+          onDay:
+            onDay != null ? parseIntFlag(onDay, "schedules add --on-day", { min: 0, max: 6 }) : undefined,
           atHour: flagValue(args, "--at-hour"),
           atMinute: flagValue(args, "--at-minute"),
         });
@@ -3019,7 +3033,7 @@ export function parseMemory(argv) {
         scope,
         projectId: scope === "project" ? (scopeFlag && scopeFlag !== "project" ? scopeFlag : projectFlag) ?? null : undefined,
         query,
-        limit: limitFlag ? Number(limitFlag) : null,
+        limit: limitFlag ? parseIntFlag(limitFlag, "memory search --limit", { min: 1 }) : null,
       };
     }
     case "write": {
@@ -3443,7 +3457,10 @@ export function parseTerminal(argv) {
       const lines = flagValue(rest, "--lines");
       return {
         action: "snapshot",
-        params: { terminalId, ...(lines !== undefined ? { lines: Number(lines) } : {}) },
+        params: {
+          terminalId,
+          ...(lines !== undefined ? { lines: parseIntFlag(lines, "terminal snapshot --lines", { min: 1 }) } : {}),
+        },
       };
     }
     case "tail": {
@@ -3554,6 +3571,22 @@ function parseInactivityTimeout(value) {
     fail("sessions start: --inactivity-timeout requires a positive duration (e.g. 20m)");
   }
   return milliseconds;
+}
+
+// Parse an integer flag value or fail. A bare `Number(...)` turns `abc`
+// into NaN, which JSON serializes as `null`, so the server silently fell
+// back to its default instead of telling the user the flag was wrong.
+function parseIntFlag(raw, label, { min, max = Infinity }) {
+  const value = typeof raw === "string" && /^-?\d+$/.test(raw.trim()) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    const expected = Number.isFinite(max)
+      ? `an integer between ${min} and ${max}`
+      : min === 1
+      ? "a positive integer"
+      : `an integer >= ${min}`;
+    fail(`${label} must be ${expected} (got ${JSON.stringify(raw ?? "")})`);
+  }
+  return value;
 }
 
 // Count the number of consecutive non-`--…` tokens at the front of
@@ -4293,7 +4326,7 @@ function printSkills(command, result) {
   }
 }
 
-async function runSkills(argv, serverUrl) {
+export async function runSkills(argv, serverUrl) {
   const { endpoint, body } = parseSkills(argv);
   let effectiveBody = body;
   // `--all` is a CLI convenience: fetch the discover list, then import every
@@ -4312,7 +4345,9 @@ async function runSkills(argv, serverUrl) {
     effectiveBody = { selections };
   }
   const { response, result } = await postJson(serverUrl, `/api/skills/${endpoint}`, effectiveBody);
-  if (response.status >= 400 && result && result.error) fail(result.error);
+  if (response.status >= 400) {
+    fail(serverError(result, `Skills ${endpoint} failed (HTTP ${response.status})`));
+  }
   printSkills(argv[0], result);
 }
 
@@ -4335,7 +4370,9 @@ export async function runIntegrations(argv, serverUrl) {
       `/api/integrations/gateway/${parsed.endpoint}`,
       parsed.body
     );
-    if (response.status >= 400 && result && result.error) fail(result.error);
+    if (response.status >= 400) {
+      fail(serverError(result, `Integrations ${parsed.endpoint} failed (HTTP ${response.status})`));
+    }
     printIntegrations(argv[0], result);
     return;
   }

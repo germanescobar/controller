@@ -329,6 +329,112 @@ test("runTerminal surfaces a server error as a non-zero exit", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// HTTP error reporting + numeric flag validation (issue #457)
+// ---------------------------------------------------------------------------
+
+/* Run `fn` with `fetch` stubbed and `process.exit`/stderr captured. */
+async function runExpectingExit(fetchStub, fn) {
+  const originalFetch = globalThis.fetch;
+  const originalExit = process.exit;
+  const originalStderr = process.stderr.write.bind(process.stderr);
+  let exitCode = null;
+  let stderrText = "";
+  globalThis.fetch = fetchStub;
+  process.exit = (code) => {
+    exitCode = code;
+    throw new Error("__exit__");
+  };
+  process.stderr.write = (chunk) => {
+    stderrText += String(chunk);
+    return true;
+  };
+  try {
+    await assert.rejects(async () => await fn(), /__exit__/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    process.stderr.write = originalStderr;
+  }
+  return { exitCode, stderrText };
+}
+
+test("runWorktrees create reports a pre-stream 409 instead of a missing-payload error", async () => {
+  const cli = await loadCli();
+  const { exitCode, stderrText } = await runExpectingExit(async (url, init) => {
+    if (String(url).endsWith("/api/projects")) {
+      return { status: 200, json: async () => [{ id: "proj-1", name: "demo" }] };
+    }
+    if (String(url).endsWith("/api/projects/proj-1/worktrees") && init?.method === "POST") {
+      return { status: 409, json: async () => ({ error: "worktree with this name already exists" }) };
+    }
+    throw new Error(`unexpected fetch in test: ${url}`);
+  }, () => cli.runWorktrees(["create", "demo", "--name", "dup"], "http://controller.test"));
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /already exists/);
+  assert.doesNotMatch(stderrText, /without a worktree payload/);
+});
+
+test("runSkills list fails on a 5xx without an error field instead of printing an empty list", async () => {
+  const cli = await loadCli();
+  const { exitCode, stderrText } = await runExpectingExit(
+    async () => ({ status: 500, json: async () => ({}) }),
+    () => cli.runSkills(["list"], "http://controller.test")
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /HTTP 500/);
+  assert.doesNotMatch(stderrText, /No unified skills/);
+});
+
+test("runSkills keeps the server hint on an error", async () => {
+  const cli = await loadCli();
+  const { exitCode, stderrText } = await runExpectingExit(
+    async () => ({
+      status: 404,
+      json: async () => ({ error: "Skill not found", hint: "Run `controller skills list` to see names." }),
+    }),
+    () => cli.runSkills(["list"], "http://controller.test")
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /Skill not found\. Run `controller skills list` to see names\./);
+});
+
+test("runIntegrations gateway fails on a 4xx without an error field", async () => {
+  const cli = await loadCli();
+  const { exitCode, stderrText } = await runExpectingExit(
+    async () => ({ status: 400, json: async () => ({}) }),
+    () => cli.runIntegrations(["call", "linear", "list_issues"], "http://controller.test")
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderrText, /HTTP 400/);
+  assert.doesNotMatch(stderrText, /HTTP undefined/);
+});
+
+test("integer flags reject non-integer values instead of sending null", async () => {
+  const cli = await loadCli();
+  const failNoFetch = async () => {
+    throw new Error("parsing should fail before any fetch");
+  };
+  const cases = [
+    [() => cli.parseTerminal(["snapshot", "t1", "--lines", "abc"]), /terminal snapshot --lines must be a positive integer \(got "abc"\)/],
+    [() => cli.parseTerminal(["snapshot", "t1", "--lines", "0"]), /--lines must be a positive integer/],
+    [() => cli.parseMemory(["search", "deploy", "--limit", "1.5"]), /memory search --limit must be a positive integer/],
+    [
+      () => cli.parseSchedules(["add", "--worktree", "wt-1", "--prompt", "hi", "--on-day", "7"]),
+      /schedules add --on-day must be an integer between 0 and 6/,
+    ],
+  ];
+  for (const [fn, message] of cases) {
+    const { exitCode, stderrText } = await runExpectingExit(failNoFetch, fn);
+    assert.equal(exitCode, 1);
+    assert.match(stderrText, message);
+  }
+  assert.deepEqual(cli.parseTerminal(["snapshot", "t1", "--lines", "25"]), {
+    action: "snapshot",
+    params: { terminalId: "t1", lines: 25 },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // worktrees + sessions CLI parsers (issue #190)
 // ---------------------------------------------------------------------------
 
