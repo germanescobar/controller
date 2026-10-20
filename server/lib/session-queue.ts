@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { lock } from "proper-lockfile";
 import {
+  assertSafeId,
   ensureOrchestratorHome,
   sessionQueueFile,
   sessionQueuesDir,
@@ -64,10 +67,12 @@ export interface QueuedMessage {
 
 /** Fields the caller supplies; `id` and `createdAt` are assigned on enqueue. */
 export type QueuedMessageInput = Omit<QueuedMessage, "id" | "createdAt">;
+export type QueuePauseReason = "cancelled" | "user_input";
 
 export interface SessionQueueTransaction {
   list(): Promise<QueuedMessage[]>;
   enqueue(input: QueuedMessageInput): Promise<QueuedMessage>;
+  clearPause(): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -80,6 +85,7 @@ export function withSessionQueueTransaction<T>(
     run({
       list: () => readQueue(sessionId),
       enqueue: (input) => enqueueUnlocked(sessionId, input),
+      clearPause: () => clearQueuePauseUnlocked(sessionId),
       clear: () => clearQueueUnlocked(sessionId),
     })
   );
@@ -111,6 +117,19 @@ async function enqueueUnlocked(
 /** Return the session's queued messages in order (empty if none). */
 export async function listQueue(sessionId: string): Promise<QueuedMessage[]> {
   return readQueue(sessionId);
+}
+
+/** Persist an intentional stop so every server leaves this queue alone. */
+export function pauseQueue(sessionId: string, reason: QueuePauseReason): Promise<void> {
+  return withLock(sessionId, () => fs.writeFile(queuePauseFile(sessionId), reason));
+}
+
+export function clearQueuePause(sessionId: string): Promise<void> {
+  return withLock(sessionId, () => clearQueuePauseUnlocked(sessionId));
+}
+
+export function getQueuePause(sessionId: string): Promise<QueuePauseReason | null> {
+  return withLock(sessionId, () => readQueuePause(sessionId));
 }
 
 /** Remove a queued message by id. Returns true if an item was removed. */
@@ -179,6 +198,7 @@ export async function dequeueFirst(
   sessionId: string
 ): Promise<QueuedMessage | null> {
   return withLock(sessionId, async () => {
+    if (await readQueuePause(sessionId)) return null;
     const queue = await readQueue(sessionId);
     const first = queue[0];
     if (!first) return null;
@@ -199,7 +219,30 @@ export async function clearQueue(sessionId: string): Promise<void> {
 }
 
 async function clearQueueUnlocked(sessionId: string): Promise<void> {
-  await fs.rm(sessionQueueFile(sessionId), { force: true });
+  await Promise.all([
+    fs.rm(sessionQueueFile(sessionId), { force: true }),
+    clearQueuePauseUnlocked(sessionId),
+  ]);
+}
+
+function queuePauseFile(sessionId: string): string {
+  assertSafeId(sessionId, "session");
+  return path.join(sessionQueuesDir(), `${sessionId}.pause`);
+}
+
+async function readQueuePause(sessionId: string): Promise<QueuePauseReason | null> {
+  try {
+    const reason = await fs.readFile(queuePauseFile(sessionId), "utf-8");
+    if (reason === "cancelled" || reason === "user_input") return reason;
+    throw new Error(`Invalid queue pause reason for ${sessionId}: ${reason}`);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function clearQueuePauseUnlocked(sessionId: string): Promise<void> {
+  await fs.rm(queuePauseFile(sessionId), { force: true });
 }
 
 async function readQueue(sessionId: string): Promise<QueuedMessage[]> {
@@ -207,8 +250,9 @@ async function readQueue(sessionId: string): Promise<QueuedMessage[]> {
     const content = await fs.readFile(sessionQueueFile(sessionId), "utf-8");
     const parsed = JSON.parse(content) as unknown;
     return Array.isArray(parsed) ? (parsed as QueuedMessage[]) : [];
-  } catch {
-    return [];
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
+    throw error;
   }
 }
 
@@ -218,20 +262,45 @@ async function writeQueue(
 ): Promise<void> {
   await ensureOrchestratorHome();
   await fs.mkdir(sessionQueuesDir(), { recursive: true });
-  await fs.writeFile(sessionQueueFile(sessionId), JSON.stringify(queue, null, 2));
+  const target = sessionQueueFile(sessionId);
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, JSON.stringify(queue, null, 2));
+    await fs.rename(temporary, target);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
 }
 
 /*
- * Serialize read-modify-write operations per session so concurrent requests
- * (e.g. an enqueue racing a dequeue) can't clobber each other's writes. The
- * server is single-process, so an in-memory promise chain per session id is
- * sufficient.
+ * Serialize read-modify-write operations across every server using this home.
  */
 const locks = new Map<string, Promise<unknown>>();
 
 function withLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+  assertSafeId(sessionId, "session");
   const previous = locks.get(sessionId) ?? Promise.resolve();
-  const next = previous.then(run, run);
+  const next = previous.then(async () => {
+    await ensureOrchestratorHome();
+    await fs.mkdir(sessionQueuesDir(), { recursive: true });
+    const lockfilePath = path.join(await fs.realpath(sessionQueuesDir()), `${sessionId}.lock`);
+    const release = await lock(lockfilePath, {
+      lockfilePath,
+      realpath: false,
+      stale: 30_000,
+      update: 5_000,
+      retries: { retries: 50, minTimeout: 20, maxTimeout: 100 },
+      onCompromised: (error) => {
+        console.error(`Queue lock lost for ${sessionId}:`, error);
+        process.exit(1);
+      },
+    });
+    try {
+      return await run();
+    } finally {
+      await release();
+    }
+  });
   locks.set(
     sessionId,
     next.then(

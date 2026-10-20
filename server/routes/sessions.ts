@@ -88,6 +88,7 @@ import {
   markSessionActive,
   markSessionInactive,
   recordSessionAttentionEvent,
+  releaseSessionRunLease,
   releaseSessionRunStart,
   setSessionAwaitingUserInput,
   stopSessionRuntime,
@@ -100,6 +101,9 @@ import {
 } from "../lib/events.js";
 import {
   enqueue as enqueueMessage,
+  pauseQueue,
+  clearQueuePause,
+  getQueuePause,
   listQueue,
   removeFromQueue,
   dequeueFirst,
@@ -1424,14 +1428,17 @@ export async function handleSessionStream(
 ) {
   const sessionId = req.query.resumeSessionId;
   const claimed = typeof sessionId === "string" && sessionId.length > 0;
-  if (claimed && !claimSessionRunStart(sessionId)) {
+  if (claimed && !await claimSessionRunStart(sessionId)) {
     res.status(409).json({ error: "A run is already active for this session" });
     return;
   }
   try {
     await startSessionStream(req, res);
   } finally {
-    if (claimed) releaseSessionRunStart(sessionId);
+    if (claimed) {
+      releaseSessionRunStart(sessionId);
+      if (!getSessionRuntime(sessionId).active) await releaseRunLeaseAndDrain(sessionId);
+    }
   }
 }
 
@@ -1918,6 +1925,7 @@ async function startSessionStream(
     options: { providerThreadId?: string } = {}
   ) {
     streamSessionId = sessionId;
+    if (controllerSessionId) await clearQueuePause(sessionId);
     markSessionActive(sessionId, {
       provider: providerId,
       child,
@@ -2163,7 +2171,9 @@ async function startSessionStream(
     // through the serialization chain so it lands after any pending writes.
     eventProcessing = eventProcessing
       .then(() => persistAgentEvent(failureEvent))
-      .catch(() => {});
+      .catch((error: unknown) => {
+        console.error(`[session] failed to persist failure event (session=${streamSessionId}):`, error);
+      });
     if (child.exitCode === null && !child.killed) {
       signalAgentProcess(child, "SIGTERM");
       setTimeout(() => {
@@ -2259,6 +2269,11 @@ async function startSessionStream(
             }
             eventProcessing = eventProcessing
               .then(async () => {
+                if (streamSessionId && event.type === "user.input_requested") {
+                  await pauseQueue(streamSessionId, "user_input");
+                } else if (streamSessionId && event.type === "run.cancelled") {
+                  await pauseQueue(streamSessionId, "cancelled");
+                }
                 // Persist session metadata on run.started so
                 // provider/model are available when loading any session,
                 // then persist each transcript event to
@@ -2289,7 +2304,7 @@ async function startSessionStream(
                   event.type === "run.cancelled"
                 ) {
                   runTerminated = true;
-                  runCancelled = event.type === "run.cancelled";
+                  runCancelled ||= event.type === "run.cancelled";
                 }
                 if (streamSessionId) {
                   recordSessionAttentionEvent(streamSessionId, event);
@@ -2341,6 +2356,11 @@ async function startSessionStream(
             const events = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
             for (const event of events) {
               if (pausedForClaudeUserInput) break;
+              if (streamSessionId && event.type === "user.input_requested") {
+                await pauseQueue(streamSessionId, "user_input");
+              } else if (streamSessionId && event.type === "run.cancelled") {
+                await pauseQueue(streamSessionId, "cancelled");
+              }
               if (
                 event.type !== "run.completed" &&
                 event.type !== "run.failed" &&
@@ -2354,7 +2374,7 @@ async function startSessionStream(
                 event.type === "run.cancelled"
               ) {
                 runTerminated = true;
-                runCancelled = event.type === "run.cancelled";
+                runCancelled ||= event.type === "run.cancelled";
               }
               if (streamSessionId) {
                 recordSessionAttentionEvent(streamSessionId, event);
@@ -2423,9 +2443,13 @@ async function startSessionStream(
         // Update runtime state and lastActiveAt once the stream closes.
         if (streamSessionId) {
           if (!pausedForClaudeUserInput && code === 0) {
-            await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+            try {
+              await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+            } catch (error) {
+              console.error(`[session] failed to persist run diff (session=${streamSessionId}):`, error);
+            }
           }
-          markSessionInactive(streamSessionId);
+          await releaseRunLeaseAndDrain(streamSessionId, !controllerSessionId);
           getSession(worktreePath, streamSessionId).then((existing) => {
             if (existing) {
               existing.lastActiveAt = new Date().toISOString();
@@ -2437,34 +2461,19 @@ async function startSessionStream(
         sseSend({ type: "done", exitCode: effectiveExitCode });
         if (clientConnected) res.end();
 
-        // On a run termination, run the next enqueued message (if any).
-        // This happens server-side so the queue drains regardless of
-        // whether any client is connected (see issue #113). Draining on
-        // `run.failed` as well as `run.completed` is required by the
-        // same-session goal loop (issue #339): a follow-up enqueued by
-        // the goal evaluator after a failed turn would otherwise be
-        // silently ignored. We do *not* drain after a user-initiated
-        // cancellation — pausing the queue there matches the existing UX
-        // where a cancelled turn waits for the user to act.
-        if (
-          streamSessionId &&
-          !pausedForClaudeUserInput &&
-          !runCancelled
-        ) {
-          void scheduleSessionQueueAdvance(
-            req.params.projectId,
-            worktreeId,
-            streamSessionId
-          );
-        }
       })
-      .catch(() => {});
+      .catch((error: unknown) => {
+        console.error(`[session] run finalization failed (session=${streamSessionId}):`, error);
+      });
   });
 
   child.on("error", (err) => {
     clearStreamTimers();
     if (streamSessionId) {
-      markSessionInactive(streamSessionId);
+      void releaseRunLeaseAndDrain(streamSessionId)
+        .catch((error: unknown) => {
+          console.error(`[session] failed to release run lease (session=${streamSessionId}):`, error);
+        });
     }
     sseSend({ type: "error", text: err.message });
     if (clientConnected) res.end();
@@ -2506,7 +2515,8 @@ async function advanceSessionQueue(
   let next: QueuedMessage | null;
   try {
     next = await dequeueFirst(sessionId);
-  } catch {
+  } catch (error) {
+    console.error(`[session] failed to dequeue queued message (session=${sessionId}):`, error);
     return;
   }
   if (!next) return;
@@ -2555,14 +2565,15 @@ function scheduleSessionQueueAdvance(
   const previous = queueAdvanceChains.get(sessionId) ?? Promise.resolve();
   const next = previous
     .then(async () => {
-      while (!claimSessionRunStart(sessionId)) {
-        await waitForSessionRunStart(sessionId);
+      while (!await claimSessionRunStart(sessionId)) {
+        if (!await waitForSessionRunStart(sessionId)) return;
         if (getSessionRuntime(sessionId).active) return;
       }
       try {
         await advanceSessionQueue(projectId, worktreeId, sessionId);
       } finally {
         releaseSessionRunStart(sessionId);
+        if (!getSessionRuntime(sessionId).active) await releaseRunLeaseAndDrain(sessionId);
       }
     })
     .catch((error) => {
@@ -2578,6 +2589,34 @@ function scheduleSessionQueueAdvance(
     }
   });
   return next;
+}
+
+/** A competing process may have abandoned its advance while we held the lease. */
+async function releaseRunLeaseAndDrain(
+  sessionId: string,
+  drainWithoutLease = false
+): Promise<void> {
+  let released = false;
+  let releaseFailed = false;
+  try {
+    released = await releaseSessionRunLease(sessionId);
+  } catch (error) {
+    releaseFailed = true;
+    console.error(`[session] failed to release run lease (session=${sessionId}):`, error);
+  }
+  if (released || drainWithoutLease || releaseFailed) markSessionInactive(sessionId);
+  if ((!released && !drainWithoutLease) || releaseFailed) return;
+
+  try {
+    if (await getQueuePause(sessionId)) return;
+    const head = (await listQueue(sessionId))[0];
+    if (!head || (head.runAt && Date.parse(head.runAt) > Date.now())) return;
+    const located = await locateSessionById(sessionId);
+    if (!located) return;
+    void scheduleSessionQueueAdvance(located.projectId, located.worktreeId, sessionId);
+  } catch (error) {
+    console.error(`[session] failed to inspect queue after run (session=${sessionId}):`, error);
+  }
 }
 
 /**
@@ -2790,33 +2829,22 @@ async function streamCodexPlanSession(
     finished = true;
     if (streamSessionId) {
       if (exitCode === 0) {
-        await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+        try {
+          await persistRunDiffEvent(worktreePath, streamSessionId, runStartTree);
+        } catch (error) {
+          console.error(`[session] failed to persist run diff (session=${streamSessionId}):`, error);
+        }
       }
-      markSessionInactive(streamSessionId);
+      await releaseRunLeaseAndDrain(streamSessionId, !controllerSessionId);
     }
-    await touchSession();
+    try {
+      await touchSession();
+    } catch (error) {
+      console.error(`[session] failed to touch session (session=${streamSessionId}):`, error);
+    }
     sseSend({ type: "done", exitCode });
     if (clientConnected) res.end();
 
-    // Drain the next enqueued message on a run termination (server-side,
-    // independent of any client; see issue #113). Draining on non-zero
-    // exits as well is required by the same-session goal loop (issue
-    // #339): a follow-up enqueued by the goal evaluator after a failed
-    // turn would otherwise be silently ignored. Cancelled runs already
-    // exit through their own drain handler in the run-completion branch,
-    // not here.
-    if (streamSessionId && exitCode === 0) {
-      void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
-    } else if (streamSessionId && exitCode !== 0) {
-      // Failed run: only drain if there is something in the queue. An
-      // empty queue means the agent (or the user) didn't ask for a
-      // follow-up, so we leave the session idle rather than auto-firing
-      // a confusing turn.
-      const queue = await listQueue(streamSessionId).catch(() => []);
-      if (queue.length > 0) {
-        void scheduleSessionQueueAdvance(projectId, worktreeId, streamSessionId);
-      }
-    }
   }
 
   /** Controller-id-stamped event forward; see the SSE-stream twin
@@ -2839,6 +2867,7 @@ async function streamCodexPlanSession(
     startOptions: { providerThreadId?: string } = {}
   ) {
     streamSessionId = sessionId;
+    if (controllerSessionId) await clearQueuePause(sessionId);
     markSessionActive(sessionId, {
       provider: providerId,
       metadata: { projectId, worktreeId },
@@ -2954,6 +2983,11 @@ async function streamCodexPlanSession(
   const handleEvent = (event: AgentStreamEvent) => {
     eventProcessing = eventProcessing
       .then(async () => {
+        if (streamSessionId && event.type === "user.input_requested") {
+          await pauseQueue(streamSessionId, "user_input");
+        } else if (streamSessionId && event.type === "run.cancelled") {
+          await pauseQueue(streamSessionId, "cancelled");
+        }
         if (event.type === "run.started") {
           // Same Controller-id-first rule as the SSE path (issue
           // #382): persist under the Controller id when we have one,
@@ -2984,7 +3018,9 @@ async function streamCodexPlanSession(
           }
         }
       })
-      .catch(() => {});
+      .catch((error: unknown) => {
+        console.error(`[session] failed to persist Codex event (session=${streamSessionId}):`, error);
+      });
   };
 
   sseSend({ type: "started" });
@@ -3242,6 +3278,7 @@ sessionsRouter.post(
         },
         enqueueFollowUp: (input) => enqueueMessage(req.params.sessionId, input),
       });
+      await clearQueuePause(req.params.sessionId);
       if (result.disposition === "queued") {
         res.json({ ok: true, ...result });
         if (!getSessionRuntime(req.params.sessionId).active) {
@@ -3369,6 +3406,7 @@ sessionsRouter.post(
       }
 
       await codexAppServerManager.submitUserInput(req.params.sessionId, answers);
+      await clearQueuePause(req.params.sessionId);
       setSessionAwaitingUserInput(req.params.sessionId, false);
       await appendEvent(worktree.path, req.params.sessionId, {
         id: randomUUID(),
@@ -3672,6 +3710,7 @@ async function enqueueExternalFollowUp(
     if (!current || current.session.status === "archived") {
       throw new Error(`Session ${session.id} is archived`);
     }
+    await queue.clearPause();
     return queue.enqueue({
       text,
       visibleText: text,

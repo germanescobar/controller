@@ -10,6 +10,9 @@ import {
   resolveQueuedMessage,
   dequeueFirst,
   clearQueue,
+  clearQueuePause,
+  getQueuePause,
+  pauseQueue,
   withSessionQueueTransaction,
   type QueuedMessageInput,
 } from "../session-queue.js";
@@ -72,6 +75,19 @@ test("dequeueFirst removes and returns the head, then null when empty", async ()
     const second = await dequeueFirst("s1");
     assert.equal(second?.text, "two");
     assert.equal(await dequeueFirst("s1"), null);
+  });
+});
+
+test("a durable pause blocks dequeue until an explicit clear", async () => {
+  await withTempHome(async () => {
+    await enqueue("s1", input("queued"));
+    await pauseQueue("s1", "cancelled");
+    assert.equal(await getQueuePause("s1"), "cancelled");
+    assert.equal(await dequeueFirst("s1"), null);
+    assert.equal((await listQueue("s1")).length, 1);
+    await clearQueuePause("s1");
+    assert.equal(await getQueuePause("s1"), null);
+    assert.equal((await dequeueFirst("s1"))?.text, "queued");
   });
 });
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import express from "express";
 import http from "node:http";
@@ -9,10 +9,16 @@ import os from "node:os";
 import path from "node:path";
 import { clearCommandResolverCache } from "../command-resolver.js";
 import { getEvents } from "../sessions.js";
-import { enqueue, listQueue } from "../session-queue.js";
-import { getSessionRuntime } from "../session-runtime.js";
+import { enqueue, getQueuePause, listQueue, pauseQueue } from "../session-queue.js";
+import {
+  claimSessionRunStart,
+  getSessionRuntime,
+  releaseSessionRunLease,
+  releaseSessionRunStart,
+} from "../session-runtime.js";
+import { runQueueRecovery } from "../queue-recovery.js";
 import { getProjectWorktrees } from "../worktrees.js";
-import { projectStoreDir } from "../paths.js";
+import { projectStoreDir, sessionQueuesDir } from "../paths.js";
 import {
   advanceSessionQueueFromConsumer,
   handleSessionStream,
@@ -123,6 +129,21 @@ test("idle send and a concurrent consumer tick dispatch one run and one user mes
   });
 });
 
+test("sending a new message resumes a paused queue", async () => {
+  await withDispatchEnv(async (env) => {
+    await pauseQueue(env.sessionId, "cancelled");
+    const response = await fetch(`${env.baseUrl}/api/sessions/${env.sessionId}/send-from`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fromSessionId: "dispatch-parent", message: "resume" }),
+    });
+    assert.equal(response.status, 201);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal(await getQueuePause(env.sessionId), null);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+    assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
 test("two racing queue dispatch attempts start one run", async () => {
   await withDispatchEnv(async (env) => {
     await enqueue(env.sessionId, {
@@ -137,6 +158,52 @@ test("two racing queue dispatch attempts start one run", async () => {
     assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
     const events = await getEvents(env.projectPath, env.sessionId);
     assert.equal(events.filter((event) => event.type === "user_message").length, 1);
+  });
+});
+
+test("two server processes sharing a home dispatch one sent message once", async () => {
+  await withDispatchEnv(async (env) => {
+    const childCode = `
+      import express from "express";
+      import http from "node:http";
+      import { advanceSessionQueueFromConsumer } from ${JSON.stringify(new URL("../../routes/sessions.ts", import.meta.url).href)};
+      const app = express();
+      app.post("/advance", async (_req, res) => {
+        await advanceSessionQueueFromConsumer(${JSON.stringify(env.projectId)}, ${JSON.stringify(env.worktreeId)}, ${JSON.stringify(env.sessionId)});
+        res.end();
+      });
+      const server = http.createServer(app);
+      server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+    `;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", childCode], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        let output = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          output += chunk.toString();
+          const line = output.split("\n")[0];
+          if (/^\d+$/.test(line)) resolve(Number(line));
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => reject(new Error(`Second server exited before ready: ${code}`)));
+      });
+      const send = fetch(`${env.baseUrl}/api/sessions/${env.sessionId}/send-from`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fromSessionId: "dispatch-parent", message: "hello" }),
+      });
+      const advance = fetch(`http://127.0.0.1:${port}/advance`, { method: "POST" });
+      const [sent, advanced] = await Promise.all([send, advance]);
+      assert.equal(sent.status, 201);
+      assert.equal(advanced.status, 200);
+      await waitForRun(env.projectPath, env.sessionId);
+      assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+      assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
+    } finally {
+      child.kill();
+    }
   });
 });
 
@@ -155,5 +222,132 @@ test("a direct resume refuses a second concurrent run", async () => {
     await first.text();
     await waitForRun(env.projectPath, env.sessionId);
     assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+  });
+});
+
+test("a direct resume that fails preflight drains a message queued behind its lease", async () => {
+  await withDispatchEnv(async (env) => {
+    await enqueue(env.sessionId, {
+      text: "after failure", visibleText: "after failure", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    const url = new URL(`${env.baseUrl}/api/projects/${env.projectId}/sessions/stream`);
+    url.searchParams.set("worktreeId", env.worktreeId);
+    url.searchParams.set("resumeSessionId", env.sessionId);
+    url.searchParams.set("provider", "unavailable-provider");
+    url.searchParams.set("message", "fails preflight");
+    const response = await fetch(url);
+    assert.equal(response.status, 400);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+    assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
+    assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
+test("owner recovery tick dispatches a plain queue behind a stale lease once", async () => {
+  await withDispatchEnv(async (env) => {
+    await enqueue(env.sessionId, {
+      text: "recover", visibleText: "recover", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    const lockDir = path.join(sessionQueuesDir(), `${env.sessionId}.run.lock`);
+    await fs.mkdir(lockDir);
+    const stale = new Date(Date.now() - 60_000);
+    await fs.utimes(lockDir, stale, stale);
+    const deps = { advanceSessionQueue: advanceSessionQueueFromConsumer };
+    await Promise.all([runQueueRecovery(deps), runQueueRecovery(deps)]);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+    assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
+    assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
+test("owner recovery tick leaves a live lease alone", async () => {
+  await withDispatchEnv(async (env) => {
+    await enqueue(env.sessionId, {
+      text: "wait", visibleText: "wait", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    assert.equal(await claimSessionRunStart(env.sessionId), true);
+    try {
+      await runQueueRecovery({ advanceSessionQueue: advanceSessionQueueFromConsumer });
+      assert.equal((await listQueue(env.sessionId)).length, 1);
+      await assert.rejects(fs.readFile(env.startsFile), { code: "ENOENT" });
+    } finally {
+      releaseSessionRunStart(env.sessionId);
+      await releaseSessionRunLease(env.sessionId);
+    }
+  });
+});
+
+for (const reason of ["cancelled", "user_input"] as const) {
+  test(`${reason} pauses queued work until an explicit resume`, async () => {
+    await withDispatchEnv(async (env) => {
+      const firstEvent = reason === "cancelled"
+        ? "{\"type\":\"run.cancelled\",\"sessionId\":\"dispatch-target\",\"reason\":\"user_interrupt\"}"
+        : "{\"type\":\"user.input_requested\",\"id\":\"request-1\",\"questions\":[]}";
+      await fs.writeFile(path.join(path.dirname(env.startsFile), "bin", "anita"), `#!/usr/bin/env bash
+set -e
+printf 'start\\n' >> '${env.startsFile}'
+printf '%s\\n' '{"type":"run.started","sessionId":"${env.sessionId}","timestamp":"2026-01-01T00:00:00.000Z"}'
+if [ "$(wc -l < '${env.startsFile}')" -eq 1 ]; then
+  printf '%s\\n' '${firstEvent}'
+else
+  printf '%s\\n' '{"type":"run.completed","sessionId":"${env.sessionId}","timestamp":"2026-01-01T00:00:01.000Z"}'
+fi
+`, { mode: 0o755 });
+      clearCommandResolverCache();
+      await enqueue(env.sessionId, {
+        text: "queued", visibleText: "queued", provider: "anita",
+        model: "", mode: "default", attachmentIds: [],
+      });
+      const url = new URL(`${env.baseUrl}/api/projects/${env.projectId}/sessions/stream`);
+      url.searchParams.set("worktreeId", env.worktreeId);
+      url.searchParams.set("resumeSessionId", env.sessionId);
+      url.searchParams.set("provider", "anita");
+      url.searchParams.set("message", "first");
+      const first = await fetch(url);
+      assert.equal(first.status, 200);
+      await first.text();
+      assert.equal(await getQueuePause(env.sessionId), reason);
+      await runQueueRecovery({ advanceSessionQueue: advanceSessionQueueFromConsumer });
+      assert.equal((await listQueue(env.sessionId)).length, 1);
+      assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+
+      url.searchParams.set("message", "resume");
+      const resumed = await fetch(url);
+      assert.equal(resumed.status, 200);
+      await resumed.text();
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const starts = (await fs.readFile(env.startsFile, "utf-8")).trim().split("\n").length;
+        if (starts === 3 && (await listQueue(env.sessionId)).length === 0 && !getSessionRuntime(env.sessionId).active) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(await getQueuePause(env.sessionId), null);
+      assert.deepEqual(await listQueue(env.sessionId), []);
+      assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim().split("\n").length, 3);
+      const events = await getEvents(env.projectPath, env.sessionId);
+      assert.equal(events.filter((event) => event.type === "user_message" && event.data.text === "queued").length, 1);
+    });
+  });
+}
+
+test("a malformed queue does not keep a completed stream open", async () => {
+  await withDispatchEnv(async (env) => {
+    const url = new URL(`${env.baseUrl}/api/projects/${env.projectId}/sessions/stream`);
+    url.searchParams.set("worktreeId", env.worktreeId);
+    url.searchParams.set("resumeSessionId", env.sessionId);
+    url.searchParams.set("provider", "anita");
+    url.searchParams.set("message", "finish despite broken queue");
+    const response = await fetch(url);
+    assert.equal(response.status, 200);
+    await fs.mkdir(sessionQueuesDir(), { recursive: true });
+    await fs.writeFile(path.join(sessionQueuesDir(), `${env.sessionId}.json`), "{truncated");
+    const stream = await response.text();
+    assert.match(stream, /"type":"done"/);
+    assert.equal(getSessionRuntime(env.sessionId).active, false);
   });
 });

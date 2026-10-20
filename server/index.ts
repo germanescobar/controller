@@ -54,6 +54,7 @@ import {
 } from "./lib/scheduler.js";
 import { makeSchedulesConsumer } from "./lib/schedules.js";
 import { makeRouteAdvanceDeps, makeWakesConsumer } from "./lib/wakes.js";
+import { makeQueueRecoveryConsumer } from "./lib/queue-recovery.js";
 import {
   listGoalSessions,
   makeGoalEvaluatorConsumer,
@@ -424,6 +425,7 @@ async function startSharedWork(): Promise<void> {
   // deadlock on a circular import.
   const wakeDeps = await makeRouteAdvanceDeps();
   registerConsumer(makeWakesConsumer(wakeDeps, fireAndForget));
+  registerConsumer(makeQueueRecoveryConsumer(wakeDeps, fireAndForget));
 
   // Register the goal evaluator consumer (issue #339). Each tick it
   // enumerates sessions with an active goal and runs the cheap judge
