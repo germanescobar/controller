@@ -329,7 +329,7 @@ async function resolveSkillActivation(
       ? invocation.rest
       : userText;
   return {
-    agentMessage: buildSkillPrefix(body.metadata.name, body.body) + trimmedText,
+    agentMessage: buildSkillPrefix(body.metadata.name, body.body, path.dirname(body.metadata.path)) + trimmedText,
     historyText: buildSkillHistoryMessage(body.metadata.name, trimmedText),
   };
 }

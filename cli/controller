@@ -92,7 +92,7 @@ const USAGE = `Usage:
 
   controller skills list
   controller skills search <query>
-  controller skills describe <name>
+  controller skills describe <name> [--json]
   controller skills activate <name>
   controller skills create --name <name> --description <description> [--body <body>] [--body-file <path>]
   controller skills import-discover
@@ -4300,6 +4300,9 @@ function printSkills(command, result) {
     return;
   }
   if (command === "describe") {
+    if (result.basePath) {
+      process.stdout.write(`Skill directory: ${result.basePath}\nRelative paths in this skill resolve against this directory.\n\n`);
+    }
     process.stdout.write(result.body ?? "");
     return;
   }
@@ -4354,6 +4357,10 @@ export async function runSkills(argv, serverUrl) {
   const { response, result } = await postJson(serverUrl, `/api/skills/${endpoint}`, effectiveBody);
   if (response.status >= 400) {
     fail(serverError(result, `Skills ${endpoint} failed (HTTP ${response.status})`));
+  }
+  if (argv[0] === "describe" && argv.includes("--json")) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
   }
   printSkills(argv[0], result);
 }

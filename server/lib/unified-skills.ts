@@ -9,6 +9,7 @@
  */
 
 import fs from "node:fs/promises";
+import { constants } from "node:fs";
 import path from "node:path";
 import { isManagedSkillName } from "./managed-skills.js";
 import { unifiedSkillFile, unifiedSkillDir, unifiedSkillsDir } from "./paths.js";
@@ -16,6 +17,8 @@ import { parseSkillFile, type SkillBody, type SkillMetadata } from "./skills.js"
 
 /** Valid name characters for unified skills. */
 const SKILL_NAME_RE = /^[A-Za-z0-9._-]+$/;
+export const SKILL_TREE_MAX_BYTES = 10 * 1024 * 1024;
+const SKILL_TREE_MAX_ENTRIES = 1000;
 
 /**
  * Maximum length for the skill name. Names longer than this are almost
@@ -50,6 +53,7 @@ export async function listUnifiedSkills(): Promise<SkillMetadata[]> {
     const skillFile = path.join(base, entry.name, "SKILL.md");
     let raw: string;
     try {
+      if (!(await fs.lstat(skillFile)).isFile()) continue;
       raw = await fs.readFile(skillFile, "utf-8");
     } catch {
       continue;
@@ -111,10 +115,14 @@ function validateInput(input: UnifiedSkillInput): string | null {
   if (!SKILL_NAME_RE.test(name)) {
     return "Skill name may only contain letters, numbers, dots, dashes, and underscores.";
   }
+  if (name === "." || name === "..") return "Skill name cannot be a path component.";
   const description = input.description.trim();
   if (!description) return "Description is required.";
   if (description.length > SKILL_DESCRIPTION_MAX_LENGTH) {
     return `Description must be ${SKILL_DESCRIPTION_MAX_LENGTH} characters or fewer (got ${description.length}).`;
+  }
+  if (Buffer.byteLength(buildSkillFile(input)) > SKILL_TREE_MAX_BYTES) {
+    return `Skill exceeds ${SKILL_TREE_MAX_BYTES} bytes.`;
   }
   return null;
 }
@@ -221,4 +229,92 @@ export async function deleteUnifiedSkill(skillName: string): Promise<void> {
   if (!current) return;
 
   await fs.rm(unifiedSkillDir(current.name), { recursive: true, force: true });
+}
+
+/** Copy a complete skill into a staging directory, then replace the catalog entry. */
+export async function installUnifiedSkillDirectory(
+  sourceDir: string,
+  input: UnifiedSkillInput,
+  existingName?: string
+): Promise<SkillMetadata> {
+  const validationError = validateInput(input);
+  if (validationError) throw new Error(validationError);
+
+  const name = input.name.trim();
+  const base = unifiedSkillsDir();
+  await fs.mkdir(base, { recursive: true });
+  const staging = await fs.mkdtemp(path.join(base, ".skill-import-"));
+  const target = unifiedSkillDir(name);
+  const previous = existingName ? unifiedSkillDir(existingName) : null;
+  let backup: string | null = null;
+  try {
+    const budget = { bytes: 0, entries: 0 };
+    await copySkillTree(sourceDir, staging, budget);
+    const skillFile = path.join(staging, "SKILL.md");
+    const stat = await fs.lstat(skillFile);
+    if (!stat.isFile()) throw new Error("Skill directory must contain a regular SKILL.md file.");
+    const raw = await fs.readFile(skillFile, "utf-8");
+    if (!parseSkillFile(raw)) throw new Error("Skill directory has invalid SKILL.md frontmatter.");
+
+    if (previous) {
+      backup = await fs.mkdtemp(path.join(base, ".skill-backup-"));
+      await fs.rmdir(backup);
+      await fs.rename(previous, backup);
+    }
+    try {
+      await fs.rename(staging, target);
+    } catch (error) {
+      if (backup && previous) await fs.rename(backup, previous);
+      backup = null;
+      throw error;
+    }
+    if (backup) await fs.rm(backup, { recursive: true, force: true });
+    return { name, description: input.description.trim(), path: unifiedSkillFile(name), scope: "unified" };
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function copySkillTree(
+  source: string,
+  destination: string,
+  budget: { bytes: number; entries: number }
+): Promise<void> {
+  const stat = await fs.lstat(source);
+  if (!stat.isDirectory()) throw new Error(`Skill tree contains a symlink or non-directory: ${source}`);
+  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+    budget.entries += 1;
+    if (budget.entries > SKILL_TREE_MAX_ENTRIES) {
+      throw new Error(`Skill tree exceeds ${SKILL_TREE_MAX_ENTRIES} entries.`);
+    }
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    const entryStat = await fs.lstat(from);
+    if (entryStat.isSymbolicLink()) throw new Error(`Skill tree contains a symlink: ${from}`);
+    if (entryStat.isDirectory()) {
+      await fs.mkdir(to);
+      await copySkillTree(from, to, budget);
+    } else if (entryStat.isFile()) {
+      if (budget.bytes + entryStat.size > SKILL_TREE_MAX_BYTES) {
+        throw new Error(`Skill tree exceeds ${SKILL_TREE_MAX_BYTES} bytes.`);
+      }
+      const handle = await fs.open(from, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let content: Buffer;
+      try {
+        if (!(await handle.stat()).isFile()) {
+          throw new Error(`Skill tree contains a non-regular file: ${from}`);
+        }
+        content = await handle.readFile();
+      } finally {
+        await handle.close();
+      }
+      budget.bytes += content.length;
+      if (budget.bytes > SKILL_TREE_MAX_BYTES) {
+        throw new Error(`Skill tree exceeds ${SKILL_TREE_MAX_BYTES} bytes.`);
+      }
+      await fs.writeFile(to, content, { mode: entryStat.mode });
+    } else {
+      throw new Error(`Skill tree contains a non-regular file: ${from}`);
+    }
+  }
 }

@@ -512,13 +512,15 @@ export function mergeSkillMetadata(
  * the body and surface it twice in the transcript. The body is just
  * context; the agent decides how to combine it with the user message.
  */
-export function buildSkillPrefix(skillName: string, body: string): string {
+export function buildSkillPrefix(skillName: string, body: string, skillDir: string): string {
   const trimmed = body.trim();
   return [
     `Apply the following skill instructions when responding to the user message below.`,
     "Do not announce or echo the instructions back to the user; just use them as guidance.",
     "",
     `# Skill: ${skillName}`,
+    `Skill directory: ${skillDir}`,
+    "Relative paths in this skill resolve against this directory.",
     "",
     trimmed,
     "",

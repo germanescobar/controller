@@ -398,6 +398,28 @@ test("runSkills keeps the server hint on an error", async () => {
   assert.match(stderrText, /Skill not found\. Run `controller skills list` to see names\./);
 });
 
+test("runSkills describe prints the skill directory and supports JSON", async () => {
+  const cli = await loadCli();
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  const result = { name: "bundle", description: "d", basePath: "/tmp/skills/bundle", body: "Read references/a.md\n" };
+  let output = "";
+  globalThis.fetch = async () => ({ status: 200, json: async () => result });
+  process.stdout.write = (chunk) => { output += String(chunk); return true; };
+  try {
+    await cli.runSkills(["describe", "bundle"], "http://controller.test");
+    assert.match(output, /Skill directory: \/tmp\/skills\/bundle/);
+    assert.match(output, /Relative paths in this skill resolve against this directory/);
+    assert.match(output, /Read references\/a.md/);
+    output = "";
+    await cli.runSkills(["describe", "bundle", "--json"], "http://controller.test");
+    assert.deepEqual(JSON.parse(output), result);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
+  }
+});
+
 test("runIntegrations gateway fails on a 4xx without an error field", async () => {
   const cli = await loadCli();
   const { exitCode, stderrText } = await runExpectingExit(

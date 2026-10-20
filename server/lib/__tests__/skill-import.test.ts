@@ -7,6 +7,8 @@ import {
   mkdirSync,
   chmodSync,
   realpathSync,
+  readFileSync,
+  symlinkSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -324,6 +326,10 @@ test("importSkills copies a user skill into the unified catalog", async () => {
       { name: "review", description: "Review PRs" },
       "Review carefully"
     );
+    mkdirSync(path.join(path.dirname(sourcePath), "references"));
+    writeFileSync(path.join(path.dirname(sourcePath), "references", "a.md"), "reference text");
+    mkdirSync(path.join(path.dirname(sourcePath), "scripts"));
+    writeFileSync(path.join(path.dirname(sourcePath), "scripts", "run.sh"), "#!/bin/sh\nexit 0\n");
 
     const env = makeEnv(home);
     const result = await importSkills(
@@ -348,11 +354,46 @@ test("importSkills copies a user skill into the unified catalog", async () => {
     assert.match(raw, /name: review/);
     assert.match(raw, /description: Review PRs/);
     assert.match(raw, /Review carefully/);
+    assert.equal(readFileSync(path.join(orchestratorHome, "skills", "review", "references", "a.md"), "utf-8"), "reference text");
+    assert.match(readFileSync(path.join(orchestratorHome, "skills", "review", "scripts", "run.sh"), "utf-8"), /exit 0/);
   } finally {
     if (original === undefined) delete process.env.CONTROLLER_HOME;
     else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects symlinks and oversized trees without replacing a skill", async () => {
+  const home = makeTempDir("import-unsafe-");
+  const catalogHome = makeTempDir("orch-unsafe-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), "unsafe", {
+      name: "unsafe", description: "source",
+    }, "source body");
+    const { createUnifiedSkill, readUnifiedSkill, SKILL_TREE_MAX_BYTES } = await import("../unified-skills.js");
+    await createUnifiedSkill({ name: "unsafe", description: "old", body: "old body" });
+    const reference = path.join(path.dirname(sourcePath), "reference.md");
+    symlinkSync(sourcePath, reference);
+    const selection = { providerId: "anita", sourcePath, scope: "user" as const, overwrite: true };
+    const symlinkResult = await importSkills({ selections: [selection] }, makeEnv(home));
+    assert.equal(symlinkResult.results[0].status, "error");
+    assert.match(symlinkResult.results[0].reason ?? "", /symlink/);
+    assert.equal((await readUnifiedSkill("unsafe"))?.body, "old body");
+
+    rmSync(reference);
+    writeFileSync(reference, Buffer.alloc(SKILL_TREE_MAX_BYTES + 1));
+    const sizeResult = await importSkills({ selections: [selection] }, makeEnv(home));
+    assert.equal(sizeResult.results[0].status, "error");
+    assert.match(sizeResult.results[0].reason ?? "", /exceeds/);
+    assert.equal((await readUnifiedSkill("unsafe"))?.body, "old body");
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
   }
 });
 

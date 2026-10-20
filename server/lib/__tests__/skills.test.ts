@@ -185,10 +185,12 @@ test("buildSkillPrefix frames the body as plain prose (no skill-load marker)", (
   // The prefix must not include the `skill:<name>` fenced marker that some
   // agents (Anita) auto-detect and surface twice in the transcript. It
   // should be plain context the agent reads but doesn't echo.
-  const prefix = buildSkillPrefix("imagegen", "do the thing");
+  const prefix = buildSkillPrefix("imagegen", "do the thing", "/tmp/skills/imagegen");
   assert.doesNotMatch(prefix, /```skill:imagegen/);
   assert.match(prefix, /Skill: imagegen/);
   assert.match(prefix, /do the thing/);
+  assert.match(prefix, /Skill directory: \/tmp\/skills\/imagegen/);
+  assert.match(prefix, /Relative paths in this skill resolve against this directory/);
   assert.ok(prefix.endsWith("\n"));
 });
 

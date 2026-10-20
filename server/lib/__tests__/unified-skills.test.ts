@@ -4,6 +4,8 @@ import {
   mkdtempSync,
   rmSync,
   readFileSync,
+  writeFileSync,
+  mkdirSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +17,7 @@ import {
   updateUnifiedSkill,
   SKILL_NAME_MAX_LENGTH,
   SKILL_DESCRIPTION_MAX_LENGTH,
+  SKILL_TREE_MAX_BYTES,
 } from "../unified-skills.js";
 import { unifiedSkillFile } from "../paths.js";
 
@@ -110,6 +113,25 @@ test("createUnifiedSkill rejects names with forbidden characters", async () => {
   });
 });
 
+test("createUnifiedSkill rejects path components", async () => {
+  await withTempHome(async () => {
+    for (const name of [".", "..", "../outside"]) {
+      const result = await createUnifiedSkill({ name, description: "d", body: "b" });
+      assert.equal("error" in result, true);
+    }
+  });
+});
+
+test("createUnifiedSkill rejects an oversized SKILL.md", async () => {
+  await withTempHome(async () => {
+    const result = await createUnifiedSkill({
+      name: "large", description: "d", body: "x".repeat(SKILL_TREE_MAX_BYTES),
+    });
+    assert.equal("error" in result, true);
+    if ("error" in result) assert.match(result.error, /exceeds/);
+  });
+});
+
 test("createUnifiedSkill rejects empty descriptions", async () => {
   await withTempHome(async () => {
     const result = await createUnifiedSkill({
@@ -185,6 +207,8 @@ test("updateUnifiedSkill renames skill directory and updates content", async () 
       description: "d",
       body: "body",
     });
+    mkdirSync(path.join(path.dirname(unifiedSkillFile("old")), "references"));
+    writeFileSync(path.join(path.dirname(unifiedSkillFile("old")), "references", "a.md"), "reference");
     const result = await updateUnifiedSkill("old", {
       name: "new",
       description: "updated",
@@ -197,6 +221,7 @@ test("updateUnifiedSkill renames skill directory and updates content", async () 
     const updated = await readUnifiedSkill("new");
     assert.ok(updated);
     assert.equal(updated.body, "updated body");
+    assert.equal(readFileSync(path.join(path.dirname(unifiedSkillFile("new")), "references", "a.md"), "utf-8"), "reference");
 
     const old = await readUnifiedSkill("old");
     assert.equal(old, null);

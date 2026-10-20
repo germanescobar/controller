@@ -38,8 +38,7 @@ import {
 import { getProjects } from "./projects.js";
 import {
   listUnifiedSkills,
-  createUnifiedSkill,
-  deleteUnifiedSkill,
+  installUnifiedSkillDirectory,
   validateUnifiedSkillInput,
 } from "./unified-skills.js";
 
@@ -202,6 +201,7 @@ async function readMetadataFromDir(
   const skillFile = path.join(dir, "SKILL.md");
   let raw: string;
   try {
+    if (!(await fs.lstat(skillFile)).isFile()) return null;
     raw = await fs.readFile(skillFile, "utf-8");
   } catch {
     return null;
@@ -394,21 +394,21 @@ export async function importSkills(
       continue;
     }
 
-    if (collision && selection.overwrite) {
-      // Overwrite path: delete the existing unified skill first. We already
-      // validated the candidate above, so this is safe — `createUnifiedSkill`
-      // cannot reject a skill that has cleared `validateUnifiedSkillInput`.
-      await deleteUnifiedSkill(sourceSkill.name);
-    }
-
-    const created = await createUnifiedSkill(candidate);
-    if ("error" in created) {
+    const existingName = unified.find(
+      (entry) => entry.name.toLowerCase() === sourceSkill.name.toLowerCase()
+    )?.name;
+    let created: SkillMetadata;
+    try {
+      created = await installUnifiedSkillDirectory(
+        path.dirname(selection.sourcePath), candidate, collision ? existingName : undefined
+      );
+    } catch (error) {
       results.push({
         providerId: selection.providerId,
         scope: selection.scope,
         name: sourceSkill.name,
         status: "error",
-        reason: created.error,
+        reason: error instanceof Error ? error.message : String(error),
       });
       continue;
     }
