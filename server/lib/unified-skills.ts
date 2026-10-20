@@ -20,6 +20,8 @@ const SKILL_NAME_RE = /^[A-Za-z0-9._-]+$/;
 export const SKILL_TREE_MAX_BYTES = 10 * 1024 * 1024;
 const SKILL_TREE_MAX_ENTRIES = 1000;
 const STALE_STAGING_AGE_MS = 60 * 60 * 1000;
+const BACKUP_NAME_RE = /^\.skill-backup-([0-9a-f]+)-[A-Za-z0-9]+$/;
+const activeBackups = new Set<string>();
 
 /**
  * Maximum length for the skill name. Names longer than this are almost
@@ -122,7 +124,7 @@ function validateInput(input: UnifiedSkillInput): string | null {
   if (!SKILL_NAME_RE.test(name)) {
     return "Skill name may only contain letters, numbers, dots, dashes, and underscores.";
   }
-  if (name === "." || name === "..") return "Skill name cannot be a path component.";
+  if (name.startsWith(".")) return "Skill name cannot start with a dot.";
   const description = input.description.trim();
   if (!description) return "Description is required.";
   if (description.length > SKILL_DESCRIPTION_MAX_LENGTH) {
@@ -256,6 +258,7 @@ export async function installUnifiedSkillDirectory(
   if (!(await fs.lstat(stagingRoot)).isDirectory()) {
     throw new Error(`Skill staging path is not a regular directory: ${stagingRoot}`);
   }
+  await recoverStagedSkillBackups();
   await cleanupStaleSkillStaging(stagingRoot);
   const staging = await fs.mkdtemp(path.join(stagingRoot, ".skill-import-"));
   const target = unifiedSkillDir(name);
@@ -284,22 +287,78 @@ export async function installUnifiedSkillDirectory(
     }
 
     if (previous) {
-      backup = await fs.mkdtemp(path.join(stagingRoot, ".skill-backup-"));
+      const encodedName = Buffer.from(path.basename(previous), "utf-8").toString("hex");
+      backup = await fs.mkdtemp(path.join(stagingRoot, `.skill-backup-${encodedName}-`));
       await fs.rmdir(backup);
+      activeBackups.add(backup);
       await fs.rename(previous, backup);
     }
     try {
       await fs.rename(staging, target);
     } catch (error) {
       if (backup && previous) await fs.rename(backup, previous);
+      if (backup) activeBackups.delete(backup);
       backup = null;
       throw error;
     }
-    if (backup) await fs.rm(backup, { recursive: true, force: true });
+    if (backup) {
+      await fs.rm(backup, { recursive: true, force: true }).catch((error: unknown) => {
+        console.warn(`Could not remove completed skill backup ${backup}:`, error);
+      });
+    }
     return { name: stagedInput.name, description: stagedInput.description, path: unifiedSkillFile(name), scope: "unified" };
   } finally {
+    if (backup) activeBackups.delete(backup);
     await fs.rm(staging, { recursive: true, force: true });
   }
+}
+
+/** Restore or discard backups left by a process interrupted during overwrite. */
+export async function recoverStagedSkillBackups(): Promise<void> {
+  const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(stagingRoot, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingPath(error)) return;
+    throw error;
+  }
+  await fs.mkdir(unifiedSkillsDir(), { recursive: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const match = BACKUP_NAME_RE.exec(entry.name);
+    if (!match) continue;
+    const backup = path.join(stagingRoot, entry.name);
+    if (activeBackups.has(backup)) continue;
+    const name = Buffer.from(match[1], "hex").toString("utf-8");
+    if (!name || name.startsWith(".") || !SKILL_NAME_RE.test(name)) {
+      console.warn(`Ignoring skill backup with invalid destination name: ${backup}`);
+      continue;
+    }
+    const target = unifiedSkillDir(name);
+    let targetStat: import("node:fs").Stats | null = null;
+    try {
+      targetStat = await fs.lstat(target);
+    } catch (error) {
+      if (!isMissingPath(error)) throw error;
+    }
+    if (targetStat) {
+      if (!targetStat.isDirectory()) {
+        console.warn(`Cannot recover skill backup; destination is not a directory: ${target}`);
+        continue;
+      }
+      await fs.rm(backup, { recursive: true, force: true });
+      console.warn(`Removed obsolete skill backup for ${name}: ${backup}`);
+    } else {
+      await fs.rename(backup, target);
+      console.warn(`Restored interrupted skill backup for ${name}: ${target}`);
+    }
+  }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 /** Remove abandoned imports without touching a concurrently running copy. */

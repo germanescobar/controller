@@ -687,6 +687,28 @@ test("importSkills rejects a source whose name fails the unified-skill character
   }
 });
 
+test("importSkills rejects a dot-prefixed skill name", async () => {
+  const home = makeTempDir("import-dot-name-");
+  const catalogHome = makeTempDir("orch-dot-name-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), ".review", {
+      name: ".review", description: "Hidden skill",
+    }, "body");
+    const result = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user" }] }, makeEnv(home));
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /cannot start with a dot/);
+    const { listUnifiedSkills } = await import("../unified-skills.js");
+    assert.deepEqual(await listUnifiedSkills(), []);
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
+  }
+});
+
 test("importSkills returns an error for an unknown provider", async () => {
   const home = makeTempDir("import-bad-provider-");
   const orchestratorHome = makeTempDir("orch-bad-provider-");

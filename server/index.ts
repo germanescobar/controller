@@ -62,6 +62,7 @@ import {
 } from "./lib/goal-evaluator.js";
 import { startSessionInProcess } from "./lib/session-start.js";
 import { installManagedSkills } from "./lib/managed-skills.js";
+import { recoverStagedSkillBackups } from "./lib/unified-skills.js";
 import { ensureMemoryDirs } from "./lib/memory.js";
 import {
   installControllerCli,
@@ -311,6 +312,9 @@ async function start(): Promise<void> {
   // server is `import()`-ed from the Electron main process in production,
   // so `import("electron")` here resolves to the real module (issue #280).
   await installDefaultBrowserOpener();
+  await recoverStagedSkillBackups().catch((error: unknown) => {
+    console.error("Failed to recover interrupted skill imports:", error);
+  });
   // Ensure the Controller-owned memory directory exists (issue #350).
   // The global scope gets an empty directory on first start so the
   // agent's preamble can show `(empty)` placeholders; project scopes

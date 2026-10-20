@@ -1195,8 +1195,9 @@ provided the relevant information explicitly.
    existing skill, pick a different name, or continue anyway.
 
 3. **Draft the skill.** Write the three required fields:
-   - \`name\` — lowercase, letters/digits/dots/dashes/underscores only, up
-     to 64 characters. Recommend something the user can type as a
+   - \`name\` — lowercase, up to 64 characters, using only letters, digits,
+     dots, dashes, and underscores. It must not start with a dot. Recommend
+     something the user can type as a
      \`/<name>\` invocation.
    - \`description\` — one sentence, up to 1024 characters, that tells the
      agent *when* to use the skill. The description is the trigger; make

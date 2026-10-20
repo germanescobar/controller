@@ -6,6 +6,8 @@ import {
   readFileSync,
   writeFileSync,
   mkdirSync,
+  renameSync,
+  existsSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,8 +20,9 @@ import {
   SKILL_NAME_MAX_LENGTH,
   SKILL_DESCRIPTION_MAX_LENGTH,
   SKILL_TREE_MAX_BYTES,
+  recoverStagedSkillBackups,
 } from "../unified-skills.js";
-import { unifiedSkillFile } from "../paths.js";
+import { unifiedSkillFile, unifiedSkillsDir } from "../paths.js";
 
 function withTempHome(run: () => Promise<void>): Promise<void> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "unified-skills-"));
@@ -128,6 +131,50 @@ test("createUnifiedSkill rejects path components", async () => {
       const result = await createUnifiedSkill({ name, description: "d", body: "b" });
       assert.equal("error" in result, true);
     }
+  });
+});
+
+test("create and update reject dot-prefixed names", async () => {
+  await withTempHome(async () => {
+    const input = { name: ".review", description: "d", body: "b" };
+    const created = await createUnifiedSkill(input);
+    assert.equal("error" in created, true);
+    if ("error" in created) assert.match(created.error, /cannot start with a dot/);
+    await createUnifiedSkill({ ...input, name: "review" });
+    const updated = await updateUnifiedSkill("review", input);
+    assert.equal("error" in updated, true);
+    if ("error" in updated) assert.match(updated.error, /cannot start with a dot/);
+  });
+});
+
+test("recoverStagedSkillBackups restores an interrupted overwrite", async () => {
+  await withTempHome(async () => {
+    await createUnifiedSkill({ name: "review", description: "old", body: "old body" });
+    const liveDir = path.dirname(unifiedSkillFile("review"));
+    const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
+    mkdirSync(stagingRoot);
+    const backup = path.join(stagingRoot, `.skill-backup-${Buffer.from("review").toString("hex")}-abcdef`);
+    renameSync(liveDir, backup);
+    assert.equal(await readUnifiedSkill("review"), null);
+
+    await recoverStagedSkillBackups();
+    assert.equal((await readUnifiedSkill("review"))?.body, "old body");
+    assert.equal(existsSync(backup), false);
+  });
+});
+
+test("recoverStagedSkillBackups removes a backup when the live skill exists", async () => {
+  await withTempHome(async () => {
+    await createUnifiedSkill({ name: "review", description: "new", body: "new body" });
+    const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
+    mkdirSync(stagingRoot);
+    const backup = path.join(stagingRoot, `.skill-backup-${Buffer.from("review").toString("hex")}-abcdef`);
+    mkdirSync(backup);
+    writeFileSync(path.join(backup, "SKILL.md"), "---\nname: review\ndescription: old\n---\n\nold body\n");
+
+    await recoverStagedSkillBackups();
+    assert.equal((await readUnifiedSkill("review"))?.body, "new body");
+    assert.equal(existsSync(backup), false);
   });
 });
 

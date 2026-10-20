@@ -39,6 +39,7 @@ import { getProjects } from "./projects.js";
 import {
   listUnifiedSkills,
   installUnifiedSkillDirectory,
+  recoverStagedSkillBackups,
   validateUnifiedSkillInput,
   type SkillInstallHooks,
 } from "./unified-skills.js";
@@ -305,6 +306,7 @@ export async function importSkills(
   request: SkillImportRequest,
   env: SkillImportEnv = defaultEnv()
 ): Promise<SkillImportResponse> {
+  await recoverStagedSkillBackups();
   const results: SkillImportResult[] = [];
   // Read the existing catalog once and update it incrementally so two
   // selections in the same request don't race past each other on collisions.
