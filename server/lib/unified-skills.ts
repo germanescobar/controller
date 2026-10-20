@@ -11,6 +11,7 @@
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
+import { lock } from "proper-lockfile";
 import { isManagedSkillName } from "./managed-skills.js";
 import { unifiedSkillFile, unifiedSkillDir, unifiedSkillsDir } from "./paths.js";
 import { parseSkillFile, type SkillBody, type SkillMetadata } from "./skills.js";
@@ -20,8 +21,12 @@ const SKILL_NAME_RE = /^[A-Za-z0-9._-]+$/;
 export const SKILL_TREE_MAX_BYTES = 10 * 1024 * 1024;
 const SKILL_TREE_MAX_ENTRIES = 1000;
 const STALE_STAGING_AGE_MS = 60 * 60 * 1000;
-const BACKUP_NAME_RE = /^\.skill-backup-([0-9a-f]+)-[A-Za-z0-9]+$/;
-const activeBackups = new Set<string>();
+const BACKUP_NAME_RE = /^\.skill-backup-[A-Za-z0-9]+$/;
+
+interface SkillBackupMarker {
+  finalTarget: string;
+  originalDir: string;
+}
 
 /**
  * Maximum length for the skill name. Names longer than this are almost
@@ -250,7 +255,83 @@ export async function installUnifiedSkillDirectory(
   const validationError = validateInput(input);
   if (validationError) throw new Error(validationError);
 
-  const name = input.name.trim();
+  return withSkillCatalogLock(async (stagingRoot) => {
+    await recoverStagedSkillBackupsUnlocked(stagingRoot);
+    await cleanupStaleSkillStaging(stagingRoot);
+    const name = input.name.trim();
+    const staging = await fs.mkdtemp(path.join(stagingRoot, ".skill-import-"));
+    const target = unifiedSkillDir(name);
+    const previous = existingName ? unifiedSkillDir(existingName) : null;
+    try {
+      const budget = { bytes: 0, entries: 0 };
+      await hooks.beforeCopy?.();
+      await copySkillTree(sourceDir, staging, budget);
+      await hooks.afterCopy?.();
+      const skillFile = path.join(staging, "SKILL.md");
+      const stat = await fs.lstat(skillFile);
+      if (!stat.isFile()) throw new Error("Skill directory must contain a regular SKILL.md file.");
+      const raw = await fs.readFile(skillFile, "utf-8");
+      const parsed = parseSkillFile(raw);
+      if (!parsed) throw new Error("Skill directory has invalid SKILL.md frontmatter.");
+      const stagedInput = {
+        name: (parsed.metadata.name ?? "").trim(),
+        description: (parsed.metadata.description ?? "").trim(),
+        body: parsed.body,
+      };
+      const stagedValidationError = validateInput(stagedInput);
+      if (stagedValidationError) throw new Error(`Copied SKILL.md is invalid: ${stagedValidationError}`);
+      if (stagedInput.name !== name) {
+        throw new Error(`Copied SKILL.md declares name "${stagedInput.name}" instead of "${name}".`);
+      }
+
+      let backup: string | null = null;
+      let marker: string | null = null;
+      if (previous) {
+        backup = await fs.mkdtemp(path.join(stagingRoot, ".skill-backup-"));
+        await fs.rmdir(backup);
+        marker = `${backup}.json`;
+        await fs.writeFile(marker, JSON.stringify({ finalTarget: name, originalDir: path.basename(previous) } satisfies SkillBackupMarker));
+        try {
+          await fs.rename(previous, backup);
+        } catch (error) {
+          await fs.rm(marker, { force: true });
+          throw error;
+        }
+      }
+      try {
+        await fs.rename(staging, target);
+      } catch (error) {
+        if (backup && previous && marker) {
+          try {
+            await fs.rename(backup, previous);
+            await fs.rm(marker, { force: true });
+          } catch (rollbackError) {
+            throw new AggregateError([error, rollbackError], `Could not restore skill after failed import: ${name}`);
+          }
+        }
+        throw error;
+      }
+      if (backup && marker) {
+        try {
+          await fs.rm(backup, { recursive: true, force: true });
+          await fs.rm(marker, { force: true });
+        } catch (error) {
+          console.warn(`Could not remove completed skill backup ${backup}:`, error);
+        }
+      }
+      return { name: stagedInput.name, description: stagedInput.description, path: unifiedSkillFile(name), scope: "unified" };
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true });
+    }
+  });
+}
+
+/** Restore or discard backups left by a process interrupted during overwrite. */
+export async function recoverStagedSkillBackups(): Promise<void> {
+  await withSkillCatalogLock(recoverStagedSkillBackupsUnlocked);
+}
+
+async function withSkillCatalogLock<T>(run: (stagingRoot: string) => Promise<T>): Promise<T> {
   const base = unifiedSkillsDir();
   await fs.mkdir(base, { recursive: true });
   const stagingRoot = path.join(path.dirname(base), ".skill-staging");
@@ -258,85 +339,37 @@ export async function installUnifiedSkillDirectory(
   if (!(await fs.lstat(stagingRoot)).isDirectory()) {
     throw new Error(`Skill staging path is not a regular directory: ${stagingRoot}`);
   }
-  await recoverStagedSkillBackups();
-  await cleanupStaleSkillStaging(stagingRoot);
-  const staging = await fs.mkdtemp(path.join(stagingRoot, ".skill-import-"));
-  const target = unifiedSkillDir(name);
-  const previous = existingName ? unifiedSkillDir(existingName) : null;
-  let backup: string | null = null;
+  const release = await lock(stagingRoot, {
+    lockfilePath: path.join(stagingRoot, "catalog.lock"),
+    realpath: false,
+    stale: 30_000,
+    update: 5_000,
+    retries: { retries: 50, factor: 1.2, minTimeout: 50, maxTimeout: 500 },
+    onCompromised: (error) => {
+      console.error("Skill catalog lock compromised:", error);
+      process.exit(1);
+    },
+  });
   try {
-    const budget = { bytes: 0, entries: 0 };
-    await hooks.beforeCopy?.();
-    await copySkillTree(sourceDir, staging, budget);
-    await hooks.afterCopy?.();
-    const skillFile = path.join(staging, "SKILL.md");
-    const stat = await fs.lstat(skillFile);
-    if (!stat.isFile()) throw new Error("Skill directory must contain a regular SKILL.md file.");
-    const raw = await fs.readFile(skillFile, "utf-8");
-    const parsed = parseSkillFile(raw);
-    if (!parsed) throw new Error("Skill directory has invalid SKILL.md frontmatter.");
-    const stagedInput = {
-      name: (parsed.metadata.name ?? "").trim(),
-      description: (parsed.metadata.description ?? "").trim(),
-      body: parsed.body,
-    };
-    const stagedValidationError = validateInput(stagedInput);
-    if (stagedValidationError) throw new Error(`Copied SKILL.md is invalid: ${stagedValidationError}`);
-    if (stagedInput.name !== name) {
-      throw new Error(`Copied SKILL.md declares name "${stagedInput.name}" instead of "${name}".`);
-    }
-
-    if (previous) {
-      const encodedName = Buffer.from(path.basename(previous), "utf-8").toString("hex");
-      backup = await fs.mkdtemp(path.join(stagingRoot, `.skill-backup-${encodedName}-`));
-      await fs.rmdir(backup);
-      activeBackups.add(backup);
-      await fs.rename(previous, backup);
-    }
-    try {
-      await fs.rename(staging, target);
-    } catch (error) {
-      if (backup && previous) await fs.rename(backup, previous);
-      if (backup) activeBackups.delete(backup);
-      backup = null;
-      throw error;
-    }
-    if (backup) {
-      await fs.rm(backup, { recursive: true, force: true }).catch((error: unknown) => {
-        console.warn(`Could not remove completed skill backup ${backup}:`, error);
-      });
-    }
-    return { name: stagedInput.name, description: stagedInput.description, path: unifiedSkillFile(name), scope: "unified" };
+    return await run(stagingRoot);
   } finally {
-    if (backup) activeBackups.delete(backup);
-    await fs.rm(staging, { recursive: true, force: true });
+    await release();
   }
 }
 
-/** Restore or discard backups left by a process interrupted during overwrite. */
-export async function recoverStagedSkillBackups(): Promise<void> {
-  const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
-  let entries: import("node:fs").Dirent[];
-  try {
-    entries = await fs.readdir(stagingRoot, { withFileTypes: true });
-  } catch (error) {
-    if (isMissingPath(error)) return;
-    throw error;
-  }
-  await fs.mkdir(unifiedSkillsDir(), { recursive: true });
+async function recoverStagedSkillBackupsUnlocked(stagingRoot: string): Promise<void> {
+  const entries = await fs.readdir(stagingRoot, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const match = BACKUP_NAME_RE.exec(entry.name);
-    if (!match) continue;
+    if (!entry.isDirectory() || !BACKUP_NAME_RE.test(entry.name)) continue;
     const backup = path.join(stagingRoot, entry.name);
-    if (activeBackups.has(backup)) continue;
-    const name = Buffer.from(match[1], "hex").toString("utf-8");
-    if (!name || name.startsWith(".") || !SKILL_NAME_RE.test(name)) {
-      console.warn(`Ignoring skill backup with invalid destination name: ${backup}`);
+    const markerPath = `${backup}.json`;
+    const marker = await readSkillBackupMarker(markerPath);
+    if (!marker) {
+      console.warn(`Ignoring skill backup without a valid marker: ${backup}`);
       continue;
     }
-    const target = unifiedSkillDir(name);
+    const target = unifiedSkillDir(marker.finalTarget);
     let targetStat: import("node:fs").Stats | null = null;
     try {
       targetStat = await fs.lstat(target);
@@ -349,11 +382,57 @@ export async function recoverStagedSkillBackups(): Promise<void> {
         continue;
       }
       await fs.rm(backup, { recursive: true, force: true });
-      console.warn(`Removed obsolete skill backup for ${name}: ${backup}`);
+      await fs.rm(markerPath, { force: true });
+      console.warn(`Removed obsolete skill backup for ${marker.finalTarget}: ${backup}`);
     } else {
-      await fs.rename(backup, target);
-      console.warn(`Restored interrupted skill backup for ${name}: ${target}`);
+      const original = unifiedSkillDir(marker.originalDir);
+      if (await pathExists(original)) {
+        console.warn(`Cannot recover skill backup; original directory exists: ${original}`);
+        continue;
+      }
+      await fs.rename(backup, original);
+      await fs.rm(markerPath, { force: true });
+      console.warn(`Restored interrupted skill backup for ${marker.originalDir}: ${original}`);
     }
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const backupName = entry.name.slice(0, -".json".length);
+    if (!BACKUP_NAME_RE.test(backupName)) continue;
+    if (await pathExists(path.join(stagingRoot, backupName))) continue;
+    await fs.rm(path.join(stagingRoot, entry.name), { force: true });
+  }
+}
+
+async function readSkillBackupMarker(markerPath: string): Promise<SkillBackupMarker | null> {
+  let parsed: unknown;
+  try {
+    const stat = await fs.lstat(markerPath);
+    if (!stat.isFile() || stat.size > 1024) return null;
+    parsed = JSON.parse(await fs.readFile(markerPath, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  if (!("finalTarget" in parsed) || !("originalDir" in parsed)) return null;
+  const { finalTarget, originalDir } = parsed;
+  if (!isSafeSkillDirName(finalTarget) || !isSafeSkillDirName(originalDir)) return null;
+  return { finalTarget, originalDir };
+}
+
+function isSafeSkillDirName(value: unknown): value is string {
+  return typeof value === "string" && value.length <= SKILL_NAME_MAX_LENGTH &&
+    !value.startsWith(".") && SKILL_NAME_RE.test(value);
+}
+
+async function pathExists(candidate: string): Promise<boolean> {
+  try {
+    await fs.lstat(candidate);
+    return true;
+  } catch (error) {
+    if (isMissingPath(error)) return false;
+    throw error;
   }
 }
 

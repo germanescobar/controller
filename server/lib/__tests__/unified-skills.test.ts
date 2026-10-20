@@ -8,9 +8,11 @@ import {
   mkdirSync,
   renameSync,
   existsSync,
+  readdirSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { lock } from "proper-lockfile";
 import {
   createUnifiedSkill,
   deleteUnifiedSkill,
@@ -149,32 +151,82 @@ test("create and update reject dot-prefixed names", async () => {
 
 test("recoverStagedSkillBackups restores an interrupted overwrite", async () => {
   await withTempHome(async () => {
-    await createUnifiedSkill({ name: "review", description: "old", body: "old body" });
-    const liveDir = path.dirname(unifiedSkillFile("review"));
+    await createUnifiedSkill({ name: "Review", description: "old", body: "old body" });
+    const liveDir = path.dirname(unifiedSkillFile("Review"));
     const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
     mkdirSync(stagingRoot);
-    const backup = path.join(stagingRoot, `.skill-backup-${Buffer.from("review").toString("hex")}-abcdef`);
+    const backup = path.join(stagingRoot, ".skill-backup-abcdef");
     renameSync(liveDir, backup);
-    assert.equal(await readUnifiedSkill("review"), null);
+    writeFileSync(`${backup}.json`, JSON.stringify({ finalTarget: "review", originalDir: "Review" }));
+    assert.equal(await readUnifiedSkill("Review"), null);
 
     await recoverStagedSkillBackups();
-    assert.equal((await readUnifiedSkill("review"))?.body, "old body");
+    assert.equal((await readUnifiedSkill("Review"))?.body, "old body");
+    assert.equal(existsSync(liveDir), true);
+    assert.deepEqual(readdirSync(unifiedSkillsDir()), ["Review"]);
     assert.equal(existsSync(backup), false);
+    assert.equal(existsSync(`${backup}.json`), false);
   });
 });
 
-test("recoverStagedSkillBackups removes a backup when the live skill exists", async () => {
+test("recoverStagedSkillBackups removes the old casing after a case-changing install", async () => {
   await withTempHome(async () => {
     await createUnifiedSkill({ name: "review", description: "new", body: "new body" });
     const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
     mkdirSync(stagingRoot);
-    const backup = path.join(stagingRoot, `.skill-backup-${Buffer.from("review").toString("hex")}-abcdef`);
+    const backup = path.join(stagingRoot, ".skill-backup-abcdef");
     mkdirSync(backup);
-    writeFileSync(path.join(backup, "SKILL.md"), "---\nname: review\ndescription: old\n---\n\nold body\n");
+    writeFileSync(path.join(backup, "SKILL.md"), "---\nname: Review\ndescription: old\n---\n\nold body\n");
+    writeFileSync(`${backup}.json`, JSON.stringify({ finalTarget: "review", originalDir: "Review" }));
 
     await recoverStagedSkillBackups();
     assert.equal((await readUnifiedSkill("review"))?.body, "new body");
+    assert.deepEqual(readdirSync(unifiedSkillsDir()), ["review"]);
     assert.equal(existsSync(backup), false);
+    assert.equal(existsSync(`${backup}.json`), false);
+  });
+});
+
+test("recoverStagedSkillBackups waits for a cross-process catalog lock", async () => {
+  await withTempHome(async () => {
+    await createUnifiedSkill({ name: "review", description: "old", body: "old body" });
+    const liveDir = path.dirname(unifiedSkillFile("review"));
+    const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
+    mkdirSync(stagingRoot);
+    const backup = path.join(stagingRoot, ".skill-backup-abcdef");
+    renameSync(liveDir, backup);
+    writeFileSync(`${backup}.json`, JSON.stringify({ finalTarget: "review", originalDir: "review" }));
+    const release = await lock(stagingRoot, {
+      lockfilePath: path.join(stagingRoot, "catalog.lock"), realpath: false,
+      stale: 30_000, update: 5_000,
+    });
+    let released = false;
+    const recovery = recoverStagedSkillBackups();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(existsSync(backup), true);
+      assert.equal(existsSync(liveDir), false);
+      await release();
+      released = true;
+      await recovery;
+      assert.equal((await readUnifiedSkill("review"))?.body, "old body");
+    } finally {
+      if (!released) await release();
+      await recovery;
+    }
+  });
+});
+
+test("recoverStagedSkillBackups leaves a backup with an invalid marker untouched", async () => {
+  await withTempHome(async () => {
+    const stagingRoot = path.join(path.dirname(unifiedSkillsDir()), ".skill-staging");
+    mkdirSync(stagingRoot);
+    const backup = path.join(stagingRoot, ".skill-backup-abcdef");
+    mkdirSync(backup);
+    writeFileSync(`${backup}.json`, JSON.stringify({ finalTarget: "../outside", originalDir: "review" }));
+    await recoverStagedSkillBackups();
+    assert.equal(existsSync(backup), true);
+    assert.equal(existsSync(`${backup}.json`), true);
   });
 });
 
