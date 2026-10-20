@@ -1,6 +1,8 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { installTerminalTouchScroll } from "@/lib/terminal-touch-scroll";
+import { isReplayDeviceResponse } from "@/lib/terminal-replay";
 import "@xterm/xterm/css/xterm.css";
 
 export type TerminalSpecialKey =
@@ -61,6 +63,10 @@ function forceSelectionMouseEvent(event: MouseEvent): void {
   });
 }
 
+function isMobileTerminal(): boolean {
+  return window.matchMedia("(pointer: coarse), (max-width: 767px)").matches;
+}
+
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal({ projectId, worktreeId, terminalId }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -68,6 +74,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const fitRef = useRef<FitAddon | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const hasAttachedRef = useRef(false);
+    const replayingRef = useRef(false);
     // Issue #296: when the user clicks X while the WebSocket is still
     // CONNECTING, the imperative `close()` is a no-op (it requires OPEN).
     // Track that intent here so the `onopen` handler can deliver the `close`
@@ -128,6 +135,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       term.open(container);
       container.addEventListener("mousedown", forceSelectionMouseEvent, { capture: true });
 
+      // xterm's screen sits above its scrollable viewport. Handle a finger
+      // drag there directly so it scrolls history without reaching tmux as
+      // mouse tracking or a synthetic click.
+      const removeTouchScroll = installTerminalTouchScroll(container, term);
+
       requestAnimationFrame(() => {
         fitAddon.fit();
       });
@@ -146,6 +158,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       return () => {
         resizeObserver.disconnect();
         container.removeEventListener("mousedown", forceSelectionMouseEvent, { capture: true });
+        removeTouchScroll();
         term.dispose();
         termRef.current = null;
         fitRef.current = null;
@@ -208,6 +221,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
               worktreeId,
               terminalId,
               replayBuffer: !hasAttachedRef.current,
+              canResize: !isMobileTerminal(),
             })
           );
           hasAttachedRef.current = true;
@@ -219,6 +233,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
           const msg = JSON.parse(event.data);
           if (msg.type === "output") {
             term.write(String(msg.data));
+          } else if (msg.type === "replay") {
+            // Old terminal queries must not send fresh device responses to
+            // the shell, which can print them as literal escape sequences.
+            replayingRef.current = true;
+            term.write(String(msg.data), () => { replayingRef.current = false; });
           } else if (msg.type === "error") {
             term.writeln(`\x1b[31mError: ${msg.message}\x1b[0m`);
           } else if (msg.type === "attached") {
@@ -245,6 +264,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       connect();
 
       const inputDisposable = term.onData((data: string) => {
+        if (replayingRef.current && isReplayDeviceResponse(data)) return;
         const ws = wsRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "input", data }));

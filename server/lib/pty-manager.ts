@@ -327,6 +327,18 @@ function configureTmuxSession(sessionName: string): void {
   });
 }
 
+function tmuxPaneSize(sessionName: string): { cols: number; rows: number } {
+  const size = execTmuxSync(
+    ["display-message", "-p", "-t", tmuxFirstPaneTarget(sessionName), "#{pane_width} #{pane_height}"],
+    { encoding: "utf8" }
+  ) as string;
+  const [cols, rows] = size.trim().split(" ").map(Number);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
+    throw new Error(`Invalid tmux pane size: ${size.trim()}`);
+  }
+  return { cols, rows };
+}
+
 class PtyManager {
   private sessions = new Map<string, PtySession>();
 
@@ -351,10 +363,14 @@ class PtyManager {
     const sessionName = tmuxSessionName(sessionId);
     try {
       ensureTmuxSession(sessionName, cwd, extraEnv);
+      // An 80x24 attaching client can shrink a previously wide tmux pane
+      // before the browser has reported its size, including on mobile-only
+      // reconnects. Attach at the pane's current dimensions instead.
+      const size = tmuxPaneSize(sessionName);
       ptyProcess = pty.spawn("tmux", ["attach-session", "-t", `=${sessionName}`], {
         name: "xterm-256color",
-        cols: 80,
-        rows: 24,
+        cols: size.cols,
+        rows: size.rows,
         cwd,
         env,
       });
@@ -424,7 +440,8 @@ class PtyManager {
   }
 
   /** Resize the PTY. */
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(sessionId: string, cols: number, rows: number, canResize = true): void {
+    if (!canResize) return;
     const session = this.sessions.get(sessionId);
     if (!session) return;
     const c = Math.max(1, Math.min(cols, 500));

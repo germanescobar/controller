@@ -580,6 +580,27 @@ test("PtyManager.resize updates the tmux server-side window (issue #317)", async
       "120x40",
       "expected resize() to propagate to the tmux pane in the same tick"
     );
+
+    // A mobile viewer shares this PTY but must not change the shell's
+    // formatting for the desktop viewer, even while both are attached.
+    const unsubscribe = ptyManager.onData(sessionId, () => {});
+    assert.ok(unsubscribe);
+    ptyManager.resize(sessionId, 40, 20, false);
+    assert.equal(
+      execFileSync("tmux", ["display-message", "-p", "-t", `${sessionName}:0.0`, "#{pane_width}x#{pane_height}"], { encoding: "utf8" }).trim(),
+      "120x40"
+    );
+    unsubscribe();
+    assert.equal(ptyManager.detachIfIdle(sessionId), true);
+
+    // A later mobile-only attachment must start at the pane's saved size;
+    // spawning tmux attach at 80x24 would shrink it before any resize event.
+    const reattached = ptyManager.getOrCreate(sessionId, cwd);
+    assert.equal(reattached.error, undefined);
+    assert.equal(
+      execFileSync("tmux", ["display-message", "-p", "-t", `${sessionName}:0.0`, "#{pane_width}x#{pane_height}"], { encoding: "utf8" }).trim(),
+      "120x40"
+    );
   } finally {
     ptyManager.kill(sessionId);
     await fs.rm(cwd, { recursive: true, force: true });

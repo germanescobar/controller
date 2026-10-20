@@ -196,6 +196,7 @@ function normalizeTerminalId(value: unknown): string {
 
 terminalWss.on("connection", (ws: WebSocket) => {
   let ptyKey: string | null = null;
+  let canResize = true;
   let unsubscribe: (() => void) | null = null;
 
   ws.on("message", async (raw: Buffer) => {
@@ -214,6 +215,7 @@ terminalWss.on("connection", (ws: WebSocket) => {
       const worktreeIdParam = msg.worktreeId as string | undefined;
       const terminalId = normalizeTerminalId(msg.terminalId);
       const replayBuffer = msg.replayBuffer !== false;
+      canResize = msg.canResize !== false;
       if (!projectId) return;
 
       const project = await getProject(projectId);
@@ -262,7 +264,7 @@ terminalWss.on("connection", (ws: WebSocket) => {
 
       // Send buffered output so the terminal restores its state
       if (replayBuffer && result.buffer) {
-        ws.send(JSON.stringify({ type: "output", data: result.buffer }));
+        ws.send(JSON.stringify({ type: "replay", data: result.buffer }));
       }
 
       // Forward new PTY output to this WebSocket client
@@ -276,7 +278,7 @@ terminalWss.on("connection", (ws: WebSocket) => {
     } else if (msg.type === "input" && ptyKey) {
       ptyManager.write(ptyKey, msg.data as string);
     } else if (msg.type === "resize" && ptyKey) {
-      ptyManager.resize(ptyKey, msg.cols as number, msg.rows as number);
+      ptyManager.resize(ptyKey, msg.cols as number, msg.rows as number, canResize);
     } else if (msg.type === "close" && ptyKey) {
       unsubscribe?.();
       unsubscribe = null;
