@@ -19,6 +19,7 @@ import { parseSkillFile, type SkillBody, type SkillMetadata } from "./skills.js"
 const SKILL_NAME_RE = /^[A-Za-z0-9._-]+$/;
 export const SKILL_TREE_MAX_BYTES = 10 * 1024 * 1024;
 const SKILL_TREE_MAX_ENTRIES = 1000;
+const STALE_STAGING_AGE_MS = 60 * 60 * 1000;
 
 /**
  * Maximum length for the skill name. Names longer than this are almost
@@ -37,6 +38,12 @@ export interface UnifiedSkillInput {
   body: string;
 }
 
+/** Test seam for changes to a source skill while an import is in progress. */
+export interface SkillInstallHooks {
+  beforeCopy?: () => Promise<void>;
+  afterCopy?: () => Promise<void>;
+}
+
 /** Read the entire unified skill catalog. */
 export async function listUnifiedSkills(): Promise<SkillMetadata[]> {
   const base = unifiedSkillsDir();
@@ -49,7 +56,7 @@ export async function listUnifiedSkills(): Promise<SkillMetadata[]> {
 
   const out: SkillMetadata[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const skillFile = path.join(base, entry.name, "SKILL.md");
     let raw: string;
     try {
@@ -235,7 +242,8 @@ export async function deleteUnifiedSkill(skillName: string): Promise<void> {
 export async function installUnifiedSkillDirectory(
   sourceDir: string,
   input: UnifiedSkillInput,
-  existingName?: string
+  existingName?: string,
+  hooks: SkillInstallHooks = {}
 ): Promise<SkillMetadata> {
   const validationError = validateInput(input);
   if (validationError) throw new Error(validationError);
@@ -243,21 +251,40 @@ export async function installUnifiedSkillDirectory(
   const name = input.name.trim();
   const base = unifiedSkillsDir();
   await fs.mkdir(base, { recursive: true });
-  const staging = await fs.mkdtemp(path.join(base, ".skill-import-"));
+  const stagingRoot = path.join(path.dirname(base), ".skill-staging");
+  await fs.mkdir(stagingRoot, { recursive: true });
+  if (!(await fs.lstat(stagingRoot)).isDirectory()) {
+    throw new Error(`Skill staging path is not a regular directory: ${stagingRoot}`);
+  }
+  await cleanupStaleSkillStaging(stagingRoot);
+  const staging = await fs.mkdtemp(path.join(stagingRoot, ".skill-import-"));
   const target = unifiedSkillDir(name);
   const previous = existingName ? unifiedSkillDir(existingName) : null;
   let backup: string | null = null;
   try {
     const budget = { bytes: 0, entries: 0 };
+    await hooks.beforeCopy?.();
     await copySkillTree(sourceDir, staging, budget);
+    await hooks.afterCopy?.();
     const skillFile = path.join(staging, "SKILL.md");
     const stat = await fs.lstat(skillFile);
     if (!stat.isFile()) throw new Error("Skill directory must contain a regular SKILL.md file.");
     const raw = await fs.readFile(skillFile, "utf-8");
-    if (!parseSkillFile(raw)) throw new Error("Skill directory has invalid SKILL.md frontmatter.");
+    const parsed = parseSkillFile(raw);
+    if (!parsed) throw new Error("Skill directory has invalid SKILL.md frontmatter.");
+    const stagedInput = {
+      name: (parsed.metadata.name ?? "").trim(),
+      description: (parsed.metadata.description ?? "").trim(),
+      body: parsed.body,
+    };
+    const stagedValidationError = validateInput(stagedInput);
+    if (stagedValidationError) throw new Error(`Copied SKILL.md is invalid: ${stagedValidationError}`);
+    if (stagedInput.name !== name) {
+      throw new Error(`Copied SKILL.md declares name "${stagedInput.name}" instead of "${name}".`);
+    }
 
     if (previous) {
-      backup = await fs.mkdtemp(path.join(base, ".skill-backup-"));
+      backup = await fs.mkdtemp(path.join(stagingRoot, ".skill-backup-"));
       await fs.rmdir(backup);
       await fs.rename(previous, backup);
     }
@@ -269,9 +296,24 @@ export async function installUnifiedSkillDirectory(
       throw error;
     }
     if (backup) await fs.rm(backup, { recursive: true, force: true });
-    return { name, description: input.description.trim(), path: unifiedSkillFile(name), scope: "unified" };
+    return { name: stagedInput.name, description: stagedInput.description, path: unifiedSkillFile(name), scope: "unified" };
   } finally {
     await fs.rm(staging, { recursive: true, force: true });
+  }
+}
+
+/** Remove abandoned imports without touching a concurrently running copy. */
+async function cleanupStaleSkillStaging(stagingRoot: string): Promise<void> {
+  try {
+    for (const entry of await fs.readdir(stagingRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(".skill-import-")) continue;
+      const dir = path.join(stagingRoot, entry.name);
+      const stat = await fs.lstat(dir);
+      if (Date.now() - stat.mtimeMs < STALE_STAGING_AGE_MS) continue;
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  } catch (error) {
+    console.warn(`Could not clean stale skill staging directories in ${stagingRoot}:`, error);
   }
 }
 

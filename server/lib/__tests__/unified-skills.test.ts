@@ -38,6 +38,15 @@ test("listUnifiedSkills is empty by default", async () => {
   });
 });
 
+test("listUnifiedSkills ignores dot-prefixed directories", async () => {
+  await withTempHome(async () => {
+    const hidden = path.join(path.dirname(unifiedSkillFile("visible")), ".skill-import-leftover");
+    mkdirSync(hidden, { recursive: true });
+    writeFileSync(path.join(hidden, "SKILL.md"), "---\nname: hidden\ndescription: staged\n---\n");
+    assert.deepEqual(await listUnifiedSkills(), []);
+  });
+});
+
 test("createUnifiedSkill writes SKILL.md and returns metadata", async () => {
   await withTempHome(async () => {
     const result = await createUnifiedSkill({

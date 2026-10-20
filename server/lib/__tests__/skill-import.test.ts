@@ -9,6 +9,8 @@ import {
   realpathSync,
   readFileSync,
   symlinkSync,
+  existsSync,
+  utimesSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -389,6 +391,83 @@ test("importSkills rejects symlinks and oversized trees without replacing a skil
     assert.equal(sizeResult.results[0].status, "error");
     assert.match(sizeResult.results[0].reason ?? "", /exceeds/);
     assert.equal((await readUnifiedSkill("unsafe"))?.body, "old body");
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills keeps staging outside the catalog and cleans abandoned staging", async () => {
+  const home = makeTempDir("import-staging-");
+  const catalogHome = makeTempDir("orch-staging-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), "bundle", {
+      name: "bundle", description: "Bundle",
+    }, "Read references/a.md");
+    const stale = path.join(catalogHome, ".skill-staging", ".skill-import-abandoned");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(path.join(stale, "SKILL.md"), "---\nname: abandoned\ndescription: stale\n---\n");
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(stale, old, old);
+    const env = makeEnv(home);
+    env.installHooks = {
+      afterCopy: async () => {
+        const { listUnifiedSkills } = await import("../unified-skills.js");
+        assert.deepEqual(await listUnifiedSkills(), []);
+        assert.equal(existsSync(stale), false);
+      },
+    };
+
+    const result = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user" }] }, env);
+    assert.equal(result.results[0].status, "imported");
+    const { listUnifiedSkills } = await import("../unified-skills.js");
+    assert.deepEqual((await listUnifiedSkills()).map((skill) => skill.name), ["bundle"]);
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects a source name changed after discovery and preserves the catalog", async () => {
+  const home = makeTempDir("import-mutated-");
+  const catalogHome = makeTempDir("orch-mutated-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), "bundle", {
+      name: "bundle", description: "new",
+    }, "new body");
+    const { createUnifiedSkill, readUnifiedSkill, listUnifiedSkills } = await import("../unified-skills.js");
+    await createUnifiedSkill({ name: "bundle", description: "old", body: "old body" });
+    const env = makeEnv(home);
+    env.installHooks = {
+      beforeCopy: async () => {
+        writeFileSync(sourcePath, "---\nname: changed\ndescription: new\n---\n\nnew body\n");
+      },
+    };
+
+    const result = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user", overwrite: true }] }, env);
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /declares name "changed" instead of "bundle"/);
+    assert.equal((await readUnifiedSkill("bundle"))?.body, "old body");
+    assert.deepEqual((await listUnifiedSkills()).map((skill) => skill.name), ["bundle"]);
+
+    writeFileSync(sourcePath, "---\nname: bundle\ndescription: valid\n---\n\nnew body\n");
+    env.installHooks = {
+      beforeCopy: async () => {
+        writeFileSync(sourcePath, "---\nname: bundle\ndescription: \n---\n\nnew body\n");
+      },
+    };
+    const invalidDescription = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user", overwrite: true }] }, env);
+    assert.equal(invalidDescription.results[0].status, "error");
+    assert.match(invalidDescription.results[0].reason ?? "", /Description is required/);
+    assert.equal((await readUnifiedSkill("bundle"))?.body, "old body");
   } finally {
     if (original === undefined) delete process.env.CONTROLLER_HOME;
     else process.env.CONTROLLER_HOME = original;

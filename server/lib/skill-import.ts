@@ -40,6 +40,7 @@ import {
   listUnifiedSkills,
   installUnifiedSkillDirectory,
   validateUnifiedSkillInput,
+  type SkillInstallHooks,
 } from "./unified-skills.js";
 
 /** A per-agent skill surfaced for import. */
@@ -103,6 +104,7 @@ export interface SkillImportEnv {
   homedir: () => string;
   codexHome: () => string;
   getProjects: typeof getProjects;
+  installHooks?: SkillInstallHooks;
 }
 
 function defaultEnv(): SkillImportEnv {
@@ -400,7 +402,8 @@ export async function importSkills(
     let created: SkillMetadata;
     try {
       created = await installUnifiedSkillDirectory(
-        path.dirname(selection.sourcePath), candidate, collision ? existingName : undefined
+        path.dirname(selection.sourcePath), candidate, collision ? existingName : undefined,
+        env.installHooks
       );
     } catch (error) {
       results.push({
