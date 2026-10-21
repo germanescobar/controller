@@ -125,7 +125,7 @@ test("integrations block renders (none configured) when no connections are enabl
 // Populated catalogs: name + description only
 // ---------------------------------------------------------------------------
 
-test("skills block lists unified skills by name and description only", async () => {
+test("skills block lists unified skills with their base directories", async () => {
   await withTempHome(async () => {
     await makeUnifiedSkill("github-issues", "Work on GitHub issues");
     await makeUnifiedSkill("pr-feedback", "Triage and address PR review feedback");
@@ -133,6 +133,7 @@ test("skills block lists unified skills by name and description only", async () 
     assert.match(block, /<additional_skills>/);
     assert.match(block, /- github-issues — Work on GitHub issues/);
     assert.match(block, /- pr-feedback — Triage and address PR review feedback/);
+    assert.match(block, /github-issues.*directory: .*skills\/github-issues/);
     // No bodies leaked into the preamble.
     assert.doesNotMatch(block, /Body for/);
   });
@@ -206,12 +207,13 @@ test("full preamble is stable for the same catalog (snapshot)", async () => {
       "",
       "In addition to your own skills, Controller exposes a catalog of " +
         "*additional* skills. To use one, call " +
-        `\`${cliPath} skills describe <name>\` for the full body and follow its instructions, or ask the user to invoke it as ` +
+        `\`${cliPath} skills describe <name>\` for the full body and follow its instructions. Relative paths in a skill body resolve against the skill directory listed below. You can also ask the user to invoke it ` +
+        "as " +
         "`/<name>`. The `/<name>` picker accepts both your native skills and " +
         "Controller's.",
       "",
       "<additional_skills>",
-      "- github-issues — Work on GitHub issues",
+      `- github-issues — Work on GitHub issues (directory: ${path.join(orchestratorHome(), "skills", "github-issues")})`,
       "</additional_skills>",
       "",
       note,

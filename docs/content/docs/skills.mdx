@@ -24,9 +24,13 @@ should reach for first: they live in one place, work across every provider
 - **They win on conflicts.** A unified skill takes precedence over a per-agent
   skill of the same name, so your catalog is the source of truth.
 
-Under the hood they're stored under your Controller home
-(`<controller-home>/skills/<name>/SKILL.md`), but you never need to touch that
-path — Settings is the interface.
+Each unified skill is a directory under your Controller home:
+`<controller-home>/skills/<name>/`. It contains `SKILL.md` and may also contain
+references, scripts, assets, or templates. Import from Settings or with
+`controller skills import` copies the complete directory. `controller skills
+describe <name>` prints its absolute directory; relative paths in the skill
+body resolve from there. Imports reject symlinks and trees larger than 10 MiB
+or 1,000 entries.
 
 ## Controller-managed skills
 

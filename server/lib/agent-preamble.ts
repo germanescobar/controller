@@ -27,8 +27,8 @@
  * shell. The preamble inlines the absolute install path so the agent can
  * copy/paste it verbatim; the skill bodies document the same contract.
  *
- * Only `name` + `description` are inlined; full bodies stay on demand via
- * the CLI.
+ * Names, descriptions, and base directories are inlined; full bodies stay
+ * on demand via the CLI.
  *
  * Delivery is provider-aware (see `server/routes/sessions.ts`):
  *   - Anita: passed to the CLI via `--system-prompt`, so it lands in Anita's system
@@ -38,6 +38,7 @@
  *     system-prompt channel in their default modes today.
  */
 
+import path from "node:path";
 import { controllerCliShellPath } from "./controller-cli.js";
 import { gatewayList, type ListedConnection } from "./integration-gateway.js";
 import { buildMemoryBlock } from "./memory.js";
@@ -99,7 +100,8 @@ function skillsIntro(): string {
     "In addition to your own skills, Controller exposes a catalog of " +
     "*additional* skills. To use one, call " +
     `\`${controllerCliShellPath()} skills describe <name>\` for the ` +
-    "full body and follow its instructions, or ask the user to invoke it " +
+    "full body and follow its instructions. Relative paths in a skill body " +
+    "resolve against the skill directory listed below. You can also ask the user to invoke it " +
     "as `/<name>`. The `/<name>` picker accepts both your native skills and " +
     "Controller's."
   );
@@ -438,7 +440,7 @@ function worktreeIntro(worktree: PreambleWorktree): string {
 }
 
 function formatSkillLine(skill: SkillMetadata): string {
-  return `- ${skill.name} — ${skill.description || "(no description)"}`;
+  return `- ${skill.name} — ${skill.description || "(no description)"} (directory: ${path.dirname(skill.path)})`;
 }
 
 function formatIntegrationLine(connection: ListedConnection): string {

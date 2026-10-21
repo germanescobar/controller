@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import path from "node:path";
 import {
   createUnifiedSkill,
   deleteUnifiedSkill,
@@ -122,7 +123,12 @@ unifiedSkillsRouter.post("/skills/describe", async (req: Request, res: Response)
     res.status(404).json({ error: `Unified skill "${name}" not found.` });
     return;
   }
-  res.json({ name: body.metadata.name, description: body.metadata.description, body: body.body });
+  res.json({
+    name: body.metadata.name,
+    description: body.metadata.description,
+    basePath: path.dirname(body.metadata.path),
+    body: body.body,
+  });
 });
 
 unifiedSkillsRouter.post("/skills/activate", async (req: Request, res: Response) => {

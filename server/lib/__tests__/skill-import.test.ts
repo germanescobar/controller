@@ -7,6 +7,10 @@ import {
   mkdirSync,
   chmodSync,
   realpathSync,
+  readFileSync,
+  symlinkSync,
+  existsSync,
+  utimesSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -324,6 +328,10 @@ test("importSkills copies a user skill into the unified catalog", async () => {
       { name: "review", description: "Review PRs" },
       "Review carefully"
     );
+    mkdirSync(path.join(path.dirname(sourcePath), "references"));
+    writeFileSync(path.join(path.dirname(sourcePath), "references", "a.md"), "reference text");
+    mkdirSync(path.join(path.dirname(sourcePath), "scripts"));
+    writeFileSync(path.join(path.dirname(sourcePath), "scripts", "run.sh"), "#!/bin/sh\nexit 0\n");
 
     const env = makeEnv(home);
     const result = await importSkills(
@@ -348,11 +356,123 @@ test("importSkills copies a user skill into the unified catalog", async () => {
     assert.match(raw, /name: review/);
     assert.match(raw, /description: Review PRs/);
     assert.match(raw, /Review carefully/);
+    assert.equal(readFileSync(path.join(orchestratorHome, "skills", "review", "references", "a.md"), "utf-8"), "reference text");
+    assert.match(readFileSync(path.join(orchestratorHome, "skills", "review", "scripts", "run.sh"), "utf-8"), /exit 0/);
   } finally {
     if (original === undefined) delete process.env.CONTROLLER_HOME;
     else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects symlinks and oversized trees without replacing a skill", async () => {
+  const home = makeTempDir("import-unsafe-");
+  const catalogHome = makeTempDir("orch-unsafe-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), "unsafe", {
+      name: "unsafe", description: "source",
+    }, "source body");
+    const { createUnifiedSkill, readUnifiedSkill, SKILL_TREE_MAX_BYTES } = await import("../unified-skills.js");
+    await createUnifiedSkill({ name: "unsafe", description: "old", body: "old body" });
+    const reference = path.join(path.dirname(sourcePath), "reference.md");
+    symlinkSync(sourcePath, reference);
+    const selection = { providerId: "anita", sourcePath, scope: "user" as const, overwrite: true };
+    const symlinkResult = await importSkills({ selections: [selection] }, makeEnv(home));
+    assert.equal(symlinkResult.results[0].status, "error");
+    assert.match(symlinkResult.results[0].reason ?? "", /symlink/);
+    assert.equal((await readUnifiedSkill("unsafe"))?.body, "old body");
+
+    rmSync(reference);
+    writeFileSync(reference, Buffer.alloc(SKILL_TREE_MAX_BYTES + 1));
+    const sizeResult = await importSkills({ selections: [selection] }, makeEnv(home));
+    assert.equal(sizeResult.results[0].status, "error");
+    assert.match(sizeResult.results[0].reason ?? "", /exceeds/);
+    assert.equal((await readUnifiedSkill("unsafe"))?.body, "old body");
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills keeps staging outside the catalog and cleans abandoned staging", async () => {
+  const home = makeTempDir("import-staging-");
+  const catalogHome = makeTempDir("orch-staging-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), "bundle", {
+      name: "bundle", description: "Bundle",
+    }, "Read references/a.md");
+    const stale = path.join(catalogHome, ".skill-staging", ".skill-import-abandoned");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(path.join(stale, "SKILL.md"), "---\nname: abandoned\ndescription: stale\n---\n");
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(stale, old, old);
+    const env = makeEnv(home);
+    env.installHooks = {
+      afterCopy: async () => {
+        const { listUnifiedSkills } = await import("../unified-skills.js");
+        assert.deepEqual(await listUnifiedSkills(), []);
+        assert.equal(existsSync(stale), false);
+      },
+    };
+
+    const result = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user" }] }, env);
+    assert.equal(result.results[0].status, "imported");
+    const { listUnifiedSkills } = await import("../unified-skills.js");
+    assert.deepEqual((await listUnifiedSkills()).map((skill) => skill.name), ["bundle"]);
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects a source name changed after discovery and preserves the catalog", async () => {
+  const home = makeTempDir("import-mutated-");
+  const catalogHome = makeTempDir("orch-mutated-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), "bundle", {
+      name: "bundle", description: "new",
+    }, "new body");
+    const { createUnifiedSkill, readUnifiedSkill, listUnifiedSkills } = await import("../unified-skills.js");
+    await createUnifiedSkill({ name: "bundle", description: "old", body: "old body" });
+    const env = makeEnv(home);
+    env.installHooks = {
+      beforeCopy: async () => {
+        writeFileSync(sourcePath, "---\nname: changed\ndescription: new\n---\n\nnew body\n");
+      },
+    };
+
+    const result = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user", overwrite: true }] }, env);
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /declares name "changed" instead of "bundle"/);
+    assert.equal((await readUnifiedSkill("bundle"))?.body, "old body");
+    assert.deepEqual((await listUnifiedSkills()).map((skill) => skill.name), ["bundle"]);
+
+    writeFileSync(sourcePath, "---\nname: bundle\ndescription: valid\n---\n\nnew body\n");
+    env.installHooks = {
+      beforeCopy: async () => {
+        writeFileSync(sourcePath, "---\nname: bundle\ndescription: \n---\n\nnew body\n");
+      },
+    };
+    const invalidDescription = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user", overwrite: true }] }, env);
+    assert.equal(invalidDescription.results[0].status, "error");
+    assert.match(invalidDescription.results[0].reason ?? "", /Description is required/);
+    assert.equal((await readUnifiedSkill("bundle"))?.body, "old body");
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
   }
 });
 
@@ -564,6 +684,28 @@ test("importSkills rejects a source whose name fails the unified-skill character
     else process.env.CONTROLLER_HOME = original;
     rmSync(home, { recursive: true, force: true });
     rmSync(orchestratorHome, { recursive: true, force: true });
+  }
+});
+
+test("importSkills rejects a dot-prefixed skill name", async () => {
+  const home = makeTempDir("import-dot-name-");
+  const catalogHome = makeTempDir("orch-dot-name-");
+  const original = process.env.CONTROLLER_HOME;
+  process.env.CONTROLLER_HOME = catalogHome;
+  try {
+    const sourcePath = writeSkillFile(path.join(home, ".anita", "skills"), ".review", {
+      name: ".review", description: "Hidden skill",
+    }, "body");
+    const result = await importSkills({ selections: [{ providerId: "anita", sourcePath, scope: "user" }] }, makeEnv(home));
+    assert.equal(result.results[0].status, "error");
+    assert.match(result.results[0].reason ?? "", /cannot start with a dot/);
+    const { listUnifiedSkills } = await import("../unified-skills.js");
+    assert.deepEqual(await listUnifiedSkills(), []);
+  } finally {
+    if (original === undefined) delete process.env.CONTROLLER_HOME;
+    else process.env.CONTROLLER_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogHome, { recursive: true, force: true });
   }
 });
 

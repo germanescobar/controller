@@ -38,9 +38,10 @@ import {
 import { getProjects } from "./projects.js";
 import {
   listUnifiedSkills,
-  createUnifiedSkill,
-  deleteUnifiedSkill,
+  installUnifiedSkillDirectory,
+  recoverStagedSkillBackups,
   validateUnifiedSkillInput,
+  type SkillInstallHooks,
 } from "./unified-skills.js";
 
 /** A per-agent skill surfaced for import. */
@@ -104,6 +105,7 @@ export interface SkillImportEnv {
   homedir: () => string;
   codexHome: () => string;
   getProjects: typeof getProjects;
+  installHooks?: SkillInstallHooks;
 }
 
 function defaultEnv(): SkillImportEnv {
@@ -202,6 +204,7 @@ async function readMetadataFromDir(
   const skillFile = path.join(dir, "SKILL.md");
   let raw: string;
   try {
+    if (!(await fs.lstat(skillFile)).isFile()) return null;
     raw = await fs.readFile(skillFile, "utf-8");
   } catch {
     return null;
@@ -303,6 +306,7 @@ export async function importSkills(
   request: SkillImportRequest,
   env: SkillImportEnv = defaultEnv()
 ): Promise<SkillImportResponse> {
+  await recoverStagedSkillBackups();
   const results: SkillImportResult[] = [];
   // Read the existing catalog once and update it incrementally so two
   // selections in the same request don't race past each other on collisions.
@@ -394,21 +398,22 @@ export async function importSkills(
       continue;
     }
 
-    if (collision && selection.overwrite) {
-      // Overwrite path: delete the existing unified skill first. We already
-      // validated the candidate above, so this is safe — `createUnifiedSkill`
-      // cannot reject a skill that has cleared `validateUnifiedSkillInput`.
-      await deleteUnifiedSkill(sourceSkill.name);
-    }
-
-    const created = await createUnifiedSkill(candidate);
-    if ("error" in created) {
+    const existingName = unified.find(
+      (entry) => entry.name.toLowerCase() === sourceSkill.name.toLowerCase()
+    )?.name;
+    let created: SkillMetadata;
+    try {
+      created = await installUnifiedSkillDirectory(
+        path.dirname(selection.sourcePath), candidate, collision ? existingName : undefined,
+        env.installHooks
+      );
+    } catch (error) {
       results.push({
         providerId: selection.providerId,
         scope: selection.scope,
         name: sourceSkill.name,
         status: "error",
-        reason: created.error,
+        reason: error instanceof Error ? error.message : String(error),
       });
       continue;
     }

@@ -958,8 +958,8 @@ below is run as \`${cliPath} skills <command>\`:
 
 - \`${cliPath} skills list\` — list every unified skill (name + description).
 - \`${cliPath} skills search <query>\` — search unified skills by name or keyword.
-- \`${cliPath} skills describe <name>\` — print the full SKILL.md body of a
-  unified skill.
+- \`${cliPath} skills describe <name>\` — print the skill directory and full
+  SKILL.md body. Resolve relative paths in the body against that directory.
 - \`${cliPath} skills activate <name>\` — activate a unified skill for the current
   turn. Controller will prepend the skill body to the user's message the same
   way the \`/\` picker does.
@@ -998,7 +998,7 @@ to replace. The server returns one status per skill (\`imported\` / \`skipped\` 
 - Unified skills are managed by the user in Controller Settings → Skills.
 - Activation is scoped to the current turn; it does not permanently change the
   session's behavior.
-- Importing copies a per-agent \`SKILL.md\` into the unified catalog under
+- Importing copies the complete per-agent skill directory into the unified catalog under
   the Controller home (e.g. \`~/Library/Application Support/Controller/skills/\`
   on macOS; the exact path is platform-dependent — see "State location" in
   the README). The original per-agent file is left in place; the unified
@@ -1195,8 +1195,9 @@ provided the relevant information explicitly.
    existing skill, pick a different name, or continue anyway.
 
 3. **Draft the skill.** Write the three required fields:
-   - \`name\` — lowercase, letters/digits/dots/dashes/underscores only, up
-     to 64 characters. Recommend something the user can type as a
+   - \`name\` — lowercase, up to 64 characters, using only letters, digits,
+     dots, dashes, and underscores. It must not start with a dot. Recommend
+     something the user can type as a
      \`/<name>\` invocation.
    - \`description\` — one sentence, up to 1024 characters, that tells the
      agent *when* to use the skill. The description is the trigger; make
@@ -1260,6 +1261,12 @@ fails on duplicate names so it cannot be used as an edit path.
   \`~/Library/Application Support/Controller/skills/<name>/SKILL.md\` on
   macOS). Do not try to write the file directly — let the CLI perform
   validation.
+- A skill can include files alongside \`SKILL.md\`, such as \`references/\`,
+  \`scripts/\`, and \`assets/\`. The \`create\` command writes only \`SKILL.md\`.
+  For a skill with supporting files, prepare the directory in a per-agent
+  skill location and use \`skills import\` to copy the complete directory.
+  Run \`skills describe <name>\` to find the base directory for relative
+  paths. Imports reject symlinks and oversized trees.
 - Skill activation (\`/name\`) prepends the body to the user's next
   message, so the body should read as instructions *to the agent*, not
   prose for the user.
