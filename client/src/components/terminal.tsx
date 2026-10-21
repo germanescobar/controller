@@ -2,6 +2,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { installTerminalTouchScroll } from "@/lib/terminal-touch-scroll";
+import { handleTerminalMouseDown } from "@/lib/terminal-mouse-selection";
 import { isReplayDeviceResponse } from "@/lib/terminal-replay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -52,15 +53,6 @@ function encodeSpecialKey(term: XTerm, key: TerminalSpecialKey): string {
     case "right":
       return term.modes.applicationCursorKeysMode ? "\u001bOC" : "\u001b[C";
   }
-}
-
-function forceSelectionMouseEvent(event: MouseEvent): void {
-  if (event.button !== 0) return;
-
-  Object.defineProperties(event, {
-    altKey: { configurable: true, value: true },
-    shiftKey: { configurable: true, value: true },
-  });
 }
 
 function isMobileTerminal(): boolean {
@@ -133,7 +125,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(container);
-      container.addEventListener("mousedown", forceSelectionMouseEvent, { capture: true });
+      container.addEventListener("mousedown", handleTerminalMouseDown, { capture: true });
 
       // xterm's screen sits above its scrollable viewport. Handle a finger
       // drag there directly so it scrolls history without reaching tmux as
@@ -157,7 +149,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
 
       return () => {
         resizeObserver.disconnect();
-        container.removeEventListener("mousedown", forceSelectionMouseEvent, { capture: true });
+        container.removeEventListener("mousedown", handleTerminalMouseDown, { capture: true });
         removeTouchScroll();
         term.dispose();
         termRef.current = null;
