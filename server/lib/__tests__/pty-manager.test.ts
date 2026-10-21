@@ -607,6 +607,68 @@ test("PtyManager.resize updates the tmux server-side window (issue #317)", async
   }
 });
 
+test("A mobile-created pane follows mobile resizes until a desktop sizes it", async (t) => {
+  if (!tmuxAvailable()) {
+    t.skip("tmux is not available");
+    return;
+  }
+
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-mobile-size-"));
+  const sessionId = "p1:w1:mobile-size-" + Math.random().toString(36).slice(2, 8);
+  const sessionName = tmuxSessionNames(sessionId)[0];
+  const paneSize = () => execFileSync(
+    "tmux", ["display-message", "-p", "-t", `=${sessionName}:`, "#{pane_width}x#{pane_height}"],
+    { encoding: "utf8" }
+  ).trim();
+
+  try {
+    const created = ptyManager.getOrCreate(sessionId, cwd);
+    assert.equal(created.error, undefined);
+    assert.equal(paneSize(), "200x50");
+
+    ptyManager.resize(sessionId, 42, 18, false);
+    assert.equal(paneSize(), "42x18");
+    ptyManager.resize(sessionId, 55, 22, false);
+    assert.equal(paneSize(), "55x22", "mobile rotation should still resize a mobile-owned pane");
+
+    assert.equal(ptyManager.detachIfIdle(sessionId), true);
+    assert.equal(ptyManager.getOrCreate(sessionId, cwd).error, undefined);
+    ptyManager.resize(sessionId, 48, 20, false);
+    assert.equal(paneSize(), "48x20", "mobile ownership should survive a PTY reconnect");
+
+    ptyManager.resize(sessionId, 120, 40);
+    ptyManager.resize(sessionId, 35, 16, false);
+    assert.equal(paneSize(), "120x40", "mobile should not shrink a desktop-sized pane");
+  } finally {
+    ptyManager.kill(sessionId);
+    await fs.rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("A tmux session with a nonzero window index attaches and runs commands", async (t) => {
+  if (!tmuxAvailable()) {
+    t.skip("tmux is not available");
+    return;
+  }
+
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pty-manager-index-"));
+  const sessionId = "p1:w1:index-" + Math.random().toString(36).slice(2, 8);
+  const sessionName = tmuxSessionNames(sessionId)[0];
+
+  try {
+    execFileSync("tmux", ["new-session", "-d", "-s", sessionName, "-c", cwd], { stdio: "ignore" });
+    execFileSync("tmux", ["move-window", "-s", `=${sessionName}:0`, "-t", `=${sessionName}:1`], { stdio: "ignore" });
+
+    const attached = ptyManager.getOrCreate(sessionId, cwd);
+    assert.equal(attached.error, undefined, "attach must not assume window 0 exists");
+    ptyManager.runCommand(sessionId, cwd, "printf INDEX_OK");
+    assert.ok(await waitFor(() => (ptyManager.snapshot(sessionId, 20) ?? "").includes("INDEX_OK")));
+  } finally {
+    ptyManager.kill(sessionId);
+    await fs.rm(cwd, { recursive: true, force: true });
+  }
+});
+
 function gitAvailable(): boolean {
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
