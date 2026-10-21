@@ -16,6 +16,7 @@ interface PtySession {
    * the terminal surface (issue #261) to report whether a terminal is being
    * watched, without changing the persistent-session lifecycle. */
   listeners: number;
+  sizeSource: "unsized" | "mobile" | "desktop";
 }
 
 /** Return the last `lines` lines of `text`, or all of it when it has fewer. */
@@ -79,8 +80,9 @@ function liveTmuxSessionName(sessionId: string): string | null {
   return null;
 }
 
-function tmuxFirstPaneTarget(sessionName: string): string {
-  return `${sessionName}:0.0`;
+function tmuxActivePaneTarget(sessionName: string): string {
+  // The trailing colon selects the active window/pane regardless of base-index.
+  return `=${sessionName}:`;
 }
 
 /* Both the current and legacy session-name prefixes for a logical prefix, so
@@ -154,9 +156,8 @@ function tmuxSessionExists(sessionId: string): boolean {
 function captureTmuxPane(sessionId: string, lines: number): string | null {
   for (const name of tmuxSessionNames(sessionId)) {
     try {
-      const target = `${name}:0.0`;
       return execTmuxSync(
-        ["capture-pane", "-p", "-t", target, "-S", `-${Math.max(1, lines)}`],
+        ["capture-pane", "-p", "-t", tmuxActivePaneTarget(name), "-S", `-${Math.max(1, lines)}`],
         { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
       ) as string;
     } catch {
@@ -287,6 +288,11 @@ function ensureTmuxSession(sessionName: string, cwd: string, env?: Record<string
       buildTmuxShellCommand(env),
     ];
     execTmuxSync(args, { stdio: "ignore" });
+    // Persist sizing ownership in tmux so mobile-only reconnects can continue
+    // resizing, while a later desktop size stays protected across restarts.
+    execTmuxSync(["set-option", "-t", sessionName, "@controller-size-source", "unsized"], {
+      stdio: "ignore",
+    });
   }
 
   if (env) {
@@ -327,6 +333,31 @@ function configureTmuxSession(sessionName: string): void {
   });
 }
 
+function tmuxPaneSize(sessionName: string): { cols: number; rows: number } {
+  const size = execTmuxSync(
+    ["display-message", "-p", "-t", tmuxActivePaneTarget(sessionName), "#{pane_width} #{pane_height}"],
+    { encoding: "utf8" }
+  ) as string;
+  const [cols, rows] = size.trim().split(" ").map(Number);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) {
+    throw new Error(`Invalid tmux pane size: ${size.trim()}`);
+  }
+  return { cols, rows };
+}
+
+function tmuxSizeSource(sessionName: string): PtySession["sizeSource"] {
+  try {
+    const source = (execTmuxSync(
+      ["show-option", "-qv", "-t", sessionName, "@controller-size-source"],
+      { encoding: "utf8" }
+    ) as string).trim();
+    if (source === "unsized" || source === "mobile") return source;
+  } catch {
+    // Sessions from older builds have no size source; preserve their pane size.
+  }
+  return "desktop";
+}
+
 class PtyManager {
   private sessions = new Map<string, PtySession>();
 
@@ -348,13 +379,19 @@ class PtyManager {
     const env = childProcessEnv(extraEnv);
 
     let ptyProcess: pty.IPty;
+    let sizeSource: PtySession["sizeSource"];
     const sessionName = tmuxSessionName(sessionId);
     try {
       ensureTmuxSession(sessionName, cwd, extraEnv);
+      sizeSource = tmuxSizeSource(sessionName);
+      // An 80x24 attaching client can shrink a previously wide tmux pane
+      // before the browser has reported its size, including on mobile-only
+      // reconnects. Attach at the pane's current dimensions instead.
+      const size = tmuxPaneSize(sessionName);
       ptyProcess = pty.spawn("tmux", ["attach-session", "-t", `=${sessionName}`], {
         name: "xterm-256color",
-        cols: 80,
-        rows: 24,
+        cols: size.cols,
+        rows: size.rows,
         cwd,
         env,
       });
@@ -369,6 +406,7 @@ class PtyManager {
       buffer: "",
       cwd,
       listeners: 0,
+      sizeSource,
     };
 
     // Accumulate output into the buffer
@@ -402,7 +440,7 @@ class PtyManager {
   ): void {
     const sessionName = tmuxSessionName(sessionId);
     ensureTmuxSession(sessionName, cwd, extraEnv);
-    const target = tmuxFirstPaneTarget(sessionName);
+    const target = tmuxActivePaneTarget(sessionName);
     runTmux(["send-keys", "-t", target, "-l", command], {
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -418,18 +456,20 @@ class PtyManager {
   interrupt(sessionId: string): void {
     const name = liveTmuxSessionName(sessionId);
     if (!name) return;
-    runTmux(["send-keys", "-t", tmuxFirstPaneTarget(name), "C-c"], {
+    runTmux(["send-keys", "-t", tmuxActivePaneTarget(name), "C-c"], {
       stdio: ["ignore", "ignore", "pipe"],
     });
   }
 
   /** Resize the PTY. */
-  resize(sessionId: string, cols: number, rows: number): void {
+  resize(sessionId: string, cols: number, rows: number, canResize = true): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+    if (!canResize && session.sizeSource === "desktop") return;
     const c = Math.max(1, Math.min(cols, 500));
     const r = Math.max(1, Math.min(rows, 200));
     session.pty.resize(c, r);
+    session.sizeSource = canResize ? "desktop" : "mobile";
 
     // Issue #317: belt-and-suspenders resize of the tmux *server's* window.
     // `pty.resize` on the attaching `tmux attach-session` child sends SIGWINCH
@@ -441,6 +481,10 @@ class PtyManager {
     // the primary path through `pty.resize` still works.
     for (const name of tmuxSessionNames(sessionId)) {
       try {
+        execTmuxSync(
+          ["set-option", "-t", name, "@controller-size-source", session.sizeSource],
+          { stdio: "ignore" }
+        );
         execTmuxSync(
           ["resize-window", "-t", `=${name}`, "-x", String(c), "-y", String(r)],
           { stdio: "ignore" }
@@ -537,7 +581,7 @@ class PtyManager {
     if (!name) return false;
     try {
       const panePid = (execTmuxSync(
-        ["display-message", "-p", "-t", tmuxFirstPaneTarget(name), "#{pane_pid}"],
+        ["display-message", "-p", "-t", tmuxActivePaneTarget(name), "#{pane_pid}"],
         { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
       ) as string).trim();
       const [pgid, tpgid] = execFileSync("ps", ["-o", "pgid=,tpgid=", "-p", panePid], {

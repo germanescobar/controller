@@ -171,9 +171,8 @@
 }
 
 @media (pointer: coarse), (max-width: 767px) {
-  .terminal-panel .xterm-viewport {
-    touch-action: pan-y;
-    -webkit-overflow-scrolling: touch;
+  .terminal-panel .xterm {
+    touch-action: none;
   }
 
   .terminal-mobile-controls {
