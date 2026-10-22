@@ -12,7 +12,7 @@ import {
   resolveWorktree,
   worktreeNotFoundPayload,
 } from "../lib/worktrees.js";
-import { projectStoreDir } from "../lib/paths.js";
+import { isSafeId, projectStoreDir } from "../lib/paths.js";
 import { rejectUnsafeIdParam } from "./safe-id-param.js";
 import {
   sharedDedupeUserMessageEvents as dedupeUserMessageEvents,
@@ -1560,8 +1560,38 @@ async function startSessionStream(
     | "xhigh"
     | undefined;
   const serviceTier = req.query.serviceTier === "fast" ? "fast" : undefined;
+  // Parent linkage is set only when creating a session. Resolve it before
+  // selecting the provider so headless starts and direct SSE starts agree.
+  const parentId = (req.query.parentId as string | undefined)?.trim() || undefined;
+  let parentProviderId: string | undefined;
+  if (parentId && !controllerSessionId) {
+    if (!isSafeId(parentId)) {
+      res.status(400).json({ error: "Invalid parent session id" });
+      return;
+    }
+    const parent = await locateSessionById(parentId);
+    if (!parent) {
+      res.status(404).json({ error: `Parent session not found: ${parentId}` });
+      return;
+    }
+    if (!req.query.provider) {
+      parentProviderId = canonicalProviderId(parent.session.provider || DEFAULT_PROVIDER_ID);
+      if (!getAgentProvider(parentProviderId)) {
+        res.status(400).json({
+          error: `Parent session ${parentId} has no valid agent provider`,
+        });
+        return;
+      }
+      if (!(await getAgentSetting(parentProviderId)).enabled) {
+        res.status(409).json({
+          error: `Parent session ${parentId} uses a disabled agent provider: ${parentProviderId}`,
+        });
+        return;
+      }
+    }
+  }
   const providerId = canonicalProviderId(
-    (req.query.provider as string) || DEFAULT_PROVIDER_ID
+    (req.query.provider as string) || parentProviderId || DEFAULT_PROVIDER_ID
   );
   // Resolve the requested model. A client-supplied `--model` always wins.
   // For brand-new sessions only, fall back to the user's saved default for
@@ -1613,12 +1643,6 @@ async function startSessionStream(
     req.query.selections as string | undefined
   );
   const skillName = (req.query.skillName as string | undefined)?.trim() || undefined;
-  // Optional parent session id (issue #353). Only set on the
-  // create-new-session branch — `persistSessionStart` honors it when
-  // writing a brand-new session, and ignores it on resumed sessions
-  // (the existing session's `parentId` is the source of truth there).
-  const parentId = (req.query.parentId as string | undefined)?.trim() || undefined;
-
   const provider = getAgentProvider(providerId);
   if (!provider) {
     res.status(400).json({ error: `Unknown agent provider: ${providerId}` });
