@@ -35,6 +35,7 @@ import {
   type PreviewWebview,
 } from "@/lib/usePreviewBrowserHost";
 import type { BrowserServerMessage } from "../../../shared/preview-browser";
+import { previewPartitionForKey } from "../../../shared/preview-partition";
 
 /** Per-pane preview chrome state, mirrored from the live webview. */
 export interface PreviewPaneState {
@@ -243,13 +244,17 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
       }
       surface(key);
       store.update(key, { input: url, loading: true, error: null });
-      // Toggle the cert-verify bypass *before* validation so a self-signed
+      // Set this pane's cert policy *before* validation so a self-signed
       // localhost cert doesn't get re-checked at navigation time. We always
       // resolve the previous policy first; the bypass is per-call, not sticky.
       Promise.resolve()
-        .then(() =>
-          getController().setPreviewCertPolicy({ insecure: options.insecure === true })
-        )
+        .then(() => getController().setPreviewCertPolicy({
+          browserKey: key,
+          insecure: options.insecure === true,
+        }))
+        .then((result) => {
+          if (!result.ok) throw new Error(result.error ?? "Failed to set preview certificate policy");
+        })
         .then(() =>
           getController().validatePreviewUrl(url, store.getRoot(key))
         )
@@ -511,7 +516,7 @@ function PaneFrame({
       registerWebview(paneKey, el);
     },
     src: url,
-    partition: "controller-preview",
+    partition: previewPartitionForKey(paneKey),
     webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
   });
 }
