@@ -31,6 +31,12 @@ export interface BridgeResult {
   refs?: Record<string, string>;
   refCount?: number;
   error?: string;
+  screenshotData?: string;
+  fullPage?: boolean;
+  viewport?: { width: number; height: number } | null;
+  diagnostics?: import("../../shared/preview-browser.js").BrowserDiagnostic[];
+  commandId?: string;
+  sessionId?: string;
 }
 
 interface PendingRequest {
@@ -65,6 +71,7 @@ class PreviewBrowserBridge {
   // lazy pane creation, avoiding cross-window registration races.
   private registry: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
+  private paneQueues = new Map<string, Promise<void>>();
   private nextRequestId = 1;
 
   /** Whether a renderer is currently hosting the given pane. */
@@ -128,6 +135,24 @@ class PreviewBrowserBridge {
     action: string,
     params: Record<string, unknown>,
     options: ExecuteOptions = {}
+  ): Promise<BridgeResult> {
+    const previous = this.paneQueues.get(key);
+    const result = previous
+      ? previous.then(() => this.executeNext(key, action, params, options))
+      : this.executeNext(key, action, params, options);
+    const settled = result.then(() => undefined, () => undefined);
+    this.paneQueues.set(key, settled);
+    void settled.then(() => {
+      if (this.paneQueues.get(key) === settled) this.paneQueues.delete(key);
+    });
+    return result;
+  }
+
+  private executeNext(
+    key: string,
+    action: string,
+    params: Record<string, unknown>,
+    options: ExecuteOptions
   ): Promise<BridgeResult> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const hostWaitMs = options.hostWaitMs ?? DEFAULT_HOST_WAIT_MS;

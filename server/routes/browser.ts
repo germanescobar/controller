@@ -20,10 +20,13 @@ import { Router, type Request, type Response } from "express";
 import { findWorktreeByPath } from "../lib/worktrees.js";
 import { validateBrowserUrl, validateBrowserFilePath } from "../lib/browser-policy.js";
 import { previewBrowserBridge } from "../lib/preview-browser.js";
+import { saveBrowserScreenshot } from "../lib/browser-evidence.js";
+import { randomUUID } from "node:crypto";
+import { diagnosticMessage, diagnosticUrl } from "../../shared/preview-diagnostics.js";
 
 export const browserRouter = Router();
 
-const KNOWN_ACTIONS = new Set(["open", "snapshot", "click", "type", "setFiles"]);
+const KNOWN_ACTIONS = new Set(["open", "snapshot", "click", "type", "setFiles", "wait", "scroll", "keys", "back", "screenshot", "viewport", "diagnostics"]);
 
 /**
  * Best-effort MIME inference from filename, used for the per-file
@@ -71,6 +74,15 @@ browserRouter.post("/command", async (req: Request, res: Response) => {
     body.params && typeof body.params === "object"
       ? ({ ...(body.params as Record<string, unknown>) })
       : {};
+
+  if (action === "viewport" && params.preset !== "default" && params.preset !== "desktop" && params.preset !== "mobile") {
+    res.status(400).json({ ok: false, error: "Viewport must be default, desktop, or mobile" });
+    return;
+  }
+  if (action === "diagnostics" && (!Number.isInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > 50)) {
+    res.status(400).json({ ok: false, error: "Diagnostics limit must be 1–50" });
+    return;
+  }
 
   if (!cwd) {
     res.status(400).json({ ok: false, error: "Missing cwd" });
@@ -165,10 +177,38 @@ browserRouter.post("/command", async (req: Request, res: Response) => {
   }
 
   const key = `${worktree.projectId}:${worktree.id}`;
+  const sessionId = typeof body.sessionId === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(body.sessionId)
+    ? body.sessionId : undefined;
   try {
     const result = await previewBrowserBridge.execute(key, action, params, {
       ensureHost: { projectRoot: worktree.path },
     });
+    if (action === "screenshot" && result.ok) {
+      if (typeof result.screenshotData !== "string" || typeof result.url !== "string") {
+        throw new Error("Preview pane returned no screenshot");
+      }
+      const screenshot = await saveBrowserScreenshot({
+        data: result.screenshotData,
+        paneKey: key,
+        url: result.url,
+        fullPage: result.fullPage === true,
+        sessionId,
+      });
+      res.json({ ok: true, screenshot, url: screenshot.url, summary: `Captured ${screenshot.width}×${screenshot.height} PNG` });
+      return;
+    }
+    if (action === "diagnostics" && result.ok) {
+      const diagnostics = Array.isArray(result.diagnostics) ? result.diagnostics
+        .slice(-(params.limit as number))
+        .map((entry) => ({
+          kind: entry.kind === "request" ? "request" : "console",
+          timestamp: String(entry.timestamp ?? ""),
+          url: diagnosticUrl(String(entry.url ?? "")),
+          message: diagnosticMessage(String(entry.message ?? "")),
+        })) : [];
+      res.json({ ok: true, diagnostics, commandId: randomUUID(), ...(sessionId ? { sessionId } : {}) });
+      return;
+    }
     res.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

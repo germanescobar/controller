@@ -20,7 +20,25 @@
  */
 
 /** Actions supported. */
-export type BrowserAction = "open" | "snapshot" | "click" | "type" | "setFiles";
+export type BrowserAction = "open" | "snapshot" | "click" | "type" | "setFiles" | "wait" | "scroll" | "keys" | "back" | "screenshot" | "viewport" | "diagnostics";
+
+export interface BrowserViewport { width: number; height: number }
+export interface BrowserDiagnostic {
+  kind: "console" | "request";
+  timestamp: string;
+  url: string;
+  message: string;
+}
+
+export interface BrowserScreenshot {
+  path: string;
+  width: number;
+  height: number;
+  url: string;
+  fullPage: boolean;
+  commandId: string;
+  sessionId?: string;
+}
 
 /**
  * Refs emitted by an accessibility snapshot. Each key is a short opaque id
@@ -46,6 +64,12 @@ export interface BrowserCommandResultData {
   summary?: string;
   /** Per-file outcome from a `setFiles` action — input order, one row each. */
   files?: BrowserSetFilesResultEntry[];
+  /** Saved PNG metadata. Pixel data is never returned in the HTTP result. */
+  screenshot?: BrowserScreenshot;
+  viewport?: BrowserViewport | null;
+  diagnostics?: BrowserDiagnostic[];
+  commandId?: string;
+  sessionId?: string;
 }
 
 export type BrowserCommandResult =

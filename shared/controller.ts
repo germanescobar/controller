@@ -15,6 +15,21 @@ export interface PreviewUrlCheckResult {
   error?: string;
 }
 
+export interface PreviewPopupRequest {
+  guestId: number;
+  url: string;
+  redirect?: boolean;
+}
+
+export interface PreviewResponseStatus {
+  url: string;
+  statusCode: number;
+}
+
+export type PreviewCaptureResult =
+  | { ok: true; data: string; width: number; height: number }
+  | { ok: false; error: string };
+
 /**
  * Result of a single preview-file read inside the Electron main process
  * (issue #356). The server has already canonicalized the path; the main
@@ -53,6 +68,13 @@ export interface ControllerBridge {
     url: string,
     projectRoot?: string
   ) => Promise<PreviewUrlCheckResult>;
+  onPreviewPopup: (cb: (request: PreviewPopupRequest) => void) => () => void;
+  onPreviewNavigation: (cb: (request: PreviewPopupRequest) => void) => () => void;
+  getPreviewResponseStatus: (
+    guestId: number,
+    since: number
+  ) => Promise<PreviewResponseStatus | null>;
+  capturePreviewPage: (guestId: number) => Promise<PreviewCaptureResult>;
   /**
    * Set the TLS-cert verification bypass on the named preview pane's session.
    * Used by the agent-controlled browser when the user passes `--insecure`
@@ -72,6 +94,7 @@ export interface ControllerBridge {
     path: string,
     options: { projectRoot?: string; allowOutside?: boolean }
   ) => Promise<PreviewFileReadResult>;
+  previewRequestFailures: (webContentsId: number, clear?: boolean) => Promise<import("./preview-browser.js").BrowserDiagnostic[]>;
   /**
    * Open a native folder picker. Returns the absolute path the user
    * selected, or null if they cancelled. The picker is window-modal

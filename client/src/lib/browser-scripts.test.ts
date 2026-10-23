@@ -6,6 +6,7 @@ import {
   buildSetFilesScript,
   buildSnapshotScript,
   buildTypeScript,
+  buildWaitCheckScript,
 } from "./browser-scripts.ts";
 
 /**
@@ -28,11 +29,11 @@ interface MockElement {
   attributes: Map<string, string>;
   textContent: string;
   innerText: string;
-  rect: { width: number; height: number };
+  rect: { width: number; height: number; left?: number; top?: number };
   style: { display: string; visibility: string };
   classList: Set<string>;
   disabled: boolean;
-  getBoundingClientRect(): { width: number; height: number };
+  getBoundingClientRect(): { width: number; height: number; left: number; top: number };
 }
 
 function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
@@ -51,7 +52,8 @@ function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
     disabled: init.disabled ?? false,
     id: init.id,
     getBoundingClientRect() {
-      return { width: this.rect.width, height: this.rect.height };
+      return { width: this.rect.width, height: this.rect.height,
+        left: this.rect.left ?? 0, top: this.rect.top ?? 0 };
     },
   };
   for (const child of init.children ?? []) {
@@ -96,7 +98,6 @@ function elApi(root: MockElement) {
     return set;
   }
 
-  const selfAndDescendants = descendantsSet(root);
   const nodeIndex = new Map<MockElement, unknown>();
   const shadowIndex = new Map<MockElement, unknown>();
   function shadowNode(host: MockElement): unknown {
@@ -176,7 +177,7 @@ function elApi(root: MockElement) {
       // and check membership in the descendant set.
       contains: (other: unknown) => {
         if (!other || typeof other !== "object") return false;
-        for (const node of selfAndDescendants) {
+        for (const node of descendantsSet(el)) {
           if (indexFor(node) === other) return true;
         }
         return false;
@@ -432,6 +433,44 @@ test("buildClickScript routes role= through the role engine", () => {
   assert.equal(result.engine, "role");
 });
 
+test("click identifies disabled and hidden targets", () => {
+  for (const [target, reason] of [
+    [makeEl("button", { id: "target", disabled: true }), "disabled"],
+    [makeEl("button", { id: "target", style: { display: "none", visibility: "visible" } }), "hidden"],
+  ] as const) {
+    const { toBody } = elApi(makeEl("body", { children: [target] }));
+    const result = runScript<{ ok: boolean; error?: string }>(buildClickScript({ selector: "#target", refs: {} }), toBody());
+    assert.equal(result.ok, false);
+    assert.equal(result.error, reason);
+  }
+});
+
+test("click identifies an obscured target", () => {
+  const target = makeEl("button", { id: "target" });
+  const overlay = makeEl("div", { id: "overlay" });
+  const { toBody } = elApi(makeEl("body", { children: [target, overlay] }));
+  const body = toBody() as { elementFromPoint?: () => object; querySelector: (selector: string) => object };
+  body.elementFromPoint = () => body.querySelector("#overlay");
+  const result = runScript<{ ok: boolean; error?: string }>(buildClickScript({ selector: "#target", refs: {} }), body);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "obscured");
+});
+
+test("wait visibility distinguishes a hidden target from a missing target", () => {
+  const target = makeEl("button", { id: "late", style: { display: "none", visibility: "visible" } });
+  const { toBody } = elApi(makeEl("body", { children: [target] }));
+  const body = toBody();
+  const hidden = runScript<{ matched: boolean; observed: string }>(buildWaitCheckScript("visible", "#late", {}), body);
+  assert.equal(hidden.matched, false);
+  assert.equal(hidden.observed, "hidden");
+  target.style.display = "block";
+  const visible = runScript<{ matched: boolean }>(buildWaitCheckScript("visible", "#late", {}), body);
+  assert.equal(visible.matched, true);
+  target.disabled = true;
+  const disabledButVisible = runScript<{ matched: boolean }>(buildWaitCheckScript("visible", "#late", {}), toBody());
+  assert.equal(disabledButVisible.matched, true);
+});
+
 test("buildClickScript reports 'no element matches' for a selector with no hit", () => {
   const root = makeEl("body", { children: [makeEl("div", {})] });
   const { toBody } = elApi(root);
@@ -499,6 +538,17 @@ test("buildTypeScript sets the value on a matched input", () => {
   // anything — our mock doesn't populate roles. We assert the dispatch path
   // ran by checking the engine field.
   assert.ok(typeof result.ok === "boolean");
+});
+
+test("type reports a disabled input before trying to edit it", () => {
+  const input = makeEl("input", { id: "name", disabled: true });
+  const { toBody } = elApi(makeEl("body", { children: [input] }));
+  const result = runScript<{ ok: boolean; error?: string }>(
+    buildTypeScript({ selector: "#name", refs: {}, text: "Ada" }),
+    toBody()
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "disabled");
 });
 
 test("typing into a shadow-root contenteditable targets the editor, not the search box", () => {

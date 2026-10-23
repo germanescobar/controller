@@ -21,7 +21,56 @@ Through the preview browser the agent can:
 
 - Open a URL.
 - Click elements and type into inputs or contenteditable editors.
+- Wait for a visible element, page text, or URL; scroll, press keys, and go back.
 - Read the rendered DOM, including visible dialogs and menus in open shadow roots.
+- Capture screenshots, select a viewport, and query recent browser errors.
+
+## Screenshot evidence and viewport
+
+```sh
+controller browser viewport mobile      # 390 × 844
+controller browser viewport desktop     # 1280 × 800
+controller browser screenshot           # current viewport
+controller browser screenshot --full-page
+controller browser viewport default     # follow the Preview pane again
+```
+
+Viewport settings belong to the current worktree's pane and stay in effect
+until reset. Full-page capture scrolls through the page, joins viewport images,
+then restores the original scroll position. Pages with horizontal overflow
+need a wider viewport. Fixed or sticky elements can appear in more than one
+slice. Captures over 8192 pixels on either side or 16 megapixels are rejected;
+PNGs are capped at 12 MiB.
+Transparent pages are captured against a white browser canvas. A parked pane
+is briefly brought into the window's paintable area during capture, then
+returned to its prior position.
+
+The screenshot command prints an absolute PNG path, pixel dimensions, page
+URL, command ID, and the Controller session ID when available. The HTTP result
+uses `screenshot: { path, width, height, url, fullPage, commandId, sessionId? }`.
+The reported URL omits credentials, query strings, and fragments.
+Files are saved with private permissions under the system temporary directory
+in a pane-specific evidence folder. The agent can inspect or attach that file
+to its report. Captures may contain private page content; they are created
+only by an explicit screenshot command and are not recorded automatically.
+
+## Browser diagnostics
+
+```sh
+controller browser diagnostics             # latest 20 entries
+controller browser diagnostics --limit 50  # maximum 50
+```
+
+The result contains timestamped console errors, network failures, and HTTP
+responses with status 400 or higher for this pane. Each entry has `kind`
+(`console` or `request`), `timestamp`,
+`url`, and `message`. Entries clear on navigation, stay bounded to the latest
+50 of each source, and the CLI returns at most the requested number with a
+command ID and optional session ID. URLs lose user information, query strings,
+and fragments; messages redact common
+authorization and cookie values and are truncated. Headers and request and
+response bodies are never collected. Page-authored console text can still
+contain application-specific secrets, so review it before sharing.
 
 Ask the agent to "open the app and check the new settings panel" and it drives
 the preview browser to do exactly that.
@@ -31,6 +80,38 @@ those refs to target a field on a complex page. CSS selectors can cross an open
 shadow root with `>>>`, for example `studio-editor >>> #textbox`. An ambiguous
 `role=textbox` typing target returns an error so the agent can choose a named
 field or ref instead.
+
+## Deterministic interactions
+
+Commands for one preview pane run in request order, including navigation and
+snapshots. `click` and `type` retry briefly while a target appears or becomes
+actionable. They fail after five seconds by default and report the last reason
+(`no element matches`, `hidden`, `disabled`, `obscured`, or `detached`). Use
+`--timeout-ms` to set a timeout from 0 to 15000 milliseconds. Unknown or stale
+snapshot refs fail immediately; take another snapshot after navigation or a
+major page change.
+
+```sh
+controller browser wait visible 'role=button[name="Save"]' --timeout-ms 10000
+controller browser click 'role=button[name="Save"]'
+controller browser wait text 'Saved successfully'
+controller browser wait url '/settings'
+controller browser scroll 0 600
+controller browser keys Escape
+controller browser back
+```
+
+`wait visible` checks visibility; `wait text` looks for a substring in page
+text, and `wait url` looks for a substring in the current URL. A successful
+click confirms that an actionable target received a native mouse gesture. Check
+the expected result with `wait` or `snapshot` when the page should change.
+`back` returns an error when there is no prior page in the preview history.
+Submitting a form through `type --submit` keeps its native HTTP method and
+body, including POST fields.
+
+`controller browser open` reports a failed result when navigation is rejected,
+the page fails to load, the main document returns an HTTP error status, or the
+load times out. The agent can use that result before taking a snapshot.
 
 ## Local HTTPS dev servers
 

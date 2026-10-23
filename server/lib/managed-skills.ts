@@ -210,6 +210,16 @@ below is run as \`${cliPath} browser <command>\`:
   per-file outcome (accepted / rejected with reason) so the agent
   can detect a size or \`accept\` mismatch without re-snapping the
   page.
+- \`${cliPath} browser viewport <desktop|mobile|default>\` — set this
+  worktree pane to 1280×800 or 390×844, or restore its normal size.
+- \`${cliPath} browser screenshot [--full-page]\` — save an explicit PNG
+  capture. Prints the private temporary artifact path, dimensions, URL,
+  command ID, and session ID when available. Full-page capture has an
+  8192-pixel / 16-megapixel limit.
+- \`${cliPath} browser diagnostics [--limit N]\` — print up to 50 recent
+  console errors and failed requests for this pane. Entries clear on
+  navigation; URL credentials and query values are removed, and no
+  headers or bodies are collected.
 
 ## Selectors for click / type
 

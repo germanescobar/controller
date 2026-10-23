@@ -3731,7 +3731,25 @@ test("parseBrowser snapshot / click / type still work", async () => {
   );
 });
 
+test("parseBrowser evidence commands validate bounded inputs", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseBrowser(["screenshot", "--full-page"]), { action: "screenshot", params: { fullPage: true } });
+  assert.deepEqual(cli.parseBrowser(["viewport", "mobile"]), { action: "viewport", params: { preset: "mobile" } });
+  assert.deepEqual(cli.parseBrowser(["viewport", "default"]), { action: "viewport", params: { preset: "default" } });
+  assert.deepEqual(cli.parseBrowser(["diagnostics", "--limit", "5"]), { action: "diagnostics", params: { limit: 5 } });
+});
+
 // `controller browser set-files` parser (issue #356).
+test("parseBrowser supports bounded waits and interaction primitives", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseBrowser(["wait", "visible", "#ready", "--timeout-ms", "1200"]), {
+    action: "wait", params: { condition: "visible", value: "#ready", timeoutMs: 1200 },
+  });
+  assert.deepEqual(cli.parseBrowser(["scroll", "0", "600"]), { action: "scroll", params: { x: 0, y: 600 } });
+  assert.deepEqual(cli.parseBrowser(["keys", "Escape"]), { action: "keys", params: { key: "Escape" } });
+  assert.deepEqual(cli.parseBrowser(["back"]), { action: "back", params: {} });
+});
+
 // ---------------------------------------------------------------------------
 
 test("parseBrowser set-files builds the canonical payload from a single path", async () => {

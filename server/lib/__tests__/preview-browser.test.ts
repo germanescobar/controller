@@ -50,6 +50,40 @@ test("forwards a command to the registered host and resolves with its result", a
   assert.deepEqual(result, { ok: true, text: "hello" });
 });
 
+test("orders navigation, snapshot, and action for one pane", async () => {
+  const socket = new FakeSocket();
+  previewBrowserBridge.handleConnection(socket as never);
+  register(socket, "p-order:w-order");
+
+  const opened = previewBrowserBridge.execute("p-order:w-order", "open", { url: "http://localhost/next" });
+  const snapped = previewBrowserBridge.execute("p-order:w-order", "snapshot", {});
+  const clicked = previewBrowserBridge.execute("p-order:w-order", "click", { selector: "#go" });
+  const screenshot = previewBrowserBridge.execute("p-order:w-order", "screenshot", {});
+  assert.equal(socket.sent.length, 1);
+
+  const reply = (index: number) => {
+    const frame = JSON.parse(socket.sent[index]);
+    socket.emit("message", Buffer.from(JSON.stringify({ kind: "result", requestId: frame.requestId, result: { ok: true, summary: frame.action } })));
+  };
+  reply(0);
+  await opened;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(socket.sent.length, 2);
+  assert.equal(JSON.parse(socket.sent[1]).action, "snapshot");
+  reply(1);
+  await snapped;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(socket.sent.length, 3);
+  assert.equal(JSON.parse(socket.sent[2]).action, "click");
+  reply(2);
+  assert.deepEqual(await clicked, { ok: true, summary: "click" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(socket.sent.length, 4);
+  assert.equal(JSON.parse(socket.sent[3]).action, "screenshot");
+  reply(3);
+  assert.deepEqual(await screenshot, { ok: true, summary: "screenshot" });
+});
+
 test("rejects when no host is connected for the key", async () => {
   await assert.rejects(
     previewBrowserBridge.execute("missing:key", "snapshot", {}, { hostWaitMs: 50 }),

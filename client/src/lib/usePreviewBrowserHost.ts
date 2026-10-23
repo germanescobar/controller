@@ -20,13 +20,17 @@ import type {
   BrowserCommandResult,
   BrowserServerMessage,
   BrowserSetFilesFileMeta,
+  BrowserDiagnostic,
+  BrowserViewport,
 } from "../../../shared/preview-browser.ts";
 import {
   buildClickScript,
   buildSetFilesScript,
   buildSnapshotScript,
   buildTypeScript,
+  buildWaitCheckScript,
 } from "./browser-scripts.ts";
+import { capturePreviewScreenshot } from "./preview-screenshot.ts";
 
 /** Subset of the Electron `<webview>` tag API we drive. */
 export interface PreviewWebview extends HTMLElement {
@@ -35,6 +39,14 @@ export interface PreviewWebview extends HTMLElement {
   getTitle: () => string;
   isLoading?: () => boolean;
   reload?: () => void;
+  canGoBack?: () => boolean;
+  goBack?: () => void;
+  sendInputEvent?: (event:
+    | { type: "keyDown" | "keyUp" | "char"; keyCode: string }
+    | { type: "mouseMove" | "mouseDown" | "mouseUp"; x: number; y: number; button?: "left"; clickCount?: number }
+  ) => Promise<void> | void;
+  loadURL?: (url: string) => Promise<void>;
+  getWebContentsId?: () => number;
 }
 
 export interface PreviewBrowserHostOptions {
@@ -44,8 +56,13 @@ export interface PreviewBrowserHostOptions {
   browserKey: string | null;
   /** Returns the live `<webview>` element, or null when no page is open. */
   getWebview: () => PreviewWebview | null;
+  /** Latest load error for the selected tab, including early load events. */
+  getLoadError: () => string | null;
   /** Trigger the visible navigation flow (validates + switches to Preview). */
-  openUrl: (url: string, options?: { insecure?: boolean }) => void;
+  openUrl: (
+    url: string,
+    options?: { insecure?: boolean }
+  ) => Promise<{ ok: true; loaded?: boolean } | { ok: false; error: string }>;
   /**
    * Worktree path the pane is bound to. Used by `setFiles` so the
    * Electron main process can re-check the path policy on read
@@ -53,10 +70,14 @@ export interface PreviewBrowserHostOptions {
    * because the renderer cannot prove the path is project-scoped.
    */
   projectRoot?: string;
+  setViewport: (preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
+  getDiagnostics: (limit: number) => Promise<BrowserDiagnostic[]>;
 }
 
 const RECONNECT_DELAY_MS = 1500;
 const LOAD_TIMEOUT_MS = 12_000;
+const ACTION_TIMEOUT_MS = 5_000;
+const MAX_WAIT_MS = 15_000;
 
 export function previewBrowserWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -68,16 +89,22 @@ export function previewBrowserWsUrl(): string {
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {
-  const { enabled, browserKey, getWebview, openUrl, projectRoot } = options;
+  const { enabled, browserKey, getWebview, getLoadError, openUrl, projectRoot, setViewport, getDiagnostics } = options;
 
   // Keep the latest callbacks in refs so the long-lived socket effect doesn't
   // reconnect on every render.
   const getWebviewRef = useRef(getWebview);
+  const getLoadErrorRef = useRef(getLoadError);
   const openUrlRef = useRef(openUrl);
   const projectRootRef = useRef(projectRoot);
+  const setViewportRef = useRef(setViewport);
+  const getDiagnosticsRef = useRef(getDiagnostics);
   getWebviewRef.current = getWebview;
+  getLoadErrorRef.current = getLoadError;
   openUrlRef.current = openUrl;
   projectRootRef.current = projectRoot;
+  setViewportRef.current = setViewport;
+  getDiagnosticsRef.current = getDiagnostics;
 
   useEffect(() => {
     if (!enabled || !browserKey) return;
@@ -89,17 +116,26 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
     // next click/type with `ref=` reads from it. Cleared on `open` because a
     // new page invalidates the selectors.
     const refs: Record<string, string> = {};
+    let refsUrl: string | null = null;
 
     const runCommand = async (
       message: BrowserCommandMessage
     ): Promise<BrowserCommandResult> => {
       try {
+        const currentUrl = safeCall(() => getWebviewRef.current()?.getURL()) ?? null;
+        if (refsUrl && currentUrl && currentUrl !== refsUrl) {
+          for (const key of Object.keys(refs)) delete refs[key];
+          refsUrl = null;
+        }
         switch (message.action) {
           case "open":
+            for (const key of Object.keys(refs)) delete refs[key];
+            refsUrl = null;
             return await handleOpen(
               String(message.params.url ?? ""),
               message.params.insecure === true,
               getWebviewRef.current,
+              getLoadErrorRef.current,
               openUrlRef.current
             );
           case "snapshot":
@@ -114,7 +150,8 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
             return await handleClick(
               getWebviewRef.current(),
               String(message.params.selector ?? ""),
-              refs
+              refs,
+              timeoutFrom(message.params)
             );
           case "type":
             return await handleType(
@@ -122,8 +159,19 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               String(message.params.selector ?? ""),
               String(message.params.text ?? ""),
               Boolean(message.params.submit),
-              refs
+              refs,
+              timeoutFrom(message.params)
             );
+          case "wait":
+            return await handleWait(getWebviewRef.current(), message.params, refs);
+          case "scroll":
+            return await handleScroll(getWebviewRef.current(), message.params);
+          case "keys":
+            return handleKeys(getWebviewRef.current(), message.params);
+          case "back":
+            for (const key of Object.keys(refs)) delete refs[key];
+            refsUrl = null;
+            return await handleBack(getWebviewRef.current());
           case "setFiles":
             return await handleSetFiles(
               getWebviewRef.current(),
@@ -133,6 +181,20 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               projectRootRef.current,
               Boolean(message.params.allowOutside)
             );
+          case "viewport": {
+            const preset = message.params.preset;
+            if (preset !== "default" && preset !== "desktop" && preset !== "mobile") {
+              return { ok: false, error: "Invalid viewport preset" };
+            }
+            const viewport = setViewportRef.current(preset);
+            if (viewport) await waitForViewport(getWebviewRef.current(), viewport);
+            return { ok: true, viewport, summary: viewport
+              ? `Viewport set to ${viewport.width}×${viewport.height}` : "Viewport restored to pane default" };
+          }
+          case "diagnostics":
+            return { ok: true, diagnostics: await getDiagnosticsRef.current(Number(message.params.limit)) };
+          case "screenshot":
+            return await handleScreenshot(getWebviewRef.current(), message.params.fullPage === true);
           default:
             return { ok: false, error: `Unsupported action` };
         }
@@ -161,10 +223,6 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
           return;
         }
         if (message.kind !== "command") return;
-        if (message.action === "open") {
-          // A new navigation invalidates any refs we cached.
-          for (const k of Object.keys(refs)) delete refs[k];
-        }
         void runCommand(message).then((result) => {
           // Snapshot replies carry refs the next `ref=` call will resolve;
           // capture them so a later click can target by id without re-running
@@ -172,6 +230,7 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
           if (message.action === "snapshot" && result.ok && result.refs) {
             for (const k of Object.keys(refs)) delete refs[k];
             Object.assign(refs, result.refs);
+            refsUrl = result.url ?? null;
           }
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
@@ -202,29 +261,101 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
   }, [enabled, browserKey]);
 }
 
+export async function waitForViewport(webview: PreviewWebview | null, viewport: BrowserViewport): Promise<void> {
+  if (!webview) return;
+  const style = webview.style;
+  const parked = style && Number.parseFloat(style.left) < -50_000;
+  const previous = parked ? { left: style.left, top: style.top, zIndex: style.zIndex } : null;
+  const deadline = Date.now() + 2_000;
+  let last: BrowserViewport | null = null;
+  try {
+    if (parked) {
+      style.left = "0px";
+      style.top = "0px";
+      style.zIndex = "20";
+      await delay(100);
+    }
+    while (Date.now() < deadline) {
+      const actual = await boundedGuestCall(
+        webview.executeJavaScript(`({ width: window.innerWidth, height: window.innerHeight })`),
+        1_000, "Preview did not respond to the viewport check"
+      ) as BrowserViewport;
+      last = actual;
+      if (actual.width === viewport.width && actual.height === viewport.height) return;
+      await delay(50);
+    }
+    throw new Error(`Preview did not reach ${viewport.width}×${viewport.height} within 2 seconds (observed ${last?.width ?? "?"}×${last?.height ?? "?"})`);
+  } finally {
+    if (previous) Object.assign(style, previous);
+  }
+}
+
+async function boundedGuestCall<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function handleScreenshot(webview: PreviewWebview | null, fullPage: boolean): Promise<BrowserCommandResult & { screenshotData?: string; fullPage?: boolean }> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const guestId = safeCall(() => webview.getWebContentsId?.());
+  if (!guestId) return { ok: false, error: "Preview guest is not ready for screenshot capture" };
+  return capturePreviewScreenshot({
+    style: webview.style,
+    getURL: () => webview.getURL(),
+    executeJavaScript: (code) => webview.executeJavaScript(code),
+    capturePage: () => getController().capturePreviewPage(guestId),
+  }, fullPage);
+}
+
 // ---------------------------------------------------------------------------
 // Command handlers
 // ---------------------------------------------------------------------------
 
-async function handleOpen(
+export async function handleOpen(
   url: string,
   insecure: boolean,
   getWebview: () => PreviewWebview | null,
-  openUrl: (url: string, options?: { insecure?: boolean }) => void
+  getLoadError: () => string | null,
+  openUrl: (
+    url: string,
+    options?: { insecure?: boolean }
+  ) => Promise<{ ok: true; loaded?: boolean } | { ok: false; error: string }>
 ): Promise<BrowserCommandResult> {
   if (!url) return { ok: false, error: "Missing url" };
   // Capture the current URL before navigating so we can tell when the *new*
   // page has actually loaded — otherwise an already-open idle pane would report
   // success against the old page and a follow-up snapshot would read it.
+  const startedAt = Date.now();
   const beforeUrl = safeCall(() => getWebview()?.getURL()) ?? null;
-  openUrl(url, insecure ? { insecure: true } : undefined);
-  const webview = await waitForOpenComplete(getWebview, beforeUrl);
-  if (!webview) {
-    return { ok: true, url, summary: `Opened ${url}` };
+  const opened = await openUrl(url, insecure ? { insecure: true } : undefined);
+  if (!opened.ok) return { ok: false, error: opened.error };
+  const webview = opened.loaded
+    ? getWebview()
+    : await waitForOpenComplete(
+        getWebview, beforeUrl, LOAD_TIMEOUT_MS, getLoadError
+      );
+  if (!webview) return { ok: false, error: "Preview page closed before it loaded" };
+  const guestId = safeCall(() => webview.getWebContentsId?.());
+  const response = guestId ? await getController().getPreviewResponseStatus(guestId, startedAt) : null;
+  const finalUrl = webview.getURL();
+  if (
+    response && response.statusCode >= 400 &&
+    response.url.split("#", 1)[0] === finalUrl.split("#", 1)[0]
+  ) {
+    return { ok: false, error: `HTTP ${response.statusCode} loading ${response.url}` };
   }
   return {
     ok: true,
-    url: safeCall(() => webview.getURL()) ?? url,
+    url: finalUrl,
     title: safeCall(() => webview.getTitle()) ?? undefined,
     summary: `Opened ${url}`,
   };
@@ -266,16 +397,15 @@ async function handleSnapshot(
   };
 }
 
-async function handleClick(
+export async function handleClick(
   webview: PreviewWebview | null,
   selector: string,
-  refs: Record<string, string>
+  refs: Record<string, string>,
+  timeoutMs: number
 ): Promise<BrowserCommandResult> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
   if (!selector) return { ok: false, error: "Missing selector" };
-  const result = (await webview.executeJavaScript(
-    buildClickScript({ selector, refs })
-  )) as { ok: boolean; engine?: string; error?: string } | null;
+  const result = await retryAction(webview, () => buildClickScript({ selector, refs }), timeoutMs);
   if (!result) return { ok: false, error: "Renderer returned no result" };
   if (!result.ok) {
     return {
@@ -285,8 +415,31 @@ async function handleClick(
           ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
           : result.error === "stale ref"
             ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
-            : `No element matches: ${selector} (engine: ${result.engine ?? "?"})`,
+            : `${result.error ?? "Target unavailable"}: ${selector} (engine: ${result.engine ?? "?"})`,
     };
+  }
+  if (!webview.sendInputEvent || typeof result.x !== "number" || typeof result.y !== "number" ||
+    !Number.isFinite(result.x) || !Number.isFinite(result.y)) {
+    return { ok: false, error: "Native mouse input is unavailable in this preview" };
+  }
+  const x = Math.round(result.x);
+  const y = Math.round(result.y);
+  const style = webview.style;
+  const parked = style && Number.parseFloat(style.left) < -50_000;
+  const previous = parked ? { left: style.left, top: style.top, zIndex: style.zIndex } : null;
+  try {
+    if (parked) {
+      style.left = "0px";
+      style.top = "0px";
+      style.zIndex = "20";
+      await delay(100);
+    }
+    await webview.sendInputEvent({ type: "mouseMove", x, y });
+    await webview.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+    await webview.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+    if (parked) await delay(50);
+  } finally {
+    if (previous) Object.assign(style, previous);
   }
   return { ok: true, summary: `Clicked ${selector} (${result.engine})` };
 }
@@ -296,13 +449,12 @@ async function handleType(
   selector: string,
   text: string,
   submit: boolean,
-  refs: Record<string, string>
+  refs: Record<string, string>,
+  timeoutMs: number
 ): Promise<BrowserCommandResult> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
   if (!selector) return { ok: false, error: "Missing selector" };
-  const result = (await webview.executeJavaScript(
-    buildTypeScript({ selector, refs, text, submit })
-  )) as { ok: boolean; engine?: string; error?: string } | null;
+  const result = await retryAction(webview, () => buildTypeScript({ selector, refs, text, submit }), timeoutMs);
   if (!result) return { ok: false, error: "Renderer returned no result" };
   if (!result.ok) {
     return {
@@ -312,7 +464,7 @@ async function handleType(
           ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
           : result.error === "stale ref"
             ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
-            : `No element matches: ${selector} (engine: ${result.engine ?? "?"})`,
+            : `${result.error ?? "Target unavailable"}: ${selector} (engine: ${result.engine ?? "?"})`,
     };
   }
   return {
@@ -497,49 +649,155 @@ async function handleSetFiles(
 // Helpers
 // ---------------------------------------------------------------------------
 
+function timeoutFrom(params: Record<string, unknown>): number {
+  const value = params.timeoutMs;
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(MAX_WAIT_MS, value))
+    : ACTION_TIMEOUT_MS;
+}
+
+export async function retryAction(
+  webview: PreviewWebview,
+  script: () => string,
+  timeoutMs: number
+): Promise<{ ok: boolean; engine?: string; error?: string; x?: number; y?: number } | null> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "no result";
+  let lastEngine: string | undefined;
+  do {
+    const result = (await webview.executeJavaScript(script())) as { ok: boolean; engine?: string; error?: string; x?: number; y?: number } | null;
+    if (!result || result.ok || result.error === "unknown ref" || result.error === "stale ref" || result.error?.startsWith("ambiguous")) return result;
+    lastError = result.error ?? "no result";
+    lastEngine = result.engine;
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(100, deadline - Date.now()));
+  } while (true);
+  return { ok: false, engine: lastEngine, error: `timed out after ${timeoutMs}ms (last reason: ${lastError})` };
+}
+
+async function handleWait(
+  webview: PreviewWebview | null,
+  params: Record<string, unknown>,
+  refs: Record<string, string>
+): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const condition = params.condition;
+  const value = params.value;
+  if (condition !== "visible" && condition !== "text" && condition !== "url") return { ok: false, error: "wait requires visible, text, or url" };
+  if (typeof value !== "string" || !value) return { ok: false, error: "wait requires a nonempty value" };
+  const timeoutMs = timeoutFrom(params);
+  const deadline = Date.now() + timeoutMs;
+  let observed = "";
+  do {
+    const result = (await webview.executeJavaScript(buildWaitCheckScript(condition, value, refs))) as { matched: boolean; observed: string };
+    if (result.matched) return { ok: true, url: safeCall(() => webview.getURL()) ?? undefined, summary: `Condition met: ${condition} ${value}` };
+    observed = result.observed;
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(100, deadline - Date.now()));
+  } while (true);
+  return { ok: false, error: `wait ${condition} ${value} timed out after ${timeoutMs}ms (last observed: ${observed})` };
+}
+
+async function handleScroll(webview: PreviewWebview | null, params: Record<string, unknown>): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const x = params.x, y = params.y;
+  if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, error: "scroll requires finite x and y offsets" };
+  await webview.executeJavaScript(`window.scrollBy(${JSON.stringify(x)}, ${JSON.stringify(y)})`);
+  return { ok: true, summary: `Scrolled by ${x}, ${y}` };
+}
+
+function handleKeys(webview: PreviewWebview | null, params: Record<string, unknown>): BrowserCommandResult {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const key = params.key;
+  if (typeof key !== "string" || !/^(Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace)$/.test(key)) return { ok: false, error: "Unsupported key; use Enter, Escape, Tab, an arrow key, or Backspace" };
+  if (!webview.sendInputEvent) return { ok: false, error: "Keyboard input is unavailable in this preview" };
+  webview.sendInputEvent({ type: "keyDown", keyCode: key });
+  webview.sendInputEvent({ type: "keyUp", keyCode: key });
+  return { ok: true, summary: `Pressed ${key}` };
+}
+
+async function handleBack(webview: PreviewWebview | null): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  if (!webview.goBack || !webview.canGoBack?.()) return { ok: false, error: "No previous page in preview history" };
+  const beforeUrl = safeCall(() => webview.getURL());
+  webview.goBack();
+  await waitForOpenComplete(() => webview, beforeUrl);
+  return { ok: true, url: safeCall(() => webview.getURL()) ?? undefined, summary: "Went back" };
+}
+
 /**
  * Wait for an `open` to settle on the newly requested page. Resolves when a
  * fresh load cycle completes (`did-stop-loading`) or the webview has finished
  * loading a URL different from `beforeUrl`, whichever comes first. Falls back to
- * a timeout so a non-navigating `open` (e.g. re-opening the current URL) still
- * returns. Returns null only if the webview never appears.
+ * a timeout with an error if no new page ever settles. In particular, a
+ * validation failure must not report success against the old page.
  */
-async function waitForOpenComplete(
+export async function waitForOpenComplete(
   getWebview: () => PreviewWebview | null,
-  beforeUrl: string | null
-): Promise<PreviewWebview | null> {
+  beforeUrl: string | null,
+  timeoutMs = LOAD_TIMEOUT_MS,
+  getLoadError: () => string | null = () => null
+): Promise<PreviewWebview> {
   const start = Date.now();
   let webview = getWebview();
-  while (!webview && Date.now() - start < LOAD_TIMEOUT_MS) {
+  while (!webview && Date.now() - start < timeoutMs) {
     await delay(100);
     webview = getWebview();
   }
-  if (!webview) return null;
+  if (!webview) throw new Error("Preview page did not open before the load timeout");
 
   const el = webview;
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const finish = () => {
+    let started = safeCall(() => el.isLoading?.()) ?? false;
+    let aborted = false;
+    const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       el.removeEventListener("did-stop-loading", onStop);
+      el.removeEventListener("did-start-loading", onStart);
+      el.removeEventListener("did-fail-load", onFail);
       window.clearInterval(interval);
       window.clearTimeout(timer);
-      resolve();
+      if (error) reject(error);
+      else resolve();
     };
     // A completed load cycle since we started waiting is the new navigation —
     // the old page was idle, so it has no pending load to confuse us.
-    const onStop = () => finish();
+    const onStart = () => {
+      started = true;
+      aborted = false;
+    };
+    const onStop = () => {
+      if (aborted) return;
+      const error = getLoadError();
+      if (error) return finish(new Error(error));
+      const current = safeCall(() => el.getURL());
+      if (started || (current && current !== beforeUrl)) finish();
+    };
+    const onFail = (event: Event) => {
+      const failure = event as Event & { errorCode?: number; errorDescription?: string };
+      if (failure.errorCode === -3) {
+        aborted = true;
+        return;
+      }
+      finish(new Error(failure.errorDescription ?? "Preview failed to load"));
+    };
     // Also poll, in case the new load finished before listeners attached
     // (common on the very first open, where the webview mounts mid-navigation).
     const poll = () => {
+      const error = getLoadError();
+      if (error) return finish(new Error(error));
+      if (aborted) return;
       const current = safeCall(() => el.getURL());
-      const loading = el.isLoading ? el.isLoading() : false;
-      if (!loading && current && current !== beforeUrl) finish();
+      const loading = safeCall(() => el.isLoading?.());
+      if (loading === false && current && current !== beforeUrl) finish();
     };
     const interval = window.setInterval(poll, 120);
-    const timer = window.setTimeout(finish, LOAD_TIMEOUT_MS - (Date.now() - start));
+    const timer = window.setTimeout(() => finish(new Error("Preview page did not finish loading before the load timeout")), Math.max(0, timeoutMs - (Date.now() - start)));
     el.addEventListener("did-stop-loading", onStop);
+    el.addEventListener("did-start-loading", onStart);
+    el.addEventListener("did-fail-load", onFail);
     poll();
   });
   return el;

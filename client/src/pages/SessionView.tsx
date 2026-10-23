@@ -3424,6 +3424,8 @@ function PreviewPanel({
   onOpenUrl,
   onReload,
   onSetInput,
+  onSelectTab,
+  onCloseTab,
   placeholderRef,
 }: {
   projectRoot?: string;
@@ -3432,6 +3434,8 @@ function PreviewPanel({
   onOpenUrl: (url: string) => void;
   onReload: () => void;
   onSetInput: (input: string) => void;
+  onSelectTab: (tabId: string) => void;
+  onCloseTab: (tabId: string) => void;
   // Region the pool sizes/positions the live webview over.
   placeholderRef: (element: HTMLDivElement | null) => void;
 }) {
@@ -3442,6 +3446,23 @@ function PreviewPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
+      {state.tabs.length > 1 && (
+        <div className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-[#1c1c1e] px-2">
+          {state.tabs.map((tab, index) => (
+            <div key={tab.id} className={`flex max-w-48 shrink-0 items-center rounded text-xs ${tab.id === state.activeTabId ? "bg-accent/30 text-foreground" : "text-muted-foreground"}`}>
+              <button type="button" onClick={() => onSelectTab(tab.id)}
+                className="min-w-0 flex-1 truncate px-2 py-1 text-left"
+                title={tab.title ?? tab.url ?? `Tab ${index + 1}`}
+                aria-label={`Switch to ${tab.title ?? tab.url ?? `Tab ${index + 1}`}`}>
+                {tab.title ?? tab.url ?? `Tab ${index + 1}`}
+              </button>
+              <button type="button" onClick={() => onCloseTab(tab.id)}
+                className="px-1.5 py-1 hover:text-foreground" title="Close tab"
+                aria-label={`Close tab ${index + 1}`}><X className="h-3 w-3" /></button>
+            </div>
+          ))}
+        </div>
+      )}
       <form
         onSubmit={submit}
         className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-[#1c1c1e] px-2"
@@ -9408,6 +9429,8 @@ export function SessionView({
                     onOpenUrl={previewPane.open}
                     onReload={previewPane.reload}
                     onSetInput={previewPane.setInput}
+                    onSelectTab={previewPane.selectTab}
+                    onCloseTab={previewPane.closeTab}
                     placeholderRef={setPreviewPlaceholder}
                   />
                 </div>

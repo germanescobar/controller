@@ -10,18 +10,27 @@ import {
   type Session,
   type WebContents,
   shell,
+  webContents as electronWebContents,
 } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { canonicalizeForBoundary, validatePreviewUrl } from "./preview-url-policy.js";
+import { canNavigatePreviewDirectly, canonicalizeForBoundary, validatePreviewUrl } from "./preview-url-policy.js";
+import { completedPreviewRequest } from "./preview-request-tracker.js";
+import { diagnosticUrl, diagnosticMessage, MAX_DIAGNOSTICS } from "../shared/preview-diagnostics.js";
+import type { BrowserDiagnostic } from "../shared/preview-browser.js";
 import { PreviewCertPolicy, previewPartitionForKey } from "../shared/preview-partition.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
+const previewResponses = new Map<number, {
+  url: string;
+  statusCode: number;
+  at: number;
+}>();
 const previewCertPolicies = new Map<string, PreviewCertPolicy>();
 
 // Mark the start of the main process so every log line can be prefixed
@@ -40,6 +49,21 @@ function warnWithTime(...args: unknown[]): void {
 }
 function errorWithTime(...args: unknown[]): void {
   console.error(`[controller ${elapsed()}]`, ...args);
+}
+
+const previewContents = new Map<number, number>();
+const previewRequestFailures = new Map<number, BrowserDiagnostic[]>();
+
+function recordPreviewRequestFailure(id: number | undefined, url: string, message: string): void {
+  if (id === undefined || !previewContents.has(id)) return;
+  const entries = previewRequestFailures.get(id) ?? [];
+  entries.push({
+    kind: "request",
+    timestamp: new Date().toISOString(),
+    url: diagnosticUrl(url),
+    message: diagnosticMessage(message),
+  });
+  previewRequestFailures.set(id, entries.slice(-MAX_DIAGNOSTICS));
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -544,6 +568,24 @@ function attachPreviewPartitionGuards(browserKey: string): PreviewCertPolicy {
   const session = electronSession.fromPartition(partition);
   const policy = new PreviewCertPolicy();
   denyPreviewSessionPermissions(session);
+  session.webRequest.onErrorOccurred((details) => {
+    if (details.error === "net::ERR_ABORTED") return;
+    const guestId = details.webContentsId ?? details.webContents?.id;
+    recordPreviewRequestFailure(guestId, details.url, details.error);
+  });
+  session.webRequest.onCompleted((details) => {
+    const result = completedPreviewRequest(details);
+    if (!result) return;
+    if (result.response) {
+      previewResponses.set(result.guestId, {
+        ...result.response,
+        at: Date.now(),
+      });
+    }
+    if (result.failure) {
+      recordPreviewRequestFailure(result.guestId, details.url, result.failure);
+    }
+  });
   // Install once, before openUrl mounts this pane's first webview. Electron
   // does not honor a replacement proc after the session has been used.
   //
@@ -562,11 +604,30 @@ function attachPreviewPartitionGuards(browserKey: string): PreviewCertPolicy {
   return policy;
 }
 
-function blockPreviewPopups(contents: WebContents): void {
+function blockPreviewPopups(contents: WebContents, host?: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
-    warnWithTime(`blocked preview popup: ${url}`);
+    // Never let Electron create a child BrowserWindow. The renderer identifies
+    // the originating guest and runs the normal preview URL policy before it
+    // creates a tab in that pane.
+    if (host && !host.isDestroyed() && url && url !== "about:blank") {
+      host.send("controller:preview-popup", { guestId: contents.id, url });
+    } else {
+      warnWithTime(`blocked preview popup: ${url}`);
+    }
     return { action: "deny" };
   });
+}
+
+function guardPreviewNavigation(guest: WebContents, host: WebContents): void {
+  const route = (event: Electron.Event, url: string, isMainFrame: boolean, redirect: boolean) => {
+    if (!isMainFrame || canNavigatePreviewDirectly(url)) return;
+    event.preventDefault();
+    if (!host.isDestroyed()) {
+      host.send("controller:preview-navigation", { guestId: guest.id, url, redirect });
+    }
+  };
+  guest.on("will-navigate", (event) => route(event, event.url, event.isMainFrame, false));
+  guest.on("will-redirect", (event) => route(event, event.url, event.isMainFrame, true));
 }
 
 // Electron 22+ denies `target="_blank"` requests by default. Without a
@@ -576,7 +637,7 @@ function blockPreviewPopups(contents: WebContents): void {
 // user's browser. We forward http(s) URLs to the system default browser
 // and mailto: URLs to the user's mail client, both via
 // shell.openExternal, and deny anything else. Preview webviews override
-// this with a stricter deny-all handler installed by
+// this with a deny-and-route handler installed by
 // attachPreviewWebviewGuards.
 function attachExternalLinkHandler(contents: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -616,8 +677,15 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
     logWithTime(`preview webview attached: ${src || "(empty)"}`);
   });
   contents.on("did-attach-webview", (_event, webContents) => {
-    blockPreviewPopups(webContents);
+    blockPreviewPopups(webContents, contents);
+    guardPreviewNavigation(webContents, contents);
     denyPreviewSessionPermissions(webContents.session);
+    previewContents.set(webContents.id, contents.id);
+    webContents.once("destroyed", () => {
+      previewContents.delete(webContents.id);
+      previewRequestFailures.delete(webContents.id);
+      previewResponses.delete(webContents.id);
+    });
   });
 }
 
@@ -766,6 +834,48 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle(
+    "controller:preview-response-status",
+    (event, guestId: unknown, since: unknown) => {
+      if (
+        typeof guestId !== "number" || !Number.isInteger(guestId) ||
+        typeof since !== "number" || !Number.isFinite(since)
+      ) return null;
+      const guest = electronWebContents.fromId(guestId);
+      if (!guest || guest.hostWebContents !== event.sender) return null;
+      const response = previewResponses.get(guestId);
+      if (!response || response.at < since) return null;
+      return { url: response.url, statusCode: response.statusCode };
+    }
+  );
+
+  ipcMain.handle("controller:capture-preview-page", async (event, guestId: unknown) => {
+    if (typeof guestId !== "number" || !Number.isInteger(guestId) ||
+      previewContents.get(guestId) !== event.sender.id) {
+      return { ok: false, error: "Preview guest is unavailable" };
+    }
+    const guest = electronWebContents.fromId(guestId);
+    if (!guest || guest.isDestroyed()) return { ok: false, error: "Preview guest is unavailable" };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const image = await Promise.race([
+        guest.capturePage(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Capture timed out after 8 seconds")), 8_000);
+        }),
+      ]);
+      const { width, height } = image.getSize();
+      if (width < 1 || height < 1) return { ok: false, error: "Screenshot capture returned an empty image" };
+      const png = image.toPNG();
+      if (png.byteLength > 12 * 1024 * 1024) return { ok: false, error: "Screenshot exceeds the 12 MiB limit" };
+      return { ok: true, data: png.toString("base64"), width, height };
+    } catch (error) {
+      return { ok: false, error: `Screenshot capture failed: ${error instanceof Error ? error.message : String(error)}` };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  });
+
+  ipcMain.handle(
     "controller:set-preview-cert-policy",
     (_event, opts: unknown) => setPreviewCertPolicy(opts)
   );
@@ -778,6 +888,15 @@ function registerIpcHandlers(): void {
       return readPreviewFile(event, input, options);
     }
   );
+
+  ipcMain.handle("controller:preview-request-failures", (event, id: unknown, clear: unknown) => {
+    if (typeof id !== "number" || previewContents.get(id) !== event.sender.id) return [];
+    if (clear === true) {
+      previewRequestFailures.delete(id);
+      return [];
+    }
+    return previewRequestFailures.get(id) ?? [];
+  });
 
   ipcMain.handle("controller:pick-directory", async (event) => {
     // Modal to the renderer that asked, so the picker feels attached

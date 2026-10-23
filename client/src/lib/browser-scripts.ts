@@ -104,6 +104,20 @@ const RESOLVE_BODY = `
       if (rect.width <= 0 || rect.height <= 0) return false;
       return true;
     }
+    function actionable(el, checkObstruction){
+      if (!el.isConnected && el.isConnected !== undefined) return 'detached';
+      var style = window.getComputedStyle(el);
+      var rect = el.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) return 'hidden';
+      if (el.disabled || el.closest && el.closest('[disabled], [aria-disabled="true"], [inert]')) return 'disabled';
+      if (checkObstruction && document.elementFromPoint) {
+        var x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+        var hit = document.elementFromPoint(x, y);
+        if (!hit) return 'obscured';
+        if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) return 'obscured';
+      }
+      return null;
+    }
     function flatten(root){
       var out = [];
       function visit(node){
@@ -163,14 +177,14 @@ const RESOLVE_BODY = `
         default: return isEditingHost(el) ? 'textbox' : null;
       }
     }
-    function byText(query){
+    function byText(query, includeHidden){
       var needle = String(query).trim().toLowerCase();
       if (!needle) return null;
       var exact = null, partial = null;
       var nodes = flatten(document.body);
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
-        if (!visible(el)) continue;
+        if (!includeHidden && !visible(el)) continue;
         var t = (el.innerText || el.textContent || '').trim();
         if (!t) continue;
         // Skip if this node has a more specific descendant with overlapping
@@ -178,7 +192,7 @@ const RESOLVE_BODY = `
         var hasDescendant = false;
         for (var j = 0; j < nodes.length; j++) {
           if (nodes[j] === el) continue;
-          if (el.contains(nodes[j]) && visible(nodes[j])) {
+          if (el.contains(nodes[j]) && (includeHidden || visible(nodes[j]))) {
             var dt = (nodes[j].innerText || nodes[j].textContent || '').trim();
             if (dt && dt.length < t.length && t.toLowerCase().indexOf(dt.toLowerCase()) >= 0) {
               hasDescendant = true; break;
@@ -192,14 +206,14 @@ const RESOLVE_BODY = `
       }
       return exact || partial;
     }
-    function byRole(role, name){
+    function byRole(role, name, includeHidden){
       var r = String(role || '').toLowerCase();
       if (!r) return null;
       var matchName = name ? String(name).toLowerCase() : null;
       var nodes = flatten(document.body);
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
-        if (!visible(el)) continue;
+        if (!includeHidden && !visible(el)) continue;
         var explicit = el.getAttribute('role');
         var implicit = implicitRole(el);
         var actual = (explicit || implicit || '').toLowerCase();
@@ -212,13 +226,13 @@ const RESOLVE_BODY = `
       }
       return null;
     }
-    function byLabel(query){
+    function byLabel(query, includeHidden){
       var needle = String(query).trim().toLowerCase();
       if (!needle) return null;
       var nodes = flatten(document.body);
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
-        if (!visible(el)) continue;
+        if (!includeHidden && !visible(el)) continue;
         var aria = (el.getAttribute('aria-label') || '').toLowerCase();
         if (aria === needle) return el;
         if (el.id) {
@@ -227,29 +241,29 @@ const RESOLVE_BODY = `
         }
         if (el.tagName === 'LABEL' && (el.textContent || '').trim().toLowerCase() === needle) {
           var control = el.htmlFor ? document.getElementById(el.htmlFor) : el.querySelector('input,textarea,select,[contenteditable]');
-          if (control && visible(control)) return control;
+          if (control && (includeHidden || visible(control))) return control;
         }
       }
       return null;
     }
-    function byPlaceholder(query){
+    function byPlaceholder(query, includeHidden){
       var needle = String(query).trim().toLowerCase();
       if (!needle) return null;
       var nodes = flatten(document.body);
       for (var i = 0; i < nodes.length; i++) {
         var el = nodes[i];
-        if (!visible(el)) continue;
+        if (!includeHidden && !visible(el)) continue;
         var p = (el.getAttribute('placeholder') || '').toLowerCase();
         if (p === needle) return el;
       }
       return null;
     }
-    function resolve(selector, refs){
+    function resolve(selector, refs, includeHidden){
       if (selector == null || selector === '') return { ok: false, error: 'empty selector' };
       var raw = String(selector);
       var lower = raw.toLowerCase();
       if (lower.indexOf('text=') === 0) {
-        var el = byText(raw.slice(5));
+        var el = byText(raw.slice(5), includeHidden);
         return el ? { ok: true, engine: 'text', element: el } : { ok: false, engine: 'text', error: 'no element matches' };
       }
       if (lower.indexOf('role=') === 0) {
@@ -257,15 +271,15 @@ const RESOLVE_BODY = `
         var m = /^(.+?)\\[name=(["'])(.*?)\\2\\]\\s*$/.exec(rest);
         var role, name;
         if (m) { role = m[1]; name = m[3]; } else { role = rest; }
-        var rel = byRole(role, name);
+        var rel = byRole(role, name, includeHidden);
         return rel ? { ok: true, engine: 'role', element: rel } : { ok: false, engine: 'role', error: 'no element matches' };
       }
       if (lower.indexOf('label=') === 0) {
-        var ll = byLabel(raw.slice(6));
+        var ll = byLabel(raw.slice(6), includeHidden);
         return ll ? { ok: true, engine: 'label', element: ll } : { ok: false, engine: 'label', error: 'no element matches' };
       }
       if (lower.indexOf('placeholder=') === 0) {
-        var pp = byPlaceholder(raw.slice(12));
+        var pp = byPlaceholder(raw.slice(12), includeHidden);
         return pp ? { ok: true, engine: 'placeholder', element: pp } : { ok: false, engine: 'placeholder', error: 'no element matches' };
       }
       if (lower.indexOf('ref=') === 0) {
@@ -281,18 +295,21 @@ const RESOLVE_BODY = `
 `;
 
 /**
- * Build a script that resolves `selector` and clicks the result.
- * Returns `{ ok, engine?, error? }`. Resolving and acting in one script keeps
- * the action in sync with the page state.
+ * Resolve an actionable target and return its guest viewport coordinates.
+ * Electron sends the actual mouse gesture so popup handlers receive trusted input.
  */
 export function buildClickScript(b: ScriptBindings): string {
   return `(function(selector, refs){
     ${RESOLVE_BODY}
-    var r = resolve(selector, refs);
+    var r = resolve(selector, refs, true);
     if (!r.ok) return { ok: false, engine: r.engine, error: r.error };
+    if (r.element.isConnected === false) return { ok: false, engine: r.engine, error: 'detached' };
     r.element.scrollIntoView({ block: 'center', inline: 'center' });
-    r.element.click();
-    return { ok: true, engine: r.engine };
+    var reason = actionable(r.element, true);
+    if (reason) return { ok: false, engine: r.engine, error: reason };
+    var rect = r.element.getBoundingClientRect();
+    return { ok: true, engine: r.engine,
+      x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   })(${JSON.stringify(b.selector)}, ${JSON.stringify(b.refs)})`;
 }
 
@@ -504,9 +521,11 @@ export function buildTypeScript(b: ScriptBindings): string {
   const submit = Boolean(b.submit);
   return `(function(selector, refs, value, submit){
     ${RESOLVE_BODY}
-    var r = resolve(selector, refs);
+    var r = resolve(selector, refs, true);
     if (!r.ok) return { ok: false, engine: r.engine, error: r.error };
     var el = r.element;
+    if (el.isConnected === false) return { ok: false, engine: r.engine, error: 'detached' };
+    el.scrollIntoView({ block: 'center', inline: 'center' });
     if (/^role=textbox\\s*$/i.test(selector)) {
       var textboxes = flatten(document.body).filter(function(node){
         return visible(node) && (node.getAttribute('role') || implicitRole(node)) === 'textbox';
@@ -514,7 +533,7 @@ export function buildTypeScript(b: ScriptBindings): string {
       if (textboxes.length > 1) return { ok: false, engine: r.engine, error: 'ambiguous textbox; use a name or ref' };
     }
     function editable(node){
-      if (!node || node.disabled || node.readOnly) return false;
+      if (!node) return false;
       if (node.tagName === 'TEXTAREA') return true;
       if (node.tagName === 'INPUT') {
         return /^(text|search|url|tel|email|password|number|date|time|month|week|datetime-local)$/i.test(node.getAttribute('type') || 'text');
@@ -526,6 +545,9 @@ export function buildTypeScript(b: ScriptBindings): string {
       if (candidates.length !== 1) return { ok: false, engine: r.engine, error: 'target is not a unique editable field' };
       el = candidates[0];
     }
+    var reason = actionable(el, true);
+    if (reason) return { ok: false, engine: r.engine, error: reason };
+    if (el.readOnly) return { ok: false, engine: r.engine, error: 'read-only' };
     el.focus();
     if (isEditingHost(el)) {
       // Chromium's editing command follows the same input pipeline as a
@@ -553,6 +575,23 @@ export function buildTypeScript(b: ScriptBindings): string {
     }
     return { ok: true, engine: r.engine };
   })(${JSON.stringify(b.selector)}, ${JSON.stringify(b.refs)}, ${JSON.stringify(text)}, ${JSON.stringify(submit)})`;
+}
+
+/** Inspect a page condition once; the renderer owns the bounded polling loop. */
+export function buildWaitCheckScript(condition: "visible" | "text" | "url", value: string, refs: Record<string, string>): string {
+  return `(function(condition, value, refs){
+    ${RESOLVE_BODY}
+    if (condition === 'url') return { matched: location.href.includes(value), observed: location.href };
+    if (condition === 'text') {
+      var bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+      return { matched: bodyText.includes(value), observed: bodyText.slice(0, 160) };
+    }
+    var r = resolve(value, refs, true);
+    if (!r.ok) return { matched: false, observed: r.error };
+    var el = r.element, style = window.getComputedStyle(el), rect = el.getBoundingClientRect();
+    var shown = el.isConnected !== false && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    return { matched: shown, observed: shown ? 'visible' : (el.isConnected === false ? 'detached' : 'hidden') };
+  })(${JSON.stringify(condition)}, ${JSON.stringify(value)}, ${JSON.stringify(refs)})`;
 }
 
 /**

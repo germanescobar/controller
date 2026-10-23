@@ -8,7 +8,7 @@ import {
   validateBrowserFilePath,
   validateBrowserUrl,
 } from "../browser-policy.js";
-import { validatePreviewUrl } from "../../../electron/preview-url-policy.js";
+import { canNavigatePreviewDirectly, validatePreviewUrl } from "../../../electron/preview-url-policy.js";
 
 const PROJECT_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "browser-policy-project-"));
 fs.mkdirSync(path.join(PROJECT_ROOT, "dist"));
@@ -25,6 +25,14 @@ test("allows web URLs", () => {
   const result = validateBrowserUrl("https://example.com/path", PROJECT_ROOT);
   assert.equal(result.allowed, true);
   assert.equal(result.url, "https://example.com/path");
+});
+
+test("direct web navigation preserves native form submissions and redirects", () => {
+  assert.equal(canNavigatePreviewDirectly("https://example.com/submit"), true);
+  assert.equal(canNavigatePreviewDirectly("http://localhost:5173/redirect"), true);
+  assert.equal(canNavigatePreviewDirectly("file:///tmp/index.html"), false);
+  assert.equal(canNavigatePreviewDirectly("javascript:alert(1)"), false);
+  assert.equal(canNavigatePreviewDirectly("not a URL"), false);
 });
 
 test("allows project-relative file paths inside the worktree", () => {
