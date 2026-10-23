@@ -36,9 +36,14 @@ controller browser viewport default     # follow the Preview pane again
 ```
 
 Viewport settings belong to the current worktree's pane and stay in effect
-until reset. Full-page capture temporarily expands the webview to the page's
-scroll dimensions, then restores its size. It rejects pages over 8192 pixels
-on either side or 16 megapixels. PNGs are capped at 12 MiB.
+until reset. Full-page capture scrolls through the page, joins viewport images,
+then restores the original scroll position. Pages with horizontal overflow
+need a wider viewport. Fixed or sticky elements can appear in more than one
+slice. Captures over 8192 pixels on either side or 16 megapixels are rejected;
+PNGs are capped at 12 MiB.
+Transparent pages are captured against a white browser canvas. A parked pane
+is briefly brought into the window's paintable area during capture, then
+returned to its prior position.
 
 The screenshot command prints an absolute PNG path, pixel dimensions, page
 URL, command ID, and the Controller session ID when available. The HTTP result
@@ -98,7 +103,7 @@ controller browser back
 
 `wait visible` checks visibility; `wait text` looks for a substring in page
 text, and `wait url` looks for a substring in the current URL. A successful
-click confirms that an actionable target received the click dispatch. Check
+click confirms that an actionable target received a native mouse gesture. Check
 the expected result with `wait` or `snapshot` when the page should change.
 `back` returns an error when there is no prior page in the preview history.
 

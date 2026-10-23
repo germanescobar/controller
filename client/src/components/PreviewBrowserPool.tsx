@@ -632,7 +632,7 @@ function PaneFrame({
     getDiagnostics: async (limit) => {
       const tabId = activeTabRef.current;
       const webview = webviewsRef.current.get(tabId);
-      const id = webview?.getWebContentsId?.();
+      const id = webview ? webviewGuestId(webview) : null;
       const requests = id && isControllerAvailable()
         ? await getController().previewRequestFailures(id) : [];
       return [...diagnosticBuffer(tabId).recent(50), ...requests.filter((entry) => entry.timestamp >= (navigationStartedAt.current.get(tabId) ?? ""))]
@@ -656,7 +656,7 @@ function PaneFrame({
       onNavigationStart={(tabId, webview) => {
         navigationStartedAt.current.set(tabId, new Date().toISOString());
         diagnosticBuffer(tabId).clear();
-        const id = webview.getWebContentsId?.();
+        const id = webviewGuestId(webview);
         if (id) void getController().previewRequestFailures(id, true);
       }}
       onDiagnostic={(tabId, entry) => diagnosticBuffer(tabId).add(entry)}
@@ -688,7 +688,7 @@ function TabFrame({ paneKey, tab, store, registerWebview, onNavigationStart, onD
       onDiagnostic(tab.id, { kind: "console", timestamp: new Date().toISOString(),
         url: info.sourceId || webview.getURL(), message: info.message ?? "Console error" });
     };
-    const onStop = () => update({ loading: webview.isLoading?.() ?? false });
+    const onStop = () => update({ loading: webviewIsLoading(webview) });
     const onFail = (event: Event) => {
       // Chromium emits ERR_ABORTED while routing a link or redirect through validation.
       if (eventNumber(event, "errorCode") === -3) return;
@@ -704,7 +704,7 @@ function TabFrame({ paneKey, tab, store, registerWebview, onNavigationStart, onD
       update({ title: eventString(event, "title") });
     const onNavigated = (event: Event) => {
       const next = eventString(event, "url");
-      if (next) update({ url: next, input: next, loading: webview.isLoading?.() ?? false });
+      if (next) update({ url: next, input: next, loading: webviewIsLoading(webview) });
     };
 
     webview.addEventListener("did-start-loading", onStart);
@@ -738,6 +738,7 @@ function TabFrame({ paneKey, tab, store, registerWebview, onNavigationStart, onD
     ref: setWebview,
     src: tab.src,
     partition: "controller-preview",
+    allowpopups: "true",
     webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
   });
 }
@@ -937,5 +938,13 @@ function webviewGuestId(webview: PreviewWebview): number | null {
     return webview.getWebContentsId?.() ?? null;
   } catch {
     return null;
+  }
+}
+
+function webviewIsLoading(webview: PreviewWebview): boolean {
+  try {
+    return webview.isLoading?.() ?? false;
+  } catch {
+    return false;
   }
 }

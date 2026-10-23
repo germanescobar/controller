@@ -29,11 +29,11 @@ interface MockElement {
   attributes: Map<string, string>;
   textContent: string;
   innerText: string;
-  rect: { width: number; height: number };
+  rect: { width: number; height: number; left?: number; top?: number };
   style: { display: string; visibility: string };
   classList: Set<string>;
   disabled: boolean;
-  getBoundingClientRect(): { width: number; height: number };
+  getBoundingClientRect(): { width: number; height: number; left: number; top: number };
 }
 
 function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
@@ -52,7 +52,8 @@ function makeEl(tag: string, init: Partial<MockElement> = {}): MockElement {
     disabled: init.disabled ?? false,
     id: init.id,
     getBoundingClientRect() {
-      return { width: this.rect.width, height: this.rect.height };
+      return { width: this.rect.width, height: this.rect.height,
+        left: this.rect.left ?? 0, top: this.rect.top ?? 0 };
     },
   };
   for (const child of init.children ?? []) {

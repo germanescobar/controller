@@ -26,6 +26,10 @@ export interface PreviewResponseStatus {
   statusCode: number;
 }
 
+export type PreviewCaptureResult =
+  | { ok: true; data: string; width: number; height: number }
+  | { ok: false; error: string };
+
 /**
  * Result of a single preview-file read inside the Electron main process
  * (issue #356). The server has already canonicalized the path; the main
@@ -70,6 +74,7 @@ export interface ControllerBridge {
     guestId: number,
     since: number
   ) => Promise<PreviewResponseStatus | null>;
+  capturePreviewPage: (guestId: number) => Promise<PreviewCaptureResult>;
   /**
    * Toggle the TLS-cert verification bypass on the preview pane's session.
    * Used by the agent-controlled browser when the user passes `--insecure`

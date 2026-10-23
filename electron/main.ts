@@ -885,6 +885,33 @@ function registerIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle("controller:capture-preview-page", async (event, guestId: unknown) => {
+    if (typeof guestId !== "number" || !Number.isInteger(guestId) ||
+      previewContents.get(guestId) !== event.sender.id) {
+      return { ok: false, error: "Preview guest is unavailable" };
+    }
+    const guest = electronWebContents.fromId(guestId);
+    if (!guest || guest.isDestroyed()) return { ok: false, error: "Preview guest is unavailable" };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const image = await Promise.race([
+        guest.capturePage(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Capture timed out after 8 seconds")), 8_000);
+        }),
+      ]);
+      const { width, height } = image.getSize();
+      if (width < 1 || height < 1) return { ok: false, error: "Screenshot capture returned an empty image" };
+      const png = image.toPNG();
+      if (png.byteLength > 12 * 1024 * 1024) return { ok: false, error: "Screenshot exceeds the 12 MiB limit" };
+      return { ok: true, data: png.toString("base64"), width, height };
+    } catch (error) {
+      return { ok: false, error: `Screenshot capture failed: ${error instanceof Error ? error.message : String(error)}` };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  });
+
   ipcMain.handle(
     "controller:set-preview-cert-policy",
     (_event, opts: unknown) => setPreviewCertPolicy(opts)

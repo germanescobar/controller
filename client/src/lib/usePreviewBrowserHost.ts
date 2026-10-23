@@ -41,10 +41,12 @@ export interface PreviewWebview extends HTMLElement {
   reload?: () => void;
   canGoBack?: () => boolean;
   goBack?: () => void;
-  sendInputEvent?: (event: { type: "keyDown" | "keyUp" | "char"; keyCode: string }) => void;
+  sendInputEvent?: (event:
+    | { type: "keyDown" | "keyUp" | "char"; keyCode: string }
+    | { type: "mouseMove" | "mouseDown" | "mouseUp"; x: number; y: number; button?: "left"; clickCount?: number }
+  ) => Promise<void> | void;
   loadURL?: (url: string) => Promise<void>;
   getWebContentsId?: () => number;
-  capturePage?: () => Promise<{ toPNG: () => Uint8Array; getSize: () => BrowserViewport }>;
 }
 
 export interface PreviewBrowserHostOptions {
@@ -185,6 +187,7 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               return { ok: false, error: "Invalid viewport preset" };
             }
             const viewport = setViewportRef.current(preset);
+            if (viewport) await waitForViewport(getWebviewRef.current(), viewport);
             return { ok: true, viewport, summary: viewport
               ? `Viewport set to ${viewport.width}×${viewport.height}` : "Viewport restored to pane default" };
           }
@@ -258,15 +261,58 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
   }, [enabled, browserKey]);
 }
 
+export async function waitForViewport(webview: PreviewWebview | null, viewport: BrowserViewport): Promise<void> {
+  if (!webview) return;
+  const style = webview.style;
+  const parked = style && Number.parseFloat(style.left) < -50_000;
+  const previous = parked ? { left: style.left, top: style.top, zIndex: style.zIndex } : null;
+  const deadline = Date.now() + 2_000;
+  let last: BrowserViewport | null = null;
+  try {
+    if (parked) {
+      style.left = "0px";
+      style.top = "0px";
+      style.zIndex = "20";
+      await delay(100);
+    }
+    while (Date.now() < deadline) {
+      const actual = await boundedGuestCall(
+        webview.executeJavaScript(`({ width: window.innerWidth, height: window.innerHeight })`),
+        1_000, "Preview did not respond to the viewport check"
+      ) as BrowserViewport;
+      last = actual;
+      if (actual.width === viewport.width && actual.height === viewport.height) return;
+      await delay(50);
+    }
+    throw new Error(`Preview did not reach ${viewport.width}×${viewport.height} within 2 seconds (observed ${last?.width ?? "?"}×${last?.height ?? "?"})`);
+  } finally {
+    if (previous) Object.assign(style, previous);
+  }
+}
+
+async function boundedGuestCall<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function handleScreenshot(webview: PreviewWebview | null, fullPage: boolean): Promise<BrowserCommandResult & { screenshotData?: string; fullPage?: boolean }> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
-  const capturePage = webview.capturePage;
-  if (!capturePage) return { ok: false, error: "Screenshot capture is unavailable in this preview" };
+  const guestId = safeCall(() => webview.getWebContentsId?.());
+  if (!guestId) return { ok: false, error: "Preview guest is not ready for screenshot capture" };
   return capturePreviewScreenshot({
     style: webview.style,
     getURL: () => webview.getURL(),
     executeJavaScript: (code) => webview.executeJavaScript(code),
-    capturePage: () => capturePage.call(webview),
+    capturePage: () => getController().capturePreviewPage(guestId),
   }, fullPage);
 }
 
@@ -298,7 +344,7 @@ export async function handleOpen(
         getWebview, beforeUrl, LOAD_TIMEOUT_MS, getLoadError
       );
   if (!webview) return { ok: false, error: "Preview page closed before it loaded" };
-  const guestId = webview.getWebContentsId?.();
+  const guestId = safeCall(() => webview.getWebContentsId?.());
   const response = guestId ? await getController().getPreviewResponseStatus(guestId, startedAt) : null;
   const finalUrl = webview.getURL();
   if (
@@ -371,6 +417,29 @@ export async function handleClick(
             ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
             : `${result.error ?? "Target unavailable"}: ${selector} (engine: ${result.engine ?? "?"})`,
     };
+  }
+  if (!webview.sendInputEvent || typeof result.x !== "number" || typeof result.y !== "number" ||
+    !Number.isFinite(result.x) || !Number.isFinite(result.y)) {
+    return { ok: false, error: "Native mouse input is unavailable in this preview" };
+  }
+  const x = Math.round(result.x);
+  const y = Math.round(result.y);
+  const style = webview.style;
+  const parked = style && Number.parseFloat(style.left) < -50_000;
+  const previous = parked ? { left: style.left, top: style.top, zIndex: style.zIndex } : null;
+  try {
+    if (parked) {
+      style.left = "0px";
+      style.top = "0px";
+      style.zIndex = "20";
+      await delay(100);
+    }
+    await webview.sendInputEvent({ type: "mouseMove", x, y });
+    await webview.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+    await webview.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+    if (parked) await delay(50);
+  } finally {
+    if (previous) Object.assign(style, previous);
   }
   return { ok: true, summary: `Clicked ${selector} (${result.engine})` };
 }
@@ -591,12 +660,12 @@ export async function retryAction(
   webview: PreviewWebview,
   script: () => string,
   timeoutMs: number
-): Promise<{ ok: boolean; engine?: string; error?: string } | null> {
+): Promise<{ ok: boolean; engine?: string; error?: string; x?: number; y?: number } | null> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "no result";
   let lastEngine: string | undefined;
   do {
-    const result = (await webview.executeJavaScript(script())) as { ok: boolean; engine?: string; error?: string } | null;
+    const result = (await webview.executeJavaScript(script())) as { ok: boolean; engine?: string; error?: string; x?: number; y?: number } | null;
     if (!result || result.ok || result.error === "unknown ref" || result.error === "stale ref" || result.error?.startsWith("ambiguous")) return result;
     lastError = result.error ?? "no result";
     lastEngine = result.engine;
@@ -680,7 +749,7 @@ export async function waitForOpenComplete(
   const el = webview;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    let started = el.isLoading?.() ?? false;
+    let started = safeCall(() => el.isLoading?.()) ?? false;
     let aborted = false;
     const finish = (error?: Error) => {
       if (settled) return;
@@ -721,8 +790,8 @@ export async function waitForOpenComplete(
       if (error) return finish(new Error(error));
       if (aborted) return;
       const current = safeCall(() => el.getURL());
-      const loading = el.isLoading ? el.isLoading() : false;
-      if (!loading && current && current !== beforeUrl) finish();
+      const loading = safeCall(() => el.isLoading?.());
+      if (loading === false && current && current !== beforeUrl) finish();
     };
     const interval = window.setInterval(poll, 120);
     const timer = window.setTimeout(() => finish(new Error("Preview page did not finish loading before the load timeout")), Math.max(0, timeoutMs - (Date.now() - start)));

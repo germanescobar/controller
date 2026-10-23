@@ -6,6 +6,7 @@ import type {
   PreviewFileReadResult,
   PreviewPopupRequest,
   PreviewResponseStatus,
+  PreviewCaptureResult,
   PreviewUrlCheckResult,
   ControllerStatus,
 } from "../shared/controller.js";
@@ -84,6 +85,8 @@ const bridge: ControllerBridge = {
   },
   getPreviewResponseStatus: (guestId, since) =>
     ipcRenderer.invoke("controller:preview-response-status", guestId, since) as Promise<PreviewResponseStatus | null>,
+  capturePreviewPage: (guestId) =>
+    ipcRenderer.invoke("controller:capture-preview-page", guestId) as Promise<PreviewCaptureResult>,
   setPreviewCertPolicy: (opts) =>
     ipcRenderer.invoke(
       "controller:set-preview-cert-policy",

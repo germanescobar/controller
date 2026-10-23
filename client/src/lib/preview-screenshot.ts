@@ -1,50 +1,162 @@
 import type { BrowserViewport } from "../../../shared/preview-browser.js";
+import type { PreviewCaptureResult } from "../../../shared/controller.js";
 
 export interface CaptureWebview {
-  style: Pick<CSSStyleDeclaration, "width" | "height">;
+  style: Pick<CSSStyleDeclaration, "width" | "height" | "left" | "top" | "zIndex" | "clipPath">;
   getURL: () => string;
   executeJavaScript: (code: string) => Promise<unknown>;
-  capturePage: () => Promise<{ toPNG: () => Uint8Array; getSize: () => BrowserViewport }>;
+  capturePage: () => Promise<PreviewCaptureResult>;
 }
 
 export type CaptureResult =
   | { ok: true; url: string; screenshotData: string; fullPage: boolean }
   | { ok: false; error: string };
 
-/** Capture the guest viewport, temporarily expanding it for full-page evidence. */
+interface PageMetrics extends BrowserViewport {
+  viewportWidth: number;
+  viewportHeight: number;
+  scrollY: number;
+}
+
+const MAX_DIMENSION = 8192;
+const MAX_PIXELS = 16_000_000;
+const MAX_PNG_BYTES = 12 * 1024 * 1024;
+
+/** Capture a guest, scrolling and stitching when its document exceeds one viewport. */
 export async function capturePreviewScreenshot(webview: CaptureWebview, fullPage: boolean): Promise<CaptureResult> {
-  const oldWidth = webview.style.width;
-  const oldHeight = webview.style.height;
+  const style = webview.style;
+  const previous = { width: style.width, height: style.height, left: style.left,
+    top: style.top, zIndex: style.zIndex, clipPath: style.clipPath };
+  let previousBackground: string | null = null;
+  let originalScrollY: number | null = null;
   try {
-    if (fullPage) {
-      const size = await webview.executeJavaScript(`({ width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0), height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0) })`) as BrowserViewport;
-      if (!Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width < 1 || size.height < 1 || size.width > 8192 || size.height > 8192 || size.width * size.height > 16_000_000) {
+    // Chromium does not update a parked guest's viewport or capture its pixels
+    // until the webview enters the window's paintable area.
+    if (Number.parseFloat(style.left) < -50_000) {
+      style.left = "0px";
+      style.top = "0px";
+      style.zIndex = "20";
+      style.clipPath = "";
+      await paintDelay();
+    }
+    const metrics = fullPage ? await pageMetrics(webview) : null;
+    if (metrics) {
+      if (!validMetrics(metrics)) return { ok: false, error: "Could not measure the preview page" };
+      if (metrics.width > MAX_DIMENSION || metrics.height > MAX_DIMENSION ||
+        metrics.width * metrics.height > MAX_PIXELS) {
         return { ok: false, error: "Full page exceeds the 8192-pixel / 16-megapixel capture limit" };
       }
-      webview.style.width = `${Math.ceil(size.width)}px`;
-      webview.style.height = `${Math.ceil(size.height)}px`;
-      const deadline = Date.now() + 2_000;
-      let ready = false;
-      while (Date.now() < deadline) {
-        const actual = await webview.executeJavaScript(`({ width: window.innerWidth, height: window.innerHeight })`) as BrowserViewport;
-        if (actual.width >= Math.ceil(size.width) && actual.height >= Math.ceil(size.height)) {
-          ready = true;
-          break;
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      if (metrics.width > metrics.viewportWidth + 1) {
+        return { ok: false, error: "Full-page capture cannot cover horizontal overflow; increase the viewport width" };
       }
-      if (!ready) return { ok: false, error: "Preview did not reach the full-page capture size within 2 seconds" };
+      originalScrollY = metrics.scrollY;
     }
-    const image = await webview.capturePage();
-    const size = image.getSize();
-    if (!size.width || !size.height) return { ok: false, error: "Screenshot capture returned an empty image" };
-    const bytes = image.toPNG();
-    if (bytes.byteLength > 12 * 1024 * 1024) return { ok: false, error: "Screenshot exceeds the 12 MiB limit" };
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-    return { ok: true, url: webview.getURL(), screenshotData: btoa(binary), fullPage };
+
+    previousBackground = await webview.executeJavaScript(`(() => {
+      const root = document.documentElement;
+      const color = getComputedStyle(root).backgroundColor;
+      if (color !== 'transparent' && !/^rgba?\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(color)) return null;
+      const previous = root.style.backgroundColor;
+      root.style.backgroundColor = '#fff';
+      return previous;
+    })()`) as string | null;
+    if (previousBackground !== null) await paintDelay();
+
+    const image = metrics && metrics.height > metrics.viewportHeight + 1
+      ? await captureFullPage(webview, metrics)
+      : await webview.capturePage();
+    if (!image.ok) return image;
+    if (image.data.length > Math.ceil(MAX_PNG_BYTES * 4 / 3) + 8) {
+      return { ok: false, error: "Screenshot exceeds the 12 MiB limit" };
+    }
+    return { ok: true, url: webview.getURL(), screenshotData: image.data, fullPage };
   } finally {
-    webview.style.width = oldWidth;
-    webview.style.height = oldHeight;
+    try {
+      if (originalScrollY !== null) await scrollTo(webview, originalScrollY);
+    } finally {
+      try {
+        if (previousBackground !== null) {
+          await webview.executeJavaScript(`document.documentElement.style.backgroundColor = ${JSON.stringify(previousBackground)}`);
+        }
+      } finally {
+        Object.assign(style, previous);
+      }
+    }
   }
+}
+
+async function captureFullPage(webview: CaptureWebview, metrics: PageMetrics): Promise<PreviewCaptureResult> {
+  let actualY = await scrollTo(webview, 0);
+  const first = await webview.capturePage();
+  if (!first.ok) return first;
+  const scale = first.width / metrics.viewportWidth;
+  const tileHeight = first.height / scale;
+  const width = first.width;
+  const height = Math.ceil(metrics.height * scale);
+  if (!Number.isFinite(scale) || scale <= 0 || tileHeight <= 0 ||
+    width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS) {
+    return { ok: false, error: "Full-page screenshot exceeds the 8192-pixel / 16-megapixel output limit" };
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return { ok: false, error: "Canvas capture is unavailable" };
+
+  let tile = first;
+  for (let destinationY = 0; destinationY < metrics.height; destinationY += tileHeight) {
+    if (destinationY > 0) {
+      const requestedY = Math.min(destinationY, Math.max(0, metrics.height - metrics.viewportHeight));
+      actualY = await scrollTo(webview, requestedY);
+      tile = await webview.capturePage();
+      if (!tile.ok) return tile;
+      if (tile.width !== width || tile.height !== first.height) {
+        return { ok: false, error: "Preview viewport changed during full-page capture" };
+      }
+    }
+    const sourceY = Math.round((destinationY - actualY) * scale);
+    const copyHeight = Math.min(Math.ceil((metrics.height - destinationY) * scale), tile.height - sourceY);
+    if (sourceY < 0 || copyHeight <= 0) {
+      return { ok: false, error: "Preview did not scroll to the requested capture position" };
+    }
+    const image = new Image();
+    image.src = `data:image/png;base64,${tile.data}`;
+    await image.decode();
+    context.drawImage(image, 0, sourceY, width, copyHeight,
+      0, Math.round(destinationY * scale), width, copyHeight);
+  }
+  return { ok: true, data: canvas.toDataURL("image/png").split(",", 2)[1], width, height };
+}
+
+async function pageMetrics(webview: CaptureWebview): Promise<PageMetrics> {
+  return await webview.executeJavaScript(`({
+    width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0),
+    height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0),
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    scrollY: window.scrollY
+  })`) as PageMetrics;
+}
+
+function validMetrics(metrics: PageMetrics): boolean {
+  return [metrics.width, metrics.height, metrics.viewportWidth, metrics.viewportHeight, metrics.scrollY]
+    .every(Number.isFinite) && metrics.width >= 1 && metrics.height >= 1 &&
+    metrics.viewportWidth >= 1 && metrics.viewportHeight >= 1;
+}
+
+async function scrollTo(webview: CaptureWebview, y: number): Promise<number> {
+  const actual = await webview.executeJavaScript(`(() => {
+    const root = document.documentElement;
+    const previous = root.style.scrollBehavior;
+    root.style.scrollBehavior = 'auto';
+    window.scrollTo(0, ${JSON.stringify(y)});
+    root.style.scrollBehavior = previous;
+    return window.scrollY;
+  })()`) as number;
+  await paintDelay();
+  return actual;
+}
+
+function paintDelay(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 100));
 }

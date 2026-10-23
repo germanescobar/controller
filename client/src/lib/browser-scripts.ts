@@ -295,9 +295,8 @@ const RESOLVE_BODY = `
 `;
 
 /**
- * Build a script that resolves `selector` and clicks the result.
- * Returns `{ ok, engine?, error? }`. Resolving and acting in one script keeps
- * the action in sync with the page state.
+ * Resolve an actionable target and return its guest viewport coordinates.
+ * Electron sends the actual mouse gesture so popup handlers receive trusted input.
  */
 export function buildClickScript(b: ScriptBindings): string {
   return `(function(selector, refs){
@@ -308,8 +307,9 @@ export function buildClickScript(b: ScriptBindings): string {
     r.element.scrollIntoView({ block: 'center', inline: 'center' });
     var reason = actionable(r.element, true);
     if (reason) return { ok: false, engine: r.engine, error: reason };
-    r.element.click();
-    return { ok: true, engine: r.engine };
+    var rect = r.element.getBoundingClientRect();
+    return { ok: true, engine: r.engine,
+      x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   })(${JSON.stringify(b.selector)}, ${JSON.stringify(b.refs)})`;
 }
 

@@ -69,6 +69,23 @@ test("open settles after a new load stops", async () => {
   assert.equal(await pending, webview);
 });
 
+test("first open tolerates webview APIs before dom-ready", async () => {
+  const webview = guest("https://new.example");
+  let ready = false;
+  webview.getURL = () => {
+    if (!ready) throw new Error("WebView has not emitted dom-ready");
+    return "https://new.example";
+  };
+  webview.isLoading = () => {
+    if (!ready) throw new Error("WebView has not emitted dom-ready");
+    return false;
+  };
+  const pending = waitForOpenComplete(() => webview, "https://old.example", 500);
+  ready = true;
+  webview.dispatchEvent(new Event("did-stop-loading"));
+  assert.equal(await pending, webview);
+});
+
 test("open returns validation errors without reporting the old page as opened", async () => {
   const webview = guest("https://old.example");
   const result = await handleOpen(
