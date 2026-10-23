@@ -211,6 +211,22 @@ exit 0
   await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
 }
 
+async function plantParentSession(projectPath: string, parentId: string, provider: string): Promise<void> {
+  const { projectStoreDir } = await import("../../lib/paths.js");
+  const sessionsDir = path.join(projectStoreDir(projectPath), "sessions");
+  await fs.mkdir(sessionsDir, { recursive: true });
+  await fs.writeFile(path.join(sessionsDir, `${parentId}.json`), JSON.stringify({
+    id: parentId,
+    workingDirectory: projectPath,
+    model: "",
+    provider,
+    messages: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastActiveAt: "2026-01-01T00:00:00.000Z",
+    status: "active",
+  }));
+}
+
 test("POST /api/projects/:projectId/sessions returns sessionId + url and persists the session", async () => {
   const sessionId = "sess-issue-190";
   await withSessionStartEnv(
@@ -679,8 +695,9 @@ test("POST /api/projects/:projectId/sessions persists parentId on the session fi
   const sessionId = "sess-issue-353-child";
   const parentId = "sess-issue-353-parent";
   await withSessionStartEnv(
-    async ({ binDir }) => {
+    async ({ binDir, projectPath }) => {
       await installFakeAgent(binDir, sessionId);
+      await plantParentSession(projectPath, parentId, "anita");
     },
     async ({ baseUrl, worktreeId, projectPath }) => {
       const res = await fetch(`${baseUrl}/sessions`, {
@@ -717,6 +734,121 @@ test("POST /api/projects/:projectId/sessions persists parentId on the session fi
   );
 });
 
+test("child start inherits the parent's Codex provider when no provider is specified", async () => {
+  const parentId = "sess-codex-parent";
+  const sessionId = "sess-codex-child";
+  await withSessionStartEnv(
+    async ({ binDir, homeDir, projectPath }) => {
+      await plantParentSession(projectPath, parentId, "codex");
+      await installFakeCodex(binDir, { argvFile: path.join(homeDir, "codex-argv.txt"), sessionId });
+      await saveImageAttachment(projectPath, "inheritance-image");
+    },
+    async ({ baseUrl, worktreeId, projectPath, homeDir }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId, message: "Spawn from Codex", parentId, attachmentIds: ["inheritance-image"] }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, body.error);
+      assert.equal(body.sessionId, sessionId);
+      const { getSession } = await import("../../lib/sessions.js");
+      assert.equal((await getSession(projectPath, sessionId))?.provider, "codex");
+      assert.equal((await getSession(projectPath, sessionId))?.parentId, parentId);
+      assert.match(await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8"), /exec/);
+    }
+  );
+});
+
+test("explicit provider overrides the parent's provider", async () => {
+  const parentId = "sess-codex-parent";
+  const sessionId = "sess-anita-child";
+  await withSessionStartEnv(
+    async ({ binDir, projectPath }) => {
+      await plantParentSession(projectPath, parentId, "codex");
+      await installFakeAgent(binDir, sessionId);
+    },
+    async ({ baseUrl, worktreeId, projectPath }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId, message: "Use Anita", parentId, provider: "anita" }),
+      });
+      const body = (await res.json()) as { sessionId?: string; error?: string };
+      assert.equal(res.status, 200, body.error);
+      const { getSession } = await import("../../lib/sessions.js");
+      assert.equal((await getSession(projectPath, sessionId))?.provider, "anita");
+    }
+  );
+});
+
+test("child start rejects a missing parent instead of falling back to the default provider", async () => {
+  await withSessionStartEnv(
+    async ({ binDir }) => { await installFakeAgent(binDir, "unused-child"); },
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId, message: "Spawn a child", parentId: "missing-parent" }),
+      });
+      const body = (await res.json()) as { error?: string };
+      assert.equal(res.status, 404);
+      assert.match(body.error ?? "", /Parent session not found: missing-parent/);
+    }
+  );
+});
+
+test("child start rejects an unsafe parent id", async () => {
+  await withSessionStartEnv(
+    async () => {},
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId, message: "Spawn a child", parentId: "../outside" }),
+      });
+      const body = (await res.json()) as { error?: string };
+      assert.equal(res.status, 400);
+      assert.equal(body.error, "Invalid parent session id");
+    }
+  );
+});
+
+test("child start rejects a parent with an unknown provider", async () => {
+  await withSessionStartEnv(
+    async ({ projectPath }) => { await plantParentSession(projectPath, "bad-parent", "unavailable-provider"); },
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId, message: "Spawn a child", parentId: "bad-parent" }),
+      });
+      const body = (await res.json()) as { error?: string };
+      assert.equal(res.status, 400);
+      assert.match(body.error ?? "", /has no valid agent provider/);
+    }
+  );
+});
+
+test("child start rejects inheritance from a disabled provider", async () => {
+  await withSessionStartEnv(
+    async ({ homeDir, projectPath }) => {
+      await plantParentSession(projectPath, "disabled-parent", "codex");
+      await fs.writeFile(path.join(homeDir, "agents.json"), JSON.stringify({ codex: { enabled: false } }));
+    },
+    async ({ baseUrl, worktreeId }) => {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ worktreeId, message: "Spawn a child", parentId: "disabled-parent" }),
+      });
+      const body = (await res.json()) as { error?: string };
+      assert.equal(res.status, 409);
+      assert.match(body.error ?? "", /disabled agent provider: codex/);
+    }
+  );
+});
+
 test("POST /api/projects/:projectId/sessions omits parentId on the session file when not supplied (issue #353)", async () => {
   const sessionId = "sess-issue-353-no-parent";
   await withSessionStartEnv(
@@ -744,6 +876,7 @@ test("POST /api/projects/:projectId/sessions omits parentId on the session file 
         `${sessionId}.json`
       );
       const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      assert.equal(session.provider, "anita", "starts without a parent keep the default provider");
       // The field must be *absent*, not set to `null` or `""`. The
       // CLI's filter is `row.parentId === parentId` — a stored
       // `parentId: ""` would never match a real id, and a stored
@@ -841,7 +974,7 @@ test("POST /api/projects/:projectId/sessions does NOT inject CONTROLLER_SESSION_
   // invalid id and surface a less actionable error.
   const sessionId = "sess-issue-353-no-env-var";
   await withSessionStartEnv(
-    async ({ binDir, homeDir }) => {
+    async ({ binDir, homeDir, projectPath }) => {
       // Shim dumps the entire env at spawn time. The orchestrator
       // passes `env` to `provider.spawn`; `provider.spawn` hands it
       // to `child_process.spawn`; the bash script inherits it.
@@ -857,6 +990,7 @@ cat >/dev/null || true
 exit 0
 `;
       await fs.writeFile(path.join(binDir, "anita"), script, { mode: 0o755 });
+      await plantParentSession(projectPath, "sess-issue-353-parent", "anita");
     },
     async ({ baseUrl, worktreeId, homeDir }) => {
       const res = await fetch(`${baseUrl}/sessions`, {

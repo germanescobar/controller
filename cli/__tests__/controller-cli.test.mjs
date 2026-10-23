@@ -4106,6 +4106,7 @@ test("parseSessions start passes an explicit --parent through unchanged (issue #
     "hi",
   ]);
   assert.equal(parsed.body.parentId, "sess-explicit");
+  assert.equal(Object.prototype.hasOwnProperty.call(parsed.body, "provider"), false);
 });
 
 test("parseSessions start without --parent omits the body field (issue #355)", async () => {
