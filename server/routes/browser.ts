@@ -23,7 +23,7 @@ import { previewBrowserBridge } from "../lib/preview-browser.js";
 
 export const browserRouter = Router();
 
-const KNOWN_ACTIONS = new Set(["open", "snapshot", "click", "type", "setFiles"]);
+const KNOWN_ACTIONS = new Set(["open", "snapshot", "click", "type", "setFiles", "wait", "scroll", "keys", "back"]);
 
 /**
  * Best-effort MIME inference from filename, used for the per-file

@@ -20,7 +20,7 @@
  */
 
 /** Actions supported. */
-export type BrowserAction = "open" | "snapshot" | "click" | "type" | "setFiles";
+export type BrowserAction = "open" | "snapshot" | "click" | "type" | "setFiles" | "wait" | "scroll" | "keys" | "back";
 
 /**
  * Refs emitted by an accessibility snapshot. Each key is a short opaque id

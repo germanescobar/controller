@@ -23,8 +23,12 @@
 const USAGE = `Usage:
   controller browser open <url> [--insecure]  # --insecure: bypass TLS cert checks for localhost
   controller browser snapshot [--a11y] [selector]
-  controller browser click <selector>
-  controller browser type <selector> <text> [--submit]
+  controller browser click <selector> [--timeout-ms N]
+  controller browser type <selector> <text> [--submit] [--timeout-ms N]
+  controller browser wait <visible|text|url> <value> [--timeout-ms N]
+  controller browser scroll <x> <y>
+  controller browser keys <Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace>
+  controller browser back
   controller browser set-files <selector> <path> [--path <path> ...] [--allow-outside]
 
   set-files drives a \`<input type="file">\` (or drag-and-drop dropzone) on
@@ -40,6 +44,13 @@ const USAGE = `Usage:
   \`label=...\`, \`placeholder=...\`, \`ref=<id>\`. \`ref=<id>\` resolves to an
   element from the most recent \`snapshot\` call — see the \`[ref=eN]\` markers
   the snapshot prints next to interactive elements.
+
+  Click/type wait up to 5 seconds for an actionable target. A timeout reports
+  the last reason (missing, hidden, disabled, obscured, or detached); set
+  --timeout-ms to 0..15000 to override it. A successful click confirms
+  dispatch to an actionable target; use wait/snapshot to assert the outcome.
+  wait checks visible selectors, page-text substrings, or URL substrings.
+  Commands to the same preview pane run in request order.
 
   \`snapshot --a11y\` prints the page as a structured accessibility tree
   (role + accessible name + ref) instead of the default text + interactive
@@ -3269,6 +3280,16 @@ export async function runMemory(argv, serverUrl) {
 
 export function parseBrowser(argv) {
   const [command, ...rest] = argv;
+  const withTimeout = (args) => {
+    const index = args.indexOf("--timeout-ms");
+    if (index < 0) return { positional: args, timeoutMs: undefined };
+    const raw = args[index + 1];
+    const timeoutMs = Number(raw);
+    if (!raw || !Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 15000) {
+      fail("browser --timeout-ms requires an integer from 0 to 15000");
+    }
+    return { positional: args.filter((_, i) => i !== index && i !== index + 1), timeoutMs };
+  };
   switch (command) {
     case "open": {
       if (!rest[0]) fail("browser open requires a <url>");
@@ -3299,14 +3320,33 @@ export function parseBrowser(argv) {
       };
     }
     case "click": {
-      if (!rest[0]) fail("browser click requires a <selector>");
-      return { action: "click", params: { selector: rest[0] } };
+      const { positional, timeoutMs } = withTimeout(rest);
+      if (!positional[0]) fail("browser click requires a <selector>");
+      return { action: "click", params: { selector: positional[0], ...(timeoutMs === undefined ? {} : { timeoutMs }) } };
     }
     case "type": {
-      const submit = rest.includes("--submit");
-      const positional = rest.filter((a) => a !== "--submit");
+      const { positional: timed, timeoutMs } = withTimeout(rest);
+      const submit = timed.includes("--submit");
+      const positional = timed.filter((a) => a !== "--submit");
       if (!positional[0]) fail("browser type requires a <selector>");
-      return { action: "type", params: { selector: positional[0], text: positional.slice(1).join(" "), submit } };
+      return { action: "type", params: { selector: positional[0], text: positional.slice(1).join(" "), submit, ...(timeoutMs === undefined ? {} : { timeoutMs }) } };
+    }
+    case "wait": {
+      const { positional, timeoutMs } = withTimeout(rest);
+      if (!["visible", "text", "url"].includes(positional[0]) || !positional[1]) fail("browser wait requires <visible|text|url> <value>");
+      return { action: "wait", params: { condition: positional[0], value: positional.slice(1).join(" "), ...(timeoutMs === undefined ? {} : { timeoutMs }) } };
+    }
+    case "scroll": {
+      if (rest.length !== 2 || !rest.every((part) => Number.isFinite(Number(part)))) fail("browser scroll requires numeric <x> <y>");
+      return { action: "scroll", params: { x: Number(rest[0]), y: Number(rest[1]) } };
+    }
+    case "keys": {
+      if (rest.length !== 1) fail("browser keys requires one key name");
+      return { action: "keys", params: { key: rest[0] } };
+    }
+    case "back": {
+      if (rest.length) fail("browser back takes no arguments");
+      return { action: "back", params: {} };
     }
     case "set-files": {
       // `controller browser set-files <selector> <path> [--path <path> ...]

@@ -26,6 +26,7 @@ import {
   buildSetFilesScript,
   buildSnapshotScript,
   buildTypeScript,
+  buildWaitCheckScript,
 } from "./browser-scripts.ts";
 
 /** Subset of the Electron `<webview>` tag API we drive. */
@@ -35,6 +36,9 @@ export interface PreviewWebview extends HTMLElement {
   getTitle: () => string;
   isLoading?: () => boolean;
   reload?: () => void;
+  canGoBack?: () => boolean;
+  goBack?: () => void;
+  sendInputEvent?: (event: { type: "keyDown" | "keyUp" | "char"; keyCode: string }) => void;
 }
 
 export interface PreviewBrowserHostOptions {
@@ -57,6 +61,8 @@ export interface PreviewBrowserHostOptions {
 
 const RECONNECT_DELAY_MS = 1500;
 const LOAD_TIMEOUT_MS = 12_000;
+const ACTION_TIMEOUT_MS = 5_000;
+const MAX_WAIT_MS = 15_000;
 
 export function previewBrowserWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -89,13 +95,21 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
     // next click/type with `ref=` reads from it. Cleared on `open` because a
     // new page invalidates the selectors.
     const refs: Record<string, string> = {};
+    let refsUrl: string | null = null;
 
     const runCommand = async (
       message: BrowserCommandMessage
     ): Promise<BrowserCommandResult> => {
       try {
+        const currentUrl = safeCall(() => getWebviewRef.current()?.getURL()) ?? null;
+        if (refsUrl && currentUrl && currentUrl !== refsUrl) {
+          for (const key of Object.keys(refs)) delete refs[key];
+          refsUrl = null;
+        }
         switch (message.action) {
           case "open":
+            for (const key of Object.keys(refs)) delete refs[key];
+            refsUrl = null;
             return await handleOpen(
               String(message.params.url ?? ""),
               message.params.insecure === true,
@@ -114,7 +128,8 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
             return await handleClick(
               getWebviewRef.current(),
               String(message.params.selector ?? ""),
-              refs
+              refs,
+              timeoutFrom(message.params)
             );
           case "type":
             return await handleType(
@@ -122,8 +137,19 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               String(message.params.selector ?? ""),
               String(message.params.text ?? ""),
               Boolean(message.params.submit),
-              refs
+              refs,
+              timeoutFrom(message.params)
             );
+          case "wait":
+            return await handleWait(getWebviewRef.current(), message.params, refs);
+          case "scroll":
+            return await handleScroll(getWebviewRef.current(), message.params);
+          case "keys":
+            return handleKeys(getWebviewRef.current(), message.params);
+          case "back":
+            for (const key of Object.keys(refs)) delete refs[key];
+            refsUrl = null;
+            return await handleBack(getWebviewRef.current());
           case "setFiles":
             return await handleSetFiles(
               getWebviewRef.current(),
@@ -161,10 +187,6 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
           return;
         }
         if (message.kind !== "command") return;
-        if (message.action === "open") {
-          // A new navigation invalidates any refs we cached.
-          for (const k of Object.keys(refs)) delete refs[k];
-        }
         void runCommand(message).then((result) => {
           // Snapshot replies carry refs the next `ref=` call will resolve;
           // capture them so a later click can target by id without re-running
@@ -172,6 +194,7 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
           if (message.action === "snapshot" && result.ok && result.refs) {
             for (const k of Object.keys(refs)) delete refs[k];
             Object.assign(refs, result.refs);
+            refsUrl = result.url ?? null;
           }
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
@@ -266,16 +289,15 @@ async function handleSnapshot(
   };
 }
 
-async function handleClick(
+export async function handleClick(
   webview: PreviewWebview | null,
   selector: string,
-  refs: Record<string, string>
+  refs: Record<string, string>,
+  timeoutMs: number
 ): Promise<BrowserCommandResult> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
   if (!selector) return { ok: false, error: "Missing selector" };
-  const result = (await webview.executeJavaScript(
-    buildClickScript({ selector, refs })
-  )) as { ok: boolean; engine?: string; error?: string } | null;
+  const result = await retryAction(webview, () => buildClickScript({ selector, refs }), timeoutMs);
   if (!result) return { ok: false, error: "Renderer returned no result" };
   if (!result.ok) {
     return {
@@ -285,7 +307,7 @@ async function handleClick(
           ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
           : result.error === "stale ref"
             ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
-            : `No element matches: ${selector} (engine: ${result.engine ?? "?"})`,
+            : `${result.error ?? "Target unavailable"}: ${selector} (engine: ${result.engine ?? "?"})`,
     };
   }
   return { ok: true, summary: `Clicked ${selector} (${result.engine})` };
@@ -296,13 +318,12 @@ async function handleType(
   selector: string,
   text: string,
   submit: boolean,
-  refs: Record<string, string>
+  refs: Record<string, string>,
+  timeoutMs: number
 ): Promise<BrowserCommandResult> {
   if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
   if (!selector) return { ok: false, error: "Missing selector" };
-  const result = (await webview.executeJavaScript(
-    buildTypeScript({ selector, refs, text, submit })
-  )) as { ok: boolean; engine?: string; error?: string } | null;
+  const result = await retryAction(webview, () => buildTypeScript({ selector, refs, text, submit }), timeoutMs);
   if (!result) return { ok: false, error: "Renderer returned no result" };
   if (!result.ok) {
     return {
@@ -312,7 +333,7 @@ async function handleType(
           ? `Unknown ref: ${selector}. Run \`snapshot\` first to populate refs.`
           : result.error === "stale ref"
             ? `Stale ref (the page changed since the snapshot): ${selector}. Run \`snapshot\` again.`
-            : `No element matches: ${selector} (engine: ${result.engine ?? "?"})`,
+            : `${result.error ?? "Target unavailable"}: ${selector} (engine: ${result.engine ?? "?"})`,
     };
   }
   return {
@@ -496,6 +517,79 @@ async function handleSetFiles(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function timeoutFrom(params: Record<string, unknown>): number {
+  const value = params.timeoutMs;
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(MAX_WAIT_MS, value))
+    : ACTION_TIMEOUT_MS;
+}
+
+export async function retryAction(
+  webview: PreviewWebview,
+  script: () => string,
+  timeoutMs: number
+): Promise<{ ok: boolean; engine?: string; error?: string } | null> {
+  const deadline = Date.now() + timeoutMs;
+  let last: { ok: boolean; engine?: string; error?: string } | null = null;
+  do {
+    last = (await webview.executeJavaScript(script())) as typeof last;
+    if (!last || last.ok || last.error === "unknown ref" || last.error === "stale ref" || last.error?.startsWith("ambiguous")) return last;
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(100, deadline - Date.now()));
+  } while (true);
+  return { ...last, ok: false, error: `timed out after ${timeoutMs}ms (last reason: ${last?.error ?? "no result"})` };
+}
+
+async function handleWait(
+  webview: PreviewWebview | null,
+  params: Record<string, unknown>,
+  refs: Record<string, string>
+): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const condition = params.condition;
+  const value = params.value;
+  if (condition !== "visible" && condition !== "text" && condition !== "url") return { ok: false, error: "wait requires visible, text, or url" };
+  if (typeof value !== "string" || !value) return { ok: false, error: "wait requires a nonempty value" };
+  const timeoutMs = timeoutFrom(params);
+  const deadline = Date.now() + timeoutMs;
+  let observed = "";
+  do {
+    const result = (await webview.executeJavaScript(buildWaitCheckScript(condition, value, refs))) as { matched: boolean; observed: string };
+    if (result.matched) return { ok: true, url: safeCall(() => webview.getURL()) ?? undefined, summary: `Condition met: ${condition} ${value}` };
+    observed = result.observed;
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(100, deadline - Date.now()));
+  } while (true);
+  return { ok: false, error: `wait ${condition} ${value} timed out after ${timeoutMs}ms (last observed: ${observed})` };
+}
+
+async function handleScroll(webview: PreviewWebview | null, params: Record<string, unknown>): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const x = params.x, y = params.y;
+  if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, error: "scroll requires finite x and y offsets" };
+  await webview.executeJavaScript(`window.scrollBy(${JSON.stringify(x)}, ${JSON.stringify(y)})`);
+  return { ok: true, summary: `Scrolled by ${x}, ${y}` };
+}
+
+function handleKeys(webview: PreviewWebview | null, params: Record<string, unknown>): BrowserCommandResult {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const key = params.key;
+  if (typeof key !== "string" || !/^(Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace)$/.test(key)) return { ok: false, error: "Unsupported key; use Enter, Escape, Tab, an arrow key, or Backspace" };
+  if (!webview.sendInputEvent) return { ok: false, error: "Keyboard input is unavailable in this preview" };
+  webview.sendInputEvent({ type: "keyDown", keyCode: key });
+  webview.sendInputEvent({ type: "keyUp", keyCode: key });
+  return { ok: true, summary: `Pressed ${key}` };
+}
+
+async function handleBack(webview: PreviewWebview | null): Promise<BrowserCommandResult> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  if (!webview.goBack || !webview.canGoBack?.()) return { ok: false, error: "No previous page in preview history" };
+  const beforeUrl = safeCall(() => webview.getURL());
+  webview.goBack();
+  await waitForOpenComplete(() => webview, beforeUrl);
+  return { ok: true, url: safeCall(() => webview.getURL()) ?? undefined, summary: "Went back" };
+}
 
 /**
  * Wait for an `open` to settle on the newly requested page. Resolves when a

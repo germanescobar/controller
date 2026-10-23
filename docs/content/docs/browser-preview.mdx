@@ -21,6 +21,7 @@ Through the preview browser the agent can:
 
 - Open a URL.
 - Click elements and type into inputs or contenteditable editors.
+- Wait for a visible element, page text, or URL; scroll, press keys, and go back.
 - Read the rendered DOM, including visible dialogs and menus in open shadow roots.
 
 Ask the agent to "open the app and check the new settings panel" and it drives
@@ -31,6 +32,32 @@ those refs to target a field on a complex page. CSS selectors can cross an open
 shadow root with `>>>`, for example `studio-editor >>> #textbox`. An ambiguous
 `role=textbox` typing target returns an error so the agent can choose a named
 field or ref instead.
+
+## Deterministic interactions
+
+Commands for one preview pane run in request order, including navigation and
+snapshots. `click` and `type` retry briefly while a target appears or becomes
+actionable. They fail after five seconds by default and report the last reason
+(`no element matches`, `hidden`, `disabled`, `obscured`, or `detached`). Use
+`--timeout-ms` to set a timeout from 0 to 15000 milliseconds. Unknown or stale
+snapshot refs fail immediately; take another snapshot after navigation or a
+major page change.
+
+```sh
+controller browser wait visible 'role=button[name="Save"]' --timeout-ms 10000
+controller browser click 'role=button[name="Save"]'
+controller browser wait text 'Saved successfully'
+controller browser wait url '/settings'
+controller browser scroll 0 600
+controller browser keys Escape
+controller browser back
+```
+
+`wait visible` checks visibility; `wait text` looks for a substring in page
+text, and `wait url` looks for a substring in the current URL. A successful
+click confirms that an actionable target received the click dispatch. Check
+the expected result with `wait` or `snapshot` when the page should change.
+`back` returns an error when there is no prior page in the preview history.
 
 ## Local HTTPS dev servers
 
