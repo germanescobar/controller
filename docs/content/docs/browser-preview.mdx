@@ -106,6 +106,8 @@ text, and `wait url` looks for a substring in the current URL. A successful
 click confirms that an actionable target received a native mouse gesture. Check
 the expected result with `wait` or `snapshot` when the page should change.
 `back` returns an error when there is no prior page in the preview history.
+Submitting a form through `type --submit` keeps its native HTTP method and
+body, including POST fields.
 
 `controller browser open` reports a failed result when navigation is rejected,
 the page fails to load, the main document returns an HTTP error status, or the

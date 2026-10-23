@@ -19,6 +19,16 @@ function hasUrlScheme(input: string): boolean {
   return /^[a-z][a-z\d+.-]*:/i.test(input);
 }
 
+/** Web navigations already satisfy the preview scheme policy and must retain their request body. */
+export function canNavigatePreviewDirectly(input: string): boolean {
+  try {
+    const protocol = new URL(input).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function normalizePreviewUrl(input: string, projectRoot?: string): string {
   const trimmed = input.trim();
   if (!trimmed) throw new Error("Enter a URL to preview");

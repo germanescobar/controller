@@ -16,7 +16,8 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { canonicalizeForBoundary, validatePreviewUrl } from "./preview-url-policy.js";
+import { canNavigatePreviewDirectly, canonicalizeForBoundary, validatePreviewUrl } from "./preview-url-policy.js";
+import { completedPreviewRequest } from "./preview-request-tracker.js";
 import { diagnosticUrl, diagnosticMessage, MAX_DIAGNOSTICS } from "../shared/preview-diagnostics.js";
 import type { BrowserDiagnostic } from "../shared/preview-browser.js";
 
@@ -76,20 +77,6 @@ function errorWithTime(...args: unknown[]): void {
 
 const previewContents = new Map<number, number>();
 const previewRequestFailures = new Map<number, BrowserDiagnostic[]>();
-const observedPreviewSessions = new WeakSet<Session>();
-
-function observePreviewRequests(session: Session): void {
-  if (observedPreviewSessions.has(session)) return;
-  observedPreviewSessions.add(session);
-  session.webRequest.onErrorOccurred((details) => {
-    if (details.error === "net::ERR_ABORTED") return;
-    recordPreviewRequestFailure(details.webContentsId, details.url, details.error);
-  });
-  session.webRequest.onCompleted((details) => {
-    if (details.statusCode < 400) return;
-    recordPreviewRequestFailure(details.webContentsId, details.url, `HTTP ${details.statusCode}`);
-  });
-}
 
 function recordPreviewRequestFailure(id: number | undefined, url: string, message: string): void {
   if (id === undefined || !previewContents.has(id)) return;
@@ -600,15 +587,23 @@ function denyPreviewSessionPermissions(session: Session): void {
 function attachPreviewPartitionGuards(): void {
   const session = electronSession.fromPartition(PREVIEW_PARTITION);
   denyPreviewSessionPermissions(session);
-  session.webRequest.onCompleted((details) => {
-    if (details.resourceType !== "mainFrame") return;
+  session.webRequest.onErrorOccurred((details) => {
+    if (details.error === "net::ERR_ABORTED") return;
     const guestId = details.webContentsId ?? details.webContents?.id;
-    if (guestId === undefined) return;
-    previewResponses.set(guestId, {
-      url: details.url,
-      statusCode: details.statusCode,
-      at: Date.now(),
-    });
+    recordPreviewRequestFailure(guestId, details.url, details.error);
+  });
+  session.webRequest.onCompleted((details) => {
+    const result = completedPreviewRequest(details);
+    if (!result) return;
+    if (result.response) {
+      previewResponses.set(result.guestId, {
+        ...result.response,
+        at: Date.now(),
+      });
+    }
+    if (result.failure) {
+      recordPreviewRequestFailure(result.guestId, details.url, result.failure);
+    }
   });
   // Install the cert-verify proc ONCE, before any webview touches the
   // session. See the `previewCertBypassEnabled` comment for why we can't
@@ -654,7 +649,7 @@ function blockPreviewPopups(contents: WebContents, host?: WebContents): void {
 
 function guardPreviewNavigation(guest: WebContents, host: WebContents): void {
   const route = (event: Electron.Event, url: string, isMainFrame: boolean, redirect: boolean) => {
-    if (!isMainFrame) return;
+    if (!isMainFrame || canNavigatePreviewDirectly(url)) return;
     event.preventDefault();
     if (!host.isDestroyed()) {
       host.send("controller:preview-navigation", { guestId: guest.id, url, redirect });
@@ -714,7 +709,6 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
     blockPreviewPopups(webContents, contents);
     guardPreviewNavigation(webContents, contents);
     denyPreviewSessionPermissions(webContents.session);
-    observePreviewRequests(webContents.session);
     previewContents.set(webContents.id, contents.id);
     webContents.once("destroyed", () => {
       previewContents.delete(webContents.id);
