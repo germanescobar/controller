@@ -31,6 +31,12 @@ export interface BridgeResult {
   refs?: Record<string, string>;
   refCount?: number;
   error?: string;
+  screenshotData?: string;
+  fullPage?: boolean;
+  viewport?: { width: number; height: number } | null;
+  diagnostics?: import("../../shared/preview-browser.js").BrowserDiagnostic[];
+  commandId?: string;
+  sessionId?: string;
 }
 
 interface PendingRequest {

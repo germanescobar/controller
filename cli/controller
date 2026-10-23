@@ -30,6 +30,9 @@ const USAGE = `Usage:
   controller browser keys <Enter|Escape|Tab|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace>
   controller browser back
   controller browser set-files <selector> <path> [--path <path> ...] [--allow-outside]
+  controller browser screenshot [--full-page]
+  controller browser viewport <desktop|mobile|default>
+  controller browser diagnostics [--limit N]
 
   set-files drives a \`<input type="file">\` (or drag-and-drop dropzone) on
   the active page (issue #356). By default the paths must live inside the
@@ -3417,6 +3420,22 @@ export function parseBrowser(argv) {
         params: { selector, paths, allowOutside },
       };
     }
+    case "screenshot": {
+      if (rest.some((arg) => arg !== "--full-page")) fail("browser screenshot only accepts --full-page");
+      return { action: "screenshot", params: { fullPage: rest.includes("--full-page") } };
+    }
+    case "viewport": {
+      if (rest.length !== 1 || !["desktop", "mobile", "default"].includes(rest[0])) {
+        fail("browser viewport requires desktop, mobile, or default");
+      }
+      return { action: "viewport", params: { preset: rest[0] } };
+    }
+    case "diagnostics": {
+      if (rest.length > 2 || (rest.length > 0 && rest[0] !== "--limit")) fail("browser diagnostics accepts --limit N");
+      const limit = rest.length === 0 ? 20 : Number(rest[1]);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 50) fail("browser diagnostics --limit must be 1–50");
+      return { action: "diagnostics", params: { limit } };
+    }
     default:
       fail(`Unknown browser command: ${command ?? ""}\n${USAGE}`);
   }
@@ -3424,7 +3443,7 @@ export function parseBrowser(argv) {
 
 async function runBrowser(argv, serverUrl) {
   const { action, params } = parseBrowser(argv);
-  const { response, result } = await postJson(serverUrl, "/api/browser/command", { action, params });
+  const { response, result } = await postJson(serverUrl, "/api/browser/command", { action, params, sessionId: process.env.CONTROLLER_SESSION_ID });
   if (!result || result.ok === false) {
     fail(serverError(result, `Browser command failed (HTTP ${response.status})`));
   }
@@ -3435,6 +3454,19 @@ async function runBrowser(argv, serverUrl) {
     if (result.refCount && result.refCount > 0) {
       process.stdout.write(`\n${result.refCount} ref(s) registered — use \`click ref=e1\` or \`type ref=e1 <text>\` to target them.\n`);
     }
+    return;
+  }
+  if (action === "screenshot") {
+    if (!result.screenshot?.path) fail("Browser returned no screenshot artifact");
+    process.stdout.write(`${result.screenshot.path}\n${result.screenshot.width}×${result.screenshot.height} PNG — ${result.screenshot.url}\nCommand: ${result.screenshot.commandId}${result.screenshot.sessionId ? `; session: ${result.screenshot.sessionId}` : ""}\n`);
+    return;
+  }
+  if (action === "diagnostics") {
+    process.stdout.write(`Command: ${result.commandId}${result.sessionId ? `; session: ${result.sessionId}` : ""}\n`);
+    for (const entry of result.diagnostics ?? []) {
+      process.stdout.write(`${entry.timestamp} ${entry.kind} ${entry.url} — ${entry.message}\n`);
+    }
+    if (!result.diagnostics?.length) process.stdout.write("No recent errors or failed requests.\n");
     return;
   }
   const lines = [];

@@ -58,6 +58,7 @@ test("orders navigation, snapshot, and action for one pane", async () => {
   const opened = previewBrowserBridge.execute("p-order:w-order", "open", { url: "http://localhost/next" });
   const snapped = previewBrowserBridge.execute("p-order:w-order", "snapshot", {});
   const clicked = previewBrowserBridge.execute("p-order:w-order", "click", { selector: "#go" });
+  const screenshot = previewBrowserBridge.execute("p-order:w-order", "screenshot", {});
   assert.equal(socket.sent.length, 1);
 
   const reply = (index: number) => {
@@ -76,6 +77,11 @@ test("orders navigation, snapshot, and action for one pane", async () => {
   assert.equal(JSON.parse(socket.sent[2]).action, "click");
   reply(2);
   assert.deepEqual(await clicked, { ok: true, summary: "click" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(socket.sent.length, 4);
+  assert.equal(JSON.parse(socket.sent[3]).action, "screenshot");
+  reply(3);
+  assert.deepEqual(await screenshot, { ok: true, summary: "screenshot" });
 });
 
 test("rejects when no host is connected for the key", async () => {

@@ -3731,6 +3731,14 @@ test("parseBrowser snapshot / click / type still work", async () => {
   );
 });
 
+test("parseBrowser evidence commands validate bounded inputs", async () => {
+  const cli = await loadCli();
+  assert.deepEqual(cli.parseBrowser(["screenshot", "--full-page"]), { action: "screenshot", params: { fullPage: true } });
+  assert.deepEqual(cli.parseBrowser(["viewport", "mobile"]), { action: "viewport", params: { preset: "mobile" } });
+  assert.deepEqual(cli.parseBrowser(["viewport", "default"]), { action: "viewport", params: { preset: "default" } });
+  assert.deepEqual(cli.parseBrowser(["diagnostics", "--limit", "5"]), { action: "diagnostics", params: { limit: 5 } });
+});
+
 // `controller browser set-files` parser (issue #356).
 test("parseBrowser supports bounded waits and interaction primitives", async () => {
   const cli = await loadCli();

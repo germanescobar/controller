@@ -35,6 +35,9 @@ import {
   type PreviewWebview,
 } from "@/lib/usePreviewBrowserHost";
 import type { BrowserServerMessage } from "../../../shared/preview-browser";
+import { PreviewDiagnosticBuffer } from "../../../shared/preview-diagnostics";
+import { PreviewViewportStore } from "@/lib/preview-viewport";
+import type { BrowserDiagnostic, BrowserViewport } from "../../../shared/preview-browser";
 
 /** Per-pane preview chrome state, mirrored from the live webview. */
 export interface PreviewPaneState {
@@ -156,6 +159,7 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
   // Live webview elements by pane key, plus the overlay container, kept in refs
   // so positioning never triggers React re-renders.
   const webviewEls = useRef(new Map<string, PreviewWebview>());
+  const viewports = useRef(new PreviewViewportStore());
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const activeKeyRef = useRef<string | null>(null);
   const placeholderRef = useRef<HTMLElement | null>(null);
@@ -173,10 +177,14 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
       el.style.display = "flex";
       if (key === activeKey && placeholder) {
         const rect = placeholder.getBoundingClientRect();
+        const viewport = viewports.current.get(key);
         el.style.top = `${rect.top}px`;
         el.style.left = `${rect.left}px`;
-        el.style.width = `${rect.width}px`;
-        el.style.height = `${rect.height}px`;
+        el.style.width = `${viewport?.width ?? rect.width}px`;
+        el.style.height = `${viewport?.height ?? rect.height}px`;
+        el.style.clipPath = viewport
+          ? `inset(0px ${Math.max(0, viewport.width - rect.width)}px ${Math.max(0, viewport.height - rect.height)}px 0px)`
+          : "";
         el.style.pointerEvents = "auto";
         el.style.zIndex = "20";
       } else {
@@ -184,13 +192,21 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
         // rendering with a realistic viewport (snapshots stay accurate).
         el.style.top = "0px";
         el.style.left = "-100000px";
-        el.style.width = `${parkW}px`;
-        el.style.height = `${parkH}px`;
+        const viewport = viewports.current.get(key);
+        el.style.width = `${viewport?.width ?? parkW}px`;
+        el.style.height = `${viewport?.height ?? parkH}px`;
+        el.style.clipPath = "";
         el.style.pointerEvents = "none";
         el.style.zIndex = "-1";
       }
     }
   }, []);
+
+  const setViewport = useCallback((key: string, preset: "default" | "desktop" | "mobile"): BrowserViewport | null => {
+    const viewport = viewports.current.set(key, preset);
+    syncOverlay();
+    return viewport;
+  }, [syncOverlay]);
 
   const registerWebview = useCallback(
     (key: string, el: PreviewWebview | null) => {
@@ -338,6 +354,7 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
             openUrl={openUrl}
             available={available}
             registerWebview={registerWebview}
+            setViewport={setViewport}
           />
         </div>
       )}
@@ -403,11 +420,13 @@ function PaneFrames({
   openUrl,
   available,
   registerWebview,
+  setViewport,
 }: {
   store: PreviewBrowserStore;
   openUrl: (key: string, url: string, options?: { insecure?: boolean }) => void;
   available: boolean;
   registerWebview: (key: string, el: PreviewWebview | null) => void;
+  setViewport: (key: string, preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
 }) {
   const topology = useSyncExternalStore(
     (cb) => store.subscribeTopology(cb),
@@ -425,6 +444,7 @@ function PaneFrames({
           openUrl={openUrl}
           available={available}
           registerWebview={registerWebview}
+          setViewport={setViewport}
         />
       ))}
     </>
@@ -443,6 +463,7 @@ function PaneFrame({
   openUrl,
   available,
   registerWebview,
+  setViewport,
 }: {
   paneKey: string;
   url: string | null;
@@ -450,8 +471,11 @@ function PaneFrame({
   openUrl: (key: string, url: string, options?: { insecure?: boolean }) => void;
   available: boolean;
   registerWebview: (key: string, el: PreviewWebview | null) => void;
+  setViewport: (key: string, preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
 }) {
   const webviewRef = useRef<PreviewWebview | null>(null);
+  const diagnostics = useRef(new PreviewDiagnosticBuffer());
+  const navigationStartedAt = useRef("");
 
   usePreviewBrowserHost({
     enabled: available,
@@ -465,6 +489,15 @@ function PaneFrame({
     // Issue #356: `setFiles` needs the worktree path so the Electron
     // main process can re-check the path policy at read time.
     projectRoot: store.getRoot(paneKey),
+    setViewport: (preset) => setViewport(paneKey, preset),
+    getDiagnostics: async (limit) => {
+      const webview = webviewRef.current;
+      const id = webview?.getWebContentsId?.();
+      const requests = id && isControllerAvailable()
+        ? await getController().previewRequestFailures(id) : [];
+      return [...diagnostics.current.recent(50), ...requests.filter((entry) => entry.timestamp >= navigationStartedAt.current)]
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-limit);
+    },
   });
 
   // Mirror the live page's load lifecycle into pane state. Intercept in-page
@@ -473,13 +506,29 @@ function PaneFrame({
     const webview = webviewRef.current;
     if (!webview) return;
 
-    const onStart = () => store.update(paneKey, { loading: true, error: null });
+    const onStart = () => {
+      navigationStartedAt.current = new Date().toISOString();
+      diagnostics.current.clear();
+      const id = webview.getWebContentsId?.();
+      if (id) void getController().previewRequestFailures(id, true);
+      store.update(paneKey, { loading: true, error: null });
+    };
+    const onConsole = (event: Event) => {
+      const info = event as Event & { level?: number | string; message?: string; sourceId?: string };
+      if (info.level !== 2 && info.level !== "error") return;
+      diagnostics.current.add({ kind: "console", timestamp: new Date().toISOString(),
+        url: info.sourceId || webview.getURL(), message: info.message ?? "Console error" });
+    };
     const onStop = () => store.update(paneKey, { loading: false });
-    const onFail = (event: Event) =>
+    const onFail = (event: Event) => {
+      const url = eventString(event, "validatedURL") ?? webview.getURL();
+      diagnostics.current.add({ kind: "request", timestamp: new Date().toISOString(),
+        url, message: eventString(event, "errorDescription") ?? "Preview failed to load" });
       store.update(paneKey, {
         loading: false,
         error: eventString(event, "errorDescription") ?? "Preview failed to load",
       });
+    };
     const onTitle = (event: Event) =>
       store.update(paneKey, { title: eventString(event, "title") });
     const onWillNavigate = (event: Event) => {
@@ -490,12 +539,14 @@ function PaneFrame({
     };
 
     webview.addEventListener("did-start-loading", onStart);
+    webview.addEventListener("console-message", onConsole);
     webview.addEventListener("did-stop-loading", onStop);
     webview.addEventListener("did-fail-load", onFail);
     webview.addEventListener("page-title-updated", onTitle);
     webview.addEventListener("will-navigate", onWillNavigate);
     return () => {
       webview.removeEventListener("did-start-loading", onStart);
+      webview.removeEventListener("console-message", onConsole);
       webview.removeEventListener("did-stop-loading", onStop);
       webview.removeEventListener("did-fail-load", onFail);
       webview.removeEventListener("page-title-updated", onTitle);

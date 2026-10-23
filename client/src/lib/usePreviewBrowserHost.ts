@@ -20,6 +20,8 @@ import type {
   BrowserCommandResult,
   BrowserServerMessage,
   BrowserSetFilesFileMeta,
+  BrowserDiagnostic,
+  BrowserViewport,
 } from "../../../shared/preview-browser.ts";
 import {
   buildClickScript,
@@ -28,6 +30,7 @@ import {
   buildTypeScript,
   buildWaitCheckScript,
 } from "./browser-scripts.ts";
+import { capturePreviewScreenshot } from "./preview-screenshot.ts";
 
 /** Subset of the Electron `<webview>` tag API we drive. */
 export interface PreviewWebview extends HTMLElement {
@@ -39,6 +42,8 @@ export interface PreviewWebview extends HTMLElement {
   canGoBack?: () => boolean;
   goBack?: () => void;
   sendInputEvent?: (event: { type: "keyDown" | "keyUp" | "char"; keyCode: string }) => void;
+  getWebContentsId?: () => number;
+  capturePage?: () => Promise<{ toPNG: () => Uint8Array; getSize: () => BrowserViewport }>;
 }
 
 export interface PreviewBrowserHostOptions {
@@ -57,6 +62,8 @@ export interface PreviewBrowserHostOptions {
    * because the renderer cannot prove the path is project-scoped.
    */
   projectRoot?: string;
+  setViewport: (preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
+  getDiagnostics: (limit: number) => Promise<BrowserDiagnostic[]>;
 }
 
 const RECONNECT_DELAY_MS = 1500;
@@ -74,16 +81,20 @@ export function previewBrowserWsUrl(): string {
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {
-  const { enabled, browserKey, getWebview, openUrl, projectRoot } = options;
+  const { enabled, browserKey, getWebview, openUrl, projectRoot, setViewport, getDiagnostics } = options;
 
   // Keep the latest callbacks in refs so the long-lived socket effect doesn't
   // reconnect on every render.
   const getWebviewRef = useRef(getWebview);
   const openUrlRef = useRef(openUrl);
   const projectRootRef = useRef(projectRoot);
+  const setViewportRef = useRef(setViewport);
+  const getDiagnosticsRef = useRef(getDiagnostics);
   getWebviewRef.current = getWebview;
   openUrlRef.current = openUrl;
   projectRootRef.current = projectRoot;
+  setViewportRef.current = setViewport;
+  getDiagnosticsRef.current = getDiagnostics;
 
   useEffect(() => {
     if (!enabled || !browserKey) return;
@@ -159,6 +170,19 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               projectRootRef.current,
               Boolean(message.params.allowOutside)
             );
+          case "viewport": {
+            const preset = message.params.preset;
+            if (preset !== "default" && preset !== "desktop" && preset !== "mobile") {
+              return { ok: false, error: "Invalid viewport preset" };
+            }
+            const viewport = setViewportRef.current(preset);
+            return { ok: true, viewport, summary: viewport
+              ? `Viewport set to ${viewport.width}×${viewport.height}` : "Viewport restored to pane default" };
+          }
+          case "diagnostics":
+            return { ok: true, diagnostics: await getDiagnosticsRef.current(Number(message.params.limit)) };
+          case "screenshot":
+            return await handleScreenshot(getWebviewRef.current(), message.params.fullPage === true);
           default:
             return { ok: false, error: `Unsupported action` };
         }
@@ -223,6 +247,18 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
       socket?.close();
     };
   }, [enabled, browserKey]);
+}
+
+async function handleScreenshot(webview: PreviewWebview | null, fullPage: boolean): Promise<BrowserCommandResult & { screenshotData?: string; fullPage?: boolean }> {
+  if (!webview) return { ok: false, error: "No page is open. Use `open <url>` first." };
+  const capturePage = webview.capturePage;
+  if (!capturePage) return { ok: false, error: "Screenshot capture is unavailable in this preview" };
+  return capturePreviewScreenshot({
+    style: webview.style,
+    getURL: () => webview.getURL(),
+    executeJavaScript: (code) => webview.executeJavaScript(code),
+    capturePage: () => capturePage.call(webview),
+  }, fullPage);
 }
 
 // ---------------------------------------------------------------------------

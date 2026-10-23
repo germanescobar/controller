@@ -16,6 +16,8 @@ import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalizeForBoundary, validatePreviewUrl } from "./preview-url-policy.js";
+import { diagnosticUrl, diagnosticMessage, MAX_DIAGNOSTICS } from "../shared/preview-diagnostics.js";
+import type { BrowserDiagnostic } from "../shared/preview-browser.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -64,6 +66,35 @@ function warnWithTime(...args: unknown[]): void {
 }
 function errorWithTime(...args: unknown[]): void {
   console.error(`[controller ${elapsed()}]`, ...args);
+}
+
+const previewContents = new Map<number, number>();
+const previewRequestFailures = new Map<number, BrowserDiagnostic[]>();
+const observedPreviewSessions = new WeakSet<Session>();
+
+function observePreviewRequests(session: Session): void {
+  if (observedPreviewSessions.has(session)) return;
+  observedPreviewSessions.add(session);
+  session.webRequest.onErrorOccurred((details) => {
+    if (details.error === "net::ERR_ABORTED") return;
+    recordPreviewRequestFailure(details.webContentsId, details.url, details.error);
+  });
+  session.webRequest.onCompleted((details) => {
+    if (details.statusCode < 400) return;
+    recordPreviewRequestFailure(details.webContentsId, details.url, `HTTP ${details.statusCode}`);
+  });
+}
+
+function recordPreviewRequestFailure(id: number | undefined, url: string, message: string): void {
+  if (id === undefined || !previewContents.has(id)) return;
+  const entries = previewRequestFailures.get(id) ?? [];
+  entries.push({
+    kind: "request",
+    timestamp: new Date().toISOString(),
+    url: diagnosticUrl(url),
+    message: diagnosticMessage(message),
+  });
+  previewRequestFailures.set(id, entries.slice(-MAX_DIAGNOSTICS));
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -647,6 +678,12 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
   contents.on("did-attach-webview", (_event, webContents) => {
     blockPreviewPopups(webContents);
     denyPreviewSessionPermissions(webContents.session);
+    observePreviewRequests(webContents.session);
+    previewContents.set(webContents.id, contents.id);
+    webContents.once("destroyed", () => {
+      previewContents.delete(webContents.id);
+      previewRequestFailures.delete(webContents.id);
+    });
   });
 }
 
@@ -809,6 +846,15 @@ function registerIpcHandlers(): void {
       return readPreviewFile(event, input, options);
     }
   );
+
+  ipcMain.handle("controller:preview-request-failures", (event, id: unknown, clear: unknown) => {
+    if (typeof id !== "number" || previewContents.get(id) !== event.sender.id) return [];
+    if (clear === true) {
+      previewRequestFailures.delete(id);
+      return [];
+    }
+    return previewRequestFailures.get(id) ?? [];
+  });
 
   ipcMain.handle("controller:pick-directory", async (event) => {
     // Modal to the renderer that asked, so the picker feels attached

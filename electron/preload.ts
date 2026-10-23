@@ -71,6 +71,8 @@ const bridge: ControllerBridge = {
       path,
       options
     ) as Promise<PreviewFileReadResult>,
+  previewRequestFailures: (webContentsId, clear) =>
+    ipcRenderer.invoke("controller:preview-request-failures", webContentsId, clear),
   pickDirectory: () =>
     ipcRenderer.invoke(
       "controller:pick-directory"

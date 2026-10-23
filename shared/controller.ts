@@ -72,6 +72,7 @@ export interface ControllerBridge {
     path: string,
     options: { projectRoot?: string; allowOutside?: boolean }
   ) => Promise<PreviewFileReadResult>;
+  previewRequestFailures: (webContentsId: number, clear?: boolean) => Promise<import("./preview-browser.js").BrowserDiagnostic[]>;
   /**
    * Open a native folder picker. Returns the absolute path the user
    * selected, or null if they cancelled. The picker is window-modal
