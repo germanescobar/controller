@@ -179,7 +179,7 @@ server.on("upgrade", (req, socket, head) => {
   const address = server.address();
   const port = address && typeof address === "object" ? address.port : parsePort(process.env.PORT, 3100);
   const trusted = req.socket.remoteAddress !== undefined && req.headers.origin !== undefined &&
-    isTrustedLocalRequest(req.headers, port, devClientPort, req.socket.remoteAddress);
+    isTrustedLocalRequest(req.headers, port, devClientPort, req.socket.remoteAddress, req.socket.localAddress);
   if (!trusted) {
     socket.destroy();
     return;

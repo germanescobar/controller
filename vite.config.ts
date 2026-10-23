@@ -2,6 +2,7 @@ import path from "node:path";
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { isTrustedLocalRequest } from "./server/lib/local-request-guard";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -25,7 +26,27 @@ export default defineConfig(({ mode }) => {
   const apiTarget = `http://localhost:${apiPort}`;
 
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), {
+      name: "controller-dev-network-guard",
+      configureServer(server) {
+        const boundClientPort = () => {
+          const address = server.httpServer?.address();
+          return address && typeof address === "object" ? address.port : clientPort;
+        };
+        server.middlewares.use((req, res, next) => {
+          if (req.socket.remoteAddress && isTrustedLocalRequest(
+            req.headers, boundClientPort(), undefined, req.socket.remoteAddress, req.socket.localAddress
+          )) return next();
+          res.statusCode = 403;
+          res.end("Request origin is not allowed");
+        });
+        server.httpServer?.prependListener("upgrade", (req, socket) => {
+          if (!req.socket.remoteAddress || !isTrustedLocalRequest(
+            req.headers, boundClientPort(), undefined, req.socket.remoteAddress, req.socket.localAddress
+          )) socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        });
+      },
+    }],
     root: "client",
     envDir: process.cwd(),
     resolve: {
@@ -38,11 +59,26 @@ export default defineConfig(({ mode }) => {
       allowedHosts: true,
       port: clientPort,
       proxy: {
-        "/api": apiTarget,
+        "/api": {
+          target: apiTarget,
+          changeOrigin: true,
+          configure(proxy) {
+            proxy.on("proxyReq", (proxyReq) => {
+              if (proxyReq.getHeader("origin")) proxyReq.setHeader("origin", apiTarget);
+            });
+          },
+        },
         "/ws/terminal": {
           target: apiTarget,
           ws: true,
           changeOrigin: true,
+          rewriteWsOrigin: true,
+        },
+        "/ws/preview-browser": {
+          target: apiTarget,
+          ws: true,
+          changeOrigin: true,
+          rewriteWsOrigin: true,
         },
       },
     },

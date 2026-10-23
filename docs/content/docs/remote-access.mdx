@@ -16,8 +16,10 @@ can drive your machine. **Do not expose it directly to the public internet.**
 
 ## Recommended: Tailscale
 
-[Tailscale](https://tailscale.com) puts your devices on a private network so
-only they can reach each other — no open ports, no public exposure.
+[Tailscale](https://tailscale.com) puts your devices on a private network.
+Anyone your Tailscale policy permits to reach this device can use Controller.
+Its API and WebSocket endpoints accept connections arriving over Tailscale,
+while local `localhost` access continues to work.
 
 1. Install Tailscale on your Mac (or Linux host) and on your phone.
 2. Sign in to the **same account** on both.
@@ -30,18 +32,20 @@ only they can reach each other — no open ports, no public exposure.
    ```
 
 4. From your phone's browser, go to `http://<shortname>:4500` — substituting
-   the port you picked on the welcome screen:
+   the port you picked on the welcome screen (or the Vite port shown by `npm run dev`):
 
    ```
    http://macbook:4500
    ```
 
 The app's **"Listening on port N"** footer has a **Copy** button that grabs the
-full local URL, so you can send it to your phone in one tap.
+full local URL. Replace `localhost` with the device's Tailscale name on your phone.
+
+Anyone your Tailscale policy permits to reach Controller can use its privileged
+API. Restrict access to devices you trust; Controller does not add a separate
+login for remote access.
 
 ## LAN fallback
 
-If both devices are on the same local network and your firewall allows the
-port, you can reach the host by its LAN address directly. This works without
-Tailscale but only on that network, and you're responsible for the firewall —
-treat it as a fallback, not the default.
+Direct LAN requests to Controller's API and WebSocket endpoints are blocked.
+Use Tailscale for remote access.
