@@ -1,5 +1,4 @@
 import express from "express";
-import cors from "cors";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -73,6 +72,7 @@ import {
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
 import { controllerHomeId, orchestratorHome } from "./lib/paths.js";
 import { tryAcquireSharedLoopOwner } from "./lib/shared-loop-owner.js";
+import { isTrustedLocalRequest, localApiGuard } from "./lib/local-request-guard.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -91,8 +91,14 @@ const DEV_API_BASE_PORT = 3102;
 const app = express();
 
 installSessionRuntimeShutdownHandlers();
-app.use(cors());
 app.use(express.json({ limit: "50mb" }));
+const devClientPort = process.env.CONTROLLER_DEV_INSTANCE === "1"
+  ? parsePort(process.env.VITE_DEV_SERVER_PORT, 4502)
+  : undefined;
+app.use("/api", localApiGuard(() => {
+  const address = server.address();
+  return address && typeof address === "object" ? address.port : parsePort(process.env.PORT, 3100);
+}, devClientPort));
 
 app.use("/api/projects", projectsRouter);
 app.use("/api/projects", worktreesRouter);
@@ -170,6 +176,14 @@ previewBrowserWss.on("connection", (ws: WebSocket) => {
 });
 
 server.on("upgrade", (req, socket, head) => {
+  const address = server.address();
+  const port = address && typeof address === "object" ? address.port : parsePort(process.env.PORT, 3100);
+  const trusted = req.socket.remoteAddress !== undefined && req.headers.origin !== undefined &&
+    isTrustedLocalRequest(req.headers, port, devClientPort, req.socket.remoteAddress);
+  if (!trusted) {
+    socket.destroy();
+    return;
+  }
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
   if (pathname === "/ws/terminal") {
     terminalWss.handleUpgrade(req, socket, head, (ws) => {
