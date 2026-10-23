@@ -102,6 +102,10 @@ click confirms that an actionable target received the click dispatch. Check
 the expected result with `wait` or `snapshot` when the page should change.
 `back` returns an error when there is no prior page in the preview history.
 
+`controller browser open` reports a failed result when navigation is rejected,
+the page fails to load, the main document returns an HTTP error status, or the
+load times out. The agent can use that result before taking a snapshot.
+
 ## Local HTTPS dev servers
 
 If your local dev server is served over `https` with a self-signed certificate

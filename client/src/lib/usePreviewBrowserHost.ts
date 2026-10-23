@@ -54,8 +54,13 @@ export interface PreviewBrowserHostOptions {
   browserKey: string | null;
   /** Returns the live `<webview>` element, or null when no page is open. */
   getWebview: () => PreviewWebview | null;
+  /** Latest load error for the selected tab, including early load events. */
+  getLoadError: () => string | null;
   /** Trigger the visible navigation flow (validates + switches to Preview). */
-  openUrl: (url: string, options?: { insecure?: boolean }) => Promise<{ ok: true } | { ok: false; error: string }>;
+  openUrl: (
+    url: string,
+    options?: { insecure?: boolean }
+  ) => Promise<{ ok: true; loaded?: boolean } | { ok: false; error: string }>;
   /**
    * Worktree path the pane is bound to. Used by `setFiles` so the
    * Electron main process can re-check the path policy on read
@@ -82,16 +87,18 @@ export function previewBrowserWsUrl(): string {
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {
-  const { enabled, browserKey, getWebview, openUrl, projectRoot, setViewport, getDiagnostics } = options;
+  const { enabled, browserKey, getWebview, getLoadError, openUrl, projectRoot, setViewport, getDiagnostics } = options;
 
   // Keep the latest callbacks in refs so the long-lived socket effect doesn't
   // reconnect on every render.
   const getWebviewRef = useRef(getWebview);
+  const getLoadErrorRef = useRef(getLoadError);
   const openUrlRef = useRef(openUrl);
   const projectRootRef = useRef(projectRoot);
   const setViewportRef = useRef(setViewport);
   const getDiagnosticsRef = useRef(getDiagnostics);
   getWebviewRef.current = getWebview;
+  getLoadErrorRef.current = getLoadError;
   openUrlRef.current = openUrl;
   projectRootRef.current = projectRoot;
   setViewportRef.current = setViewport;
@@ -126,6 +133,7 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
               String(message.params.url ?? ""),
               message.params.insecure === true,
               getWebviewRef.current,
+              getLoadErrorRef.current,
               openUrlRef.current
             );
           case "snapshot":
@@ -270,19 +278,38 @@ export async function handleOpen(
   url: string,
   insecure: boolean,
   getWebview: () => PreviewWebview | null,
-  openUrl: (url: string, options?: { insecure?: boolean }) => Promise<{ ok: true } | { ok: false; error: string }>
+  getLoadError: () => string | null,
+  openUrl: (
+    url: string,
+    options?: { insecure?: boolean }
+  ) => Promise<{ ok: true; loaded?: boolean } | { ok: false; error: string }>
 ): Promise<BrowserCommandResult> {
   if (!url) return { ok: false, error: "Missing url" };
   // Capture the current URL before navigating so we can tell when the *new*
   // page has actually loaded — otherwise an already-open idle pane would report
   // success against the old page and a follow-up snapshot would read it.
+  const startedAt = Date.now();
   const beforeUrl = safeCall(() => getWebview()?.getURL()) ?? null;
   const opened = await openUrl(url, insecure ? { insecure: true } : undefined);
   if (!opened.ok) return { ok: false, error: opened.error };
-  const webview = await waitForOpenComplete(getWebview, beforeUrl);
+  const webview = opened.loaded
+    ? getWebview()
+    : await waitForOpenComplete(
+        getWebview, beforeUrl, LOAD_TIMEOUT_MS, getLoadError
+      );
+  if (!webview) return { ok: false, error: "Preview page closed before it loaded" };
+  const guestId = webview.getWebContentsId?.();
+  const response = guestId ? await getController().getPreviewResponseStatus(guestId, startedAt) : null;
+  const finalUrl = webview.getURL();
+  if (
+    response && response.statusCode >= 400 &&
+    response.url.split("#", 1)[0] === finalUrl.split("#", 1)[0]
+  ) {
+    return { ok: false, error: `HTTP ${response.statusCode} loading ${response.url}` };
+  }
   return {
     ok: true,
-    url: safeCall(() => webview.getURL()) ?? url,
+    url: finalUrl,
     title: safeCall(() => webview.getTitle()) ?? undefined,
     summary: `Opened ${url}`,
   };
@@ -639,7 +666,8 @@ async function handleBack(webview: PreviewWebview | null): Promise<BrowserComman
 export async function waitForOpenComplete(
   getWebview: () => PreviewWebview | null,
   beforeUrl: string | null,
-  timeoutMs = LOAD_TIMEOUT_MS
+  timeoutMs = LOAD_TIMEOUT_MS,
+  getLoadError: () => string | null = () => null
 ): Promise<PreviewWebview> {
   const start = Date.now();
   let webview = getWebview();
@@ -652,10 +680,13 @@ export async function waitForOpenComplete(
   const el = webview;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let started = el.isLoading?.() ?? false;
+    let aborted = false;
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       el.removeEventListener("did-stop-loading", onStop);
+      el.removeEventListener("did-start-loading", onStart);
       el.removeEventListener("did-fail-load", onFail);
       window.clearInterval(interval);
       window.clearTimeout(timer);
@@ -664,16 +695,31 @@ export async function waitForOpenComplete(
     };
     // A completed load cycle since we started waiting is the new navigation —
     // the old page was idle, so it has no pending load to confuse us.
-    const onStop = () => finish();
+    const onStart = () => {
+      started = true;
+      aborted = false;
+    };
+    const onStop = () => {
+      if (aborted) return;
+      const error = getLoadError();
+      if (error) return finish(new Error(error));
+      const current = safeCall(() => el.getURL());
+      if (started || (current && current !== beforeUrl)) finish();
+    };
     const onFail = (event: Event) => {
       const failure = event as Event & { errorCode?: number; errorDescription?: string };
-      if (failure.errorCode !== -3) {
-        finish(new Error(failure.errorDescription ?? "Preview failed to load"));
+      if (failure.errorCode === -3) {
+        aborted = true;
+        return;
       }
+      finish(new Error(failure.errorDescription ?? "Preview failed to load"));
     };
     // Also poll, in case the new load finished before listeners attached
     // (common on the very first open, where the webview mounts mid-navigation).
     const poll = () => {
+      const error = getLoadError();
+      if (error) return finish(new Error(error));
+      if (aborted) return;
       const current = safeCall(() => el.getURL());
       const loading = el.isLoading ? el.isLoading() : false;
       if (!loading && current && current !== beforeUrl) finish();
@@ -681,6 +727,7 @@ export async function waitForOpenComplete(
     const interval = window.setInterval(poll, 120);
     const timer = window.setTimeout(() => finish(new Error("Preview page did not finish loading before the load timeout")), Math.max(0, timeoutMs - (Date.now() - start)));
     el.addEventListener("did-stop-loading", onStop);
+    el.addEventListener("did-start-loading", onStart);
     el.addEventListener("did-fail-load", onFail);
     poll();
   });

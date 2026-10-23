@@ -10,6 +10,7 @@ import {
   type Session,
   type WebContents,
   shell,
+  webContents as electronWebContents,
 } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -24,6 +25,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
 const PREVIEW_PARTITION = "controller-preview";
+const previewResponses = new Map<number, {
+  url: string;
+  statusCode: number;
+  at: number;
+}>();
 
 // Toggle for the preview-pane cert-verify bypass. Set by the
 // `controller:set-preview-cert-policy` IPC handler when the agent passes
@@ -594,6 +600,16 @@ function denyPreviewSessionPermissions(session: Session): void {
 function attachPreviewPartitionGuards(): void {
   const session = electronSession.fromPartition(PREVIEW_PARTITION);
   denyPreviewSessionPermissions(session);
+  session.webRequest.onCompleted((details) => {
+    if (details.resourceType !== "mainFrame") return;
+    const guestId = details.webContentsId ?? details.webContents?.id;
+    if (guestId === undefined) return;
+    previewResponses.set(guestId, {
+      url: details.url,
+      statusCode: details.statusCode,
+      at: Date.now(),
+    });
+  });
   // Install the cert-verify proc ONCE, before any webview touches the
   // session. See the `previewCertBypassEnabled` comment for why we can't
   // install it lazily inside the IPC handler — Electron only honors a
@@ -703,6 +719,7 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
     webContents.once("destroyed", () => {
       previewContents.delete(webContents.id);
       previewRequestFailures.delete(webContents.id);
+      previewResponses.delete(webContents.id);
     });
   });
 }
@@ -850,6 +867,21 @@ function registerIpcHandlers(): void {
         url,
         typeof projectRoot === "string" && projectRoot.trim() ? projectRoot : undefined
       );
+    }
+  );
+
+  ipcMain.handle(
+    "controller:preview-response-status",
+    (event, guestId: unknown, since: unknown) => {
+      if (
+        typeof guestId !== "number" || !Number.isInteger(guestId) ||
+        typeof since !== "number" || !Number.isFinite(since)
+      ) return null;
+      const guest = electronWebContents.fromId(guestId);
+      if (!guest || guest.hostWebContents !== event.sender) return null;
+      const response = previewResponses.get(guestId);
+      if (!response || response.at < since) return null;
+      return { url: response.url, statusCode: response.statusCode };
     }
   );
 

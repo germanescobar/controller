@@ -21,6 +21,11 @@ export interface PreviewPopupRequest {
   redirect?: boolean;
 }
 
+export interface PreviewResponseStatus {
+  url: string;
+  statusCode: number;
+}
+
 /**
  * Result of a single preview-file read inside the Electron main process
  * (issue #356). The server has already canonicalized the path; the main
@@ -61,6 +66,10 @@ export interface ControllerBridge {
   ) => Promise<PreviewUrlCheckResult>;
   onPreviewPopup: (cb: (request: PreviewPopupRequest) => void) => () => void;
   onPreviewNavigation: (cb: (request: PreviewPopupRequest) => void) => () => void;
+  getPreviewResponseStatus: (
+    guestId: number,
+    since: number
+  ) => Promise<PreviewResponseStatus | null>;
   /**
    * Toggle the TLS-cert verification bypass on the preview pane's session.
    * Used by the agent-controlled browser when the user passes `--insecure`

@@ -39,7 +39,7 @@ import { PreviewDiagnosticBuffer } from "../../../shared/preview-diagnostics";
 import { PreviewViewportStore } from "@/lib/preview-viewport";
 import type { BrowserDiagnostic, BrowserViewport } from "../../../shared/preview-browser";
 
-type PreviewOpenResult = { ok: true } | { ok: false; error: string };
+type PreviewOpenResult = { ok: true; loaded?: boolean } | { ok: false; error: string };
 
 /** Per-pane preview chrome state, mirrored from the live webview. */
 export interface PreviewPaneState {
@@ -315,12 +315,15 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
         if (previousUrl === result.url) {
           const webview = webviewEls.current.get(`${key}:${targetId}`);
           if (webview?.loadURL) {
-            void webview.loadURL(result.url).catch((error: unknown) => {
-              store.updateTab(key, targetId, {
-                loading: false,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
+            try {
+              await webview.loadURL(result.url);
+              return { ok: true, loaded: true };
+            } catch (error) {
+              // A main-frame redirect cancels this load and starts another
+              // validated navigation. The host wait observes that next load.
+              const message = error instanceof Error ? error.message : String(error);
+              if (!message.includes("ERR_ABORTED")) throw error;
+            }
           }
         }
         return { ok: true };
@@ -616,6 +619,7 @@ function PaneFrame({
     enabled: available,
     browserKey: paneKey,
     getWebview: useCallback(() => webviewsRef.current.get(activeTabRef.current) ?? null, []),
+    getLoadError: useCallback(() => store.getPane(paneKey).error, [store, paneKey]),
     openUrl: useCallback(
       (next: string, options?: { insecure?: boolean }) =>
         openUrl(paneKey, next, options),
@@ -636,17 +640,19 @@ function PaneFrame({
     },
   });
 
+  const registerTabWebview = useCallback((key: string, tabId: string, el: PreviewWebview | null) => {
+    if (el) webviewsRef.current.set(tabId, el);
+    else webviewsRef.current.delete(tabId);
+    registerWebview(key, tabId, el);
+  }, [registerWebview]);
+
   return <>{tabs.map((tab) => tab.src && (
     <TabFrame
       key={tab.id}
       paneKey={paneKey}
       tab={tab}
       store={store}
-      registerWebview={(key, tabId, el) => {
-        if (el) webviewsRef.current.set(tabId, el);
-        else webviewsRef.current.delete(tabId);
-        registerWebview(key, tabId, el);
-      }}
+      registerWebview={registerTabWebview}
       onNavigationStart={(tabId, webview) => {
         navigationStartedAt.current.set(tabId, new Date().toISOString());
         diagnosticBuffer(tabId).clear();
@@ -666,14 +672,11 @@ function TabFrame({ paneKey, tab, store, registerWebview, onNavigationStart, onD
   onNavigationStart: (tabId: string, webview: PreviewWebview) => void;
   onDiagnostic: (tabId: string, entry: BrowserDiagnostic) => void;
 }) {
-  const webviewRef = useRef<PreviewWebview | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
 
-  // Keep load handlers attached for the whole guest lifetime. Main-process
-  // navigation guards route links and redirects through openUrl before commit.
-  useEffect(() => {
-    const webview = webviewRef.current;
-    if (!webview) return;
-
+  // Attach in the ref callback, before a newly mounted guest can finish or
+  // fail a fast load. Main-process guards route links and redirects.
+  const attachEvents = useCallback((webview: PreviewWebview) => {
     const update = (partial: Partial<PreviewTab>) => store.updateTab(paneKey, tab.id, partial);
     const onStart = () => {
       onNavigationStart(tab.id, webview);
@@ -724,11 +727,15 @@ function TabFrame({ paneKey, tab, store, registerWebview, onNavigationStart, onD
     };
   }, [paneKey, tab.id, store, onNavigationStart, onDiagnostic]);
 
+  const setWebview = useCallback((el: PreviewWebview | null) => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    if (el) cleanupRef.current = attachEvents(el);
+    registerWebview(paneKey, tab.id, el);
+  }, [attachEvents, registerWebview, paneKey, tab.id]);
+
   return createElement("webview", {
-    ref: (el: PreviewWebview | null) => {
-      webviewRef.current = el;
-      registerWebview(paneKey, tab.id, el);
-    },
+    ref: setWebview,
     src: tab.src,
     partition: "controller-preview",
     webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
