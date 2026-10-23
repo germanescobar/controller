@@ -29,10 +29,10 @@ export function isTrustedLocalRequest(
       allowed.add(`http://127.0.0.1:${devClientPort}`);
       allowed.add(`http://[::1]:${devClientPort}`);
     }
-    if (!allowed.has(origin)) return false;
+    return allowed.has(origin);
   }
 
-  // Fetch Metadata covers browser GETs that omit Origin (images, links, etc.).
+  // Fetch Metadata covers browser requests that omit Origin (images, links, etc.).
   const site = singleHeader(headers["sec-fetch-site"]);
   return site !== "cross-site" && site !== "same-site";
 }

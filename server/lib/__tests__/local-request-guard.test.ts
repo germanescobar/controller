@@ -10,11 +10,14 @@ test("allows CLI and renderer requests but rejects foreign origins and rebinding
   assert.equal(isTrustedLocalRequest({ host }, 3102, 4502), true);
   assert.equal(isTrustedLocalRequest({ host, origin: "http://localhost:3102" }, 3102, 4502), true);
   assert.equal(isTrustedLocalRequest({ host, origin: "http://localhost:4502" }, 3102, 4502), true);
+  assert.equal(isTrustedLocalRequest({ host, origin: "http://localhost:4502", "sec-fetch-site": "same-site" }, 3102, 4502), true);
+  assert.equal(isTrustedLocalRequest({ host, origin: "http://evil.example", "sec-fetch-site": "same-site" }, 3102, 4502), false);
   assert.equal(isTrustedLocalRequest({ host: "localhost:4502", origin: "http://localhost:4502", "sec-fetch-site": "same-origin" }, 3102, 4502), true);
   assert.equal(isTrustedLocalRequest({ host, origin: "http://localhost:4502" }, 3102), false);
   assert.equal(isTrustedLocalRequest({ host, origin: "http://evil.example" }, 3102, 4502), false);
   assert.equal(isTrustedLocalRequest({ host, origin: "null" }, 3102, 4502), false);
   assert.equal(isTrustedLocalRequest({ host, "sec-fetch-site": "cross-site" }, 3102), false);
+  assert.equal(isTrustedLocalRequest({ host, "sec-fetch-site": "same-site" }, 3102), false);
   assert.equal(isTrustedLocalRequest({ host: "evil.example:3102" }, 3102), false);
   assert.equal(isTrustedLocalRequest({ host: "localhost:9999" }, 3102), false);
   assert.equal(isTrustedLocalRequest({ host: ["localhost:3102"] }, 3102), false);
@@ -55,12 +58,12 @@ test("the API guard covers every CLI route with no CORS response for a foreign p
   }
 });
 
-test("WebSocket origin policy rejects a foreign page and accepts the renderer", async () => {
+test("terminal and preview WebSockets accept the dev renderer's same-site upgrades", async () => {
   const server = http.createServer();
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
     const port = (server.address() as { port: number }).port;
-    if (!req.headers.origin || !isTrustedLocalRequest(req.headers, port)) {
+    if (!req.headers.origin || !isTrustedLocalRequest(req.headers, port, port + 1, req.socket.remoteAddress)) {
       socket.destroy();
       return;
     }
@@ -71,20 +74,23 @@ test("WebSocket origin policy rejects a foreign page and accepts the renderer", 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
   try {
-    const rejected = new WebSocket(`ws://127.0.0.1:${port}/ws/preview-browser`, {
-      origin: "https://evil.example",
-    });
-    await assert.rejects(new Promise<void>((resolve, reject) => {
-      rejected.once("open", resolve);
-      rejected.once("error", reject);
-    }));
-    const accepted = new WebSocket(`ws://127.0.0.1:${port}/ws/preview-browser`, {
-      origin: `http://127.0.0.1:${port}`,
-    });
-    await new Promise<void>((resolve, reject) => {
-      accepted.once("open", resolve);
-      accepted.once("error", reject);
-    });
+    for (const route of ["terminal", "preview-browser"]) {
+      const url = `ws://127.0.0.1:${port}/ws/${route}`;
+      const headers = { "sec-fetch-site": "same-site" };
+      const rejected = new WebSocket(url, { origin: "https://evil.example", headers });
+      await assert.rejects(new Promise<void>((resolve, reject) => {
+        rejected.once("open", resolve);
+        rejected.once("error", reject);
+      }));
+      const accepted = new WebSocket(url, {
+        origin: `http://127.0.0.1:${port + 1}`,
+        headers,
+      });
+      await new Promise<void>((resolve, reject) => {
+        accepted.once("open", resolve);
+        accepted.once("error", reject);
+      });
+    }
   } finally {
     wss.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
