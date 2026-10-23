@@ -16,10 +16,10 @@ can drive your machine. **Do not expose it directly to the public internet.**
 
 ## Recommended: Tailscale
 
-[Tailscale](https://tailscale.com) puts your devices on a private network. Controller
-requires you to explicitly allow the Tailscale name you will use. Its API and
-WebSocket endpoints accept that name only from Tailscale peers, while local
-`localhost` access continues to work.
+[Tailscale](https://tailscale.com) puts your devices on a private network.
+Anyone your Tailscale policy permits to reach this device can use Controller.
+Its API and WebSocket endpoints accept connections arriving over Tailscale,
+while local `localhost` access continues to work.
 
 1. Install Tailscale on your Mac (or Linux host) and on your phone.
 2. Sign in to the **same account** on both.
@@ -31,26 +31,7 @@ WebSocket endpoints accept that name only from Tailscale peers, while local
    sudo tailscale set --hostname=macbook
    ```
 
-4. Set `CONTROLLER_TAILSCALE_HOSTS` in the environment that starts Controller,
-   then restart it. For development, for example:
-
-   ```sh
-   CONTROLLER_TAILSCALE_HOSTS=macbook npm run dev
-   ```
-
-   For a packaged macOS app launched from a shell, use:
-
-   ```sh
-   CONTROLLER_TAILSCALE_HOSTS=macbook /Applications/Controller.app/Contents/MacOS/Controller
-   ```
-
-   You can list more than one exact name, separated by commas, such as
-   `macbook,macbook.your-tailnet.ts.net`. Wildcards are not supported. If you
-   browse by Tailscale IPv4 address, add that exact address too. The setting
-   must reach the Controller process; setting it only in a shell and opening
-   the app from Finder will not apply it.
-
-5. From your phone's browser, go to `http://<shortname>:4500` — substituting
+4. From your phone's browser, go to `http://<shortname>:4500` — substituting
    the port you picked on the welcome screen (or the Vite port shown by `npm run dev`):
 
    ```
@@ -58,7 +39,7 @@ WebSocket endpoints accept that name only from Tailscale peers, while local
    ```
 
 The app's **"Listening on port N"** footer has a **Copy** button that grabs the
-full local URL. Replace `localhost` with the allowed Tailscale name on your phone.
+full local URL. Replace `localhost` with the device's Tailscale name on your phone.
 
 Anyone your Tailscale policy permits to reach Controller can use its privileged
 API. Restrict access to devices you trust; Controller does not add a separate

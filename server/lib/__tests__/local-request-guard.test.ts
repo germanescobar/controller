@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
-import { isTrustedLocalRequest, localApiGuard, parseTrustedTailscaleHosts } from "../local-request-guard.js";
+import { isTrustedLocalRequest, localApiGuard } from "../local-request-guard.js";
 
 test("allows CLI and renderer requests but rejects foreign origins and rebinding hosts", () => {
   const host = "localhost:3102";
@@ -25,16 +25,16 @@ test("allows CLI and renderer requests but rejects foreign origins and rebinding
   assert.equal(isTrustedLocalRequest({ host }, 3102, undefined, "::ffff:127.0.0.1"), true);
 });
 
-test("only configured Tailscale hosts and peers can reach API and WebSocket ports", () => {
-  const hosts = parseTrustedTailscaleHosts("macbook, macbook.tailnet.ts.net, 100.101.102.103");
+test("any Tailscale peer can use a tailnet name or the server's Tailscale IP", () => {
   const check = (host: string, origin: string | undefined, peer: string, site?: string) =>
     isTrustedLocalRequest({ host, ...(origin && { origin }), ...(site && { "sec-fetch-site": site }) },
-      3102, 4502, peer, hosts, peer.includes("fd7a:") ? "fd7a:115c:a1e0::2" : "100.101.102.103");
+      3102, 4502, peer, peer.includes("fd7a:") ? "fd7a:115c:a1e0::2" : "100.101.102.103");
 
   assert.equal(check("macbook:3102", "http://macbook:4502", "100.101.102.104"), true);
   assert.equal(check("macbook:3102", "http://macbook:3102", "::ffff:100.101.102.104"), true);
   assert.equal(check("macbook.tailnet.ts.net:3102", "http://macbook.tailnet.ts.net:4502", "fd7a:115c:a1e0::1"), true);
   assert.equal(check("100.101.102.103:3102", undefined, "100.101.102.104"), true);
+  assert.equal(check("100.101.102.105:3102", undefined, "100.101.102.104"), false);
   assert.equal(check("macbook:3102", "http://evil.example", "100.101.102.104"), false);
   assert.equal(check("macbook:3102", "http://localhost:3102", "100.101.102.104"), false);
   assert.equal(check("macbook:3102", "http://macbook.tailnet.ts.net:4502", "100.101.102.104"), false);
@@ -49,15 +49,14 @@ test("only configured Tailscale hosts and peers can reach API and WebSocket port
   assert.equal(check("macbook:4502", "http://macbook:4502", "100.101.102.104"), false);
   assert.equal(check("macbook:3102", "http://macbook:4502", "127.0.0.1"), false);
   assert.equal(isTrustedLocalRequest({ host: "macbook:3102", origin: "http://macbook:4502" },
-    3102, 4502, "100.101.102.104", hosts, "192.168.1.5"), false);
+    3102, 4502, "100.101.102.104", "192.168.1.5"), false);
   assert.equal(isTrustedLocalRequest({ host: "macbook:3102", origin: "http://macbook:4502" },
-    3102, 4502, "100.101.102.104", hosts), false);
+    3102, 4502, "100.101.102.104"), false);
   // Vite proxies API requests over loopback while preserving the browser Origin.
   assert.equal(check("localhost:3102", "http://macbook:4502", "127.0.0.1"), true);
   assert.equal(check("localhost:3102", "http://evil.example", "127.0.0.1"), false);
-  assert.equal(isTrustedLocalRequest({ host: "macbook:3102", origin: "http://macbook:3102" },
-    3102, 4502, "100.101.102.104"), false);
-  assert.deepEqual(parseTrustedTailscaleHosts("macbook,*.ts.net,http://evil.example,localhost"), ["macbook"]);
+  assert.equal(check("localhost:3102", "http://100.101.102.103:4502", "127.0.0.1"), true);
+  assert.equal(check("evil.example:3102", "http://evil.example:3102", "100.101.102.104"), false);
 });
 
 test("the API guard covers every CLI route with no CORS response for a foreign page", async () => {

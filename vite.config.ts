@@ -2,7 +2,7 @@ import path from "node:path";
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { isTrustedLocalRequest, parseTrustedTailscaleHosts } from "./server/lib/local-request-guard";
+import { isTrustedLocalRequest } from "./server/lib/local-request-guard";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -24,7 +24,6 @@ export default defineConfig(({ mode }) => {
   const clientPort = parsePort(env.VITE_DEV_SERVER_PORT, DEV_CLIENT_BASE_PORT);
   const apiPort = parsePort(env.VITE_API_PORT ?? env.API_PORT ?? env.PORT, DEV_API_BASE_PORT);
   const apiTarget = `http://localhost:${apiPort}`;
-  const trustedTailscaleHosts = parseTrustedTailscaleHosts(env.CONTROLLER_TAILSCALE_HOSTS);
 
   return {
     plugins: [react(), tailwindcss(), {
@@ -32,10 +31,15 @@ export default defineConfig(({ mode }) => {
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
           if (req.socket.remoteAddress && isTrustedLocalRequest(
-            req.headers, clientPort, undefined, req.socket.remoteAddress, trustedTailscaleHosts, req.socket.localAddress
+            req.headers, clientPort, undefined, req.socket.remoteAddress, req.socket.localAddress
           )) return next();
           res.statusCode = 403;
           res.end("Request origin is not allowed");
+        });
+        server.httpServer?.prependListener("upgrade", (req, socket) => {
+          if (!req.socket.remoteAddress || !isTrustedLocalRequest(
+            req.headers, clientPort, undefined, req.socket.remoteAddress, req.socket.localAddress
+          )) socket.destroy();
         });
       },
     }],
@@ -48,7 +52,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: "0.0.0.0",
-      allowedHosts: trustedTailscaleHosts,
+      allowedHosts: true,
       port: clientPort,
       proxy: {
         "/api": {

@@ -11,20 +11,11 @@ const tailnetAddresses = new BlockList();
 tailnetAddresses.addSubnet("100.64.0.0", 10, "ipv4");
 tailnetAddresses.addSubnet("fd7a:115c:a1e0::", 48, "ipv6");
 
-export function parseTrustedTailscaleHosts(value: string | undefined): string[] {
-  if (!value) return [];
-  return value.split(",").map((host) => host.trim().toLowerCase()).filter((host) => {
-    return host !== "localhost" && host !== "127.0.0.1" && host !== "::1" &&
-      (isIP(host) === 4 || /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(host));
-  });
-}
-
 export function isTrustedLocalRequest(
   headers: IncomingHttpHeaders,
   serverPort: number,
   devClientPort?: number,
   remoteAddress?: string,
-  trustedTailscaleHosts: readonly string[] = [],
   localAddress?: string
 ): boolean {
   const loopbackPeer = remoteAddress === undefined || isLoopbackAddress(remoteAddress);
@@ -34,21 +25,24 @@ export function isTrustedLocalRequest(
   const host = singleHeader(headers.host);
   if (!host) return false;
   const localHost = isLoopbackAuthority(host, serverPort, devClientPort);
-  const tailnetHost = isTrustedTailscaleAuthority(host, serverPort, trustedTailscaleHosts);
+  const tailnetHost = tailscalePeer && isTrustedTailscaleAuthority(host, serverPort, localAddress!);
   if (!(loopbackPeer && localHost) && !(tailscalePeer && tailnetHost)) return false;
 
   const origin = singleHeader(headers.origin);
   if (headers.origin !== undefined && !origin) return false;
   if (origin) {
-    const originHosts = tailnetHost
-      ? [new URL(`http://${host}`).hostname]
-      : ["localhost", "127.0.0.1", "[::1]", ...trustedTailscaleHosts];
-    const allowed = new Set<string>();
-    for (const name of originHosts) {
-      allowed.add(`http://${name}:${serverPort}`);
-      if (devClientPort !== undefined) allowed.add(`http://${name}:${devClientPort}`);
+    if (tailnetHost) {
+      const name = new URL(`http://${host}`).hostname;
+      return origin === `http://${name}:${serverPort}` ||
+        (devClientPort !== undefined && origin === `http://${name}:${devClientPort}`);
     }
-    return allowed.has(origin);
+    const localOrigins = ["localhost", "127.0.0.1", "[::1]"];
+    for (const name of localOrigins) {
+      if (origin === `http://${name}:${serverPort}` ||
+        (devClientPort !== undefined && origin === `http://${name}:${devClientPort}`)) return true;
+    }
+    // Vite proxies browser API requests over loopback and preserves Origin.
+    return devClientPort !== undefined && isTailnetOrigin(origin, devClientPort);
   }
 
   // Fetch Metadata covers browser requests that omit Origin (images, links, etc.).
@@ -56,10 +50,10 @@ export function isTrustedLocalRequest(
   return site !== "cross-site" && site !== "same-site";
 }
 
-export function localApiGuard(serverPort: () => number, devClientPort?: number, trustedTailscaleHosts: readonly string[] = []): RequestHandler {
+export function localApiGuard(serverPort: () => number, devClientPort?: number): RequestHandler {
   return (req, res, next) => {
     const trusted = req.socket.remoteAddress !== undefined &&
-      isTrustedLocalRequest(req.headers, serverPort(), devClientPort, req.socket.remoteAddress, trustedTailscaleHosts, req.socket.localAddress);
+      isTrustedLocalRequest(req.headers, serverPort(), devClientPort, req.socket.remoteAddress, req.socket.localAddress);
     if (!trusted) {
       res.status(403).json({ error: "Request origin is not allowed" });
       return;
@@ -95,13 +89,33 @@ function isLoopbackAuthority(authority: string, serverPort: number, devClientPor
   }
 }
 
-function isTrustedTailscaleAuthority(authority: string, serverPort: number, hosts: readonly string[]): boolean {
+function isTrustedTailscaleAuthority(authority: string, serverPort: number, localAddress: string): boolean {
   try {
     const url = new URL(`http://${authority}`);
     return url.host === authority &&
       url.port === String(serverPort) &&
-      hosts.includes(url.hostname);
+      isTailnetHostName(url.hostname, localAddress);
   } catch {
     return false;
   }
+}
+
+function isTailnetOrigin(origin: string, port: number): boolean {
+  try {
+    const url = new URL(origin);
+    const name = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
+    return url.origin === origin && url.protocol === "http:" && url.port === String(port) &&
+      (isTailnetHostName(url.hostname) || isTailscaleAddress(name));
+  } catch {
+    return false;
+  }
+}
+
+function isTailnetHostName(name: string, localAddress?: string): boolean {
+  if (name === "localhost" || name === "[::1]") return false;
+  const normalized = name.startsWith("[") && name.endsWith("]") ? name.slice(1, -1) : name;
+  if (isIP(normalized)) return localAddress !== undefined && normalized === localAddress.replace(/^::ffff:/, "");
+  // MagicDNS short names and full *.ts.net names are private to a tailnet.
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name) ||
+    /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+ts\.net$/.test(name);
 }
