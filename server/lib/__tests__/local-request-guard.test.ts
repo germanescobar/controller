@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
+import net from "node:net";
+import path from "node:path";
+import { createServer as createViteServer } from "vite";
 import WebSocket, { WebSocketServer } from "ws";
 import { isTrustedLocalRequest, localApiGuard } from "../local-request-guard.js";
 
@@ -52,10 +55,11 @@ test("any Tailscale peer can use a tailnet name or the server's Tailscale IP", (
     3102, 4502, "100.101.102.104", "192.168.1.5"), false);
   assert.equal(isTrustedLocalRequest({ host: "macbook:3102", origin: "http://macbook:4502" },
     3102, 4502, "100.101.102.104"), false);
-  // Vite proxies API requests over loopback while preserving the browser Origin.
-  assert.equal(check("localhost:3102", "http://macbook:4502", "127.0.0.1"), true);
+  // Direct loopback requests cannot impersonate Vite's trusted proxy.
+  assert.equal(check("localhost:3102", "http://macbook:4502", "127.0.0.1"), false);
+  assert.equal(check("localhost:3102", "http://attacker:4502", "127.0.0.1"), false);
   assert.equal(check("localhost:3102", "http://evil.example", "127.0.0.1"), false);
-  assert.equal(check("localhost:3102", "http://100.101.102.103:4502", "127.0.0.1"), true);
+  assert.equal(check("localhost:3102", "http://100.101.102.103:4502", "127.0.0.1"), false);
   assert.equal(check("evil.example:3102", "http://evil.example:3102", "100.101.102.104"), false);
 });
 
@@ -128,5 +132,79 @@ test("terminal and preview WebSockets accept the dev renderer's same-site upgrad
   } finally {
     wss.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("Vite's fallback port proxies API and WebSockets with a trusted backend Origin", async () => {
+  const app = express();
+  const backend = http.createServer(app);
+  const backendPort = () => (backend.address() as { port: number }).port;
+  app.use("/api", localApiGuard(backendPort, 4502));
+  app.get("/api/check", (_req, res) => res.sendStatus(204));
+  const wss = new WebSocketServer({ noServer: true });
+  backend.on("upgrade", (req, socket, head) => {
+    if (!req.headers.origin || !isTrustedLocalRequest(req.headers, backendPort(), 4502,
+      req.socket.remoteAddress, req.socket.localAddress)) {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => ws.close());
+  });
+  const blocker = net.createServer();
+  await new Promise<void>((resolve) => backend.listen(0, resolve));
+  await new Promise<void>((resolve) => blocker.listen(0, "0.0.0.0", resolve));
+  const requestedPort = (blocker.address() as { port: number }).port;
+  const previousClientPort = process.env.VITE_DEV_SERVER_PORT;
+  const previousApiPort = process.env.VITE_API_PORT;
+  process.env.VITE_DEV_SERVER_PORT = String(requestedPort);
+  process.env.VITE_API_PORT = String(backendPort());
+  let vite: Awaited<ReturnType<typeof createViteServer>> | undefined;
+  try {
+    vite = await createViteServer({ configFile: path.resolve("vite.config.ts"), logLevel: "silent" });
+    await vite.listen();
+    const actualPort = (vite.httpServer!.address() as { port: number }).port;
+    assert.notEqual(actualPort, requestedPort);
+    const origin = `http://127.0.0.1:${actualPort}`;
+    const response = await fetch(`${origin}/api/check`, { headers: { origin } });
+    assert.equal(response.status, 204);
+    const hostileRequest = await fetch(`${origin}/api/check`, {
+      headers: { origin: "http://attacker:4502", "sec-fetch-site": "cross-site" },
+    });
+    assert.equal(hostileRequest.status, 403);
+
+    for (const route of ["terminal", "preview-browser"]) {
+      const ws = new WebSocket(`ws://127.0.0.1:${actualPort}/ws/${route}`, { origin });
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", resolve);
+        ws.once("error", reject);
+      });
+      ws.close();
+    }
+
+    const hostileViaVite = new WebSocket(`ws://127.0.0.1:${actualPort}/ws/terminal`, {
+      origin: "http://attacker:4502",
+    });
+    await assert.rejects(new Promise<void>((resolve, reject) => {
+      hostileViaVite.once("open", resolve);
+      hostileViaVite.once("error", reject);
+    }));
+
+    const hostile = new WebSocket(`ws://127.0.0.1:${backendPort()}/ws/terminal`, {
+      origin: "http://attacker:4502",
+      headers: { "sec-fetch-site": "cross-site" },
+    });
+    await assert.rejects(new Promise<void>((resolve, reject) => {
+      hostile.once("open", resolve);
+      hostile.once("error", reject);
+    }));
+  } finally {
+    if (vite) await vite.close();
+    wss.close();
+    await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+    if (previousClientPort === undefined) delete process.env.VITE_DEV_SERVER_PORT;
+    else process.env.VITE_DEV_SERVER_PORT = previousClientPort;
+    if (previousApiPort === undefined) delete process.env.VITE_API_PORT;
+    else process.env.VITE_API_PORT = previousApiPort;
   }
 });

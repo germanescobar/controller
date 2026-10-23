@@ -81,11 +81,7 @@ const MAX_WAIT_MS = 15_000;
 
 export function previewBrowserWsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host = window.location.hostname;
-  const port = import.meta.env.DEV
-    ? import.meta.env.VITE_API_PORT ?? "3100"
-    : window.location.port;
-  return `${protocol}//${host}:${port}/ws/preview-browser`;
+  return `${protocol}//${window.location.host}/ws/preview-browser`;
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {

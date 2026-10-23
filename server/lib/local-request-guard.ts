@@ -41,8 +41,7 @@ export function isTrustedLocalRequest(
       if (origin === `http://${name}:${serverPort}` ||
         (devClientPort !== undefined && origin === `http://${name}:${devClientPort}`)) return true;
     }
-    // Vite proxies browser API requests over loopback and preserves Origin.
-    return devClientPort !== undefined && isTailnetOrigin(origin, devClientPort);
+    return false;
   }
 
   // Fetch Metadata covers browser requests that omit Origin (images, links, etc.).
@@ -95,17 +94,6 @@ function isTrustedTailscaleAuthority(authority: string, serverPort: number, loca
     return url.host === authority &&
       url.port === String(serverPort) &&
       isTailnetHostName(url.hostname, localAddress);
-  } catch {
-    return false;
-  }
-}
-
-function isTailnetOrigin(origin: string, port: number): boolean {
-  try {
-    const url = new URL(origin);
-    const name = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
-    return url.origin === origin && url.protocol === "http:" && url.port === String(port) &&
-      (isTailnetHostName(url.hostname) || isTailscaleAddress(name));
   } catch {
     return false;
   }

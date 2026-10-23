@@ -100,7 +100,7 @@ npm run dev
 
 This starts both the Express server (port 3102 by default) and the Vite dev server concurrently. Each dev launch keeps its CLI and runtime under a separate `<CONTROLLER_HOME>/dev/` directory, so development does not replace the packaged app's CLI or another launch from the same checkout. Servers sharing one Controller home claim a single owner for schedules, wakes, goals, and managed-skill installation; a second server still serves requests and takes over shared work when the owner exits.
 
-The Vite dev server listens on port 4502 by default and proxies `/api` to the Express server. Devices on the same Tailscale network can reach it using the host's Tailscale name or address. See [Remote access](docs/content/docs/remote-access.mdx).
+The Vite dev server listens on port 4502 by default and proxies `/api` and both `/ws` endpoints to the Express server. Devices on the same Tailscale network can reach it using the host's Tailscale name or address. See [Remote access](docs/content/docs/remote-access.mdx).
 
 ### Electron Development
 
