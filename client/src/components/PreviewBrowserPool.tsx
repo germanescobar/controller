@@ -38,6 +38,7 @@ import type { BrowserServerMessage } from "../../../shared/preview-browser";
 import { PreviewDiagnosticBuffer } from "../../../shared/preview-diagnostics";
 import { PreviewViewportStore } from "@/lib/preview-viewport";
 import type { BrowserDiagnostic, BrowserViewport } from "../../../shared/preview-browser";
+import { previewPartitionForKey } from "../../../shared/preview-partition";
 
 type PreviewOpenResult = { ok: true; loaded?: boolean } | { ok: false; error: string };
 
@@ -291,11 +292,15 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
       store.updateTab(key, targetId, {
         input: url, loading: true, error: null, insecure: options.insecure === true,
       });
-      // Toggle the cert-verify bypass *before* validation so a self-signed
+      // Set this pane's cert policy *before* validation so a self-signed
       // localhost cert doesn't get re-checked at navigation time. We always
       // resolve the previous policy first; the bypass is per-call, not sticky.
       try {
-        await getController().setPreviewCertPolicy({ insecure: options.insecure === true });
+        const policy = await getController().setPreviewCertPolicy({
+          browserKey: key,
+          insecure: options.insecure === true,
+        });
+        if (!policy.ok) throw new Error(policy.error ?? "Failed to set preview certificate policy");
         const result = await getController().validatePreviewUrl(url, store.getRoot(key));
         if (!result.allowed || !result.url) {
           const error = result.error ?? "Preview URL is not allowed";
@@ -303,7 +308,7 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
           toast.error(error);
           return { ok: false, error };
         }
-        const previousUrl = store.getTab(key, targetId)?.url;
+        const previousSrc = store.getTab(key, targetId)?.src;
         store.updateTab(key, targetId, {
           input: result.url,
           url: result.url,
@@ -312,7 +317,9 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
           loading: true,
           error: null,
         });
-        if (previousUrl === result.url) {
+        // React cannot restart a guest load when its src prop stays the same
+        // (for example, reopening the form page after a native POST).
+        if (previousSrc === result.url) {
           const webview = webviewEls.current.get(`${key}:${targetId}`);
           if (webview?.loadURL) {
             try {
@@ -355,9 +362,10 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
     // A redirect can leave reload() targeting an obsolete provisional load.
     // Revalidate the committed URL and explicitly navigate the guest instead.
     const insecure = store.getTab(key, tabId)?.insecure === true;
-    void getController().setPreviewCertPolicy({ insecure }).then(() =>
-      getController().validatePreviewUrl(url, store.getRoot(key))
-    ).then((result) => {
+    void getController().setPreviewCertPolicy({ browserKey: key, insecure }).then((policy) => {
+      if (!policy.ok) throw new Error(policy.error ?? "Failed to set preview certificate policy");
+      return getController().validatePreviewUrl(url, store.getRoot(key));
+    }).then((result) => {
       if (!result.allowed || !result.url) {
         store.updateTab(key, tabId, { loading: false, error: result.error ?? "Preview URL is not allowed" });
         return;
@@ -737,7 +745,7 @@ function TabFrame({ paneKey, tab, store, registerWebview, onNavigationStart, onD
   return createElement("webview", {
     ref: setWebview,
     src: tab.src,
-    partition: "controller-preview",
+    partition: previewPartitionForKey(paneKey),
     allowpopups: "true",
     webpreferences: "contextIsolation=yes,nodeIntegration=no,sandbox=yes",
   });

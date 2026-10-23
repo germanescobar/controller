@@ -20,42 +20,18 @@ import { canNavigatePreviewDirectly, canonicalizeForBoundary, validatePreviewUrl
 import { completedPreviewRequest } from "./preview-request-tracker.js";
 import { diagnosticUrl, diagnosticMessage, MAX_DIAGNOSTICS } from "../shared/preview-diagnostics.js";
 import type { BrowserDiagnostic } from "../shared/preview-browser.js";
+import { PreviewCertPolicy, previewPartitionForKey } from "../shared/preview-partition.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_CLIENT_PORT = 4500;
 const MAX_PORT_SEARCH_OFFSET = 100;
-const PREVIEW_PARTITION = "controller-preview";
 const previewResponses = new Map<number, {
   url: string;
   statusCode: number;
   at: number;
 }>();
-
-// Toggle for the preview-pane cert-verify bypass. Set by the
-// `controller:set-preview-cert-policy` IPC handler when the agent passes
-// `--insecure` to `controller browser open`, and reset by the next
-// non-`--insecure` open (so the bypass is per-call, not sticky).
-//
-// We can't just call `setCertificateVerifyProc` on demand inside the IPC
-// handler: in Electron the proc only takes effect if it's installed on
-// the session before any webview starts using it. Once a webview has
-// navigated through `controller-preview`, swapping the proc is a no-op —
-// the next load still uses Chromium's default verifier and fails on
-// self-signed loopback certs. Installing the proc eagerly at startup
-// and reading this flag from inside the closure avoids that race
-// entirely; the IPC handler is now a one-line flag flip.
-//
-// Known limitation: every preview pane shares the same
-// `controller-preview` partition (see `PreviewBrowserPool.tsx`), so this
-// flag is effectively process-wide. When two panes issue `open` calls
-// that overlap — e.g. one starts an `--insecure` navigation and another
-// pane performs a plain open before the cert handshake fires — the last
-// IPC wins, and the earlier pane can lose (or gain) the bypass
-// spuriously. A full fix (per-pane partitions, each with its own proc)
-// is tracked in #325; this PR stays within the original #324 / #323
-// scope and only fixes the eager-install race.
-let previewCertBypassEnabled = false;
+const previewCertPolicies = new Map<string, PreviewCertPolicy>();
 
 // Mark the start of the main process so every log line can be prefixed
 // with elapsed time. Helpful for diagnosing slow first-launch flows where
@@ -584,8 +560,13 @@ function denyPreviewSessionPermissions(session: Session): void {
   });
 }
 
-function attachPreviewPartitionGuards(): void {
-  const session = electronSession.fromPartition(PREVIEW_PARTITION);
+function attachPreviewPartitionGuards(browserKey: string): PreviewCertPolicy {
+  const partition = previewPartitionForKey(browserKey);
+  const existing = previewCertPolicies.get(partition);
+  if (existing) return existing;
+
+  const session = electronSession.fromPartition(partition);
+  const policy = new PreviewCertPolicy();
   denyPreviewSessionPermissions(session);
   session.webRequest.onErrorOccurred((details) => {
     if (details.error === "net::ERR_ABORTED") return;
@@ -605,10 +586,8 @@ function attachPreviewPartitionGuards(): void {
       recordPreviewRequestFailure(result.guestId, details.url, result.failure);
     }
   });
-  // Install the cert-verify proc ONCE, before any webview touches the
-  // session. See the `previewCertBypassEnabled` comment for why we can't
-  // install it lazily inside the IPC handler — Electron only honors a
-  // proc that was in place before the first connection.
+  // Install once, before openUrl mounts this pane's first webview. Electron
+  // does not honor a replacement proc after the session has been used.
   //
   // The proc is scoped to loopback hosts so the agent can reach a local
   // dev server with a self-signed cert without gaining the ability to
@@ -619,18 +598,10 @@ function attachPreviewPartitionGuards(): void {
   // a valid cert — are still checked and accepted. Returning `-2` would
   // actively break those loads.
   session.setCertificateVerifyProc((request, callback) => {
-    if (!previewCertBypassEnabled) {
-      callback(-3);
-      return;
-    }
-    const host = (request.hostname ?? "").toLowerCase();
-    const isLoopback =
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "[::1]" ||
-      host === "::1";
-    callback(isLoopback ? 0 : -3);
+    callback(policy.verify(request.hostname ?? ""));
   });
+  previewCertPolicies.set(partition, policy);
+  return policy;
 }
 
 function blockPreviewPopups(contents: WebContents, host?: WebContents): void {
@@ -719,17 +690,12 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
 }
 
 /**
- * Toggle the TLS-cert verification bypass on the preview pane's session.
+ * Set the TLS-cert verification bypass on one preview pane's session.
  * Called from the renderer through the `controller:set-preview-cert-policy`
  * IPC handler when the agent passes `--insecure` to `controller browser open`.
  *
- * The actual cert-verify proc is installed eagerly at app startup by
- * `attachPreviewPartitionGuards` — once a webview has navigated through
- * `controller-preview`, calling `setCertificateVerifyProc` from the IPC
- * handler is a silent no-op and the next load still uses Chromium's default
- * verifier. Flipping the `previewCertBypassEnabled` flag here is enough:
- * the proc reads the flag on every verification and decides whether to
- * allow loopback certs.
+ * The proc is installed when this pane first opens, before its webview mounts.
+ * Later opens only update that pane's policy, never another pane's session.
  *
  * The bypass is intentionally scoped to localhost-shaped hosts so the agent
  * can reach a local dev server with a self-signed cert without gaining the
@@ -738,14 +704,17 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
  * continue to be rejected on TLS errors.
  */
 function setPreviewCertPolicy(opts: unknown): { ok: boolean; error?: string } {
-  if (opts === null) {
-    previewCertBypassEnabled = false;
-    return { ok: true };
-  }
   if (!opts || typeof opts !== "object") {
-    return { ok: false, error: "Cert-policy opts must be an object or null" };
+    return { ok: false, error: "Cert-policy opts must be an object" };
   }
-  previewCertBypassEnabled = (opts as { insecure?: unknown }).insecure === true;
+  const { browserKey, insecure } = opts as { browserKey?: unknown; insecure?: unknown };
+  if (typeof browserKey !== "string" || !browserKey) {
+    return { ok: false, error: "Preview pane key must be a non-empty string" };
+  }
+  if (typeof insecure !== "boolean") {
+    return { ok: false, error: "Cert-policy insecure flag must be a boolean" };
+  }
+  attachPreviewPartitionGuards(browserKey).setInsecure(insecure);
   return { ok: true };
 }
 
@@ -967,7 +936,6 @@ app.whenReady().then(async () => {
   logWithTime("app ready");
   registerIpcHandlers();
   logWithTime("ipc handlers registered");
-  attachPreviewPartitionGuards();
   app.on("web-contents-created", (_event, contents) => {
     if (contents.getType() === "window") {
       attachPreviewWebviewGuards(contents);

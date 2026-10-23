@@ -76,12 +76,12 @@ export interface ControllerBridge {
   ) => Promise<PreviewResponseStatus | null>;
   capturePreviewPage: (guestId: number) => Promise<PreviewCaptureResult>;
   /**
-   * Toggle the TLS-cert verification bypass on the preview pane's session.
+   * Set the TLS-cert verification bypass on the named preview pane's session.
    * Used by the agent-controlled browser when the user passes `--insecure`
    * to `controller browser open`. The bypass is scoped to loopback hosts in
    * the main process, so external URLs are unaffected.
    */
-  setPreviewCertPolicy: (opts: { insecure: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  setPreviewCertPolicy: (opts: { browserKey: string; insecure: boolean }) => Promise<{ ok: boolean; error?: string }>;
   /**
    * Read a file from disk for the agent-driven preview browser
    * (issue #356). The main process re-runs the path policy at read

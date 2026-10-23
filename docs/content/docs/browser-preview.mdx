@@ -132,6 +132,9 @@ bypass can never be used to talk to an arbitrary external host without cert
 validation. Human users running the same flow in a normal browser can keep
 clicking through the "Advanced → Proceed" interstitial.
 
+Each worktree preview uses its own browser session. Cookies, localStorage, and
+the `--insecure` certificate policy in one worktree do not affect another.
+
 ## Uploading files from the agent
 
 When the page you're testing contains an `<input type="file">` (single or
