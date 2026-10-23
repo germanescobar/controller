@@ -4,11 +4,14 @@ import type {
   ControllerBridge,
   ControllerCheckResult,
   PreviewFileReadResult,
+  PreviewPopupRequest,
   PreviewUrlCheckResult,
   ControllerStatus,
 } from "../shared/controller.js";
 
 const statusListeners = new Set<(status: ControllerStatus) => void>();
+const popupListeners = new Set<(request: PreviewPopupRequest) => void>();
+const navigationListeners = new Set<(request: PreviewPopupRequest) => void>();
 // Cached so getStatus() can return synchronously, which is what the
 // StatusBar needs on mount to avoid flashing "Connecting...".
 let latestStatus: ControllerStatus | null = null;
@@ -22,6 +25,16 @@ ipcRenderer.on("controller:status", (_event, status: ControllerStatus) => {
       console.error("controller:status listener threw:", err);
     }
   }
+});
+
+ipcRenderer.on("controller:preview-popup", (_event, request: PreviewPopupRequest) => {
+  if (typeof request?.guestId !== "number" || typeof request.url !== "string") return;
+  for (const listener of popupListeners) listener(request);
+});
+
+ipcRenderer.on("controller:preview-navigation", (_event, request: PreviewPopupRequest) => {
+  if (typeof request?.guestId !== "number" || typeof request.url !== "string") return;
+  for (const listener of navigationListeners) listener(request);
 });
 
 const bridge: ControllerBridge = {
@@ -60,6 +73,14 @@ const bridge: ControllerBridge = {
       url,
       projectRoot
     ) as Promise<PreviewUrlCheckResult>,
+  onPreviewPopup: (cb) => {
+    popupListeners.add(cb);
+    return () => popupListeners.delete(cb);
+  },
+  onPreviewNavigation: (cb) => {
+    navigationListeners.add(cb);
+    return () => navigationListeners.delete(cb);
+  },
   setPreviewCertPolicy: (opts) =>
     ipcRenderer.invoke(
       "controller:set-preview-cert-policy",

@@ -42,6 +42,7 @@ export interface PreviewWebview extends HTMLElement {
   canGoBack?: () => boolean;
   goBack?: () => void;
   sendInputEvent?: (event: { type: "keyDown" | "keyUp" | "char"; keyCode: string }) => void;
+  loadURL?: (url: string) => Promise<void>;
   getWebContentsId?: () => number;
   capturePage?: () => Promise<{ toPNG: () => Uint8Array; getSize: () => BrowserViewport }>;
 }
@@ -54,7 +55,7 @@ export interface PreviewBrowserHostOptions {
   /** Returns the live `<webview>` element, or null when no page is open. */
   getWebview: () => PreviewWebview | null;
   /** Trigger the visible navigation flow (validates + switches to Preview). */
-  openUrl: (url: string, options?: { insecure?: boolean }) => void;
+  openUrl: (url: string, options?: { insecure?: boolean }) => Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * Worktree path the pane is bound to. Used by `setFiles` so the
    * Electron main process can re-check the path policy on read
@@ -265,22 +266,20 @@ async function handleScreenshot(webview: PreviewWebview | null, fullPage: boolea
 // Command handlers
 // ---------------------------------------------------------------------------
 
-async function handleOpen(
+export async function handleOpen(
   url: string,
   insecure: boolean,
   getWebview: () => PreviewWebview | null,
-  openUrl: (url: string, options?: { insecure?: boolean }) => void
+  openUrl: (url: string, options?: { insecure?: boolean }) => Promise<{ ok: true } | { ok: false; error: string }>
 ): Promise<BrowserCommandResult> {
   if (!url) return { ok: false, error: "Missing url" };
   // Capture the current URL before navigating so we can tell when the *new*
   // page has actually loaded — otherwise an already-open idle pane would report
   // success against the old page and a follow-up snapshot would read it.
   const beforeUrl = safeCall(() => getWebview()?.getURL()) ?? null;
-  openUrl(url, insecure ? { insecure: true } : undefined);
+  const opened = await openUrl(url, insecure ? { insecure: true } : undefined);
+  if (!opened.ok) return { ok: false, error: opened.error };
   const webview = await waitForOpenComplete(getWebview, beforeUrl);
-  if (!webview) {
-    return { ok: true, url, summary: `Opened ${url}` };
-  }
   return {
     ok: true,
     url: safeCall(() => webview.getURL()) ?? url,
@@ -567,14 +566,17 @@ export async function retryAction(
   timeoutMs: number
 ): Promise<{ ok: boolean; engine?: string; error?: string } | null> {
   const deadline = Date.now() + timeoutMs;
-  let last: { ok: boolean; engine?: string; error?: string } | null = null;
+  let lastError = "no result";
+  let lastEngine: string | undefined;
   do {
-    last = (await webview.executeJavaScript(script())) as typeof last;
-    if (!last || last.ok || last.error === "unknown ref" || last.error === "stale ref" || last.error?.startsWith("ambiguous")) return last;
+    const result = (await webview.executeJavaScript(script())) as { ok: boolean; engine?: string; error?: string } | null;
+    if (!result || result.ok || result.error === "unknown ref" || result.error === "stale ref" || result.error?.startsWith("ambiguous")) return result;
+    lastError = result.error ?? "no result";
+    lastEngine = result.engine;
     if (Date.now() >= deadline) break;
     await delay(Math.min(100, deadline - Date.now()));
   } while (true);
-  return { ...last, ok: false, error: `timed out after ${timeoutMs}ms (last reason: ${last?.error ?? "no result"})` };
+  return { ok: false, engine: lastEngine, error: `timed out after ${timeoutMs}ms (last reason: ${lastError})` };
 }
 
 async function handleWait(
@@ -631,35 +633,44 @@ async function handleBack(webview: PreviewWebview | null): Promise<BrowserComman
  * Wait for an `open` to settle on the newly requested page. Resolves when a
  * fresh load cycle completes (`did-stop-loading`) or the webview has finished
  * loading a URL different from `beforeUrl`, whichever comes first. Falls back to
- * a timeout so a non-navigating `open` (e.g. re-opening the current URL) still
- * returns. Returns null only if the webview never appears.
+ * a timeout with an error if no new page ever settles. In particular, a
+ * validation failure must not report success against the old page.
  */
-async function waitForOpenComplete(
+export async function waitForOpenComplete(
   getWebview: () => PreviewWebview | null,
-  beforeUrl: string | null
-): Promise<PreviewWebview | null> {
+  beforeUrl: string | null,
+  timeoutMs = LOAD_TIMEOUT_MS
+): Promise<PreviewWebview> {
   const start = Date.now();
   let webview = getWebview();
-  while (!webview && Date.now() - start < LOAD_TIMEOUT_MS) {
+  while (!webview && Date.now() - start < timeoutMs) {
     await delay(100);
     webview = getWebview();
   }
-  if (!webview) return null;
+  if (!webview) throw new Error("Preview page did not open before the load timeout");
 
   const el = webview;
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const finish = () => {
+    const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
       el.removeEventListener("did-stop-loading", onStop);
+      el.removeEventListener("did-fail-load", onFail);
       window.clearInterval(interval);
       window.clearTimeout(timer);
-      resolve();
+      if (error) reject(error);
+      else resolve();
     };
     // A completed load cycle since we started waiting is the new navigation —
     // the old page was idle, so it has no pending load to confuse us.
     const onStop = () => finish();
+    const onFail = (event: Event) => {
+      const failure = event as Event & { errorCode?: number; errorDescription?: string };
+      if (failure.errorCode !== -3) {
+        finish(new Error(failure.errorDescription ?? "Preview failed to load"));
+      }
+    };
     // Also poll, in case the new load finished before listeners attached
     // (common on the very first open, where the webview mounts mid-navigation).
     const poll = () => {
@@ -668,8 +679,9 @@ async function waitForOpenComplete(
       if (!loading && current && current !== beforeUrl) finish();
     };
     const interval = window.setInterval(poll, 120);
-    const timer = window.setTimeout(finish, LOAD_TIMEOUT_MS - (Date.now() - start));
+    const timer = window.setTimeout(() => finish(new Error("Preview page did not finish loading before the load timeout")), Math.max(0, timeoutMs - (Date.now() - start)));
     el.addEventListener("did-stop-loading", onStop);
+    el.addEventListener("did-fail-load", onFail);
     poll();
   });
   return el;

@@ -622,11 +622,30 @@ function attachPreviewPartitionGuards(): void {
   });
 }
 
-function blockPreviewPopups(contents: WebContents): void {
+function blockPreviewPopups(contents: WebContents, host?: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
-    warnWithTime(`blocked preview popup: ${url}`);
+    // Never let Electron create a child BrowserWindow. The renderer identifies
+    // the originating guest and runs the normal preview URL policy before it
+    // creates a tab in that pane.
+    if (host && !host.isDestroyed() && url && url !== "about:blank") {
+      host.send("controller:preview-popup", { guestId: contents.id, url });
+    } else {
+      warnWithTime(`blocked preview popup: ${url}`);
+    }
     return { action: "deny" };
   });
+}
+
+function guardPreviewNavigation(guest: WebContents, host: WebContents): void {
+  const route = (event: Electron.Event, url: string, isMainFrame: boolean, redirect: boolean) => {
+    if (!isMainFrame) return;
+    event.preventDefault();
+    if (!host.isDestroyed()) {
+      host.send("controller:preview-navigation", { guestId: guest.id, url, redirect });
+    }
+  };
+  guest.on("will-navigate", (event) => route(event, event.url, event.isMainFrame, false));
+  guest.on("will-redirect", (event) => route(event, event.url, event.isMainFrame, true));
 }
 
 // Electron 22+ denies `target="_blank"` requests by default. Without a
@@ -636,7 +655,7 @@ function blockPreviewPopups(contents: WebContents): void {
 // user's browser. We forward http(s) URLs to the system default browser
 // and mailto: URLs to the user's mail client, both via
 // shell.openExternal, and deny anything else. Preview webviews override
-// this with a stricter deny-all handler installed by
+// this with a deny-and-route handler installed by
 // attachPreviewWebviewGuards.
 function attachExternalLinkHandler(contents: WebContents): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -676,7 +695,8 @@ function attachPreviewWebviewGuards(contents: WebContents): void {
     logWithTime(`preview webview attached: ${src || "(empty)"}`);
   });
   contents.on("did-attach-webview", (_event, webContents) => {
-    blockPreviewPopups(webContents);
+    blockPreviewPopups(webContents, contents);
+    guardPreviewNavigation(webContents, contents);
     denyPreviewSessionPermissions(webContents.session);
     observePreviewRequests(webContents.session);
     previewContents.set(webContents.id, contents.id);
