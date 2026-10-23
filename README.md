@@ -100,7 +100,7 @@ npm run dev
 
 This starts both the Express server (port 3102 by default) and the Vite dev server concurrently. Each dev launch keeps its CLI and runtime under a separate `<CONTROLLER_HOME>/dev/` directory, so development does not replace the packaged app's CLI or another launch from the same checkout. Servers sharing one Controller home claim a single owner for schedules, wakes, goals, and managed-skill installation; a second server still serves requests and takes over shared work when the owner exits.
 
-The Vite dev server listens on port 4500 by default and proxies `/api` and `/ws/terminal` to the Express server. The server remains reachable from other devices when your network allows it, which supports mobile access through trusted LAN, VPN, or secure tunnel setups such as Tailscale.
+The Vite dev server listens on port 4502 by default and proxies `/api` to the Express server. Remote Tailscale access requires `CONTROLLER_TAILSCALE_HOSTS` to contain the exact Tailscale hostname or IPv4 address used in the browser. For example, start development with `CONTROLLER_TAILSCALE_HOSTS=macbook npm run dev`. See [Remote access](docs/content/docs/remote-access.mdx).
 
 ### Electron Development
 
@@ -126,7 +126,7 @@ The same window shows a "Listening on port N" footer in the main app shell, with
 
 ### Network Access
 
-Coding Orchestrator can manage local paths, spawn agent CLIs, run terminal sessions, and store API keys. Treat the backend as privileged. For access from phones or other devices, prefer trusted networks, VPNs, or secure tunnels such as Tailscale. Do not expose the server directly to the public internet without adding an authentication layer.
+Controller can manage local paths, spawn agent CLIs, run terminal sessions, and store API keys. Treat the backend as privileged. Configure remote access through Tailscale and limit which tailnet devices can reach it. Direct LAN API and WebSocket requests are blocked, and the server must not be exposed to the public internet.
 
 ## Releases
 

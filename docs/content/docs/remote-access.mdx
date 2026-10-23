@@ -16,8 +16,10 @@ can drive your machine. **Do not expose it directly to the public internet.**
 
 ## Recommended: Tailscale
 
-[Tailscale](https://tailscale.com) puts your devices on a private network so
-only they can reach each other — no open ports, no public exposure.
+[Tailscale](https://tailscale.com) puts your devices on a private network. Controller
+requires you to explicitly allow the Tailscale name you will use. Its API and
+WebSocket endpoints accept that name only from Tailscale peers, while local
+`localhost` access continues to work.
 
 1. Install Tailscale on your Mac (or Linux host) and on your phone.
 2. Sign in to the **same account** on both.
@@ -29,19 +31,40 @@ only they can reach each other — no open ports, no public exposure.
    sudo tailscale set --hostname=macbook
    ```
 
-4. From your phone's browser, go to `http://<shortname>:4500` — substituting
-   the port you picked on the welcome screen:
+4. Set `CONTROLLER_TAILSCALE_HOSTS` in the environment that starts Controller,
+   then restart it. For development, for example:
+
+   ```sh
+   CONTROLLER_TAILSCALE_HOSTS=macbook npm run dev
+   ```
+
+   For a packaged macOS app launched from a shell, use:
+
+   ```sh
+   CONTROLLER_TAILSCALE_HOSTS=macbook /Applications/Controller.app/Contents/MacOS/Controller
+   ```
+
+   You can list more than one exact name, separated by commas, such as
+   `macbook,macbook.your-tailnet.ts.net`. Wildcards are not supported. If you
+   browse by Tailscale IPv4 address, add that exact address too. The setting
+   must reach the Controller process; setting it only in a shell and opening
+   the app from Finder will not apply it.
+
+5. From your phone's browser, go to `http://<shortname>:4500` — substituting
+   the port you picked on the welcome screen (or the Vite port shown by `npm run dev`):
 
    ```
    http://macbook:4500
    ```
 
 The app's **"Listening on port N"** footer has a **Copy** button that grabs the
-full local URL, so you can send it to your phone in one tap.
+full local URL. Replace `localhost` with the allowed Tailscale name on your phone.
+
+Anyone your Tailscale policy permits to reach Controller can use its privileged
+API. Restrict access to devices you trust; Controller does not add a separate
+login for remote access.
 
 ## LAN fallback
 
-If both devices are on the same local network and your firewall allows the
-port, you can reach the host by its LAN address directly. This works without
-Tailscale but only on that network, and you're responsible for the firewall —
-treat it as a fallback, not the default.
+Direct LAN requests to Controller's API and WebSocket endpoints are blocked.
+Use Tailscale for remote access.

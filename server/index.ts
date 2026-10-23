@@ -72,7 +72,7 @@ import {
 import { installDefaultBrowserOpener } from "./lib/oauth-dynamic.js";
 import { controllerHomeId, orchestratorHome } from "./lib/paths.js";
 import { tryAcquireSharedLoopOwner } from "./lib/shared-loop-owner.js";
-import { isTrustedLocalRequest, localApiGuard } from "./lib/local-request-guard.js";
+import { isTrustedLocalRequest, localApiGuard, parseTrustedTailscaleHosts } from "./lib/local-request-guard.js";
 
 function parsePort(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -95,10 +95,11 @@ app.use(express.json({ limit: "50mb" }));
 const devClientPort = process.env.CONTROLLER_DEV_INSTANCE === "1"
   ? parsePort(process.env.VITE_DEV_SERVER_PORT, 4502)
   : undefined;
+const trustedTailscaleHosts = parseTrustedTailscaleHosts(process.env.CONTROLLER_TAILSCALE_HOSTS);
 app.use("/api", localApiGuard(() => {
   const address = server.address();
   return address && typeof address === "object" ? address.port : parsePort(process.env.PORT, 3100);
-}, devClientPort));
+}, devClientPort, trustedTailscaleHosts));
 
 app.use("/api/projects", projectsRouter);
 app.use("/api/projects", worktreesRouter);
@@ -179,7 +180,7 @@ server.on("upgrade", (req, socket, head) => {
   const address = server.address();
   const port = address && typeof address === "object" ? address.port : parsePort(process.env.PORT, 3100);
   const trusted = req.socket.remoteAddress !== undefined && req.headers.origin !== undefined &&
-    isTrustedLocalRequest(req.headers, port, devClientPort, req.socket.remoteAddress);
+    isTrustedLocalRequest(req.headers, port, devClientPort, req.socket.remoteAddress, trustedTailscaleHosts, req.socket.localAddress);
   if (!trusted) {
     socket.destroy();
     return;
