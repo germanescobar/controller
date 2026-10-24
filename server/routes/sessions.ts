@@ -773,6 +773,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
   const body = (req.body ?? {}) as {
     worktreeId?: string;
     message?: string;
+    title?: string;
     provider?: string;
     model?: string;
     mode?: "default" | "plan";
@@ -823,6 +824,10 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     res.status(400).json({ error: "message is required" });
     return;
   }
+  if (body.title !== undefined && (typeof body.title !== "string" || !body.title.trim())) {
+    res.status(400).json({ error: "title must be a non-empty string" });
+    return;
+  }
   const mode: "default" | "plan" = body.mode === "plan" ? "plan" : "default";
   const attachmentIds = Array.isArray(body.attachmentIds)
     ? body.attachmentIds.filter((id): id is string => typeof id === "string")
@@ -842,6 +847,7 @@ sessionsRouter.post("/:projectId/sessions", async (req, res) => {
     await handleSessionStream(
       makeHeadlessSessionStartRequest(req, project.id, worktreeId, {
         message,
+        title: body.title?.trim(),
         provider: body.provider,
         model: body.model,
         mode,
@@ -1143,6 +1149,7 @@ export function makeHeadlessSessionStartRequest(
   worktreeId: string,
   body: {
     message: string;
+    title?: string;
     /**
      * Override the text the persistence layer records as the
      * user_message event. Defaults to `body.message` when omitted;
@@ -1190,6 +1197,7 @@ export function makeHeadlessSessionStartRequest(
     mode: body.mode,
   };
   if (body.historyText) query.historyText = body.historyText;
+  if (body.title) query.title = body.title;
   if (body.model) query.model = body.model;
   if (body.skillName) query.skillName = body.skillName;
   if (body.attachmentIds.length) query.attachmentIds = body.attachmentIds.join(",");
@@ -1563,6 +1571,7 @@ async function startSessionStream(
   // Parent linkage is set only when creating a session. Resolve it before
   // selecting the provider so headless starts and direct SSE starts agree.
   const parentId = (req.query.parentId as string | undefined)?.trim() || undefined;
+  const requestedTitle = (req.query.title as string | undefined)?.trim() || undefined;
   let parentProviderId: string | undefined;
   if (parentId && !controllerSessionId) {
     if (!isSafeId(parentId)) {
@@ -1777,6 +1786,7 @@ async function startSessionStream(
       attachments,
       autoApprove,
       parentId,
+      requestedTitle,
       // Branched-session plumbing (issue #382). The Codex path has
       // its own `persistSessionStart`, so it needs the same two
       // facts the SSE path derives above: which Controller id the
@@ -1977,10 +1987,10 @@ async function startSessionStream(
       });
     }
     // Merge with existing session file (preserve title/createdAt from earlier messages).
-    // Only auto-generate a title for brand-new sessions; for existing ones we keep
-    // whatever the title is — including an intentional absence the user cleared.
+    // Apply the requested title only to a brand-new session. Existing titles,
+    // including an intentional absence the user cleared, survive later turns.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing ? existing.title : deriveAutoTitle(historyText);
+    const title = existing ? existing.title : requestedTitle ?? deriveAutoTitle(historyText);
     // Focus state lives in a Controller-owned sidecar, not on the
     // session file: any provider that writes the session file
     // (e.g. Anita on legacy resumed sessions) would silently drop
@@ -2778,6 +2788,7 @@ async function streamCodexPlanSession(
     // the same query → `persistSessionStart` path the SSE handler
     // uses; only honored on brand-new sessions.
     parentId?: string;
+    requestedTitle?: string;
     // Branched-session plumbing (issue #382). `controllerSessionId`
     // is the events-file key / URL id — it equals `resumeSessionId`
     // for every ordinary session and diverges from it on a branched
@@ -2816,6 +2827,7 @@ async function streamCodexPlanSession(
     attachments,
     autoApprove,
     parentId,
+    requestedTitle,
     controllerSessionId,
     branchedFirstTurn,
     agentInactivityTimeoutMs,
@@ -2914,10 +2926,10 @@ async function streamCodexPlanSession(
       });
     }
 
-    // Only auto-generate a title for brand-new sessions; for existing ones we keep
-    // whatever the title is — including an intentional absence the user cleared.
+    // Apply the requested title only to a brand-new session. Existing titles,
+    // including an intentional absence the user cleared, survive later turns.
     const existing = await getSession(worktreePath, sessionId);
-    const title = existing ? existing.title : deriveAutoTitle(historyText);
+    const title = existing ? existing.title : requestedTitle ?? deriveAutoTitle(historyText);
     // Focus state lives in a Controller-owned sidecar; see the
     // SSE-stream persistSessionStart for the rationale (issue #139).
     const existingFocus = await readSessionFocus(sessionId);

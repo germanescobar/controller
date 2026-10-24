@@ -136,7 +136,7 @@ const USAGE = `Usage:
   controller sessions start [<project>] <message> \\
       --worktree <worktreeId> \\
       [--provider|--agent codex|claude|anita] [--model <model>] [--mode default|plan] [--skill <name>] \\
-      [--parent <sessionId|self>] [--inactivity-timeout <duration>]
+      [--parent <sessionId|self>] [--title <title>] [--inactivity-timeout <duration>]
 
   \`<message>\` is a positional argument (issue #355). Flags can come
   before or after it in any order. If the prompt happens to start with
@@ -158,6 +158,8 @@ const USAGE = `Usage:
   not set (e.g. on a brand-new session that hasn't been assigned an id
   yet), pointing the agent at \`controller sessions list\` to discover its
   own id.
+  \`--title <title>\` names the new session independently of its full task
+  message. Without it, the title comes from the message.
   \`--inactivity-timeout\` accepts a positive duration such as \`20m\` and
   persists it on the session for later turns.
 
@@ -1096,6 +1098,7 @@ export function parseSessions(argv) {
           "--mode",
           "--skill",
           "--parent",
+          "--title",
           "--inactivity-timeout",
         ],
         "sessions start"
@@ -1124,6 +1127,10 @@ export function parseSessions(argv) {
       const model = flagValue(flagArgs, "--model");
       const mode = flagValue(flagArgs, "--mode");
       const skill = flagValue(flagArgs, "--skill");
+      const titleFlag = flagValue(flagArgs, "--title");
+      if (titleFlag !== undefined && !titleFlag.trim()) {
+        fail("sessions start: --title must not be empty");
+      }
       const inactivityTimeout = flagValue(flagArgs, "--inactivity-timeout");
       const agentInactivityTimeoutMs = inactivityTimeout === undefined
         ? undefined
@@ -1150,6 +1157,7 @@ export function parseSessions(argv) {
           ...(model ? { model } : {}),
           ...(mode ? { mode } : {}),
           ...(skill ? { skillName: skill } : {}),
+          ...(titleFlag !== undefined ? { title: titleFlag.trim() } : {}),
           ...(parentId ? { parentId } : {}),
           ...(agentInactivityTimeoutMs ? { agentInactivityTimeoutMs } : {}),
         },
