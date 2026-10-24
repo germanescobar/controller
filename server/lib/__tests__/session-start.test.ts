@@ -705,7 +705,8 @@ test("POST /api/projects/:projectId/sessions persists parentId on the session fi
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           worktreeId,
-          message: "Spawn a child session.",
+          message: "Spawn a child session with complete instructions.",
+          title: "Focused child title",
           provider: "anita",
           parentId,
         }),
@@ -725,6 +726,7 @@ test("POST /api/projects/:projectId/sessions persists parentId on the session fi
       // → `handleSessionStream` → `persistSessionStart` → `saveSession`
       // and lands on the session file as a literal field. The CLI's
       // `sessions list --parent <id>` filter reads it back from here.
+      assert.equal(session.title, "Focused child title");
       assert.equal(
         session.parentId,
         parentId,
@@ -747,7 +749,7 @@ test("child start inherits the parent's Codex provider when no provider is speci
       const res = await fetch(`${baseUrl}/sessions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ worktreeId, message: "Spawn from Codex", parentId, attachmentIds: ["inheritance-image"] }),
+        body: JSON.stringify({ worktreeId, message: "Spawn from Codex", title: "Codex child", parentId, attachmentIds: ["inheritance-image"] }),
       });
       const body = (await res.json()) as { sessionId?: string; error?: string };
       assert.equal(res.status, 200, body.error);
@@ -755,6 +757,7 @@ test("child start inherits the parent's Codex provider when no provider is speci
       const { getSession } = await import("../../lib/sessions.js");
       assert.equal((await getSession(projectPath, sessionId))?.provider, "codex");
       assert.equal((await getSession(projectPath, sessionId))?.parentId, parentId);
+      assert.equal((await getSession(projectPath, sessionId))?.title, "Codex child");
       assert.match(await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8"), /exec/);
     }
   );
@@ -877,6 +880,7 @@ test("POST /api/projects/:projectId/sessions omits parentId on the session file 
       );
       const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
       assert.equal(session.provider, "anita", "starts without a parent keep the default provider");
+      assert.equal(session.title, "Start a session with no parent.");
       // The field must be *absent*, not set to `null` or `""`. The
       // CLI's filter is `row.parentId === parentId` — a stored
       // `parentId: ""` would never match a real id, and a stored
@@ -938,6 +942,7 @@ test("POST /api/projects/:projectId/sessions preserves an existing parentId on r
           message: "Resume an already-parented session.",
           provider: "anita",
           resumeSessionId: sessionId,
+          title: "Attempted replacement title",
           // Different value — must NOT overwrite the existing parentId.
           parentId: attemptedParentId,
         }),
@@ -955,6 +960,7 @@ test("POST /api/projects/:projectId/sessions preserves an existing parentId on r
         `${sessionId}.json`
       );
       const session = JSON.parse(await fs.readFile(sessionFile, "utf-8"));
+      assert.equal(session.title, "Pre-existing session");
       assert.equal(
         session.parentId,
         originalParentId,

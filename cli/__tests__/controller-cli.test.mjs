@@ -1431,6 +1431,8 @@ test("parseSessions accepts a message-first form when <project> is omitted (PR r
     "wt-1",
     "--parent",
     "sess-self-42",
+    "--title",
+    "Review PR",
     "--agent",
     "claude",
   ]);
@@ -1442,6 +1444,7 @@ test("parseSessions accepts a message-first form when <project> is omitted (PR r
     "Review the PR from session sess-self-42"
   );
   assert.equal(parsed.body.parentId, "sess-self-42");
+  assert.equal(parsed.body.title, "Review PR");
   assert.equal(parsed.body.provider, "claude");
 });
 
@@ -4628,6 +4631,8 @@ test("runSessions start forwards --parent on the POST body (issue #353)", async 
         "wt-1",
         "--parent",
         "sess-parent",
+        "--title",
+        "Child task",
       ],
       "http://controller.test"
     );
@@ -4641,6 +4646,7 @@ test("runSessions start forwards --parent on the POST body (issue #353)", async 
   assert.equal(postCall.init.method, "POST");
   const body = JSON.parse(postCall.init.body);
   assert.equal(body.parentId, "sess-parent");
+  assert.equal(body.title, "Child task");
   assert.equal(body.worktreeId, "wt-1");
   assert.equal(body.message, "spawn a child");
 });
