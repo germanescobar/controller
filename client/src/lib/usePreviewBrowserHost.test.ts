@@ -21,23 +21,6 @@ test("click retries until a delayed target becomes actionable", async () => {
   assert.deepEqual(events, ["mouseMove", "mouseDown", "mouseUp"]);
 });
 
-test("background click keeps the guest hidden while sending native input", async () => {
-  const style = { left: "-100000px", top: "0px", zIndex: "-1", clipPath: "", opacity: "0", pointerEvents: "none" };
-  const webview = {
-    style,
-    executeJavaScript: async () => ({ ok: true, engine: "css", x: 24, y: 42 }),
-    sendInputEvent: async () => {
-      assert.equal(style.left, "0px");
-      assert.equal(style.clipPath, "inset(100%)");
-      assert.equal(style.opacity, "0");
-      assert.equal(style.pointerEvents, "none");
-    },
-  } as unknown as PreviewWebview;
-
-  assert.equal((await handleClick(webview, "#target", {}, 500)).ok, true);
-  assert.deepEqual(style, { left: "-100000px", top: "0px", zIndex: "-1", clipPath: "", opacity: "0", pointerEvents: "none" });
-});
-
 test("action timeout includes the last actionable failure", async () => {
   Object.defineProperty(globalThis, "window", { value: { setTimeout }, configurable: true });
   const webview = {
@@ -53,25 +36,18 @@ test("viewport command waits for the guest resize", async () => {
   const webview = {
     executeJavaScript: async () => ++reads < 3
       ? { width: 1280, height: 800 } : { width: 390, height: 844 },
-  } as unknown as PreviewWebview;
+  } as PreviewWebview;
   await waitForViewport(webview, { width: 390, height: 844 });
   assert.equal(reads, 3);
 });
 
-test("viewport command repaints a parked guest without exposing it over chrome", async () => {
-  const style = { left: "-100000px", top: "0px", zIndex: "-1", clipPath: "", opacity: "0", pointerEvents: "none" };
+test("viewport command repaints a parked guest and restores its position", async () => {
+  const style = { left: "-100000px", top: "0px", zIndex: "-1" };
   const webview = {
     style,
-    executeJavaScript: async () => {
-      if (style.left === "0px") {
-        assert.equal(style.clipPath, "inset(100%)");
-        assert.equal(style.opacity, "0");
-        assert.equal(style.pointerEvents, "none");
-        return { width: 390, height: 844 };
-      }
-      return { width: 1280, height: 828 };
-    },
-  } as unknown as PreviewWebview;
+    executeJavaScript: async () => style.left === "0px"
+      ? { width: 390, height: 844 } : { width: 1280, height: 828 },
+  } as PreviewWebview;
   await waitForViewport(webview, { width: 390, height: 844 });
-  assert.deepEqual(style, { left: "-100000px", top: "0px", zIndex: "-1", clipPath: "", opacity: "0", pointerEvents: "none" });
+  assert.deepEqual(style, { left: "-100000px", top: "0px", zIndex: "-1" });
 });

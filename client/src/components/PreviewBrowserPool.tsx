@@ -211,7 +211,6 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
           ? `inset(0px ${Math.max(0, viewport.width - rect.width)}px ${Math.max(0, viewport.height - rect.height)}px 0px)`
           : "";
         el.style.pointerEvents = "auto";
-        el.style.opacity = "1";
         el.style.zIndex = "20";
       } else {
         // Park inactive panes off-screen at full size so the guest keeps
@@ -222,7 +221,6 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
         el.style.height = `${viewport?.height ?? parkH}px`;
         el.style.clipPath = "";
         el.style.pointerEvents = "none";
-        el.style.opacity = "0";
         el.style.zIndex = "-1";
       }
     }
@@ -489,7 +487,6 @@ export function PreviewBrowserProvider({ children }: { children: ReactNode }) {
             available={available}
             registerWebview={registerWebview}
             setViewport={setViewport}
-            syncLayout={syncOverlay}
           />
         </div>
       )}
@@ -556,14 +553,12 @@ function PaneFrames({
   available,
   registerWebview,
   setViewport,
-  syncLayout,
 }: {
   store: PreviewBrowserStore;
   openUrl: (key: string, url: string, options?: { insecure?: boolean }, tabId?: string) => Promise<PreviewOpenResult>;
   available: boolean;
   registerWebview: (key: string, tabId: string, el: PreviewWebview | null) => void;
   setViewport: (key: string, preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
-  syncLayout: () => void;
 }) {
   const topology = useSyncExternalStore(
     (cb) => store.subscribeTopology(cb),
@@ -583,7 +578,6 @@ function PaneFrames({
           available={available}
           registerWebview={registerWebview}
           setViewport={setViewport}
-          syncLayout={syncLayout}
         />
       ))}
     </>
@@ -604,7 +598,6 @@ function PaneFrame({
   available,
   registerWebview,
   setViewport,
-  syncLayout,
 }: {
   paneKey: string;
   tabs: PreviewTab[];
@@ -614,7 +607,6 @@ function PaneFrame({
   available: boolean;
   registerWebview: (key: string, tabId: string, el: PreviewWebview | null) => void;
   setViewport: (key: string, preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
-  syncLayout: () => void;
 }) {
   const webviewsRef = useRef(new Map<string, PreviewWebview>());
   const activeTabRef = useRef(activeTabId);
@@ -645,7 +637,6 @@ function PaneFrame({
     // main process can re-check the path policy at read time.
     projectRoot: store.getRoot(paneKey),
     setViewport: (preset) => setViewport(paneKey, preset),
-    syncLayout,
     getDiagnostics: async (limit) => {
       const tabId = activeTabRef.current;
       const webview = webviewsRef.current.get(tabId);
