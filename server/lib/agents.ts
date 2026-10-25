@@ -15,7 +15,6 @@ import {
   DEFAULT_AUTO_APPROVE,
   anitaAutoApproveFlags,
   claudePermissionMode,
-  codexExecAutoApproveFlags,
 } from "./auto-approve.js";
 
 export interface AgentPlanStep {
@@ -194,7 +193,8 @@ export interface AgentProvider {
   id: string;
   name: string;
   command: string;
-  spawn(opts: SpawnOptions): ChildProcess;
+  /** Codex uses the app-server manager; other providers spawn per turn. */
+  spawn?(opts: SpawnOptions): ChildProcess;
   parseEvent(line: string): AgentStreamEvent | AgentStreamEvent[] | null;
   /**
    * Build a stateful per-run parser. `autoApprove` mirrors the spawn flag so a
@@ -706,71 +706,6 @@ const codexProvider: AgentProvider = {
   name: "Codex",
   command: "codex",
 
-  spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, serviceTier, mode, autoApprove = DEFAULT_AUTO_APPROVE }) {
-    // Flags must come before the prompt argument. Same belt-and-suspenders
-    // guard as the anita provider: only emit `--model` when the caller
-    // supplied a non-empty value (issue #213). Codex is more permissive
-    // than anita with empty model strings, but emitting `--model ""`
-    // still risks it picking a default the user didn't intend.
-    const flags = ["--json", ...codexExecAutoApproveFlags(autoApprove), "--skip-git-repo-check"];
-    if (model && model.trim()) {
-      flags.push("--model", model);
-    }
-    if (reasoningEffort) {
-      flags.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
-    }
-    if (serviceTier === "fast") {
-      flags.push("-c", `service_tier="${serviceTier}"`);
-    }
-    if (mode === "plan") {
-      flags.push("--enable", "default_mode_request_user_input");
-    }
-
-    const imageArgs = attachments
-      .filter((attachment) => attachment.isImage)
-      .flatMap((attachment) => ["--image", attachment.path]);
-    const prompt = withAttachmentContext(message, attachments, "codex");
-
-    // Codex's clap parser marks `-i/--image` as `Occurrence::ZeroOrMore`, so
-    // every token after the first `--image` is consumed as another image
-    // path. The argv shape must keep the positional `[PROMPT]` (and
-    // `[SESSION_ID]` on the resume path) BEFORE any `--image` flag, and we
-    // intentionally do NOT insert a `--` option-terminator between the
-    // flags and the positional:
-    //
-    //   - `... --image PATH -- PROMPT` (the original buggy shape) makes
-    //     clap consume the prompt as a second image path → exit 1, "No
-    //     prompt provided via stdin." (issue #376).
-    //   - `... -- PROMPT --image PATH` puts `--image` *after* the option
-    //     terminator, which clap refuses outright ("unexpected argument
-    //     '--image' found", exit 2 — Codex PR #379 review). Same for the
-    //     resume shape with `--` between flags and positional.
-    //   - `... PROMPT --image PATH` parses correctly: the prompt is the
-    //     positional `[PROMPT]`, then `--image` is consumed as the
-    //     repeatable option. Verified against the installed codex-cli
-    //     0.154.0 by hand-spawning both argv shapes. Matches how the
-    //     anita and claude providers push their prompts at the end of
-    //     argv without `--`. The `--`-defense-against-prompts-starting-
-    //     with-`-` is not a real concern here: `withAttachmentContext`
-    //     decorates the message with a multi-line `Attached files:` block,
-    //     and user chat input doesn't start with `-`.
-    let args: string[];
-    if (resumeSessionId) {
-      args = ["exec", ...flags, "resume", resumeSessionId, prompt, ...imageArgs];
-    } else {
-      args = ["exec", ...flags, prompt, ...imageArgs];
-    }
-
-    const fullCmd = `codex ${args.join(" ")}`;
-    console.log(`[codex] ${fullCmd.slice(0, 100)}...`);
-
-    return spawnAgentProcess(command ?? "codex", args, {
-      cwd,
-      env: childProcessEnv(env),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  },
-
   createParser() {
     const state = { threadId: "" };
     return (line: string): AgentStreamEvent | null => {
@@ -799,7 +734,7 @@ const claudeProvider: AgentProvider = {
 
   spawn({ message, cwd, env, command, attachments = [], resumeSessionId, model, reasoningEffort, mode, autoApprove = DEFAULT_AUTO_APPROVE }) {
     const planMode = mode === "plan";
-    const prompt = withAttachmentContext(message, attachments, "claude");
+    const prompt = withAttachmentContext(message, attachments);
     // The CLI must route `can_use_tool` requests to us — over the stream-json
     // control channel — whenever the user should see approval prompts. That is
     // true in plan mode (interactive approval loop) and whenever auto-approve
@@ -892,16 +827,11 @@ const claudeProvider: AgentProvider = {
 
 function withAttachmentContext(
   message: string,
-  attachments: AgentAttachment[],
-  provider: "codex" | "claude"
+  attachments: AgentAttachment[]
 ): string {
   if (attachments.length === 0) return message;
   const lines = attachments.map((attachment, index) => {
-    const note =
-      provider === "codex" && attachment.isImage
-        ? "also attached through --image"
-        : "available as a local file";
-    return `${index + 1}. ${attachment.name} (${attachment.mimeType || "application/octet-stream"}, ${attachment.size} bytes): ${attachment.path} - ${note}`;
+    return `${index + 1}. ${attachment.name} (${attachment.mimeType || "application/octet-stream"}, ${attachment.size} bytes): ${attachment.path} - available as a local file`;
   });
   return `${message}\n\nAttached files:\n${lines.join("\n")}`;
 }
@@ -1271,114 +1201,11 @@ function normalizeClaudeUserInputOption(value: unknown): AgentUserInputOption | 
   };
 }
 
-/**
- * Map a Codex JSONL event to our normalized AgentStreamEvent format.
- * Returns null for events we don't surface to the UI.
- */
+/** Map a Codex app-server notification to a normalized stream event. */
 function mapCodexEvent(event: Record<string, unknown>, state: { threadId: string }): AgentStreamEvent | null {
   const method = event.method as string | undefined;
   const params = event.params as Record<string, unknown> | undefined;
-  if (method && params) {
-    return mapCodexAppServerEvent(method, params, state);
-  }
-
-  const type = event.type as string;
-
-  if (type === "thread.started") {
-    state.threadId = event.thread_id as string;
-    return {
-      type: "run.started",
-      sessionId: state.threadId,
-      model: "",
-      workingDirectory: "",
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  if (type === "item.completed" || type === "item.started") {
-    const item = event.item as Record<string, unknown> | undefined;
-    if (!item) return null;
-
-    const itemType = item.type as string;
-    const itemId = (item.id as string) ?? "";
-
-    // Agent message (assistant text)
-    if (itemType === "agent_message" && type === "item.completed") {
-      const text = (item.text as string) ?? "";
-      if (!text) return null;
-      return { type: "assistant.text", text };
-    }
-
-    // Reasoning
-    if (itemType === "reasoning" && type === "item.completed") {
-      const text =
-        (item.text as string) ??
-        (item.content as string) ??
-        "";
-      if (!text) return null;
-      return { type: "assistant.reasoning", text };
-    }
-
-    // Command execution / tool calls
-    if (
-      itemType === "command_execution" ||
-      itemType === "mcp_call" ||
-      itemType === "file_change" ||
-      itemType === "web_search"
-    ) {
-      if (type === "item.started") {
-        const name =
-          (item.tool as string) ??
-          (item.command as string) ??
-          itemType;
-        const input =
-          (item.input as Record<string, unknown>) ??
-          (item.args as Record<string, unknown>) ??
-          {};
-        return { type: "tool.call", id: itemId, name, input };
-      }
-
-      if (type === "item.completed") {
-        const name =
-          (item.tool as string) ??
-          (item.command as string) ??
-          itemType;
-        const rawContent =
-          item.aggregated_output ??
-          item.output ??
-          item.content ??
-          item.result ??
-          item;
-        const content = normalizeToolResultContent(rawContent);
-        const isError = (item.exit_code as number) !== 0 && item.exit_code != null;
-        return { type: "tool.result", id: itemId, name, content, isError };
-      }
-    }
-
-    return null;
-  }
-
-  if (type === "turn.completed") {
-    return {
-      type: "run.completed",
-      sessionId: state.threadId,
-      status: "completed",
-      stopReason: "completed",
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  if (type === "turn.failed" || type === "error") {
-    return {
-      type: "run.failed",
-      sessionId: state.threadId,
-      error: normalizeErrorMessage(event.error ?? event.message, "Unknown error"),
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  // Ignore other event types (turn.started, etc.)
-  return null;
+  return method && params ? mapCodexAppServerEvent(method, params, state) : null;
 }
 
 function mapCodexAppServerEvent(

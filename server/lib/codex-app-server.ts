@@ -212,6 +212,11 @@ export class CodexAppServerManager {
     this.timeouts = options.timeouts ?? DEFAULT_CALL_TIMEOUTS;
   }
 
+  /** Stop the process and clear its thread state when the manager is disposed. */
+  shutdown(): void {
+    this.resetChild(new Error("Codex app-server shut down"));
+  }
+
   async startPlanTurn(
     options: StartPlanTurnOptions,
     listener: (event: AgentStreamEvent) => void

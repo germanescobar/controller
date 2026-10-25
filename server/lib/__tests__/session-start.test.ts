@@ -100,6 +100,8 @@ async function withSessionStartEnv<T>(
       worktreePath: projectPath,
     });
   } finally {
+    const { codexAppServerManager } = await import("../../lib/codex-app-server.js");
+    codexAppServerManager.shutdown();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previous === undefined) delete process.env.CONTROLLER_HOME;
     else process.env.CONTROLLER_HOME = previous;
@@ -758,7 +760,7 @@ test("child start inherits the parent's Codex provider when no provider is speci
       assert.equal((await getSession(projectPath, sessionId))?.provider, "codex");
       assert.equal((await getSession(projectPath, sessionId))?.parentId, parentId);
       assert.equal((await getSession(projectPath, sessionId))?.title, "Codex child");
-      assert.match(await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8"), /exec/);
+      assert.match(await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8"), /^app-server /);
     }
   );
 });
@@ -1115,36 +1117,12 @@ test("GET /api/projects/:projectId/sessions sets Cache-Control: no-store so the 
   );
 });
 
-/*
- * Issue #390: a codex session that took the `streamCodexPlanSession`
- * (long-lived `codex app-server`) path on its first turn must continue
- * via the same path when the user attaches an image — falling back to
- * `codex exec resume … --image` against the still-alive app-server
- * fails immediately with `thread <id> already has an active writer
- * (code -32600)` because the app-server holds the per-thread writer
- * lock. The route's condition at `server/routes/sessions.ts:1407` was
- * the gate; the tests below pin both halves of the new behavior:
- *
- *   1. **Resumed codex session + attachment → `codex app-server` path.**
- *      The pre-existing session file is enough to make the route treat
- *      the request as a resume (so `resumeSessionId` is set in the
- *      branch the route sees). The fake `codex` records its argv and
- *      implements the JSON-RPC handshake the app-server path expects
- *      so the test exercises the real end-to-end pipeline.
- *
- *   2. **Brand-new codex session + attachment → `codex exec resume`
- *      path.** No pre-existing session file, no `resumeSessionId` —
- *      the legacy fallback is still correct here because no app-server
- *      lock exists yet to compete for. This pins the other half of the
- *      fix so we don't accidentally route brand-new sessions through
- *      the app-server path (which would force every codex turn onto
- *      the long-lived process before the user has any history to
- *      resume against).
- */
+/* Exercise resumed and brand-new Codex turns through the real route and
+ * JSON-RPC app-server shim, including attachment payloads. */
 
 interface FakeCodexOptions {
   argvFile: string;
-  /** sessionId echoed in the agent's `run.started` JSONL line / app-server `thread/started` event. */
+  /** Thread id returned by the app-server shim. */
   sessionId: string;
   /**
    * Optional file the app-server branch writes the most recent
@@ -1154,16 +1132,16 @@ interface FakeCodexOptions {
    * undefined for tests that don't care about the payload.
    */
   turnStartParamsFile?: string;
+  threadStartParamsFile?: string;
 }
 
 /**
  * Stand up a fake `codex` binary on PATH that:
- *   - records its argv (newline-joined) to `argvFile` so the test can
- *     distinguish `codex app-server …` from `codex exec resume …`;
+ *   - records its argv so the test can assert the app-server command;
  *   - when invoked as `codex app-server`, speaks just enough
  *     newline-delimited JSON-RPC to satisfy the orchestrator's
  *     `codexAppServerManager.startPlanTurn` flow (`initialize`,
- *     `thread/resume`, `turn/start` + a `thread/started` event +
+ *     `thread/start`, `thread/resume`, `turn/start` + a `thread/started` event +
  *     `turn/completed` event so the SSE handler exits cleanly);
  *     validates `turn/start` payloads against the same image-variant
  *     rules the real codex app-server enforces (see v2 schema
@@ -1171,9 +1149,7 @@ interface FakeCodexOptions {
  *     `codex app-server generate-json-schema`) so a regression to
  *     `type: "image"` with a filesystem path surfaces here instead
  *     of as a silent integration failure;
- *   - when invoked as `codex exec …`, emits one `run.started` JSONL
- *     line followed by `run.completed`, like the existing
- *     `installFakeAgent` helper.
+ *   - rejects any other invocation.
  *
  * Writing it in Node keeps the JSON-RPC parsing honest — a bash script
  * would need a hand-rolled line reader and the tests would be harder
@@ -1184,16 +1160,18 @@ async function installFakeCodex(
   options: FakeCodexOptions
 ): Promise<void> {
   const turnStartParamsFile = options.turnStartParamsFile ?? "";
+  const threadStartParamsFile = options.threadStartParamsFile ?? "";
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
 
 const argvFile = ${JSON.stringify(options.argvFile)};
 const sessionId = ${JSON.stringify(options.sessionId)};
 const turnStartParamsFile = ${JSON.stringify(turnStartParamsFile)};
+const threadStartParamsFile = ${JSON.stringify(threadStartParamsFile)};
 
 // Record the spawned argv for the test to assert against. Joined with
 // spaces so a single \`fs.readFileSync\` produces a grep-friendly
-// string ("exec", "app-server", "resume <id>", "--image PATH").
+// string ("app-server").
 fs.writeFileSync(argvFile, process.argv.slice(2).join(" ") + "\\n");
 
 const isAppServer = process.argv.includes("app-server");
@@ -1206,7 +1184,6 @@ if (isAppServer) {
   // SSE handler reaches its \`run.completed\` path and exits cleanly.
   let buffered = "";
   let nextId = 1;
-  const threadsById = new Map();
 
   function send(msg) {
     process.stdout.write(JSON.stringify(msg) + "\\n");
@@ -1267,9 +1244,13 @@ if (isAppServer) {
       if (typeof req.id !== "undefined" && req.method) {
         if (req.method === "initialize") {
           reply(req.id, {});
+        } else if (req.method === "thread/start") {
+          if (threadStartParamsFile) {
+            fs.writeFileSync(threadStartParamsFile, JSON.stringify(req.params));
+          }
+          reply(req.id, { thread: { id: sessionId } });
         } else if (req.method === "thread/resume") {
           const requested = req.params && req.params.threadId;
-          threadsById.set(requested, { id: requested });
           reply(req.id, { thread: { id: requested } });
           // Emit the lifecycle event the parser turns into \`run.started\`.
           send({ jsonrpc: "2.0", method: "thread/started", params: { threadId: requested } });
@@ -1316,17 +1297,8 @@ if (isAppServer) {
   });
   process.stdin.on("end", () => process.exit(0));
 } else {
-  // Legacy \`codex exec …\` shape: newline-delimited JSON events on
-  // stdout. The orchestrator's \`mapCodexEvent\` (\`server/lib/agents.ts\`)
-  // translates \`thread.started\` → \`run.started\` and \`turn.completed\`
-  // → \`run.completed\`, so the legacy fake emits the codex-native event
-  // names — not the normalized ones anita uses. Mirrors
-  // \`installFakeAgent()\`'s shape so the SSE handler's close path
-  // (which only emits a synthetic \`run.failed\` on non-zero exit) sees
-  // a clean two-event run.
-  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId, timestamp: "2026-01-01T00:00:00.000Z" }) + "\\n");
-  process.stdout.write(JSON.stringify({ type: "turn.completed", timestamp: "2026-01-01T00:00:00.000Z" }) + "\\n");
-  process.exit(0);
+  process.stderr.write("unexpected codex invocation: " + process.argv.join(" "));
+  process.exit(1);
 }
 `;
   await fs.writeFile(path.join(binDir, "codex"), script, { mode: 0o755 });
@@ -1496,50 +1468,62 @@ test("issue #390: resumed codex session with attachment goes through the codex a
   );
 });
 
-test("issue #390: brand-new codex session with attachment still uses the legacy codex exec path", async () => {
-  // The other half of the fix: a brand-new codex turn (no
-  // \`resumeSessionId\`) must keep using \`codex exec …\`. There's no
-  // app-server lock yet to compete for, so spawning the short-lived
-  // exec process is the right call — the app-server path would force
-  // every codex turn onto the long-lived process from turn 1, which
-  // is a bigger behavior change than #390 is asking for. Pinning this
-  // here means a future "always use app-server" refactor has to
-  // explicitly opt in to changing it.
-  const sessionId = "sess-issue-390-brand-new-with-image";
-  const attachmentId = "att-issue-390-image-2";
-  await withSessionStartEnv(
-    async ({ binDir, homeDir, projectPath }) => {
-      await installFakeCodex(binDir, { argvFile: path.join(homeDir, "codex-argv.txt"), sessionId });
-      await saveImageAttachment(projectPath, attachmentId);
-    },
-    async ({ baseUrl, worktreeId, homeDir }) => {
-      const res = await fetch(`${baseUrl}/sessions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          worktreeId,
-          message: "Here's an image to look at.",
-          provider: "codex",
-          // No resumeSessionId — brand-new thread.
-          attachmentIds: [attachmentId],
-        }),
-      });
-      const body = (await res.json()) as { sessionId?: string; error?: string };
-      assert.equal(
-        res.status,
-        200,
-        `expected 200, got ${res.status}: ${JSON.stringify(body)}`
-      );
-
-      const argv = (await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8")).trim();
-      assert.ok(
-        argv.startsWith("exec") || argv.includes(" exec "),
-        `brand-new codex session with attachment must use codex exec; got argv: ${argv}`
-      );
-      assert.ok(
-        !argv.includes("app-server"),
-        `brand-new codex session must not use app-server (issue #390); got argv: ${argv}`
-      );
-    }
-  );
+test("brand-new Codex session with image and file attachments uses app-server approval and input", async () => {
+  for (const autoApprove of [true, false]) {
+    const sessionId = `sess-new-codex-with-attachments-${autoApprove}`;
+    const imageId = "att-new-image";
+    const fileId = "att-new-file";
+    await withSessionStartEnv(
+      async ({ binDir, homeDir, projectPath }) => {
+        await installFakeCodex(binDir, {
+          argvFile: path.join(homeDir, "codex-argv.txt"),
+          sessionId,
+          turnStartParamsFile: path.join(homeDir, "turn-start-params.json"),
+          threadStartParamsFile: path.join(homeDir, "thread-start-params.json"),
+        });
+        const { setAgentSetting } = await import("../../lib/agent-settings.js");
+        await setAgentSetting("codex", { autoApprove });
+        await saveImageAttachment(projectPath, imageId);
+        const { saveAttachment } = await import("../../lib/sessions.js");
+        await saveAttachment(projectPath, {
+          id: fileId, name: "notes.txt", mimeType: "text/plain", size: 5,
+          path: "", isImage: false, createdAt: "2026-01-01T00:00:00.000Z",
+        }, Buffer.from("hello"));
+      },
+      async ({ baseUrl, worktreeId, homeDir, projectPath }) => {
+        const res = await fetch(`${baseUrl}/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            worktreeId, message: "Inspect both attachments", provider: "codex",
+            attachmentIds: [imageId, fileId],
+          }),
+        });
+        const body = (await res.json()) as { sessionId?: string; error?: string };
+        assert.equal(res.status, 200, JSON.stringify(body));
+        assert.equal(body.sessionId, sessionId);
+        const argv = await fs.readFile(path.join(homeDir, "codex-argv.txt"), "utf-8");
+        assert.match(argv, /^app-server /);
+        const params = JSON.parse(await fs.readFile(path.join(homeDir, "turn-start-params.json"), "utf-8")) as {
+          input: Array<{ type: string; text?: string; path?: string }>;
+          approvalPolicy: string;
+          sandboxPolicy: { type: string };
+        };
+        assert.equal(params.approvalPolicy, autoApprove ? "never" : "untrusted");
+        assert.equal(params.sandboxPolicy.type, autoApprove ? "dangerFullAccess" : "readOnly");
+        const threadParams = JSON.parse(await fs.readFile(path.join(homeDir, "thread-start-params.json"), "utf-8")) as { approvalPolicy: string; sandbox: string };
+        assert.equal(threadParams.approvalPolicy, params.approvalPolicy);
+        assert.equal(threadParams.sandbox, autoApprove ? "danger-full-access" : "read-only");
+        assert.match(params.input[0].text ?? "", /notes\.txt.*available as a local file/);
+        const { projectStoreDir } = await import("../../lib/paths.js");
+        assert.deepEqual(params.input.slice(1), [{
+          type: "localImage",
+          path: path.join(projectStoreDir(projectPath), "attachments", imageId, "image.png"),
+        }]);
+        const { getSession } = await import("../../lib/sessions.js");
+        const persisted = await getSession(projectPath, sessionId);
+        assert.equal(persisted?.provider, "codex");
+      }
+    );
+  }
 });

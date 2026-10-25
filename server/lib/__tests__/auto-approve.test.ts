@@ -4,7 +4,6 @@ import {
   DEFAULT_AUTO_APPROVE,
   anitaAutoApproveFlags,
   claudePermissionMode,
-  codexExecAutoApproveFlags,
   codexAppServerApprovalConfig,
 } from "../auto-approve.js";
 
@@ -20,22 +19,6 @@ test("anita flag set: --auto-approve only when on", () => {
 test("claude permission mode follows auto-approve", () => {
   assert.equal(claudePermissionMode(true), "bypassPermissions");
   assert.equal(claudePermissionMode(false), "default");
-});
-
-test("codex exec flags use workspace-write when on and a restricted, prompting sandbox when off", () => {
-  assert.deepEqual(codexExecAutoApproveFlags(true), [
-    "--sandbox",
-    "workspace-write",
-    "-c",
-    'approval_policy="on-request"',
-  ]);
-  const off = codexExecAutoApproveFlags(false);
-  assert.ok(!off.includes("--full-auto"), "off must not auto-approve");
-  assert.ok(off.includes("read-only"), "off restricts the sandbox");
-  assert.ok(
-    off.some((flag) => flag.includes("approval_policy")),
-    "off sets an approval policy"
-  );
 });
 
 test("codex app-server approval config: never/full-access when on, untrusted/read-only when off", () => {

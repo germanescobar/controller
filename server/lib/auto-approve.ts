@@ -42,24 +42,7 @@ export function claudePermissionMode(
 }
 
 /**
- * Codex `exec` flags for the attachments-only spawn path. Explicit
- * `workspace-write` + `on-request` replaces the deprecated `--full-auto`
- * shorthand without inheriting a prompting approval policy from user config.
- * The OFF variant asks for approval on every command by restricting the sandbox
- * to read-only and using the `untrusted` approval policy. NOTE: `codex exec` is
- * headless and cannot answer prompts mid-run, so OFF on this path degrades
- * rather than rendering cards — the primary Codex path (no attachments) goes
- * through the app-server, which does support interactive approvals. See
- * `codexAppServerApprovalConfig`.
- */
-export function codexExecAutoApproveFlags(autoApprove: boolean): string[] {
-  return autoApprove
-    ? ["--sandbox", "workspace-write", "-c", 'approval_policy="on-request"']
-    : ["--sandbox", "read-only", "-c", 'approval_policy="untrusted"'];
-}
-
-/**
- * Codex app-server approval configuration (the primary Codex path). When ON,
+ * Codex app-server approval configuration. When ON,
  * the agent never asks (`never` policy, full-access sandbox). When OFF, every
  * command and file change requires approval by pairing the `untrusted` policy
  * with a read-only sandbox, so the app-server emits
