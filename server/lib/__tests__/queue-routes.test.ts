@@ -5,6 +5,8 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { projectStoreDir } from "../paths.js";
+import { enqueue } from "../session-queue.js";
 
 /*
  * Issue #312 (P1 review): the queue endpoint's `parseQueuedMessageInput`
@@ -43,7 +45,7 @@ async function withRoutes<T>(fn: (env: RoutesEnv) => Promise<T>): Promise<T> {
       },
     ])
   );
-  const { sessionsRouter } = await import("../../routes/sessions.js");
+  const { sessionsRouter, queueBySessionIdRouter } = await import("../../routes/sessions.js");
   const app = express();
   app.use(express.json({ limit: "10mb" }));
   // Mounted under the same prefix the real app uses
@@ -51,6 +53,7 @@ async function withRoutes<T>(fn: (env: RoutesEnv) => Promise<T>): Promise<T> {
   // The router's own paths already include `:projectId`, so the
   // final URL is `${baseUrl}/${projectId}/sessions/...`.
   app.use("/api/projects", sessionsRouter);
+  app.use("/api/sessions", queueBySessionIdRouter);
   const server = http.createServer(app);
   await new Promise<void>((resolve) =>
     server.listen(0, "127.0.0.1", () => resolve())
@@ -111,6 +114,36 @@ test("POST /queue preserves mentions and GET /queue returns them", async () => {
       { path: "server/lib/sessions.ts", type: "file" },
       { path: "client/src", type: "directory" },
     ]);
+  });
+});
+
+test("ID-only queue routes list and remove a feature-worktree session's messages", async () => {
+  await withRoutes(async ({ baseUrl, projectId }) => {
+    const home = process.env.CONTROLLER_HOME!;
+    const featurePath = path.join(home, "feature");
+    const sessionId = "feature-session";
+    const sessionDir = path.join(projectStoreDir(featurePath), "sessions");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(path.join(sessionDir, `${sessionId}.json`), JSON.stringify({
+      id: sessionId, worktreeId: "feature", workingDirectory: featurePath,
+    }));
+    await fs.writeFile(path.join(home, "worktrees.json"), JSON.stringify([{
+      id: "feature", projectId, name: "feature", path: featurePath,
+      branch: "feature", isMain: false, createdAt: new Date().toISOString(),
+    }]));
+    const message = await enqueue(sessionId, {
+      origin: "wake", text: "check CI", visibleText: "check CI", provider: "codex",
+      model: "", mode: "default", attachmentIds: [], runAt: "2026-11-01T00:00:00.000Z",
+    });
+    const route = baseUrl.replace("/api/projects", `/api/sessions/${sessionId}/queue`);
+    const listed = await fetch(route);
+    assert.equal(listed.status, 200);
+    assert.deepEqual((await listed.json() as { queue: { id: string }[] }).queue.map((entry) => entry.id), [message.id]);
+    const removed = await fetch(`${route}/${message.id}`, { method: "DELETE" });
+    assert.equal(removed.status, 200);
+    assert.equal((await fetch(`${route}/${message.id}`, { method: "DELETE" })).status, 404);
+    assert.deepEqual((await (await fetch(route)).json() as { queue: unknown[] }).queue, []);
+    assert.equal((await fetch(route.replace(sessionId, "missing"))).status, 404);
   });
 });
 

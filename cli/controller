@@ -247,6 +247,15 @@ const USAGE = `Usage:
   the evaluator; \`--expires-at <iso>\` is an absolute hard deadline.
   Set once per loop; re-setting preserves the evaluator's turn count.
 
+  controller sessions queue list <sessionId|self> [--json]
+  controller sessions queue remove <sessionId|self> <messageId>
+
+  \`sessions queue list\` shows pending message IDs, origins, run times, and
+  message text. \`--json\` prints the full queue as a JSON array. \`remove\`
+  cancels one entry that is still queued, regardless of its origin. Clearing
+  a goal or stopping a monitor stops future follow-ups from that source;
+  remove any entries they already queued separately.
+
   controller sessions monitor start <sessionId> --description <text> --command <shell> \\
       [--timeout-ms <ms>] [--persistent]
   controller sessions monitor list <sessionId>
@@ -1518,6 +1527,9 @@ export function parseSessions(argv) {
         goalArgv: rest,
       };
     }
+    case "queue": {
+      return { project: "", action: "queue", queueArgv: rest };
+    }
     case "collisions": {
       // `controller sessions collisions [--json]` (issue #437).
       // Diagnostic-only surface: reports every session id that has
@@ -1653,6 +1665,10 @@ export function parseGoal(argv) {
 
 export async function runSessions(argv, serverUrl) {
   const parsed = parseSessions(argv);
+  if (parsed.action === "queue") {
+    await runQueue(parsed.queueArgv, serverUrl);
+    return;
+  }
   // `on-radar` and `pin|unpin|done` resolve their own projects
   // (either via `--all-projects` skipping the resolve entirely, or
   // via a per-action `resolveProjectId` call with the right
@@ -1797,6 +1813,64 @@ export async function runSessions(argv, serverUrl) {
     return;
   }
   fail(`Unknown sessions action: ${parsed.action}`);
+}
+
+export function parseQueue(argv) {
+  const [command, sessionFlag, ...rest] = argv;
+  if (command !== "list" && command !== "remove") {
+    fail("sessions queue requires a subcommand: list, remove");
+  }
+  if (!sessionFlag || sessionFlag.startsWith("--")) {
+    fail(`sessions queue ${command} requires a sessionId`);
+  }
+  const sessionId = resolveParentFlag(sessionFlag, `sessions queue ${command}`);
+  if (command === "list") {
+    if (rest.length > 1 || (rest.length === 1 && rest[0] !== "--json")) {
+      fail("sessions queue list accepts only --json");
+    }
+    return { action: "list", sessionId, json: rest.includes("--json") };
+  }
+  const [messageId, ...extra] = rest;
+  if (!messageId || messageId.startsWith("--") || extra.length) {
+    fail("sessions queue remove requires exactly one messageId");
+  }
+  return { action: "remove", sessionId, messageId };
+}
+
+export async function runQueue(argv, serverUrl) {
+  const parsed = parseQueue(argv);
+  const route = `/api/sessions/${encodeURIComponent(parsed.sessionId)}/queue`;
+  if (parsed.action === "remove") {
+    const { response, result } = await deleteJson(
+      serverUrl,
+      `${route}/${encodeURIComponent(parsed.messageId)}`
+    );
+    if (response.status >= 400) {
+      fail(serverError(result, `Failed to remove queued message (HTTP ${response.status})`));
+    }
+    process.stdout.write(`Removed queued message ${parsed.messageId}\n`);
+    return;
+  }
+  const { response, result } = await getJson(serverUrl, route);
+  if (response.status >= 400) {
+    fail(serverError(result, `Failed to list queued messages (HTTP ${response.status})`));
+  }
+  const queue = result?.queue;
+  if (!Array.isArray(queue)) fail("Server did not return a queue");
+  if (parsed.json) {
+    process.stdout.write(`${JSON.stringify(queue)}\n`);
+  } else if (queue.length === 0) {
+    process.stdout.write("No queued messages.\n");
+  } else {
+    for (const message of queue) {
+      const origin = message.origin ?? "unknown";
+      const runAt = message.runAt ?? "immediate";
+      const messageText = message.visibleText || message.text || "";
+      process.stdout.write(
+        `${message.id}  origin=${origin}  runAt=${runAt}  ${JSON.stringify(messageText)}\n`
+      );
+    }
+  }
 }
 
 /*

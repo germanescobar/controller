@@ -3544,6 +3544,43 @@ sessionsRouter.delete(
   }
 );
 
+// ID-only queue routes use the same cross-worktree lookup as wake and goal.
+export const queueBySessionIdRouter = Router();
+rejectUnsafeIdParam(queueBySessionIdRouter, "sessionId", "session");
+rejectUnsafeIdParam(queueBySessionIdRouter, "messageId", "queued message");
+
+queueBySessionIdRouter.get("/:sessionId/queue", async (req, res) => {
+  if (!(await locateSessionById(req.params.sessionId))) {
+    res.status(404).json({ error: "Session not found" });
+    return;
+  }
+  try {
+    res.json({ queue: await listQueue(req.params.sessionId) });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+queueBySessionIdRouter.delete("/:sessionId/queue/:messageId", async (req, res) => {
+  if (!(await locateSessionById(req.params.sessionId))) {
+    res.status(404).json({ error: "Session not found" });
+    return;
+  }
+  try {
+    if (!(await removeFromQueue(req.params.sessionId, req.params.messageId))) {
+      res.status(404).json({ error: "Queued message not found" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 // --- Wake (issue #339) ---
 //
 // `controller sessions wake <sessionId> --message <text> [--delay 30s |

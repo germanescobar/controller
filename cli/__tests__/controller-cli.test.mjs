@@ -2509,6 +2509,41 @@ test("runGoal show GETs the goal endpoint and prints the fields", async () => {
   assert.match(out, /lastReason="still going"/);
 });
 
+test("sessions queue resolves self and lists or removes entries by ID", async () => {
+  const cli = await loadCli();
+  const previousId = process.env.CONTROLLER_SESSION_ID;
+  const originalFetch = globalThis.fetch;
+  const originalStdout = process.stdout.write;
+  const calls = [];
+  const output = [];
+  process.env.CONTROLLER_SESSION_ID = "feature-session";
+  process.stdout.write = (chunk) => { output.push(String(chunk)); return true; };
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method ?? "GET" });
+    return { status: 200, text: async () => JSON.stringify({ ok: true }), json: async () => init?.method === "DELETE"
+      ? { ok: true }
+      : { queue: [{ id: "msg-1", origin: "monitor", runAt: "2026-11-01T00:00:00.000Z", text: "check CI", visibleText: "check CI" }] } };
+  };
+  try {
+    assert.deepEqual(cli.parseQueue(["list", "self", "--json"]), {
+      action: "list", sessionId: "feature-session", json: true,
+    });
+    await cli.runSessions(["queue", "list", "self"], "http://controller.test");
+    assert.match(output.join(""), /msg-1  origin=monitor  runAt=2026-11-01T00:00:00.000Z  "check CI"/);
+    output.length = 0;
+    await cli.runQueue(["list", "self", "--json"], "http://controller.test");
+    assert.equal(JSON.parse(output.join(""))[0].id, "msg-1");
+    await cli.runQueue(["remove", "self", "msg-1"], "http://controller.test");
+    assert.deepEqual(calls.map((call) => call.method), ["GET", "GET", "DELETE"]);
+    assert.ok(calls.every((call) => call.url.includes("/api/sessions/feature-session/queue")));
+  } finally {
+    if (previousId === undefined) delete process.env.CONTROLLER_SESSION_ID;
+    else process.env.CONTROLLER_SESSION_ID = previousId;
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalStdout;
+  }
+});
+
 test("parseGoal set resolves 'self' via $CONTROLLER_SESSION_ID (issue #339, #375)", async () => {
   // The agent preamble teaches `goal set <self> --condition "..."`
   // (issue #339); the parser used to forward the literal "self" to

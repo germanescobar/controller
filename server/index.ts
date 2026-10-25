@@ -7,6 +7,7 @@ import { projectsRouter } from "./routes/projects.js";
 import {
   sessionsRouter,
   wakeBySessionIdRouter,
+  queueBySessionIdRouter,
   goalBySessionIdRouter,
   monitorBySessionIdRouter,
   sendBySessionIdRouter,
@@ -106,6 +107,7 @@ app.use("/api/projects", sessionsRouter);
 app.use("/api/projects", eventsRouter);
 app.use("/api/projects", schedulesRouter);
 app.use("/api/sessions", wakeBySessionIdRouter);
+app.use("/api/sessions", queueBySessionIdRouter);
 app.use("/api/sessions", goalBySessionIdRouter);
 app.use("/api/sessions", monitorBySessionIdRouter);
 app.use("/api/sessions", sendBySessionIdRouter);
