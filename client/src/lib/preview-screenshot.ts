@@ -1,8 +1,9 @@
 import type { BrowserViewport } from "../../../shared/preview-browser.js";
 import type { PreviewCaptureResult } from "../../../shared/controller.js";
+import { withPaintablePreview } from "./paintable-preview.js";
 
 export interface CaptureWebview {
-  style: Pick<CSSStyleDeclaration, "width" | "height" | "left" | "top" | "zIndex" | "clipPath">;
+  style: Pick<CSSStyleDeclaration, "width" | "height" | "left" | "top" | "zIndex" | "clipPath" | "opacity" | "pointerEvents">;
   getURL: () => string;
   executeJavaScript: (code: string) => Promise<unknown>;
   capturePage: () => Promise<PreviewCaptureResult>;
@@ -29,60 +30,55 @@ export async function capturePreviewScreenshot(webview: CaptureWebview, fullPage
     top: style.top, zIndex: style.zIndex, clipPath: style.clipPath };
   let previousBackground: string | null = null;
   let originalScrollY: number | null = null;
-  try {
-    // Chromium does not update a parked guest's viewport or capture its pixels
-    // until the webview enters the window's paintable area.
-    if (Number.parseFloat(style.left) < -50_000) {
-      style.left = "0px";
-      style.top = "0px";
-      style.zIndex = "20";
-      style.clipPath = "";
-      await paintDelay();
-    }
-    const metrics = fullPage ? await pageMetrics(webview) : null;
-    if (metrics) {
-      if (!validMetrics(metrics)) return { ok: false, error: "Could not measure the preview page" };
-      if (metrics.width > MAX_DIMENSION || metrics.height > MAX_DIMENSION ||
-        metrics.width * metrics.height > MAX_PIXELS) {
-        return { ok: false, error: "Full page exceeds the 8192-pixel / 16-megapixel capture limit" };
-      }
-      if (metrics.width > metrics.viewportWidth + 1) {
-        return { ok: false, error: "Full-page capture cannot cover horizontal overflow; increase the viewport width" };
-      }
-      originalScrollY = metrics.scrollY;
-    }
-
-    previousBackground = await webview.executeJavaScript(`(() => {
-      const root = document.documentElement;
-      const color = getComputedStyle(root).backgroundColor;
-      if (color !== 'transparent' && !/^rgba?\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(color)) return null;
-      const previous = root.style.backgroundColor;
-      root.style.backgroundColor = '#fff';
-      return previous;
-    })()`) as string | null;
-    if (previousBackground !== null) await paintDelay();
-
-    const image = metrics && metrics.height > metrics.viewportHeight + 1
-      ? await captureFullPage(webview, metrics)
-      : await webview.capturePage();
-    if (!image.ok) return image;
-    if (image.data.length > Math.ceil(MAX_PNG_BYTES * 4 / 3) + 8) {
-      return { ok: false, error: "Screenshot exceeds the 12 MiB limit" };
-    }
-    return { ok: true, url: webview.getURL(), screenshotData: image.data, fullPage };
-  } finally {
+  return withPaintablePreview(style, async () => {
     try {
-      if (originalScrollY !== null) await scrollTo(webview, originalScrollY);
+      // Chromium does not capture a guest parked outside the paintable area.
+      if (Number.parseFloat(previous.left) < -50_000) await paintDelay();
+      const metrics = fullPage ? await pageMetrics(webview) : null;
+      if (metrics) {
+        if (!validMetrics(metrics)) return { ok: false, error: "Could not measure the preview page" };
+        if (metrics.width > MAX_DIMENSION || metrics.height > MAX_DIMENSION ||
+          metrics.width * metrics.height > MAX_PIXELS) {
+          return { ok: false, error: "Full page exceeds the 8192-pixel / 16-megapixel capture limit" };
+        }
+        if (metrics.width > metrics.viewportWidth + 1) {
+          return { ok: false, error: "Full-page capture cannot cover horizontal overflow; increase the viewport width" };
+        }
+        originalScrollY = metrics.scrollY;
+      }
+
+      previousBackground = await webview.executeJavaScript(`(() => {
+        const root = document.documentElement;
+        const color = getComputedStyle(root).backgroundColor;
+        if (color !== 'transparent' && !/^rgba?\\([^)]*,\\s*0(?:\\.0+)?\\)$/.test(color)) return null;
+        const previous = root.style.backgroundColor;
+        root.style.backgroundColor = '#fff';
+        return previous;
+      })()`) as string | null;
+      if (previousBackground !== null) await paintDelay();
+
+      const image = metrics && metrics.height > metrics.viewportHeight + 1
+        ? await captureFullPage(webview, metrics)
+        : await webview.capturePage();
+      if (!image.ok) return image;
+      if (image.data.length > Math.ceil(MAX_PNG_BYTES * 4 / 3) + 8) {
+        return { ok: false, error: "Screenshot exceeds the 12 MiB limit" };
+      }
+      return { ok: true, url: webview.getURL(), screenshotData: image.data, fullPage };
     } finally {
       try {
-        if (previousBackground !== null) {
-          await webview.executeJavaScript(`document.documentElement.style.backgroundColor = ${JSON.stringify(previousBackground)}`);
-        }
+        if (originalScrollY !== null) await scrollTo(webview, originalScrollY);
       } finally {
-        Object.assign(style, previous);
+        try {
+          if (previousBackground !== null) {
+            await webview.executeJavaScript(`document.documentElement.style.backgroundColor = ${JSON.stringify(previousBackground)}`);
+          }
+        } finally {
+          Object.assign(style, previous);
+        }
       }
     }
-  }
+  });
 }
 
 async function captureFullPage(webview: CaptureWebview, metrics: PageMetrics): Promise<PreviewCaptureResult> {

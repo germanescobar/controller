@@ -31,6 +31,7 @@ import {
   buildWaitCheckScript,
 } from "./browser-scripts.ts";
 import { capturePreviewScreenshot } from "./preview-screenshot.ts";
+import { withPaintablePreview } from "./paintable-preview.ts";
 
 /** Subset of the Electron `<webview>` tag API we drive. */
 export interface PreviewWebview extends HTMLElement {
@@ -71,6 +72,8 @@ export interface PreviewBrowserHostOptions {
    */
   projectRoot?: string;
   setViewport: (preset: "default" | "desktop" | "mobile") => BrowserViewport | null;
+  /** Reconcile temporary guest styles with the pane that is active now. */
+  syncLayout: () => void;
   getDiagnostics: (limit: number) => Promise<BrowserDiagnostic[]>;
 }
 
@@ -85,7 +88,7 @@ export function previewBrowserWsUrl(): string {
 }
 
 export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void {
-  const { enabled, browserKey, getWebview, getLoadError, openUrl, projectRoot, setViewport, getDiagnostics } = options;
+  const { enabled, browserKey, getWebview, getLoadError, openUrl, projectRoot, setViewport, getDiagnostics, syncLayout } = options;
 
   // Keep the latest callbacks in refs so the long-lived socket effect doesn't
   // reconnect on every render.
@@ -95,12 +98,14 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
   const projectRootRef = useRef(projectRoot);
   const setViewportRef = useRef(setViewport);
   const getDiagnosticsRef = useRef(getDiagnostics);
+  const syncLayoutRef = useRef(syncLayout);
   getWebviewRef.current = getWebview;
   getLoadErrorRef.current = getLoadError;
   openUrlRef.current = openUrl;
   projectRootRef.current = projectRoot;
   setViewportRef.current = setViewport;
   getDiagnosticsRef.current = getDiagnostics;
+  syncLayoutRef.current = syncLayout;
 
   useEffect(() => {
     if (!enabled || !browserKey) return;
@@ -199,6 +204,8 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
           ok: false,
           error: error instanceof Error ? error.message : String(error),
         };
+      } finally {
+        syncLayoutRef.current();
       }
     };
 
@@ -259,18 +266,11 @@ export function usePreviewBrowserHost(options: PreviewBrowserHostOptions): void 
 
 export async function waitForViewport(webview: PreviewWebview | null, viewport: BrowserViewport): Promise<void> {
   if (!webview) return;
-  const style = webview.style;
-  const parked = style && Number.parseFloat(style.left) < -50_000;
-  const previous = parked ? { left: style.left, top: style.top, zIndex: style.zIndex } : null;
   const deadline = Date.now() + 2_000;
   let last: BrowserViewport | null = null;
-  try {
-    if (parked) {
-      style.left = "0px";
-      style.top = "0px";
-      style.zIndex = "20";
-      await delay(100);
-    }
+  const parked = Number.parseFloat(webview.style?.left ?? "") < -50_000;
+  await withPaintablePreview(webview.style, async () => {
+    if (parked) await delay(100);
     while (Date.now() < deadline) {
       const actual = await boundedGuestCall(
         webview.executeJavaScript(`({ width: window.innerWidth, height: window.innerHeight })`),
@@ -281,9 +281,7 @@ export async function waitForViewport(webview: PreviewWebview | null, viewport: 
       await delay(50);
     }
     throw new Error(`Preview did not reach ${viewport.width}×${viewport.height} within 2 seconds (observed ${last?.width ?? "?"}×${last?.height ?? "?"})`);
-  } finally {
-    if (previous) Object.assign(style, previous);
-  }
+  });
 }
 
 async function boundedGuestCall<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -420,23 +418,15 @@ export async function handleClick(
   }
   const x = Math.round(result.x);
   const y = Math.round(result.y);
-  const style = webview.style;
-  const parked = style && Number.parseFloat(style.left) < -50_000;
-  const previous = parked ? { left: style.left, top: style.top, zIndex: style.zIndex } : null;
-  try {
-    if (parked) {
-      style.left = "0px";
-      style.top = "0px";
-      style.zIndex = "20";
-      await delay(100);
-    }
-    await webview.sendInputEvent({ type: "mouseMove", x, y });
-    await webview.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
-    await webview.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+  const sendInputEvent = webview.sendInputEvent.bind(webview);
+  const parked = Number.parseFloat(webview.style?.left ?? "") < -50_000;
+  await withPaintablePreview(webview.style, async () => {
+    if (parked) await delay(100);
+    await sendInputEvent({ type: "mouseMove", x, y });
+    await sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+    await sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
     if (parked) await delay(50);
-  } finally {
-    if (previous) Object.assign(style, previous);
-  }
+  });
   return { ok: true, summary: `Clicked ${selector} (${result.engine})` };
 }
 

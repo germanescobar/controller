@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { capturePreviewScreenshot, type CaptureWebview } from "./preview-screenshot.js";
 
 test("viewport capture returns PNG data without resizing the guest", async () => {
-  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "" };
+  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "", opacity: "1", pointerEvents: "auto" };
   const webview: CaptureWebview = {
     style,
     getURL: () => "http://localhost:3000/",
@@ -20,7 +20,7 @@ test("viewport capture returns PNG data without resizing the guest", async () =>
 });
 
 test("full-page capture stitches viewport tiles and restores scroll position", async () => {
-  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "" };
+  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "", opacity: "1", pointerEvents: "auto" };
   let scrollY = 200;
   let captures = 0;
   const draws: number[][] = [];
@@ -63,7 +63,7 @@ test("full-page capture stitches viewport tiles and restores scroll position", a
 });
 
 test("full-page capture rejects oversized pages without resizing", async () => {
-  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "" };
+  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "", opacity: "1", pointerEvents: "auto" };
   const webview: CaptureWebview = {
     style,
     getURL: () => "http://localhost:3000/",
@@ -78,7 +78,7 @@ test("full-page capture rejects oversized pages without resizing", async () => {
 });
 
 test("parked guest is moved into the paintable area only for capture", async () => {
-  const style = { width: "390px", height: "844px", left: "-100000px", top: "0px", zIndex: "-1", clipPath: "" };
+  const style = { width: "390px", height: "844px", left: "-100000px", top: "0px", zIndex: "-1", clipPath: "", opacity: "1", pointerEvents: "auto" };
   Object.defineProperty(globalThis, "requestAnimationFrame", {
     value: (callback: FrameRequestCallback) => { callback(0); return 1; }, configurable: true,
   });
@@ -92,6 +92,9 @@ test("parked guest is moved into the paintable area only for capture", async () 
     capturePage: async () => {
       assert.equal(style.left, "0px");
       assert.equal(style.zIndex, "20");
+      assert.equal(style.clipPath, "inset(100%)");
+      assert.equal(style.opacity, "0");
+      assert.equal(style.pointerEvents, "none");
       return { ok: true, width: 390, height: 844, data: "AQ==" };
     },
   };
@@ -101,7 +104,7 @@ test("parked guest is moved into the paintable area only for capture", async () 
 });
 
 test("transparent page background is restored after capture", async () => {
-  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "" };
+  const style = { width: "390px", height: "844px", left: "0px", top: "0px", zIndex: "20", clipPath: "", opacity: "1", pointerEvents: "auto" };
   let restored = false;
   const webview: CaptureWebview = {
     style,
