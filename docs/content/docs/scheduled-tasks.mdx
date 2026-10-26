@@ -21,6 +21,21 @@ turn on a scheduler tick. Durations include `30s`, `5m`, `1h`, and `2d`. You can
 use `--run-at <iso>` for a specific time instead. The message is a positional
 argument, so put it in quotes when it contains spaces.
 
+List pending follow-ups or cancel one by the ID printed by `wake`:
+
+```bash
+controller sessions queue list self
+controller sessions queue list self --json
+controller sessions queue remove self <messageId>
+```
+
+The queue includes messages from the user, wakes, goals, sends, and monitors.
+`list` shows each ID, origin, run time, and message text; `--json` emits the
+full queue as a JSON array. `remove` succeeds only while the message is still
+queued. It does not interrupt a running session. Clearing a goal or stopping
+a monitor stops future messages from that source, but any messages already
+queued remain until they run or you remove them.
+
 ## Keep working toward a goal
 
 Use `goal` when the session should continue until a condition is met:
