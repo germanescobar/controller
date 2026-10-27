@@ -30,3 +30,19 @@ export function visibleSessionEvents(
     ? transcript.events
     : EMPTY_EVENTS;
 }
+
+/** Keep the optimistic bubble until a fetched transcript contains its user turn. */
+export function pendingMessageAfterRefresh(
+  pendingMessage: string | null,
+  events: AgentEvent[],
+  afterEventId: string | null = null,
+): string | null {
+  if (!pendingMessage) return null;
+  const afterIndex = afterEventId
+    ? events.findIndex((event) => event.id === afterEventId)
+    : -1;
+  if (afterEventId && afterIndex === -1) return pendingMessage;
+  return events.slice(afterIndex + 1).some(
+    (event) => event.type === "user_message" && event.data.text === pendingMessage,
+  ) ? null : pendingMessage;
+}
