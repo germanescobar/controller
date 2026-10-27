@@ -7566,7 +7566,7 @@ export function SessionView({
   );
 
   // Floating bar runtime rows (issue #339): delayed follow-up in the
-  // queue head (`runAt`) and live monitors. The hook polls on a
+  // queue (`runAt`) and live monitors. The hook polls on a
   // single 2s tick — fast enough for the countdown label, cheap
   // enough that two endpoints per tick is fine. The mobile variant
   // of the panel ignores both props (desktop-only), but we still

@@ -8,17 +8,15 @@ import { locateSessionPath } from "./session-locator.js";
  *
  * `controller sessions wake ... --delay 30s` enqueues a follow-up message
  * whose `runAt` is in the future. The wakes consumer scans the queue
- * directory on every scheduler tick and, for every session whose head is
- * now due, calls the existing `advanceSessionQueue` path. That function
- * already does the right thing: its internal `dequeueFirst` honors
- * `runAt` and skips heads whose delay hasn't elapsed yet, so by the time
- * the consumer fires it the queue is ready to drain.
+ * directory on every scheduler tick and, for every session with a due wake,
+ * calls the existing `advanceSessionQueue` path. A pending earlier wake
+ * cannot block this one or an incoming message.
  *
  * The consumer is intentionally thin: the queue file is the durable
  * source of truth (the same one `enqueueMessage` writes), and the
  * existing queue machinery does the pop-and-replay. Two ticks racing the
- * same due wake cannot both fire a turn because the second `dequeueFirst`
- * sees an empty queue and returns.
+ * same due wake cannot both fire it because the second `dequeueFirst`
+ * no longer finds that message.
  */
 
 const DELAY_PATTERN = /^(\d+)\s*(s|sec|seconds?|m|min|minutes?|h|hr|hours?|d|days?)$/i;
@@ -114,7 +112,7 @@ export async function enqueueWake(
 }
 
 /**
- * Identify every session whose queue head is now due (issue #339). Used by
+ * Identify every session with a wake now due (issue #339). Used by
  * the wakes consumer; exposed for tests so a fake clock can drive it
  * deterministically.
  */
@@ -136,10 +134,7 @@ export async function listDueWakes(now: Date): Promise<string[]> {
     } catch {
       continue;
     }
-    const head = queue[0];
-    if (!head) continue;
-    if (!head.runAt) continue;
-    if (new Date(head.runAt).getTime() <= now.getTime()) {
+    if (queue.some((message) => message.runAt && Date.parse(message.runAt) <= now.getTime())) {
       due.push(sessionId);
     }
   }

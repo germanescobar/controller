@@ -78,6 +78,20 @@ test("dequeueFirst removes and returns the head, then null when empty", async ()
   });
 });
 
+test("a pending wake does not block later ready messages", async () => {
+  await withTempHome(async () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const wake = await enqueue("s1", { ...input("wake"), origin: "wake", runAt: future });
+    await enqueue("s1", { ...input("sent"), origin: "send" });
+    await enqueue("s1", input("typed"));
+
+    assert.equal((await dequeueFirst("s1"))?.text, "sent");
+    assert.equal((await dequeueFirst("s1"))?.text, "typed");
+    assert.equal(await dequeueFirst("s1"), null);
+    assert.deepEqual((await listQueue("s1")).map((item) => item.id), [wake.id]);
+  });
+});
+
 test("a durable pause blocks dequeue until an explicit clear", async () => {
   await withTempHome(async () => {
     await enqueue("s1", input("queued"));

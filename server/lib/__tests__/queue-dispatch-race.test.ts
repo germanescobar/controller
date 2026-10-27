@@ -129,6 +129,26 @@ test("idle send and a concurrent consumer tick dispatch one run and one user mes
   });
 });
 
+test("send starts behind a pending wake and leaves the wake scheduled", async () => {
+  await withDispatchEnv(async (env) => {
+    const wake = await enqueue(env.sessionId, {
+      text: "later", visibleText: "later", origin: "wake", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+      runAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const response = await fetch(`${env.baseUrl}/api/sessions/${env.sessionId}/send-from`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fromSessionId: "dispatch-parent", message: "now" }),
+    });
+    assert.equal(response.status, 201);
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
+    assert.deepEqual((await listQueue(env.sessionId)).map((item) => item.id), [wake.id]);
+    const messages = (await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message");
+    assert.equal(messages.length, 1);
+  });
+});
+
 test("sending a new message resumes a paused queue", async () => {
   await withDispatchEnv(async (env) => {
     await pauseQueue(env.sessionId, "cancelled");
@@ -261,6 +281,23 @@ test("owner recovery tick dispatches a plain queue behind a stale lease once", a
     assert.equal((await fs.readFile(env.startsFile, "utf-8")).trim(), "start");
     assert.equal((await getEvents(env.projectPath, env.sessionId)).filter((event) => event.type === "user_message").length, 1);
     assert.deepEqual(await listQueue(env.sessionId), []);
+  });
+});
+
+test("owner recovery dispatches a ready message behind a pending wake", async () => {
+  await withDispatchEnv(async (env) => {
+    const wake = await enqueue(env.sessionId, {
+      text: "later", visibleText: "later", origin: "wake", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+      runAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await enqueue(env.sessionId, {
+      text: "recover", visibleText: "recover", provider: "anita",
+      model: "", mode: "default", attachmentIds: [],
+    });
+    await runQueueRecovery({ advanceSessionQueue: advanceSessionQueueFromConsumer });
+    await waitForRun(env.projectPath, env.sessionId);
+    assert.deepEqual((await listQueue(env.sessionId)).map((item) => item.id), [wake.id]);
   });
 });
 

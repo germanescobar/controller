@@ -70,13 +70,13 @@ interface FocusConversationControlsProps {
     sessionId: string;
   }) => void;
   /**
-   * ISO timestamp from the head queued message's `runAt`, or
+   * ISO timestamp from the first delayed follow-up's `runAt`, or
    * `null` when no delayed follow-up is queued (issue #339).
    * When set, the panel renders a countdown-style row.
    */
   delayRunAt?: string | null;
   /**
-   * Short preview of the head queued message's text. The delay
+   * Short preview of the first delayed follow-up's text. The delay
    * row renders this alongside the countdown so the user can
    * tell *what* is going to fire (a wake) without having to
    * glance at the queued-messages strip below the chat input.

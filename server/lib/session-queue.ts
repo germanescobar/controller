@@ -57,7 +57,7 @@ export interface QueuedMessage {
    * message is not dequeued for the agent until the wall clock passes it —
    * the wakes consumer (registered on the shared wakeup loop in
    * `scheduler.ts`) calls `advanceSessionQueue` once the delay has elapsed,
-   * so the queue stays drained without a client or a follow-up turn. Items
+   * while ready messages behind it can run in the meantime. Items
    * without `runAt` keep their existing "process as soon as a turn finishes"
    * behavior.
    */
@@ -184,15 +184,15 @@ export async function resolveQueuedMessage<T>(
   });
 }
 
-/** Remove and return the first queued message, or null if the queue is empty.
+/** Whether a queued message can start at the current wall-clock time. */
+export function isQueuedMessageReady(message: QueuedMessage, now = Date.now()): boolean {
+  return !message.runAt || !(Date.parse(message.runAt) > now);
+}
+
+/** Remove and return the first ready queued message, or null if none is ready.
  *
- * Honors deferred-wakeup `runAt` (issue #339): a head whose `runAt` is still
- * in the future is *not* popped, since firing the agent before the delay
- * would defeat the purpose. The wakes consumer (registered on the shared
- * wakeup loop from #243) calls `advanceSessionQueue` once the delay has
- * elapsed, which re-invokes this function and gets the now-ready head. The
- * peek-then-pop happens under the same per-session lock so a concurrent
- * enqueue can't race the check.
+ * Deferred wakes retain their queue position until due, but cannot block
+ * later ready messages. Selection and removal share the per-session lock.
  */
 export async function dequeueFirst(
   sessionId: string
@@ -200,14 +200,9 @@ export async function dequeueFirst(
   return withLock(sessionId, async () => {
     if (await readQueuePause(sessionId)) return null;
     const queue = await readQueue(sessionId);
-    const first = queue[0];
-    if (!first) return null;
-    if (first.runAt && new Date(first.runAt).getTime() > Date.now()) {
-      // Not yet. The wakes consumer will fire `advanceSessionQueue` on the
-      // session once the delay has elapsed.
-      return null;
-    }
-    queue.shift();
+    const index = queue.findIndex((message) => isQueuedMessageReady(message));
+    if (index === -1) return null;
+    const [first] = queue.splice(index, 1);
     await writeQueue(sessionId, queue);
     return first;
   });

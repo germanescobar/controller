@@ -753,7 +753,7 @@ export interface QueuedMessage {
   /**
    * Optional ISO timestamp for deferred wakeups (issue #339). When
    * set, the wakes consumer holds the message until the wall clock
-   * passes it. The floating bar reads this off the queue head to
+   * passes it. The floating bar reads the first delayed follow-up to
    * surface an in-progress delay in the session.
    */
   runAt?: string;

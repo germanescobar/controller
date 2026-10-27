@@ -16,9 +16,11 @@ Use `wake` when you know when to check again:
 controller sessions wake self "Check the CI status again" --delay 30s
 ```
 
-The message is queued until the delay passes, then Controller starts the next
-turn on a scheduler tick. Durations include `30s`, `5m`, `1h`, and `2d`. You can
-use `--run-at <iso>` for a specific time instead. The message is a positional
+The follow-up waits until the delay passes, then Controller starts it on a
+scheduler tick. Messages sent to the same session while it waits can run
+first; the pending follow-up does not hold up the message queue. Durations
+include `30s`, `5m`, `1h`, and `2d`. You can use `--run-at <iso>` for a
+specific time instead. The message is a positional
 argument, so put it in quotes when it contains spaces.
 
 List pending follow-ups or cancel one by the ID printed by `wake`:
