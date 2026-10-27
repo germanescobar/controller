@@ -173,6 +173,17 @@ test("listDueWakes returns every session whose head is now due", async () => {
   });
 });
 
+test("listDueWakes finds a due wake behind a pending wake", async () => {
+  await withTempHome(async () => {
+    const now = new Date();
+    await enqueue("mixed", { ...queueInput("later"), runAt: new Date(now.getTime() + 60_000).toISOString() });
+    await enqueue("mixed", { ...queueInput("due"), runAt: new Date(now.getTime() - 1_000).toISOString() });
+    assert.deepEqual(await listDueWakes(now), ["mixed"]);
+    assert.equal((await dequeueFirst("mixed"))?.text, "due");
+    assert.deepEqual((await listQueue("mixed")).map((item) => item.text), ["later"]);
+  });
+});
+
 test("listDueWakes skips empty queue files", async () => {
   await withTempHome(async () => {
     // Write an empty queue file directly so the directory has something to

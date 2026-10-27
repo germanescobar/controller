@@ -440,7 +440,7 @@ async function startSharedWork(): Promise<void> {
   );
 
   // Register the wakes consumer (issue #339). Each tick it scans the
-  // session queue directory for heads whose `runAt` is now due and
+  // session queue directory for wakes whose `runAt` is now due and
   // delegates to the same `scheduleSessionQueueAdvance` chain the run
   // completion handler uses. `makeRouteAdvanceDeps` returns once the
   // routes module is loaded; registering before that resolves would

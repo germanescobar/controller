@@ -107,6 +107,7 @@ import {
   listQueue,
   removeFromQueue,
   dequeueFirst,
+  isQueuedMessageReady,
   resolveQueuedMessage,
   clearQueue,
   withSessionQueueTransaction,
@@ -2635,8 +2636,7 @@ async function releaseRunLeaseAndDrain(
 
   try {
     if (await getQueuePause(sessionId)) return;
-    const head = (await listQueue(sessionId))[0];
-    if (!head || (head.runAt && Date.parse(head.runAt) > Date.now())) return;
+    if (!(await listQueue(sessionId)).some((message) => isQueuedMessageReady(message))) return;
     const located = await locateSessionById(sessionId);
     if (!located) return;
     void scheduleSessionQueueAdvance(located.projectId, located.worktreeId, sessionId);
@@ -2648,7 +2648,7 @@ async function releaseRunLeaseAndDrain(
 /**
  * Drain a session's queue from outside the route pipeline (issue #339).
  * Used by the wakes consumer (`server/lib/wakes.ts`) to fire deferred
- * wakeups: each tick sees the head's `runAt` is now due and delegates to
+ * wakeups: each tick finds due wakes and delegates to
  * the same chain that the run-completion handler uses, so the replay goes
  * through the identical preflight + headless-stream machinery.
  */

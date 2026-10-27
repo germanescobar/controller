@@ -223,7 +223,8 @@ const USAGE = `Usage:
   #339). The message is replayed as the next turn once the current turn
   finishes, exactly like a queued composer message. \`--delay <duration>\`
   (forms: \`30s\`, \`5m\`, \`1h\`, \`2d\`) holds the message until the wall clock
-  has passed; the wakes consumer fires it on the next scheduler tick.
+  has passed; the wakes consumer fires it on the next scheduler tick. Ready
+  messages sent to the session can run while a delayed wake is pending.
   \`--run-at <iso>\` is the absolute-time counterpart. With no delay, the
   message is replayed as soon as the live turn finishes. The session keeps its
   existing transcript — the wake is the same shape as a queued message. The

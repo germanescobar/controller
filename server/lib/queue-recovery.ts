@@ -35,8 +35,7 @@ export async function runQueueRecovery(deps: QueueRecoveryDeps): Promise<void> {
     const sessionId = entry.slice(0, -".json".length);
     if (!isSafeId(sessionId)) return;
     try {
-      const head = (await listQueue(sessionId))[0];
-      if (!head || head.runAt) return;
+      if (!(await listQueue(sessionId)).some((message) => !message.runAt)) return;
       if (await getQueuePause(sessionId)) return;
       if (await hasLiveSessionRunLease(sessionId)) return;
       const located = await locateSessionPath(sessionId);

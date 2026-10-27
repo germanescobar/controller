@@ -11,7 +11,7 @@ import {
 /* Poll pending follow-ups, active goal, and monitors for the floating panel. */
 
 export interface SessionRuntimeState {
-  /** ISO timestamp from the head queued message's `runAt`, or `null`. */
+  /** ISO timestamp from the first delayed follow-up, or `null`. */
   delayRunAt: string | null;
   /** Short text preview for the legacy delay row. */
   delayMessagePreview: string | null;
@@ -55,7 +55,7 @@ export function filterVisibleQueue(queue: readonly QueuedMessage[]): QueuedMessa
 }
 
 /**
- * Poll the queue head's `runAt` and the monitor list for a session.
+ * Poll delayed follow-ups and the monitor list for a session.
  * Pass `null` when no session is mounted (e.g. archived view) to
  * short-circuit the fetches.
  *
@@ -101,24 +101,24 @@ export function useSessionRuntimeState(
           getSessionGoal(projectId, sessionId, worktreeId).catch(() => null),
         ]);
         if (cancelled) return;
-        const head = queue[0];
+        const delayed = queue.find((message) => typeof message.runAt === "string" && message.runAt);
         // `runAt` is the wakes consumer's "hold until" timestamp; a
-        // message without it goes straight to the head of the queue
+        // message without it can run as soon as the session is idle
         // and isn't really a wake, so we don't surface it in the
         // panel's delay row.
         const delayRunAt =
-          head && typeof head.runAt === "string" && head.runAt
-            ? head.runAt
+          delayed && typeof delayed.runAt === "string" && delayed.runAt
+            ? delayed.runAt
             : null;
         // Prefer `visibleText` (the user-visible form, e.g. after
         // stripping skill preambles) and fall back to `text` for
         // older queue shapes. Empty / whitespace-only previews are
         // dropped so the row never renders an empty label.
         const rawPreview =
-          head && typeof head.visibleText === "string" && head.visibleText.trim()
-            ? head.visibleText.trim()
-            : head && typeof head.text === "string" && head.text.trim()
-              ? head.text.trim()
+          delayed && typeof delayed.visibleText === "string" && delayed.visibleText.trim()
+            ? delayed.visibleText.trim()
+            : delayed && typeof delayed.text === "string" && delayed.text.trim()
+              ? delayed.text.trim()
               : null;
         const delayMessagePreview = delayRunAt && rawPreview ? rawPreview : null;
         setState({
