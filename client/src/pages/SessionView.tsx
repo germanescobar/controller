@@ -112,6 +112,12 @@ import {
   type ToolApprovalDecision,
 } from "../api.ts";
 import { canonicalProviderId } from "../lib/provider-id.ts";
+import { updateSessionTranscript, visibleSessionEvents, type SessionTranscript } from "../lib/session-transcript.ts";
+import { isStreamVisible } from "../lib/session-stream-visibility.ts";
+import {
+  continueEmulatedSteerInBackground,
+  type BackgroundEmulatedSteer,
+} from "../lib/background-emulated-steer.ts";
 import {
   parseSkillTokenAtCaret,
   removeSkillToken,
@@ -3861,10 +3867,34 @@ export function SessionView({
     text: string;
     mentions: FileMention[];
     selections: SelectionMention[];
-  } | null>(null);
+  } & BackgroundEmulatedSteer | null>(null);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
-  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [sessionTranscript, setSessionTranscript] = useState<SessionTranscript>({
+    sessionId: null,
+    events: [],
+  });
+  const events = visibleSessionEvents(sessionTranscript, sessionId);
+  // A request can finish after navigation. Read the current render's target
+  // when it commits, rather than the session id captured when it started.
+  const transcriptTargetRef = useRef({ projectId, worktreeId, sessionId });
+  transcriptTargetRef.current = { projectId, worktreeId, sessionId };
+  const commitEvents = (
+    targetSessionId: string,
+    update: AgentEvent[] | ((current: AgentEvent[]) => AgentEvent[]),
+  ) => {
+    setSessionTranscript((previous) =>
+      updateSessionTranscript(
+        previous,
+        transcriptTargetRef.current.projectId === projectId &&
+          transcriptTargetRef.current.worktreeId === worktreeId
+          ? transcriptTargetRef.current.sessionId
+          : undefined,
+        targetSessionId,
+        update,
+      )
+    );
+  };
   // True while the initial event fetch for the current `sessionId` is in
   // flight. Surfaces a centered spinner in the transcript so the user gets
   // feedback that the conversation is loading. The first page is
@@ -4793,7 +4823,7 @@ export function SessionView({
       setInitialEventsLoading(true);
       setLoadingEarlier(false);
       setReachedTranscriptStart(false);
-      setEvents([]);
+      setSessionTranscript({ sessionId, events: [] });
       setProviderResolved(false);
       Promise.allSettled([
         fetchSession(projectId, sessionId, worktreeId),
@@ -4837,9 +4867,9 @@ export function SessionView({
           }
 
           if (eventsResult.status === "fulfilled") {
-            setEvents(eventsResult.value);
+            commitEvents(sessionId, eventsResult.value);
           } else {
-            setEvents([]);
+            commitEvents(sessionId, []);
           }
           // Initial load is done — clear the spinner regardless of success
           // or failure. Subsequent refetches during streaming / dismiss /
@@ -4862,7 +4892,7 @@ export function SessionView({
       setIsFocusPinned(false);
       setSessionTitle(undefined);
       setTitleDialogOpen(false);
-      setEvents([]);
+      setSessionTranscript({ sessionId: null, events: [] });
       setStreamItems([]);
       setStreaming(false);
       setInitialEventsLoading(false);
@@ -5045,7 +5075,7 @@ export function SessionView({
           fetchActiveRuntimes(),
         ]);
         if (cancelled) return;
-        setEvents(evts);
+        commitEvents(sessionId, evts);
         const isActive = runtimes.some(
           (entry) => entry.sessionId === sessionId && entry.active,
         );
@@ -5059,6 +5089,7 @@ export function SessionView({
           if (
             steerInProgressRef.current &&
             pendingSteerRef.current &&
+            pendingSteerRef.current.sessionId === sessionId &&
             sessionId
           ) {
             const pendingSteer = pendingSteerRef.current;
@@ -5105,7 +5136,7 @@ export function SessionView({
   }, [projectId, sessionId, worktreeId, streaming, ownStreamActive]);
 
   // Track current session and manage stream visibility on session switch
-  useEffect(() => {
+  useLayoutEffect(() => {
     const prevSessionId = currentViewRef.current.sessionId;
     const prevProjectId = currentViewRef.current.projectId;
     const prevWorktreeId = currentViewRef.current.worktreeId;
@@ -5142,7 +5173,34 @@ export function SessionView({
           sessionId,
           streamContext: sendContextRef.current,
         });
-        // Navigated away from the streaming session — hide streaming UI
+        // The server keeps the run alive after an SSE disconnect. Release
+        // this view's subscription so a second session in the same worktree
+        // cannot share its refs or receive events from the old stream.
+        const pendingSteer = pendingSteerRef.current;
+        if (
+          steerInProgressRef.current &&
+          pendingSteer &&
+          pendingSteer.sessionId === sendContextRef.current.sessionId
+        ) {
+          continueEmulatedSteerInBackground(
+            eventSourceRef.current,
+            pendingSteer,
+            startSession,
+            (completedSessionId) => onBackgroundComplete?.(completedSessionId),
+            (error) => toast.error(`Could not resume steer in ${pendingSteer.sessionId.slice(0, 8)}: ${error.message}`),
+          );
+          pendingSteerRef.current = null;
+          steerInProgressRef.current = false;
+          setSteerInProgress(false);
+        } else {
+          eventSourceRef.current.close();
+        }
+        eventSourceRef.current = null;
+        sendContextRef.current = null;
+        pendingAttachedSessionIdRef.current = null;
+        focusAdvanceOnAttachRef.current = false;
+        streamingRef.current = false;
+        setOwnStreamActive(false);
         setStreaming(false);
         setPendingMessage(null);
         setPendingAttachments([]);
@@ -5226,7 +5284,7 @@ export function SessionView({
   eventsRef.current = events;
   const loadEarlierOnePage = async (): Promise<boolean> => {
     const el = scrollContainerRef.current;
-    if (!el) return false;
+    if (!el || !sessionId) return false;
     const currentEvents = eventsRef.current;
     const anchor = currentEvents[0]?.id;
     if (!anchor) return false;
@@ -5269,7 +5327,7 @@ export function SessionView({
         setReachedTranscriptStart(true);
         return false;
       }
-      setEvents((prev) => {
+      commitEvents(sessionId, (prev) => {
         // Drop the loaded-page head entries consumed by dedupe so
         // the seam collapses to a single canonical event. The
         // merged event lives in `stitch.newPage` (the round-1
@@ -6041,23 +6099,13 @@ export function SessionView({
     // Check if the user is still viewing the session this stream belongs to
     const isVisible = () => {
       const streamContext = sendContextRef.current;
-      if (!streamContext) return false;
-
       const currentView = currentViewRef.current;
-      const currentMatchesStreamView =
-        currentView.projectId === streamContext.projectId &&
-        currentView.worktreeId === streamContext.worktreeId &&
-        currentView.sessionId === streamContext.sessionId;
-
-      const visible =
-        currentMatchesStreamView ||
-        (
-          currentView.projectId === streamContext.projectId &&
-          currentView.worktreeId === streamContext.worktreeId &&
-          currentView.sessionId == null &&
-          pendingAttachedSessionIdRef.current === streamContext.sessionId &&
-          streamContext.sessionId === detectedSessionId
-        );
+      const visible = isStreamVisible(
+        currentView,
+        streamContext,
+        detectedSessionId,
+        pendingAttachedSessionIdRef.current,
+      );
 
       debugSessionIsolation("stream.visibilityCheck", {
         streamContext,
@@ -6066,18 +6114,11 @@ export function SessionView({
         visible,
       });
 
-      if (currentMatchesStreamView) return true;
-
-      return (
-        currentView.projectId === streamContext.projectId &&
-        currentView.worktreeId === streamContext.worktreeId &&
-        currentView.sessionId == null &&
-        pendingAttachedSessionIdRef.current === streamContext.sessionId &&
-        streamContext.sessionId === detectedSessionId
-      );
+      return visible;
     };
 
     es.onmessage = (event) => {
+      if (eventSourceRef.current !== es) return;
       const data = JSON.parse(event.data) as SessionStreamEvent;
       debugSessionIsolation("stream.message", {
         streamContext: sendContextRef.current,
@@ -6093,14 +6134,17 @@ export function SessionView({
           }
         }
       } else if (data.type === "session_focus") {
-        setIsFocusPinned(Boolean(data.focusPinnedAt));
+        if (isVisible()) setIsFocusPinned(Boolean(data.focusPinnedAt));
         onFocusPinnedChange?.();
       } else if (data.type === "anita_event") {
         const adaEvent = data.event;
         if (adaEvent.type === "run.started") {
           nativeSteerStateRef.current = "active";
           detectedSessionId = adaEvent.sessionId;
-          attachToSession(adaEvent.sessionId);
+          // A run can report its id after the user has opened another
+          // thread in this worktree. Keep it running in the background;
+          // only the originating view may claim its transcript.
+          if (isVisible()) attachToSession(adaEvent.sessionId);
         } else if (adaEvent.type === "assistant.text") {
           if (adaEvent.text && isVisible()) {
             setStreamItems((prev) => [
@@ -6308,6 +6352,7 @@ export function SessionView({
         if (
           steerInProgressRef.current &&
           pendingSteerRef.current &&
+          pendingSteerRef.current.sessionId === completedSessionId &&
           completedSessionId
         ) {
           const pendingSteer = pendingSteerRef.current;
@@ -6339,7 +6384,7 @@ export function SessionView({
           if (completedSessionId) {
             fetchEvents(projectId, completedSessionId, worktreeId)
               .then((evts) => {
-                setEvents(evts);
+                commitEvents(completedSessionId, evts);
                 // Once the persisted transcript is loaded it covers the whole
                 // run — including cancelled/failed runs, which #166 now
                 // persists. Clearing the live items only on a clean exit left
@@ -6414,6 +6459,7 @@ export function SessionView({
     };
 
     es.onerror = () => {
+      if (eventSourceRef.current !== es) return;
       const wasVisible = isVisible();
       debugSessionIsolation("stream.transportError", {
         detectedSessionId,
@@ -6836,21 +6882,40 @@ export function SessionView({
     // steer can't race the stop+resume.
     steerInProgressRef.current = true;
     setSteerInProgress(true);
+    const stopRequest = stopSession(projectId, targetSessionId, worktreeId);
     pendingSteerRef.current = {
+      projectId,
+      sessionId: targetSessionId,
       text: steerText,
       mentions: steerMentions,
       selections: steerSelections,
+      options: {
+        resumeSessionId: targetSessionId,
+        provider: selectedProvider,
+        model: selectedModel,
+        reasoningEffort: providerSupportsReasoningEffort ? selectedReasoningEffort : undefined,
+        serviceTier: providerSupportsServiceTier && selectedServiceTier === "fast" ? "fast" : undefined,
+        mode: providerSupportsPlanMode ? selectedMode : "default",
+        worktreeId,
+        mentions: steerMentions,
+        selections: steerSelections,
+      },
+      stopRequest,
     };
     try {
-      await stopSession(projectId, targetSessionId, worktreeId);
+      await stopRequest;
     } catch (err) {
-      steerInProgressRef.current = false;
-      setSteerInProgress(false);
-      pendingSteerRef.current = null;
-      setStreamItems((prev) => [
-        ...prev,
-        { type: "error", text: err instanceof Error ? err.message : "Failed to steer session", at: Date.now() },
-      ]);
+      if (pendingSteerRef.current?.sessionId === targetSessionId) {
+        steerInProgressRef.current = false;
+        setSteerInProgress(false);
+        pendingSteerRef.current = null;
+        if (currentViewRef.current.sessionId === targetSessionId) {
+          setStreamItems((prev) => [
+            ...prev,
+            { type: "error", text: err instanceof Error ? err.message : "Failed to steer session", at: Date.now() },
+          ]);
+        }
+      }
     }
   };
 
@@ -7266,7 +7331,7 @@ export function SessionView({
         )
       );
       fetchEvents(projectId, targetSessionId, worktreeId)
-        .then(setEvents)
+        .then((evts) => commitEvents(targetSessionId, evts))
         .catch(() => {});
       // Submitting the structured-input form is the "I'm done with this
       // session for now" moment, same as sending a message: schedule
@@ -7335,7 +7400,7 @@ export function SessionView({
         )
       );
       fetchEvents(projectId, targetSessionId, worktreeId)
-        .then(setEvents)
+        .then((evts) => commitEvents(targetSessionId, evts))
         .catch(() => {});
     } catch (error) {
       setStreamItems((prev) => [
@@ -7369,7 +7434,7 @@ export function SessionView({
     try {
       await submitToolApproval(projectId, targetSessionId, requestId, decision, worktreeId);
       fetchEvents(projectId, targetSessionId, worktreeId)
-        .then(setEvents)
+        .then((evts) => commitEvents(targetSessionId, evts))
         .catch(() => {});
       // Resolving an approval card is the same "I'm done with this session
       // for now" moment as sending a message: schedule the focus-advance
