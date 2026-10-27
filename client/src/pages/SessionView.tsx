@@ -115,6 +115,10 @@ import { canonicalProviderId } from "../lib/provider-id.ts";
 import { updateSessionTranscript, visibleSessionEvents, type SessionTranscript } from "../lib/session-transcript.ts";
 import { isStreamVisible } from "../lib/session-stream-visibility.ts";
 import {
+  continueEmulatedSteerInBackground,
+  type BackgroundEmulatedSteer,
+} from "../lib/background-emulated-steer.ts";
+import {
   parseSkillTokenAtCaret,
   removeSkillToken,
   buildSkillHistoryText,
@@ -3863,7 +3867,7 @@ export function SessionView({
     text: string;
     mentions: FileMention[];
     selections: SelectionMention[];
-  } | null>(null);
+  } & BackgroundEmulatedSteer | null>(null);
   const [queuedStreamStart, setQueuedStreamStart] = useState<QueuedStreamStart | null>(null);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
   const [sessionTranscript, setSessionTranscript] = useState<SessionTranscript>({
@@ -5085,6 +5089,7 @@ export function SessionView({
           if (
             steerInProgressRef.current &&
             pendingSteerRef.current &&
+            pendingSteerRef.current.sessionId === sessionId &&
             sessionId
           ) {
             const pendingSteer = pendingSteerRef.current;
@@ -5171,7 +5176,25 @@ export function SessionView({
         // The server keeps the run alive after an SSE disconnect. Release
         // this view's subscription so a second session in the same worktree
         // cannot share its refs or receive events from the old stream.
-        eventSourceRef.current.close();
+        const pendingSteer = pendingSteerRef.current;
+        if (
+          steerInProgressRef.current &&
+          pendingSteer &&
+          pendingSteer.sessionId === sendContextRef.current.sessionId
+        ) {
+          continueEmulatedSteerInBackground(
+            eventSourceRef.current,
+            pendingSteer,
+            startSession,
+            (completedSessionId) => onBackgroundComplete?.(completedSessionId),
+            (error) => toast.error(`Could not resume steer in ${pendingSteer.sessionId.slice(0, 8)}: ${error.message}`),
+          );
+          pendingSteerRef.current = null;
+          steerInProgressRef.current = false;
+          setSteerInProgress(false);
+        } else {
+          eventSourceRef.current.close();
+        }
         eventSourceRef.current = null;
         sendContextRef.current = null;
         pendingAttachedSessionIdRef.current = null;
@@ -6329,6 +6352,7 @@ export function SessionView({
         if (
           steerInProgressRef.current &&
           pendingSteerRef.current &&
+          pendingSteerRef.current.sessionId === completedSessionId &&
           completedSessionId
         ) {
           const pendingSteer = pendingSteerRef.current;
@@ -6858,21 +6882,40 @@ export function SessionView({
     // steer can't race the stop+resume.
     steerInProgressRef.current = true;
     setSteerInProgress(true);
+    const stopRequest = stopSession(projectId, targetSessionId, worktreeId);
     pendingSteerRef.current = {
+      projectId,
+      sessionId: targetSessionId,
       text: steerText,
       mentions: steerMentions,
       selections: steerSelections,
+      options: {
+        resumeSessionId: targetSessionId,
+        provider: selectedProvider,
+        model: selectedModel,
+        reasoningEffort: providerSupportsReasoningEffort ? selectedReasoningEffort : undefined,
+        serviceTier: providerSupportsServiceTier && selectedServiceTier === "fast" ? "fast" : undefined,
+        mode: providerSupportsPlanMode ? selectedMode : "default",
+        worktreeId,
+        mentions: steerMentions,
+        selections: steerSelections,
+      },
+      stopRequest,
     };
     try {
-      await stopSession(projectId, targetSessionId, worktreeId);
+      await stopRequest;
     } catch (err) {
-      steerInProgressRef.current = false;
-      setSteerInProgress(false);
-      pendingSteerRef.current = null;
-      setStreamItems((prev) => [
-        ...prev,
-        { type: "error", text: err instanceof Error ? err.message : "Failed to steer session", at: Date.now() },
-      ]);
+      if (pendingSteerRef.current?.sessionId === targetSessionId) {
+        steerInProgressRef.current = false;
+        setSteerInProgress(false);
+        pendingSteerRef.current = null;
+        if (currentViewRef.current.sessionId === targetSessionId) {
+          setStreamItems((prev) => [
+            ...prev,
+            { type: "error", text: err instanceof Error ? err.message : "Failed to steer session", at: Date.now() },
+          ]);
+        }
+      }
     }
   };
 
