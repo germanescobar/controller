@@ -30,3 +30,27 @@ export function visibleSessionEvents(
     ? transcript.events
     : EMPTY_EVENTS;
 }
+
+/** Keep the optimistic bubble until a fetched transcript contains its user turn. */
+export function pendingMessageAfterRefresh(
+  pendingMessage: string | null,
+  events: AgentEvent[],
+  afterEventId: string | null = null,
+  sentMessage: string = pendingMessage ?? "",
+): string | null {
+  if (!pendingMessage) return null;
+  const afterIndex = afterEventId
+    ? events.findIndex((event) => event.id === afterEventId)
+    : -1;
+  if (afterEventId && afterIndex === -1) return pendingMessage;
+  const matchesSentTurn = (event: AgentEvent): boolean => {
+    if (event.type !== "user_message" || typeof event.data.text !== "string") return false;
+    const persistedText = event.data.text;
+    const hasContextPrefix = /^(?:<mentions>|<selections>|<selection-annotations>)/.test(persistedText);
+    // Mention and selection context is persisted before the user-facing text.
+    return [pendingMessage, sentMessage].some(
+      (text) => persistedText === text || (hasContextPrefix && persistedText.endsWith(`\n\n${text}`)),
+    );
+  };
+  return events.slice(afterIndex + 1).some(matchesSentTurn) ? null : pendingMessage;
+}

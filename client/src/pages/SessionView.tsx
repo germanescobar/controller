@@ -112,7 +112,7 @@ import {
   type ToolApprovalDecision,
 } from "../api.ts";
 import { canonicalProviderId } from "../lib/provider-id.ts";
-import { updateSessionTranscript, visibleSessionEvents, type SessionTranscript } from "../lib/session-transcript.ts";
+import { pendingMessageAfterRefresh, updateSessionTranscript, visibleSessionEvents, type SessionTranscript } from "../lib/session-transcript.ts";
 import { isStreamVisible } from "../lib/session-stream-visibility.ts";
 import {
   continueEmulatedSteerInBackground,
@@ -1714,24 +1714,6 @@ function getLatestPendingUserInputRequest(
   }
 
   return null;
-}
-
-function hasMatchingPersistedUserMessage(
-  events: AgentEvent[],
-  pendingMessage: string | null
-): boolean {
-  if (!pendingMessage) return false;
-
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    if (event.type !== "user_message") continue;
-    return (
-      typeof event.data.text === "string" &&
-      event.data.text === pendingMessage
-    );
-  }
-
-  return false;
 }
 
 type EventRenderItem =
@@ -3826,6 +3808,11 @@ export function SessionView({
     COMPOSER_MAX_LINES,
   );
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  const pendingMessageRef = useRef(pendingMessage);
+  pendingMessageRef.current = pendingMessage;
+  const pendingMessageAfterEventIdRef = useRef<string | null>(null);
+  const pendingSentMessageRef = useRef("");
+  const streamGenerationRef = useRef(0);
   const [pendingAttachments, setPendingAttachments] = useState<SessionAttachment[]>([]);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -3875,6 +3862,8 @@ export function SessionView({
     events: [],
   });
   const events = visibleSessionEvents(sessionTranscript, sessionId);
+  const eventsRef = useRef(events);
+  eventsRef.current = events;
   // A request can finish after navigation. Read the current render's target
   // when it commits, rather than the session id captured when it started.
   const transcriptTargetRef = useRef({ projectId, worktreeId, sessionId });
@@ -5069,12 +5058,13 @@ export function SessionView({
     const poll = async () => {
       if (inFlight) return;
       inFlight = true;
+      const streamGeneration = streamGenerationRef.current;
       try {
         const [evts, runtimes] = await Promise.all([
           fetchEvents(projectId, sessionId, worktreeId),
           fetchActiveRuntimes(),
         ]);
-        if (cancelled) return;
+        if (cancelled || streamGeneration !== streamGenerationRef.current) return;
         commitEvents(sessionId, evts);
         const isActive = runtimes.some(
           (entry) => entry.sessionId === sessionId && entry.active,
@@ -5113,9 +5103,22 @@ export function SessionView({
             return;
           }
           setStreaming(false);
-          setPendingMessage(null);
-          setPendingAttachments([]);
-          setStreamItems([]);
+          setPendingMessage((current) =>
+            pendingMessageAfterRefresh(
+              current, evts, pendingMessageAfterEventIdRef.current, pendingSentMessageRef.current
+            )
+          );
+          if (
+            pendingMessageAfterRefresh(
+              pendingMessageRef.current,
+              evts,
+              pendingMessageAfterEventIdRef.current,
+              pendingSentMessageRef.current
+            ) === null
+          ) {
+            setPendingAttachments([]);
+            setStreamItems([]);
+          }
         }
       } catch {
         if (!cancelled) {
@@ -5280,8 +5283,6 @@ export function SessionView({
   // commit (not the value captured at fetch start). Without the
   // ref the chain would build on a stale snapshot and mis-stitch
   // the seam.
-  const eventsRef = useRef(events);
-  eventsRef.current = events;
   const loadEarlierOnePage = async (): Promise<boolean> => {
     const el = scrollContainerRef.current;
     if (!el || !sessionId) return false;
@@ -6032,6 +6033,9 @@ export function SessionView({
     }
 
     const streamSessionId = resumeSessionIdOverride ?? sessionId;
+    streamGenerationRef.current += 1;
+    pendingMessageAfterEventIdRef.current = eventsRef.current.at(-1)?.id ?? null;
+    pendingSentMessageRef.current = sentMessage;
     streamingRef.current = true;
     setPendingMessage(pendingVisibleMessage);
     setPendingAttachments(visibleAttachments ?? []);
@@ -6378,13 +6382,28 @@ export function SessionView({
 
         if (wasVisible) {
           streamingRef.current = false;
-          setPendingMessage(null);
-          setPendingAttachments([]);
           setActiveStreamSessionId(completedSessionId || null);
           if (completedSessionId) {
+            const completedGeneration = streamGenerationRef.current;
             fetchEvents(projectId, completedSessionId, worktreeId)
               .then((evts) => {
+                if (completedGeneration !== streamGenerationRef.current) return;
                 commitEvents(completedSessionId, evts);
+                setPendingMessage((current) =>
+                  pendingMessageAfterRefresh(
+                    current, evts, pendingMessageAfterEventIdRef.current, pendingSentMessageRef.current
+                  )
+                );
+                if (
+                  pendingMessageAfterRefresh(
+                    pendingVisibleMessage,
+                    evts,
+                    pendingMessageAfterEventIdRef.current,
+                    pendingSentMessageRef.current
+                  ) === null
+                ) {
+                  setPendingAttachments([]);
+                }
                 // Once the persisted transcript is loaded it covers the whole
                 // run — including cancelled/failed runs, which #166 now
                 // persists. Clearing the live items only on a clean exit left
@@ -6414,6 +6433,10 @@ export function SessionView({
                 }
               })
               .catch(() => {});
+          } else {
+            // A run that never attached has no transcript to replace the draft.
+            setPendingMessage(null);
+            setPendingAttachments([]);
           }
           // The server drains the queue (one-at-a-time, on clean completion).
           // When items remain, stay in the streaming state so the runtime
@@ -7505,10 +7528,12 @@ export function SessionView({
               }
             : null;
         })();
-  const showPendingMessage = !hasMatchingPersistedUserMessage(
+  const showPendingMessage = pendingMessageAfterRefresh(
+    pendingMessage,
     events,
-    pendingMessage
-  );
+    pendingMessageAfterEventIdRef.current,
+    pendingSentMessageRef.current,
+  ) !== null;
   const showComposerDetails = composerLayout.showDetails;
   const composerPlaceholder = steerInProgress
     ? "Steering…"
