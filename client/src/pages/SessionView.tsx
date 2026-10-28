@@ -3811,6 +3811,7 @@ export function SessionView({
   const pendingMessageRef = useRef(pendingMessage);
   pendingMessageRef.current = pendingMessage;
   const pendingMessageAfterEventIdRef = useRef<string | null>(null);
+  const pendingSentMessageRef = useRef("");
   const streamGenerationRef = useRef(0);
   const [pendingAttachments, setPendingAttachments] = useState<SessionAttachment[]>([]);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
@@ -5103,13 +5104,16 @@ export function SessionView({
           }
           setStreaming(false);
           setPendingMessage((current) =>
-            pendingMessageAfterRefresh(current, evts, pendingMessageAfterEventIdRef.current)
+            pendingMessageAfterRefresh(
+              current, evts, pendingMessageAfterEventIdRef.current, pendingSentMessageRef.current
+            )
           );
           if (
             pendingMessageAfterRefresh(
               pendingMessageRef.current,
               evts,
-              pendingMessageAfterEventIdRef.current
+              pendingMessageAfterEventIdRef.current,
+              pendingSentMessageRef.current
             ) === null
           ) {
             setPendingAttachments([]);
@@ -6031,6 +6035,7 @@ export function SessionView({
     const streamSessionId = resumeSessionIdOverride ?? sessionId;
     streamGenerationRef.current += 1;
     pendingMessageAfterEventIdRef.current = eventsRef.current.at(-1)?.id ?? null;
+    pendingSentMessageRef.current = sentMessage;
     streamingRef.current = true;
     setPendingMessage(pendingVisibleMessage);
     setPendingAttachments(visibleAttachments ?? []);
@@ -6385,13 +6390,16 @@ export function SessionView({
                 if (completedGeneration !== streamGenerationRef.current) return;
                 commitEvents(completedSessionId, evts);
                 setPendingMessage((current) =>
-                  pendingMessageAfterRefresh(current, evts, pendingMessageAfterEventIdRef.current)
+                  pendingMessageAfterRefresh(
+                    current, evts, pendingMessageAfterEventIdRef.current, pendingSentMessageRef.current
+                  )
                 );
                 if (
                   pendingMessageAfterRefresh(
                     pendingVisibleMessage,
                     evts,
-                    pendingMessageAfterEventIdRef.current
+                    pendingMessageAfterEventIdRef.current,
+                    pendingSentMessageRef.current
                   ) === null
                 ) {
                   setPendingAttachments([]);
@@ -7524,6 +7532,7 @@ export function SessionView({
     pendingMessage,
     events,
     pendingMessageAfterEventIdRef.current,
+    pendingSentMessageRef.current,
   ) !== null;
   const showComposerDetails = composerLayout.showDetails;
   const composerPlaceholder = steerInProgress

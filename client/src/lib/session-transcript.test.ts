@@ -77,3 +77,39 @@ test("an earlier identical message cannot hide or settle a newly sent turn", () 
   const current: AgentEvent = { ...previous, id: "current-done" };
   assert.equal(pendingMessageAfterRefresh("Done", [previous, current], previous.id), null);
 });
+
+test("mention context still settles the optimistic user turn", () => {
+  const previous = event("active", "before-send");
+  const persisted: AgentEvent = {
+    id: "mentioned-turn", sessionId: "active", timestamp: "2026-10-26T00:00:01Z",
+    type: "user_message", data: { text: "<mentions>\n- file: src/index.ts\n</mentions>\n\nInspect this" },
+  };
+  assert.equal(pendingMessageAfterRefresh("Inspect this", [previous], previous.id), "Inspect this");
+  assert.equal(pendingMessageAfterRefresh("Inspect this", [previous, persisted], previous.id), null);
+  const selection: AgentEvent = {
+    ...persisted, id: "selected-turn",
+    data: { text: "<selections>\n- src/index.ts:12-20\n</selections>\n\nInspect this" },
+  };
+  assert.equal(pendingMessageAfterRefresh("Inspect this", [previous, selection], previous.id), null);
+  const unrelated: AgentEvent = {
+    ...persisted, id: "other-turn", data: { text: "Another request\n\nInspect this" },
+  };
+  assert.equal(pendingMessageAfterRefresh("Inspect this", [previous, unrelated], previous.id), "Inspect this");
+});
+
+test("structured-input display label settles against the sent answer prompt", () => {
+  const previous = event("active", "before-answer");
+  const answerPrompt = "The user answered the agent request: proceed.";
+  const persisted: AgentEvent = {
+    id: "answer-turn", sessionId: "active", timestamp: "2026-10-26T00:00:01Z",
+    type: "user_message", data: { text: answerPrompt },
+  };
+  assert.equal(
+    pendingMessageAfterRefresh("Answered agent request", [previous], previous.id, answerPrompt),
+    "Answered agent request",
+  );
+  assert.equal(
+    pendingMessageAfterRefresh("Answered agent request", [previous, persisted], previous.id, answerPrompt),
+    null,
+  );
+});
