@@ -23,10 +23,24 @@ test("Markdown preview renders local images through the project route and saniti
       onOpenFile={() => {}}
     />,
   );
-  assert.match(html, /<h1>Draft<\/h1>/);
+  assert.match(html, /<h1 id="draft">Draft<\/h1>/);
   assert.match(html, /format=image/);
   assert.match(html, /%2Fproject%2Fimages%2Fplot.png/);
   assert.match(html, /href="next.md"/);
   assert.match(html, /href="https:\/\/example.com" target="_blank" rel="noopener noreferrer"/);
   assert.doesNotMatch(html, /<script|href="javascript:|\[object Object\]/);
+});
+
+test("Markdown preview gives fragment links matching, unique heading targets", () => {
+  const html = renderToStaticMarkup(
+    <SourceMarkdownPreview
+      content={'[Installation](#installation)\n\n## Installation\n\n## Installation'}
+      filePath="/project/README.md"
+      projectId="project-1"
+      onOpenFile={() => {}}
+    />,
+  );
+  assert.match(html, /href="#installation"/);
+  assert.match(html, /<h2 id="installation">Installation<\/h2>/);
+  assert.match(html, /<h2 id="installation-1">Installation<\/h2>/);
 });

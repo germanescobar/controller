@@ -800,6 +800,7 @@ interface OpenSourceReferenceOptions extends SourceReference {
 interface SourceFilePreview {
   file: SourceFile;
   line?: number;
+  navigationId?: number;
 }
 
 interface PreviewActions {
@@ -3204,6 +3205,7 @@ function SourceViewerPanel({
               worktreeId={worktreeId}
               onOpenFile={onOpenFile}
               initialLine={selectedLine}
+              lineNavigationId={preview?.navigationId}
               onDirtyChange={onDirtyChange}
               onDraftEdit={onDraftEdit}
               onSaved={(saved) => {
@@ -4023,6 +4025,7 @@ export function SessionView({
   }, [sessionId, sessionTitle, project?.name, activeWorktree?.name, onMobileHeadingChange]);
   const [continuingOnMain, setContinuingOnMain] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<SourceFilePreview | null>(null);
+  const sourceNavigationIdRef = useRef(0);
   // True while the SourceEditor (Files tab) has unsaved edits.
   // Drives the browser, Files tab, and app navigation guards.
   const [sourceEditorDirty, setSourceEditorDirty] = useState(false);
@@ -7119,7 +7122,8 @@ export function SessionView({
           typeof line === "number"
             ? Math.min(Math.max(line, 1), lineCount)
             : undefined;
-        setSourcePreview({ file, line: selectedLine });
+        sourceNavigationIdRef.current += 1;
+        setSourcePreview({ file, line: selectedLine, navigationId: sourceNavigationIdRef.current });
         setTerminalOpen(true);
         setRightTab("files");
         // `mobilePanel` is a mobile-only concept: on phones it picks
@@ -7165,10 +7169,10 @@ export function SessionView({
   // actually runs.
   const requestOpenSourcePath = useCallback(
     (path: string, line?: number, errorLabel = path) => {
-      if (!confirmLeaveFilesIfDirty()) return;
+      if (sourcePreview?.file.path !== path && !confirmLeaveFilesIfDirty()) return;
       openSourcePath(path, line, errorLabel);
     },
-    [confirmLeaveFilesIfDirty, openSourcePath]
+    [confirmLeaveFilesIfDirty, openSourcePath, sourcePreview?.file.path]
   );
 
   // Tab-switch helper. Going to / staying on the Files tab is
@@ -7232,9 +7236,9 @@ export function SessionView({
   }, [prPanelRequestId]);
 
   const openSourceReference = useCallback((reference: OpenSourceReferenceOptions) => {
-    if (rightTab === "files" && sourceEditorDirty && !confirmLeaveFilesIfDirty()) return;
+    if (rightTab === "files" && sourceEditorDirty && sourcePreview?.file.path !== reference.path && !confirmLeaveFilesIfDirty()) return;
     openSourcePath(reference.path, reference.line, reference.label);
-  }, [openSourcePath, rightTab, sourceEditorDirty, confirmLeaveFilesIfDirty]);
+  }, [openSourcePath, rightTab, sourceEditorDirty, sourcePreview?.file.path, confirmLeaveFilesIfDirty]);
 
   // Files-panel keyboard shortcuts (issue #313):
   //   - Toggle: open the right panel on the `files` tab if it isn't

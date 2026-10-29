@@ -86,6 +86,8 @@ export interface SourceEditorProps {
    *  the cursor lands on the line the agent was talking about
    *  (matches the behaviour of the previous static viewer). */
   initialLine?: number;
+  /** Changes for each file-open request, including repeated references to the same line. */
+  lineNavigationId?: number;
   /** Called when the user saves the file. The parent can use this
    *  to update its preview cache and the file-tree refresh button. */
   onSaved: (saved: { path: string; relativePath: string; content: string; savedAt: string }) => void;
@@ -102,6 +104,7 @@ export function SourceEditor({
   projectId,
   worktreeId,
   initialLine,
+  lineNavigationId,
   onSaved,
   onDirtyChange,
   onDraftEdit,
@@ -134,11 +137,12 @@ export function SourceEditor({
   // Scroll-to-line support. When the parent opens a file with an
   // `initialLine`, we wait for the editor to mount, then dispatch
   // a CodeMirror `scrollIntoView` on the target line. We only
-  // honour the latest `initialLine` value per file load so a
-  // user scrolling on their own doesn't get yanked back when
-  // the parent re-renders.
+  // honour each navigation request once so parent re-renders do not
+  // yank the user back after they scroll. A navigation id also handles
+  // repeated clicks on the same path:line reference.
   useEffect(() => {
     if (!initialLine) return;
+    setMode("edit");
     let cancelled = false;
     const tryScroll = () => {
       if (cancelled) return;
@@ -156,11 +160,12 @@ export function SourceEditor({
       });
       view.focus();
     };
-    tryScroll();
+    // Let React reveal CodeMirror before it measures the scroll target.
+    window.requestAnimationFrame(tryScroll);
     return () => {
       cancelled = true;
     };
-  }, [initialLine, file.path, file.content]);
+  }, [initialLine, lineNavigationId, file.path]);
 
   // Track the last `file` prop we synced from so we know when an
   // external reload (e.g. an agent rewriting the file) should

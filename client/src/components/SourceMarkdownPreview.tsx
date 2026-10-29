@@ -1,5 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeSlug from "rehype-slug";
 
 interface SourceMarkdownPreviewProps {
   content: string;
@@ -47,6 +48,7 @@ export function SourceMarkdownPreview({
     <div className="prose prose-sm dark:prose-invert max-w-none break-words p-5 [&_img]:max-w-full">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeSlug]}
         components={{
           a: ({ href, children, node: _node, ...props }) => {
             if (href?.startsWith("#")) {
