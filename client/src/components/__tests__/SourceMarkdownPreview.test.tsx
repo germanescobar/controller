@@ -44,3 +44,18 @@ test("Markdown preview gives fragment links matching, unique heading targets", (
   assert.match(html, /<h2 id="installation">Installation<\/h2>/);
   assert.match(html, /<h2 id="installation-1">Installation<\/h2>/);
 });
+
+test("Markdown preview renders Mermaid fences separately from ordinary code fences", () => {
+  const html = renderToStaticMarkup(
+    <SourceMarkdownPreview
+      content={'```mermaid\nflowchart LR\n A --> B\n```\n\n```typescript\nconst answer = 42;\n```\n\n`mermaid`'}
+      filePath="/project/README.md"
+      projectId="project-1"
+      onOpenFile={() => {}}
+    />,
+  );
+  assert.match(html, /Rendering Mermaid diagram/);
+  assert.match(html, /<pre><code class="language-typescript">const answer = 42;/);
+  assert.match(html, /<code>mermaid<\/code>/);
+  assert.doesNotMatch(html, /<code class="language-mermaid">/);
+});
