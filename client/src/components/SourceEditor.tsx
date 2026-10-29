@@ -17,6 +17,7 @@ import { Check, Loader2, Save, X } from "lucide-react";
 import { toast } from "sonner";
 import { saveSourceFile, SourceFileConflictError, fetchSourceFile } from "@/api.ts";
 import type { SourceFile } from "@/api.ts";
+import { SourceMarkdownPreview } from "@/components/SourceMarkdownPreview";
 
 /*
  * In-experience code editor for the Files tab (issue #313 follow-up).
@@ -85,6 +86,8 @@ export interface SourceEditorProps {
    *  the cursor lands on the line the agent was talking about
    *  (matches the behaviour of the previous static viewer). */
   initialLine?: number;
+  /** Changes for each file-open request, including repeated references to the same line. */
+  lineNavigationId?: number;
   /** Called when the user saves the file. The parent can use this
    *  to update its preview cache and the file-tree refresh button. */
   onSaved: (saved: { path: string; relativePath: string; content: string; savedAt: string }) => void;
@@ -93,6 +96,7 @@ export interface SourceEditorProps {
   onDirtyChange?: (dirty: boolean) => void;
   /** Called synchronously for each CodeMirror edit, including edits while a parent action awaits. */
   onDraftEdit?: () => void;
+  onOpenFile: (path: string) => void;
 }
 
 export function SourceEditor({
@@ -100,15 +104,21 @@ export function SourceEditor({
   projectId,
   worktreeId,
   initialLine,
+  lineNavigationId,
   onSaved,
   onDirtyChange,
   onDraftEdit,
+  onOpenFile,
 }: SourceEditorProps) {
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
   useEffect(() => () => onDirtyChangeRef.current?.(false), []);
   const [draft, setDraft] = useState<string>(file.content);
+  const isMarkdown = file.path.toLowerCase().endsWith(".md");
+  const [mode, setMode] = useState<"edit" | "preview">(
+    isMarkdown && !initialLine ? "preview" : "edit"
+  );
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   // Revision token captured at open time. Echoed back to the server
@@ -127,11 +137,12 @@ export function SourceEditor({
   // Scroll-to-line support. When the parent opens a file with an
   // `initialLine`, we wait for the editor to mount, then dispatch
   // a CodeMirror `scrollIntoView` on the target line. We only
-  // honour the latest `initialLine` value per file load so a
-  // user scrolling on their own doesn't get yanked back when
-  // the parent re-renders.
+  // honour each navigation request once so parent re-renders do not
+  // yank the user back after they scroll. A navigation id also handles
+  // repeated clicks on the same path:line reference.
   useEffect(() => {
     if (!initialLine) return;
+    setMode("edit");
     let cancelled = false;
     const tryScroll = () => {
       if (cancelled) return;
@@ -149,11 +160,12 @@ export function SourceEditor({
       });
       view.focus();
     };
-    tryScroll();
+    // Let React reveal CodeMirror before it measures the scroll target.
+    window.requestAnimationFrame(tryScroll);
     return () => {
       cancelled = true;
     };
-  }, [initialLine, file.path, file.content]);
+  }, [initialLine, lineNavigationId, file.path]);
 
   // Track the last `file` prop we synced from so we know when an
   // external reload (e.g. an agent rewriting the file) should
@@ -413,6 +425,26 @@ export function SourceEditor({
               ? "Unsaved changes"
               : "No changes"}
         </div>
+        {isMarkdown && (
+          <div className="flex shrink-0 rounded border border-border p-0.5" role="group" aria-label="Markdown view">
+            <button
+              type="button"
+              aria-pressed={mode === "edit"}
+              onClick={() => setMode("edit")}
+              className={`rounded px-2 py-1 text-[11px] ${mode === "edit" ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === "preview"}
+              onClick={() => setMode("preview")}
+              className={`rounded px-2 py-1 text-[11px] ${mode === "preview" ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            >
+              Preview
+            </button>
+          </div>
+        )}
         <button
           type="button"
           onClick={discard}
@@ -434,7 +466,18 @@ export function SourceEditor({
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
+      {isMarkdown && mode === "preview" && (
+        <div className="min-h-0 flex-1 overflow-auto" aria-label="Markdown preview">
+          <SourceMarkdownPreview
+            content={draft}
+            filePath={file.path}
+            projectId={projectId}
+            worktreeId={worktreeId}
+            onOpenFile={onOpenFile}
+          />
+        </div>
+      )}
+      <div className={`min-h-0 flex-1 overflow-auto ${isMarkdown && mode === "preview" ? "hidden" : ""}`}>
         <CodeMirror
           ref={cmRef}
           value={draft}
