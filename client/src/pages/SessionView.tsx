@@ -3198,10 +3198,11 @@ function SourceViewerPanel({
           </div>
           {displayedPreview ? (
             <SourceEditor
-              key={editorVersion}
+              key={`${displayedPreview.file.path}:${editorVersion}`}
               file={displayedPreview.file}
               projectId={projectId}
               worktreeId={worktreeId}
+              onOpenFile={onOpenFile}
               initialLine={selectedLine}
               onDirtyChange={onDirtyChange}
               onDraftEdit={onDraftEdit}
@@ -9487,7 +9488,7 @@ export function SessionView({
                       // the saved relative path so it surfaces
                       // at the top of the fuzzy finder.
                       setSourcePreview((current) =>
-                        current
+                        current?.file.path === saved.path
                           ? {
                               ...current,
                               file: {

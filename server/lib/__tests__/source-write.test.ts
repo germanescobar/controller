@@ -103,6 +103,23 @@ test("PUT /source saves the new content to an existing file", async () => {
   });
 });
 
+test("GET /source serves only scoped raster images for Markdown previews", async () => {
+  await withEnv(async ({ baseUrl, projectPath }) => {
+    const image = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await fs.writeFile(path.join(projectPath, "chart.png"), image);
+    const served = await fetch(`${baseUrl}?path=chart.png&format=image`);
+    assert.equal(served.status, 200);
+    assert.match(served.headers.get("content-type") ?? "", /^image\/png/);
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), image);
+
+    const unsupported = await fetch(`${baseUrl}?path=README.md&format=image`);
+    assert.equal(unsupported.status, 415);
+
+    const outside = await fetch(`${baseUrl}?path=${encodeURIComponent(path.join(projectPath, "../projects.json"))}&format=image`);
+    assert.equal(outside.status, 403);
+  });
+});
+
 test("PUT /source rejects a missing content field with 400", async () => {
   await withEnv(async ({ baseUrl }) => {
     const res = await fetch(`${baseUrl}?path=notes.txt`, {

@@ -17,6 +17,7 @@ import { Check, Loader2, Save, X } from "lucide-react";
 import { toast } from "sonner";
 import { saveSourceFile, SourceFileConflictError, fetchSourceFile } from "@/api.ts";
 import type { SourceFile } from "@/api.ts";
+import { SourceMarkdownPreview } from "@/components/SourceMarkdownPreview";
 
 /*
  * In-experience code editor for the Files tab (issue #313 follow-up).
@@ -93,6 +94,7 @@ export interface SourceEditorProps {
   onDirtyChange?: (dirty: boolean) => void;
   /** Called synchronously for each CodeMirror edit, including edits while a parent action awaits. */
   onDraftEdit?: () => void;
+  onOpenFile: (path: string) => void;
 }
 
 export function SourceEditor({
@@ -103,12 +105,17 @@ export function SourceEditor({
   onSaved,
   onDirtyChange,
   onDraftEdit,
+  onOpenFile,
 }: SourceEditorProps) {
   const cmRef = useRef<ReactCodeMirrorRef | null>(null);
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
   useEffect(() => () => onDirtyChangeRef.current?.(false), []);
   const [draft, setDraft] = useState<string>(file.content);
+  const isMarkdown = file.path.toLowerCase().endsWith(".md");
+  const [mode, setMode] = useState<"edit" | "preview">(
+    isMarkdown && !initialLine ? "preview" : "edit"
+  );
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   // Revision token captured at open time. Echoed back to the server
@@ -413,6 +420,26 @@ export function SourceEditor({
               ? "Unsaved changes"
               : "No changes"}
         </div>
+        {isMarkdown && (
+          <div className="flex shrink-0 rounded border border-border p-0.5" role="group" aria-label="Markdown view">
+            <button
+              type="button"
+              aria-pressed={mode === "edit"}
+              onClick={() => setMode("edit")}
+              className={`rounded px-2 py-1 text-[11px] ${mode === "edit" ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === "preview"}
+              onClick={() => setMode("preview")}
+              className={`rounded px-2 py-1 text-[11px] ${mode === "preview" ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            >
+              Preview
+            </button>
+          </div>
+        )}
         <button
           type="button"
           onClick={discard}
@@ -434,7 +461,18 @@ export function SourceEditor({
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
+      {isMarkdown && mode === "preview" && (
+        <div className="min-h-0 flex-1 overflow-auto" aria-label="Markdown preview">
+          <SourceMarkdownPreview
+            content={draft}
+            filePath={file.path}
+            projectId={projectId}
+            worktreeId={worktreeId}
+            onOpenFile={onOpenFile}
+          />
+        </div>
+      )}
+      <div className={`min-h-0 flex-1 overflow-auto ${isMarkdown && mode === "preview" ? "hidden" : ""}`}>
         <CodeMirror
           ref={cmRef}
           value={draft}

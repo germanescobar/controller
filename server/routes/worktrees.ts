@@ -58,6 +58,14 @@ import { emitWorktreeAdded, emitWorktreeRemoved, emitWorktreeUpdated } from "../
 export const worktreesRouter = Router();
 
 const RUN_TERMINAL_ID = "run";
+const SOURCE_IMAGE_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+};
 
 // Track worktrees that currently have an in-flight setup run so we can refuse
 // overlapping requests instead of racing two `setup.sh` invocations against
@@ -360,6 +368,23 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
     const stat = await fs.stat(targetRealPath);
     if (!stat.isFile()) {
       res.status(400).json({ error: "Path does not reference a file" });
+      return;
+    }
+
+    // Markdown previews request project images through this same path gate.
+    // Only raster formats are served; SVG can contain active content.
+    const imageType = SOURCE_IMAGE_TYPES[path.extname(targetRealPath).toLowerCase()];
+    if (getQueryString(req.query.format) === "image") {
+      if (!imageType) {
+        res.status(415).json({ error: "Unsupported image format" });
+        return;
+      }
+      if (stat.size > 10 * 1024 * 1024) {
+        res.status(413).json({ error: "Image is too large to preview" });
+        return;
+      }
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.type(imageType).send(await fs.readFile(targetRealPath));
       return;
     }
 
