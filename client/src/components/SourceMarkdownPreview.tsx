@@ -1,3 +1,4 @@
+import { Children, isValidElement, useEffect, useId, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSlug from "rehype-slug";
@@ -50,6 +51,16 @@ export function SourceMarkdownPreview({
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSlug]}
         components={{
+          pre: ({ children, node: _node, ...props }) => {
+            const code = Children.toArray(children)[0];
+            if (
+              isValidElement<{ className?: string; children?: ReactNode }>(code) &&
+              code.props.className?.split(/\s+/).includes("language-mermaid")
+            ) {
+              return <MermaidDiagram source={String(code.props.children ?? "").replace(/\n$/, "")} />;
+            }
+            return <pre {...props}>{children}</pre>;
+          },
           a: ({ href, children, node: _node, ...props }) => {
             if (href?.startsWith("#")) {
               return <a href={href} {...props}>{children}</a>;
@@ -80,4 +91,75 @@ export function SourceMarkdownPreview({
       </ReactMarkdown>
     </div>
   );
+}
+
+interface DiagramResult {
+  imageUrl?: string;
+  error?: string;
+}
+
+// Mermaid has global configuration. Serialize renders so a theme change cannot
+// reconfigure a diagram while another one is rendering.
+let renderQueue: Promise<void> = Promise.resolve();
+
+function renderDiagram(source: string, id: string, dark: boolean): Promise<string> {
+  const render = async () => {
+    const { default: mermaid } = await import("mermaid");
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      secure: [
+        "secure", "securityLevel", "startOnLoad", "maxTextSize",
+        "suppressErrorRendering", "maxEdges", "htmlLabels", "theme",
+      ],
+      htmlLabels: false,
+      suppressErrorRendering: true,
+      theme: dark ? "dark" : "default",
+    });
+    const { svg } = await mermaid.render(id, source);
+    // SVG loaded as an image cannot execute scripts or navigate through links.
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  };
+  const result = renderQueue.then(render);
+  renderQueue = result.then(() => {}, () => {});
+  return result;
+}
+
+function MermaidDiagram({ source }: { source: string }) {
+  const id = `mermaid-${useId().replace(/:/g, "")}`;
+  const [dark, setDark] = useState(() =>
+    typeof document !== "undefined" && document.documentElement.classList.contains("dark")
+  );
+  const [result, setResult] = useState<DiagramResult>({});
+
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setDark(document.documentElement.classList.contains("dark"))
+    );
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setResult({});
+    void renderDiagram(source, id, dark).then(
+      (imageUrl) => { if (!cancelled) setResult({ imageUrl }); },
+      (error: unknown) => {
+        if (!cancelled) setResult({ error: error instanceof Error ? error.message : "Unknown error" });
+      },
+    );
+    return () => { cancelled = true; };
+  }, [source, id, dark]);
+
+  if (result.error) {
+    return (
+      <div role="alert" className="rounded border border-destructive p-3">
+        <p>Could not render Mermaid diagram: {result.error}</p>
+        <pre><code>{source}</code></pre>
+      </div>
+    );
+  }
+  if (!result.imageUrl) return <p role="status">Rendering Mermaid diagram…</p>;
+  return <img src={result.imageUrl} alt="Mermaid diagram" className="max-w-full" />;
 }
