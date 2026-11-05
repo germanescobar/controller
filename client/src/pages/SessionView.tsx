@@ -49,6 +49,7 @@ import {
   type MobilePanel,
 } from "@/lib/right-panel-visibility";
 import { FileFinderDialog } from "@/components/FileFinderDialog";
+import { SourceImagePreview } from "@/components/SourceImagePreview";
 import { SourceEditor } from "@/components/SourceEditor";
 import {
   usePreviewPane,
@@ -3197,7 +3198,9 @@ function SourceViewerPanel({
               )}
             </div>
           </div>
-          {displayedPreview ? (
+          {displayedPreview?.file.image ? (
+            <SourceImagePreview key={displayedPreview.file.path} projectId={projectId} worktreeId={worktreeId} path={displayedPreview.file.path} />
+          ) : displayedPreview ? (
             <SourceEditor
               key={`${displayedPreview.file.path}:${editorVersion}`}
               file={displayedPreview.file}

@@ -388,6 +388,20 @@ worktreesRouter.get("/:projectId/source", async (req, res) => {
       return;
     }
 
+    if (imageType) {
+      if (stat.size > 10 * 1024 * 1024) {
+        res.status(413).json({ error: "Image is too large to preview" });
+        return;
+      }
+      res.json({
+        path: targetRealPath,
+        relativePath: matchingRoot.relativePath || path.basename(targetRealPath),
+        content: "",
+        image: true,
+      });
+      return;
+    }
+
     const maxSourceFileBytes = 1024 * 1024;
     if (stat.size > maxSourceFileBytes) {
       res.status(413).json({ error: "File is too large to preview" });
