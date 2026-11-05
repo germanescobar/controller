@@ -108,6 +108,7 @@ export interface TerminalTab {
 }
 
 export interface SourceFile {
+  image?: boolean;
   path: string;
   relativePath: string;
   content: string;
