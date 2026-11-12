@@ -447,6 +447,9 @@ export class CodexAppServerManager {
       cwd: options.cwd,
       approvalPolicy: approval.approvalPolicy,
       sandbox: approval.sandboxMode,
+      // The app-server is shared across worktrees; its process environment
+      // belongs to the first caller. Override command env for each thread.
+      config: { "shell_environment_policy.set": options.env },
       experimentalRawEvents: false,
       persistExtendedHistory: true,
       ephemeral: false,
@@ -484,6 +487,9 @@ export class CodexAppServerManager {
       cwd: options.cwd,
       approvalPolicy: approval.approvalPolicy,
       sandbox: approval.sandboxMode,
+      // The app-server is shared across worktrees; its process environment
+      // belongs to the first caller. Override command env for each thread.
+      config: { "shell_environment_policy.set": options.env },
       persistExtendedHistory: true,
     });
 

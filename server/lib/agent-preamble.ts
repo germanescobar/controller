@@ -46,6 +46,7 @@ import { listUnifiedSkills } from "./unified-skills.js";
 import type { SkillMetadata } from "./skills.js";
 
 export interface PreambleWorktree {
+  portOffset: number;
   id: string;
   name: string;
   path: string;
@@ -423,6 +424,10 @@ function worktreeIntro(worktree: PreambleWorktree): string {
     `This conversation is bound to the \`${worktree.name}\` worktree at \`${worktree.path}\`.`,
     "Only edit files inside it. Other worktrees belong to their own conversations: do not edit, commit, stash, or otherwise change their files.",
   ];
+  scope.push(
+    `This worktree's PORT_OFFSET is ${worktree.portOffset}. Derive service ports from the project's base ports plus this offset. Before starting services, inspect the project run script in .controller/run.sh or the supported legacy locations (.coding-orchestrator/run.sh, conductor.json, or .superset/config.json).`,
+    "Use Controller visible terminals for dev servers, watchers, and other persistent processes. Use the controller-terminal skill to list visible terminals and inspect their existing output before starting a process. Reuse a suitable terminal. If none is available, ask the user to open a terminal in Controller before starting the process. Ordinary file inspection, git commands, and short checks may use native agent shells.",
+  );
   if (!worktree.isMain) return scope.join("\n");
   const cli = controllerCliShellPath();
   return [

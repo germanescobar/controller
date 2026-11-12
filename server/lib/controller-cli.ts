@@ -287,7 +287,7 @@ export async function removeLegacyControllerSymlinks(): Promise<void> {
  *  its absolute install path; that path is what the agent preamble and the
  *  managed browser skill document.
  */
-export function controllerAgentEnv(options?: { sessionId?: string }): Record<string, string> {
+export function controllerAgentEnv(options?: { sessionId?: string; portOffset?: number }): Record<string, string> {
   const basePath = process.env.PATH ?? "";
   // A dev instance usually inherits a PATH that already holds the app's
   // `<home>/bin` (it was started from an app agent or terminal). Put the dev
@@ -316,5 +316,6 @@ export function controllerAgentEnv(options?: { sessionId?: string }): Record<str
   if (options?.sessionId) {
     env.CONTROLLER_SESSION_ID = options.sessionId;
   }
+  if (options?.portOffset !== undefined) env.PORT_OFFSET = String(options.portOffset);
   return env;
 }

@@ -165,3 +165,29 @@ test("an EPIPE on stdin fails pending calls instead of throwing uncaught", async
   await manager.listModels({});
   assert.equal(children.length, 2);
 });
+
+test("shared app-server scopes command environments to new and resumed threads", async () => {
+  const { manager, children } = managerWith([healthy]);
+  try {
+    await manager.startPlanTurn({
+      ...turnOptions, env: { PORT_OFFSET: "3", CONTROLLER_SESSION_ID: "first" },
+    }, () => {});
+    await manager.startPlanTurn({
+      ...turnOptions, env: { PORT_OFFSET: "6", CONTROLLER_SESSION_ID: "second" },
+    }, () => {});
+    await manager.startPlanTurn({
+      ...turnOptions, resumeSessionId: "resumed-thread", env: { PORT_OFFSET: "0" },
+    }, () => {});
+    assert.equal(children.length, 1);
+    const requests = children[0].requests.filter(
+      (request) => request.method === "thread/start" || request.method === "thread/resume"
+    );
+    assert.deepEqual(requests.map((request) => request.params?.config), [
+      { "shell_environment_policy.set": { PORT_OFFSET: "3", CONTROLLER_SESSION_ID: "first" } },
+      { "shell_environment_policy.set": { PORT_OFFSET: "6", CONTROLLER_SESSION_ID: "second" } },
+      { "shell_environment_policy.set": { PORT_OFFSET: "0" } },
+    ]);
+  } finally {
+    manager.shutdown();
+  }
+});
