@@ -505,7 +505,7 @@ test("every preamble binds the conversation to its own worktree (issue #436)", a
     assert.match(feature, /bound to the `feature` worktree at `\/repo\/wt\/feature`/);
     assert.match(feature, /Other worktrees belong to their own conversations/);
     assert.doesNotMatch(feature, /hand it off/);
-    for (const text of ["PORT_OFFSET is 6", "base ports plus this offset", "inspect the project run script", "list visible terminals", "inspect their existing output", "Reuse a suitable terminal", "ask the user to open a terminal", "short checks may use native agent shells"]) {
+    for (const text of ["PORT_OFFSET is 6", ".coding-orchestrator/run.sh", "conductor.json", ".superset/config.json", "base ports plus this offset", "inspect the project run script", "list visible terminals", "inspect their existing output", "Reuse a suitable terminal", "ask the user to open a terminal", "short checks may use native agent shells"]) {
       assert.ok(feature.includes(text), text);
     }
   });
