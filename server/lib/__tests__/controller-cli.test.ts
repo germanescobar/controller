@@ -583,3 +583,8 @@ test("controllerCliShellPath contains the install path verbatim inside the quote
   assert.ok(quoted.startsWith("'"));
   assert.ok(quoted.endsWith("'"));
 });
+
+test("controllerAgentEnv supplies the worktree offset including main", () => {
+  assert.equal(controllerAgentEnv({ portOffset: 6 }).PORT_OFFSET, "6");
+  assert.equal(controllerAgentEnv({ portOffset: 0 }).PORT_OFFSET, "0");
+});

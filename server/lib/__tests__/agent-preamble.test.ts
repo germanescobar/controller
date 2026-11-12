@@ -500,18 +500,21 @@ test("preamble documents the same-session loop primitives (issue #339)", async (
 test("every preamble binds the conversation to its own worktree (issue #436)", async () => {
   await withTempHome(async () => {
     const feature = await buildControllerPreamble({
-      worktree: { id: "wt-feature", name: "feature", path: "/repo/wt/feature", isMain: false },
+      worktree: { id: "wt-feature", name: "feature", path: "/repo/wt/feature", isMain: false, portOffset: 6 },
     });
     assert.match(feature, /bound to the `feature` worktree at `\/repo\/wt\/feature`/);
     assert.match(feature, /Other worktrees belong to their own conversations/);
     assert.doesNotMatch(feature, /hand it off/);
+    for (const text of ["PORT_OFFSET is 6", "base ports plus this offset", "inspect the project run script", "list visible terminals", "inspect their existing output", "Reuse a suitable terminal", "ask the user to open a terminal", "short checks may use native agent shells"]) {
+      assert.ok(feature.includes(text), text);
+    }
   });
 });
 
 test("main-worktree preambles hand changes off and report the link (issue #436)", async () => {
   await withTempHome(async () => {
     const main = await buildControllerPreamble({
-      worktree: { id: "wt-main", name: "main", path: "/repo", isMain: true },
+      worktree: { id: "wt-main", name: "main", path: "/repo", isMain: true, portOffset: 0 },
     });
     assert.match(main, /Use it for planning, inspection, tests, and running the project/);
     assert.match(main, /Do not edit repository source, documentation, or configuration here/);

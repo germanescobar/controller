@@ -1695,6 +1695,7 @@ async function startSessionStream(
       name: worktree.name,
       path: worktree.path,
       isMain: worktree.isMain,
+      portOffset: worktree.portOffset ?? 0,
     },
   });
   const usesSystemPrompt = providerId === "anita";
@@ -1851,7 +1852,7 @@ async function startSessionStream(
       // `--parent self` / `wake self` resolve against, not the
       // provider's thread id (they diverge on branched sessions).
       ...controllerAgentEnv(
-        controllerSessionId ? { sessionId: controllerSessionId } : undefined
+        { sessionId: controllerSessionId, portOffset: worktree.portOffset ?? 0 }
       ),
     },
     command: resolvedCommand,
@@ -3070,7 +3071,7 @@ async function streamCodexPlanSession(
           // The *Controller* id, not the provider thread id — those
           // diverge on a branched session (issue #382).
           ...controllerAgentEnv(
-            controllerSessionId ? { sessionId: controllerSessionId } : undefined
+            { sessionId: controllerSessionId, portOffset: (await resolveWorktree(projectId, worktreeId))?.portOffset ?? 0 }
           ),
         },
         resumeSessionId,
