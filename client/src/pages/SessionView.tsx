@@ -1,3 +1,4 @@
+import { MarkdownImage } from "../components/MarkdownImage.tsx";
 import { Fragment, memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, createContext, useContext } from "react";
 import { diffLines } from "diff";
 import { ArrowLeft, ArrowDown, ArrowUp, Loader2, Copy, Check, ChevronDown, ChevronRight, TerminalSquare, MessageSquare, Square, Diff, PanelRight, Zap, Plus, X, Paperclip, FileText, FileCode, Folder, FolderOpen, StepForward, Play, Sparkles, Globe2, RefreshCw, Pencil, Archive, GitFork } from "lucide-react";
@@ -2331,6 +2332,7 @@ function MarkdownLink({
 }
 
 const markdownComponents = {
+  img: MarkdownImage,
   a: MarkdownLink,
 };
 

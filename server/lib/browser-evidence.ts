@@ -7,6 +7,24 @@ import { diagnosticUrl } from "../../shared/preview-diagnostics.js";
 
 const MAX_PNG_BYTES = 12 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const artifacts = new Map<string, { png: Buffer; expires: number }>();
+const TTL = 24 * 60 * 60 * 1000;
+
+/*
+ * URLs are bearer capabilities: the random command ID grants access to this
+ * capture only. Pane/session segments cannot be substituted to read another
+ * capture. No filesystem reads occur, and restarting clears the registry.
+ */
+export function readBrowserScreenshot(url: string): Buffer | undefined {
+  const artifact = artifacts.get(url);
+  if (!artifact) return undefined;
+  if (artifact.expires <= Date.now()) {
+    artifacts.delete(url);
+    return undefined;
+  }
+  return artifact.png;
+}
+
 let evidenceRoot: Promise<string> | null = null;
 
 export async function saveBrowserScreenshot(input: {
@@ -36,7 +54,18 @@ export async function saveBrowserScreenshot(input: {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const filePath = path.join(dir, `${commandId}.png`);
   await writeFile(filePath, png, { flag: "wx", mode: 0o600 });
+  for (const [key, artifact] of artifacts) {
+    if (artifact.expires <= Date.now()) artifacts.delete(key);
+  }
+  // Bound retained image memory even during a long-running server session.
+  while (artifacts.size >= 32 || [...artifacts.values()].reduce((bytes, artifact) => bytes + artifact.png.length, 0) + png.length > 48 * 1024 * 1024) {
+    const oldest = artifacts.keys().next().value;
+    if (oldest) artifacts.delete(oldest);
+  }
+  const imageUrl = `/api/browser/artifacts/${paneHash}/${input.sessionId ?? "pane"}/${commandId}.png`;
+  artifacts.set(imageUrl, { png, expires: Date.now() + TTL });
   return {
+    imageUrl,
     path: filePath, width, height, url: diagnosticUrl(input.url),
     fullPage: input.fullPage, commandId,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),

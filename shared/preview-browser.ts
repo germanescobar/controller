@@ -31,6 +31,7 @@ export interface BrowserDiagnostic {
 }
 
 export interface BrowserScreenshot {
+  imageUrl: string;
   path: string;
   width: number;
   height: number;
