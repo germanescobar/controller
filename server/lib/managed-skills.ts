@@ -213,7 +213,9 @@ below is run as \`${cliPath} browser <command>\`:
 - \`${cliPath} browser viewport <desktop|mobile|default>\` — set this
   worktree pane to 1280×800 or 390×844, or restore its normal size.
 - \`${cliPath} browser screenshot [--full-page]\` — save an explicit PNG
-  capture. Prints the private temporary artifact path, dimensions, URL,
+  capture. Embed the printed Markdown image to display it inline in chat; never use
+  the local path or file:// as an image source. Image URLs expire after 24 hours,
+  server restart, or eviction (up to 32 captures / 48 MiB retained). Prints the private path, dimensions, URL,
   command ID, and session ID when available. Full-page capture has an
   8192-pixel / 16-megapixel limit.
 - \`${cliPath} browser diagnostics [--limit N]\` — print up to 50 recent

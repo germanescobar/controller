@@ -3541,7 +3541,7 @@ async function runBrowser(argv, serverUrl) {
   }
   if (action === "screenshot") {
     if (!result.screenshot?.path) fail("Browser returned no screenshot artifact");
-    process.stdout.write(`${result.screenshot.path}\n${result.screenshot.width}×${result.screenshot.height} PNG — ${result.screenshot.url}\nCommand: ${result.screenshot.commandId}${result.screenshot.sessionId ? `; session: ${result.screenshot.sessionId}` : ""}\n`);
+    process.stdout.write(`${result.screenshot.path}\n![Preview screenshot](${result.screenshot.imageUrl})\n${result.screenshot.width}×${result.screenshot.height} PNG — ${result.screenshot.url}\nCommand: ${result.screenshot.commandId}${result.screenshot.sessionId ? `; session: ${result.screenshot.sessionId}` : ""}\n`);
     return;
   }
   if (action === "diagnostics") {

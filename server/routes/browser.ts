@@ -20,11 +20,22 @@ import { Router, type Request, type Response } from "express";
 import { findWorktreeByPath } from "../lib/worktrees.js";
 import { validateBrowserUrl, validateBrowserFilePath } from "../lib/browser-policy.js";
 import { previewBrowserBridge } from "../lib/preview-browser.js";
-import { saveBrowserScreenshot } from "../lib/browser-evidence.js";
+import { readBrowserScreenshot, saveBrowserScreenshot } from "../lib/browser-evidence.js";
 import { randomUUID } from "node:crypto";
 import { diagnosticMessage, diagnosticUrl } from "../../shared/preview-diagnostics.js";
 
 export const browserRouter = Router();
+
+browserRouter.get("/artifacts/:pane/:session/:file", (req, res) => {
+  const png = readBrowserScreenshot(`/api/browser${req.path}`);
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  if (!png) {
+    res.status(404).send("Screenshot unavailable or expired");
+    return;
+  }
+  res.type("png").send(png);
+});
 
 const KNOWN_ACTIONS = new Set(["open", "snapshot", "click", "type", "setFiles", "wait", "scroll", "keys", "back", "screenshot", "viewport", "diagnostics"]);
 
