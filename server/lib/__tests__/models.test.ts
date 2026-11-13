@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   __test__fetchCloudflareModels,
+  getClaudeModels,
 } from "../models.js";
 
 /**
@@ -125,4 +126,22 @@ test("falls back to the model id when the upstream omits a name", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("getClaudeModels lists the Claude 5.5 lineup first, then legacy pins", () => {
+  const models = getClaudeModels();
+  assert.deepEqual(
+    models.map((m) => [m.id, m.name, m.size]),
+    [
+      ["claude-opus-5-5", "Opus 5.5", "default"],
+      ["claude-sonnet-5-5", "Sonnet 5.5", ""],
+      ["claude-haiku-5-5", "Haiku 5.5", ""],
+      ["claude-fable-5-2", "Fable 5.2", ""],
+      ["claude-opus-5", "Opus 5", ""],
+      ["claude-sonnet-5", "Sonnet 5", ""],
+      ["claude-fable-5", "Fable 5", ""],
+    ],
+  );
+  assert.ok(models.every((m) => m.provider === "claude"));
+  assert.equal(models.filter((m) => m.size === "default").length, 1);
 });
