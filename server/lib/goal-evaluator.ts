@@ -42,7 +42,7 @@ const TRANSCRIPT_TAIL_EVENTS = 50;
 /** Default follow-up prompt the evaluator enqueues when the goal isn't met. */
 const DEFAULT_FOLLOW_UP_PROMPT =
   "Continue working toward the active goal. Re-read the goal condition and the latest transcript, take the next concrete step, and either re-set the goal if you have more work to do or call `controller sessions goal clear` if the condition is satisfied.";
-const DEFAULT_MODEL = "anthropic/claude-3-haiku";
+const DEFAULT_MODEL = "anthropic/claude-haiku-5.5";
 /** OpenRouter chat-completions endpoint; the orchestrator's providers
  *  include OpenRouter, so reusing it keeps the evaluator on a key the
  *  user has already configured. */
