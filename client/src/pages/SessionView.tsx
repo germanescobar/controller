@@ -3242,7 +3242,7 @@ function SourceViewerPanel({
   );
 }
 
-function FileTree({
+const FileTree = memo(function FileTree({
   activePath,
   onOpenFile,
   projectId,
@@ -3406,7 +3406,7 @@ function FileTree({
       {renderEntries("", 0)}
     </div>
   );
-}
+});
 
 /*
  * Preview chrome (URL bar, status, empty state). The live `<webview>` itself is
@@ -9481,7 +9481,7 @@ export function SessionView({
               {rightTab === "files" && (
                 <div className="absolute inset-0 overflow-hidden bg-background">
                   <SourceViewerPanel
-                    onOpenFile={(path) => requestOpenSourcePath(path)}
+                    onOpenFile={requestOpenSourcePath}
                     onBackToExplorer={confirmLeaveFilesIfDirty}
                     onDirtyChange={(dirty) => {
                       setSourceEditorDirty(dirty);
