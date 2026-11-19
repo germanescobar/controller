@@ -12,6 +12,7 @@ import {
   shell,
   webContents as electronWebContents,
 } from "electron";
+import { assertUiReady } from "./ui-readiness.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
@@ -317,9 +318,8 @@ async function waitForServer(url: string): Promise<void> {
 
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url);
-      if (response.ok) return;
-      lastError = new Error(`Server responded with ${response.status}`);
+      await assertUiReady(url);
+      return;
     } catch (error) {
       lastError = error;
     }
@@ -424,16 +424,16 @@ function broadcastStatus(status: ControllerStatus): void {
 }
 
 // Returns true if the previously-started server is still reachable on its
-// port. We probe with a short-timeout fetch against the agent-providers
-// endpoint (the same one the renderer uses) so a stuck or crashed child
-// process is detected.
+// port, including the UI document and entry assets.
 async function isActiveServerAlive(): Promise<boolean> {
   if (!activeServer) return false;
   try {
     const res = await fetch(`${activeServer.url}/api/agent-providers`, {
       signal: AbortSignal.timeout(1000),
     });
-    return res.ok;
+    if (!res.ok) return false;
+    await assertUiReady(activeServer.url);
+    return true;
   } catch {
     return false;
   }
@@ -441,7 +441,8 @@ async function isActiveServerAlive(): Promise<boolean> {
 
 async function startProductionServer(port: number): Promise<string> {
   const appPath = app.getAppPath();
-  const clientDistDir = path.join(appPath, "dist/client");
+  // Serve real files: Electron caches ASAR stream extraction in disposable temp files.
+  const clientDistDir = path.join(appPath.endsWith(".asar") ? `${appPath}.unpacked` : appPath, "dist/client");
   const serverEntry = path.join(appPath, "dist/server/index.js");
 
   process.env.PORT = String(port);
@@ -454,7 +455,13 @@ async function startProductionServer(port: number): Promise<string> {
   await import(pathToFileURL(serverEntry).href);
 
   const url = `http://localhost:${port}`;
-  await waitForServer(`${url}/api/agent-providers`);
+  try {
+    await waitForServer(url);
+  } catch (error) {
+    const message = `${new Date().toISOString()} UI startup failed (${clientDistDir}): ${String(error)}\n`;
+    await fs.appendFile(path.join(app.getPath("userData"), "server-errors.log"), message);
+    throw error;
+  }
   activeServer = { port, url };
   broadcastStatus({ state: "listening", port });
   return url;
