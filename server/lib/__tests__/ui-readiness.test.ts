@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { assertUiReady } from "../../../electron/ui-readiness.js";
+import { assertUiReady, isServerAlive } from "../../../electron/ui-readiness.js";
 
 test("readiness rejects missing entry assets even when API and HTML succeed", async () => {
   let missing = false;
@@ -27,8 +27,12 @@ test("readiness rejects missing entry assets even when API and HTML succeed", as
     const url = `http://127.0.0.1:${address.port}`;
     await assertUiReady(url);
     missing = true;
-    assert.equal((await fetch(`${url}/api/agent-providers`)).status, 200);
+    assert.equal(await isServerAlive(url), true);
     await assert.rejects(assertUiReady(url), /app.js HTTP 404/);
+    assert.equal(await isServerAlive(url), true);
+    // Retry against the original listener after the transient asset failure clears.
+    missing = false;
+    await assertUiReady(url);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

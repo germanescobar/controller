@@ -12,7 +12,7 @@ import {
   shell,
   webContents as electronWebContents,
 } from "electron";
-import { assertUiReady } from "./ui-readiness.js";
+import { assertUiReady, isServerAlive } from "./ui-readiness.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
@@ -420,22 +420,6 @@ function broadcastStatus(status: ControllerStatus): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     win.webContents.send("controller:status", status);
-  }
-}
-
-// Returns true if the previously-started server is still reachable on its
-// port, including the UI document and entry assets.
-async function isActiveServerAlive(): Promise<boolean> {
-  if (!activeServer) return false;
-  try {
-    const res = await fetch(`${activeServer.url}/api/agent-providers`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    if (!res.ok) return false;
-    await assertUiReady(activeServer.url);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -973,11 +957,21 @@ app.whenReady().then(async () => {
     // and the orphan Express process is still serving. Otherwise fall
     // back to the welcome screen.
     void (async () => {
-      if (app.isPackaged && (await isActiveServerAlive())) {
-        logWithTime(
-          `activate: reusing active server on port ${activeServer!.port}`
-        );
-        await openMainAppWindow(activeServer!.url);
+      if (app.isPackaged && activeServer && (await isServerAlive(activeServer.url))) {
+        // UI failure does not release the listener. Keep its address so closing
+        // the error window and reopening from the Dock retries the same server.
+        try {
+          await waitForServer(activeServer.url);
+        } catch (error) {
+          errorWithTime("activate: active server UI unavailable:", error);
+          await showStartupErrorWindow(new Error(
+            `The server is still running, but its UI is unavailable. Close this window and reopen Controller from the Dock to retry.\n\n${String(error)}`,
+            { cause: error },
+          ));
+          return;
+        }
+        logWithTime(`activate: reusing active server on port ${activeServer.port}`);
+        await openMainAppWindow(activeServer.url);
         return;
       }
       activeServer = null;

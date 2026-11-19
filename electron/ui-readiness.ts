@@ -21,3 +21,16 @@ export async function assertUiReady(url: string): Promise<void> {
     await read(target, asset.endsWith(".css") ? "text/css" : "javascript");
   }
 }
+
+/* Listener liveness is separate from UI readiness: asset failures do not stop Express. */
+export async function isServerAlive(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(new URL("/api/agent-providers", url), {
+      signal: AbortSignal.timeout(1000),
+    });
+    await response.arrayBuffer();
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
