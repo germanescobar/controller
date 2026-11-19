@@ -33,6 +33,7 @@
     "asarUnpack": [
       "node_modules/node-pty/**/*",
       "dist/electron/**/*",
+      "dist/client/**/*",
       "dist/cli/**/*"
     ],
     "mac": {
